@@ -1,0 +1,38 @@
+# CLI reference
+
+The executable is `tevu`. From the repository checkout, `bun run start --` accepts the same arguments. Every command supports `--help`.
+
+For the execution workflow, see the [benchmark guide](../guides/run-benchmark.md).
+
+## Commands
+
+| Command | Behavior |
+| --- | --- |
+| `tevu task add [--config <path>] [--jira <issue-key>]` | Interviews for a task and writes one complete configuration update after confirmation. A missing configuration starts a setup interview. Jira is read once for an imported task |
+| `tevu validate [--config <path>]` | Checks the configuration, local prerequisites, source commits, variable presence, output-directory access, and agent capabilities without invoking a model |
+| `tevu run [--config <path>] [--dry-run]` | Runs each task/model pair once, with the configured concurrency limit. Dry-run prints the plan without creating run artifacts or workspaces, contacting Jira, or starting a model session |
+| `tevu assess <run-id> <case-id> [--config <path>]` | Records manual verdicts for a saved case, optionally replaces confirmed existing verdicts, and regenerates the report |
+| `tevu report <run-id> [--config <path>]` | Rebuilds normalized results and Markdown from saved run artifacts without Git, Jira, agent, or model calls |
+
+`--config` defaults to `tevu.yaml` in the current directory. Paths inside that file resolve relative to the configuration file. See the [configuration reference](configuration.md).
+
+`task add` and `assess` require terminal input and output. The other commands produce plain text when output is redirected. Interactive benchmark progress is prefixed with the case ID.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Command completed. For `run`, all required checks passed and no case retained a runtime failure |
+| `1` | Invalid input, a missing prerequisite, or an infrastructure/artifact failure prevented completion |
+| `2` | Benchmark evidence was retained, but a case timed out, had a runtime failure, or had failed or pending required checks |
+| `130` | The command was cancelled; partial run artifacts are finalized when possible |
+
+For a run with multiple conditions, cancellation takes precedence, then incomplete evidence (`1`), then a degraded result (`2`). A model process can fail while its submitted solution passes the acceptance checks; the run still returns `2`.
+
+## Assessment and recovery
+
+`assess` processes pending required and optional manual checks in their configured order. An assessor name is required. A failed verdict also requires a note. Replacing an existing verdict requires confirmation; the prior verdict remains in history.
+
+An assessment lock prevents concurrent changes to the same case. An existing lock is not automatically removed. A verdict committed before a later report-write failure remains saved; `tevu report <run-id>` regenerates the derived files after the write problem is resolved.
+
+See [results and artifacts](results.md) for the files these commands read and write.

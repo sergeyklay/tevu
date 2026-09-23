@@ -1,0 +1,72 @@
+# How to run your first comparison
+
+Compare at least two model settings on a task from your backlog using its local Git repository.
+
+## Prepare the tools
+
+Use Linux or macOS with Node.js 24, Bun, Git, and OpenCode installed. The current agent adapter uses OpenCode's `run` and `export` commands, JSON output, model selection, and effort variants. Compatibility is checked by those capabilities, not a fixed OpenCode version.
+
+Choose a model and effort variant supported by your configured provider. Make its credential environment variables available in the terminal that will launch tevu. tevu uses isolated agent state, so credentials stored only in your usual agent login are not copied into benchmark runs.
+
+From the tevu checkout, install dependencies and check the command interface:
+
+```sh
+bun install --frozen-lockfile
+bun run start -- --help
+```
+
+The command reference uses the executable name `tevu`. From a checkout, use `bun run start --` in its place.
+
+## Define a task
+
+Run the wizard in an interactive terminal:
+
+```sh
+bun run start -- task add
+```
+
+For a missing configuration, the wizard first asks for repositories, model settings, execution limits, and environment-variable names. Declare provider authentication variables as `provider-credential`; enter their names, not their values.
+
+Choose a repository commit from before the task was solved. Describe the task, the instructions for the model, the prerequisites you have checked, the acceptance criteria, and the completion checks. A check can run a command or require your manual verdict. See the [configuration reference](../reference/configuration.md) for the field definitions.
+
+Confirm the final review to write `tevu.yaml`. Cancelling leaves the configuration unchanged.
+
+For a Jira source, use the [Jira import guide](import-jira-task.md) when adding the task, then continue with validation below.
+
+## Validate and preview
+
+```sh
+bun run start -- validate
+bun run start -- run --dry-run
+```
+
+Validation should print `Configuration is valid.` The preview lists every task/model pair, the starting commits, execution limits, and the output directory. Neither command starts a model session.
+
+## Run and review
+
+```sh
+bun run start -- run
+```
+
+This command starts model sessions and can incur provider charges. Open the `report.md` path printed when the run finishes. Check task outcomes separately from runtime errors, then compare the available time, usage, and cost measurements. See the [results reference](../reference/results.md).
+
+For pending manual checks, use the run and case IDs shown in the output. The following IDs are examples; replace them with yours:
+
+```sh
+bun run start -- assess 20260923t120000z-a1b2c3 csv-export--high
+```
+
+The assessment command records your verdicts and rebuilds the report. To rebuild it again from saved evidence:
+
+```sh
+bun run start -- report 20260923t120000z-a1b2c3
+```
+
+Confirm that required manual checks now have verdicts. Optional checks remain visible but do not change an otherwise passed task outcome.
+
+## Troubleshooting
+
+- **Missing variable:** export the variable named in the error in the same terminal, then rerun validation.
+- **Unsupported source tree:** choose a commit without submodules or Git LFS content. See the [source-tree reference](../reference/configuration.md#source-trees).
+- **Missing agent capability:** check that `opencode.executable` points to the intended executable and that it supports the required commands and options.
+- **Interactive terminal required:** run `task add` or `assess` with both input and output attached to a terminal.
