@@ -10,7 +10,7 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 ## Gotchas
 
 - **Sources run directly under Node's type stripping.** Only erasable TypeScript syntax works: no `enum`, `namespace`, or constructor parameter properties. Vitest transpiles them and passes; `node src/index.ts` crashes. Only `bun run typecheck` catches it.
-- **Dependencies point one way: `domain` ← `config` ← `application` ← `interface`.** `adapters` implement contracts declared in `domain` and import nothing else from `src`. `src/index.ts` is the only module that wires concrete adapters. The code currently violates this in several places; those imports are debt to remove, not precedent to follow.
+- **Dependencies point one way: `domain` <- `config` <- `application` <- `interface`.** `adapters` implement contracts declared in `domain` and import nothing else from `src`. `src/index.ts` is the only module that wires concrete adapters. The code currently violates this in several places; those imports are debt to remove, not precedent to follow.
 - **Errors cross module boundaries as `TevuResult`, never as thrown exceptions.**
 - **Pure modules read time only through the injected clock**, never `Date.now()` or `new Date()`.
 - **`tevu report` must reproduce byte-identical JSON and Markdown from unchanged artifacts.** Derived output may not depend on wall-clock time, randomness, or unordered iteration.
