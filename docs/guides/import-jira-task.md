@@ -10,10 +10,10 @@ Make those variables available in the terminal that will launch tevu. Store thei
 
 ## Import the issue
 
-From the tevu checkout, run:
+From the directory that holds your `tevu.yaml`, run:
 
 ```sh
-bun run start -- task add --jira YOUR-123
+tevu task add --jira YOUR-123
 ```
 
 Replace `YOUR-123` with an issue key you can access. Review the imported title and description, then choose the repository and starting commit. Add the model instructions, prerequisites, acceptance criteria, and completion checks.
@@ -23,7 +23,7 @@ Confirm the final review to save the task. Cancelling or an import failure leave
 ## Verify the task
 
 ```sh
-bun run start -- validate
+tevu validate
 ```
 
 Confirm that validation prints `Configuration is valid.` The task's `source` records the issue identity and imported text as a snapshot; later Jira edits do not change it.

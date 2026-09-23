@@ -38,8 +38,13 @@ From a checkout, with Node.js 24 and Bun installed:
 
 ```sh
 bun install --frozen-lockfile
-bun run start -- --help
+bun run build
+mkdir -p ~/.local/bin
+ln -sf "$PWD/dist/index.js" ~/.local/bin/tevu
+tevu --help
 ```
+
+`~/.local/bin` must be on `PATH`; any directory on `PATH` works. The link points into the checkout, which must stay in place.
 
 [Create your first comparison](docs/guides/run-benchmark.md). Runs locally on Linux and macOS.
 

@@ -8,21 +8,24 @@ Use Linux or macOS with Node.js 24, Bun, Git, and OpenCode installed. The curren
 
 Choose a model and effort variant supported by your configured provider. Make its credential environment variables available in the terminal that will launch tevu. tevu uses isolated agent state, so credentials stored only in your usual agent login are not copied into benchmark runs.
 
-From the tevu checkout, install dependencies and check the command interface:
+From the tevu checkout, install dependencies, build, and link the command:
 
 ```sh
 bun install --frozen-lockfile
-bun run start -- --help
+bun run build
+mkdir -p ~/.local/bin
+ln -sf "$PWD/dist/index.js" ~/.local/bin/tevu
+tevu --help
 ```
 
-The command reference uses the executable name `tevu`. From a checkout, use `bun run start --` in its place.
+`tevu` runs with the `node` on `PATH`, which must be Node.js 24 in every directory where `tevu` is used. The link points into the checkout, which must stay in place. After updating the checkout, rerun `bun install --frozen-lockfile` and `bun run build`. If the shell cannot find `tevu`, add `~/.local/bin` to `PATH` or link into another directory on `PATH`. Run the remaining commands in this guide from the directory that holds, or will hold, `tevu.yaml`.
 
 ## Define a task
 
 Run the wizard in an interactive terminal:
 
 ```sh
-bun run start -- task add
+tevu task add
 ```
 
 For a missing configuration, the wizard first asks for repositories, model settings, execution limits, and environment-variable names. Declare provider authentication variables as `provider-credential`; enter their names, not their values.
@@ -36,8 +39,8 @@ For a Jira source, use the [Jira import guide](import-jira-task.md) when adding 
 ## Validate and preview
 
 ```sh
-bun run start -- validate
-bun run start -- run --dry-run
+tevu validate
+tevu run --dry-run
 ```
 
 Validation should print `Configuration is valid.` The preview lists every task/model pair, the starting commits, execution limits, and the output directory. Neither command starts a model session.
@@ -45,7 +48,7 @@ Validation should print `Configuration is valid.` The preview lists every task/m
 ## Run and review
 
 ```sh
-bun run start -- run
+tevu run
 ```
 
 This command starts model sessions and can incur provider charges. Open the `report.md` path printed when the run finishes. Check task outcomes separately from runtime errors, then compare the available time, usage, and cost measurements. See the [results reference](../reference/results.md).
@@ -53,13 +56,13 @@ This command starts model sessions and can incur provider charges. Open the `rep
 For pending manual checks, use the run and case IDs shown in the output. The following IDs are examples; replace them with yours:
 
 ```sh
-bun run start -- assess 20260923t120000z-a1b2c3 csv-export--high
+tevu assess 20260923t120000z-a1b2c3 csv-export--high
 ```
 
 The assessment command records your verdicts and rebuilds the report. To rebuild it again from saved evidence:
 
 ```sh
-bun run start -- report 20260923t120000z-a1b2c3
+tevu report 20260923t120000z-a1b2c3
 ```
 
 Confirm that required manual checks now have verdicts. Optional checks remain visible but do not change an otherwise passed task outcome.
@@ -67,6 +70,7 @@ Confirm that required manual checks now have verdicts. Optional checks remain vi
 ## Troubleshooting
 
 - **Missing variable:** export the variable named in the error in the same terminal, then rerun validation.
+- **`prerequisites.bun` finding:** `validate` or `run` means `bun --version` fails in the current directory. Make Bun resolvable there; a version manager that pins Bun only inside the tevu checkout does not apply elsewhere.
 - **Unsupported source tree:** choose a commit without submodules or Git LFS content. See the [source-tree reference](../reference/configuration.md#source-trees).
 - **Missing agent capability:** check that `opencode.executable` points to the intended executable and that it supports the required commands and options.
 - **Interactive terminal required:** run `task add` or `assess` with both input and output attached to a terminal.
