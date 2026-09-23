@@ -606,20 +606,27 @@ describe("buildTaskPrompt", () => {
   it("builds identical prompt bytes for every contender on the same task", () => {
     const task = buildTask();
 
-    const prompt = buildTaskPrompt(task, task.startCommit);
+    const prompt = buildTaskPrompt(task);
 
-    expect(prompt).toBe(buildTaskPrompt(task, task.startCommit));
+    expect(prompt).toBe(buildTaskPrompt(task));
   });
 
-  it("includes the prompt, description, check descriptions, pinned commit, and repository boundary instruction", () => {
-    const prompt = buildTaskPrompt(buildTask(), "0123456789abcdef0123456789abcdef01234567");
+  it("includes the prompt, description, check descriptions, and repository boundary instruction", () => {
+    const task = buildTask();
 
-    expect(prompt).toContain("TEVU-PROMPT-BODY implement the welcome route");
-    expect(prompt).toContain("synthetic task description for the welcome route");
-    expect(prompt).toContain("acceptance command exits zero");
-    expect(prompt).toContain("manual Definition of Done review");
-    expect(prompt).toContain("Pinned source commit: 0123456789abcdef0123456789abcdef01234567");
-    expect(prompt).toContain("Work only inside the current repository.");
+    const prompt = buildTaskPrompt(task);
+
+    expect(prompt).toBe(
+      [
+        task.prompt,
+        task.description,
+        `Acceptance criteria:\n- ${task.acceptanceCriteria[0].description}`,
+        `Definition of Done:\n- ${task.definitionOfDone[0].description}`,
+        "Work only inside the current repository. Do not read or modify any path outside this repository's working tree.",
+      ].join("\n\n"),
+    );
+    expect(prompt).not.toContain("Pinned source commit");
+    expect(prompt.toLowerCase()).not.toContain("0123456");
   });
 
   it("omits evaluator commands, contender identity, and Jira identity from the prompt", () => {
@@ -635,13 +642,20 @@ describe("buildTaskPrompt", () => {
     });
     const contender: ContenderDefinition = buildContender();
 
-    const prompt = buildTaskPrompt(jiraTask, "abc");
+    const prompt = buildTaskPrompt(jiraTask);
 
     expect(prompt).not.toContain("/synthetic/acceptance-probe");
     expect(prompt).not.toContain("TEVU-999");
     expect(prompt).not.toContain("TEVU-JIRA-DESCRIPTION");
     expect(prompt).not.toContain(contender.model);
     expect(prompt).not.toContain(contender.variant);
+  });
+
+  it("does not read the task's start commit", () => {
+    const first = buildTask({ startCommit: "0123456789abcdef0123456789abcdef01234567" });
+    const second = buildTask({ startCommit: "fedcba9876543210fedcba9876543210fedcba98" });
+
+    expect(buildTaskPrompt(first)).toBe(buildTaskPrompt(second));
   });
 });
 
@@ -1041,16 +1055,12 @@ describe("OpenCode adapter over a synthetic executable", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Credential-secret redaction on OpenCode stdout streams (spec 3.3)
-//
-// The corpus from the JSON value grammar: a secret containing newline, quote,
-// and backslash reaches stdout ESCAPED inside the executable's JSON output, so
-// chunk-level literal redaction before parsing can never match it; a
-// digit-only secret equal to a numeric field is byte-replaced before parsing
-// and corrupts the record framing. No real OpenCode is involved.
-// ---------------------------------------------------------------------------
-
+// The corpus below exercises the JSON value grammar: a secret containing
+// newline, quote, and backslash reaches stdout escaped inside the
+// executable's JSON output, so chunk-level literal redaction before parsing
+// can never match it; a digit-only secret equal to a numeric field is
+// byte-replaced before parsing and corrupts the record framing. No real
+// OpenCode is involved.
 describe("credential-secret redaction on OpenCode stdout streams", () => {
   it("removes an escape-serialized secret from decoded run-event string content", async () => {
     const worktree = join(tempRoot, "worktree-secret-string");

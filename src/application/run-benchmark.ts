@@ -10,6 +10,7 @@ import pLimit from "p-limit";
 
 import { evaluateChecks, orderTaskChecks, reduceRequiredOutcome } from "../evaluation/checks.ts";
 import { normalizeMetrics, unavailableBenchmarkMetrics } from "../evaluation/metrics.ts";
+import { describeSourceCommitInPrompt } from "./source-commit-in-prompt.ts";
 
 import type { TaskDefinition, TevuConfig } from "../config/schema.ts";
 import type {
@@ -269,8 +270,9 @@ function cancellationFailure(): {
 
 /**
  * Pins every planned case to its resolved source commit before any write,
- * probing each unique repository-and-commit pair once. Source failures are
- * remapped to the owning task's identity.
+ * probing each unique repository-and-commit pair once, and rejects a case
+ * whose agent prompt names the resolved commit. Source failures are remapped
+ * to the owning task's identity.
  */
 async function resolvePlannedCases(
   plan: BenchmarkPlan,
@@ -303,6 +305,10 @@ async function resolvePlannedCases(
       }
       commit = validated.value.resolvedCommit;
       resolvedCommits.set(key, commit);
+    }
+    const reason = describeSourceCommitInPrompt(dependencies.buildTaskPrompt(task), commit);
+    if (reason !== undefined) {
+      return sourceFailure(task.id, reason);
     }
     planned.push({ identity: { ...identity, sourceCommit: commit }, task });
   }
@@ -391,7 +397,7 @@ async function runActiveCase(run: RunContext, active: ActiveCase): Promise<void>
   const outcome = await run.dependencies.opencode.run({
     identity: active.identity,
     executable: run.plan.config.opencode.executable,
-    prompt: run.dependencies.buildTaskPrompt(active.task, active.identity.sourceCommit),
+    prompt: run.dependencies.buildTaskPrompt(active.task),
     worktreeDirectory: active.workspace.worktreeDirectory,
     environment: active.environments.opencode,
     timeoutMs: run.plan.caseTimeoutMs,

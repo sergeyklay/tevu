@@ -639,6 +639,7 @@ export type ValidationDependencies = {
   opencode: OpenCodeAdapter;
   environments: EnvironmentAdapter;
   prerequisites: PrerequisiteAdapter;
+  buildTaskPrompt: (task: TaskDefinition) => string;
 };
 
 /** Aggregate validation outcome; any error-severity finding makes the configuration invalid. */
@@ -669,7 +670,7 @@ export type RunDependencies = {
   clock: Clock;
   generateRunId: RunIdGenerator;
   configDigest: (config: TevuConfig) => string;
-  buildTaskPrompt: (task: TaskDefinition, sourceCommit: string) => string;
+  buildTaskPrompt: (task: TaskDefinition) => string;
   redact: (text: string) => string;
   cancellation: AbortSignal;
   onLifecycle?: (caseId: string, lifecycle: CaseLifecycle) => void;

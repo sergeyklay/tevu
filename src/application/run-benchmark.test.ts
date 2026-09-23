@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { planBenchmark, reduceRunExitCode, runBenchmark } from "./run-benchmark.ts";
 import { TevuConfigSchema } from "../config/schema.ts";
@@ -683,7 +683,7 @@ function createHarness(config: TevuConfig) {
     clock,
     generateRunId: () => RUN_ID,
     configDigest: () => "digest-synthetic",
-    buildTaskPrompt: (task, sourceCommit) => `prompt:${task.id}:${sourceCommit}`,
+    buildTaskPrompt: vi.fn((task: TaskDefinition) => `prompt:${task.id}`),
     redact: (text) => text,
     cancellation: cancellationController.signal,
     onLifecycle: (caseId, lifecycle) => lifecycleEvents.push({ caseId, lifecycle }),
@@ -1103,7 +1103,46 @@ describe("runBenchmark", () => {
     expect(harness.opencode.runCalls.size).toBe(0);
   });
 
+  it("fails before any case starts when a planned case's prompt names its resolved commit", async () => {
+    const config = buildTevuConfig();
+    const harness = createHarness(config);
+    harness.dependencies.buildTaskPrompt = (task) =>
+      task.id === "task-2" ? "the agent prompt names pinned-something" : "an unrelated prompt";
+
+    const result = await runBenchmark(planBenchmark(config), harness.dependencies);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: "SourceMaterializationError",
+        taskId: "task-2",
+        reason: "agent prompt contains resolved start commit pinned-",
+      },
+    });
+    expect(harness.timeline).toEqual(["probeHost", "snapshotParent", "probe", "validateSource:repo-1"]);
+  });
+
+  it("fails before any case starts when the first, uncached task's prompt names its resolved commit", async () => {
+    const config = buildTevuConfig();
+    const harness = createHarness(config);
+    harness.dependencies.buildTaskPrompt = (task) =>
+      task.id === "task-1" ? "the agent prompt names pinned-something" : "an unrelated prompt";
+
+    const result = await runBenchmark(planBenchmark(config), harness.dependencies);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: "SourceMaterializationError",
+        taskId: "task-1",
+        reason: "agent prompt contains resolved start commit pinned-",
+      },
+    });
+    expect(harness.timeline).toEqual(["probeHost", "snapshotParent", "probe", "validateSource:repo-1"]);
+  });
+
   it("runs the complete per-case pipeline in order with the patch captured before evaluators", async () => {
+    const task = buildTask();
     const config = buildTevuConfig({
       execution: {
         concurrency: 1,
@@ -1112,7 +1151,7 @@ describe("runBenchmark", () => {
         opencodeEnvironment: [{ name: "TEVU_PROVIDER_KEY", classification: "provider-credential" }],
         evaluatorEnvironment: [{ name: "TEVU_EVAL_VAR", classification: "ordinary" }],
       },
-      tasks: [buildTask()],
+      tasks: [task],
     });
     const harness = createHarness(config);
 
@@ -1161,7 +1200,9 @@ describe("runBenchmark", () => {
     const runInput = harness.opencode.runInputs[0];
     expect(runInput.identity).toEqual({ ...buildCaseIdentity("task-1--c1"), sourceCommit: `pinned-${COMMIT_A}` });
     expect(runInput.executable).toBe("/synthetic/opencode");
-    expect(runInput.prompt).toBe(`prompt:task-1:pinned-${COMMIT_A}`);
+    expect(runInput.prompt).toBe("prompt:task-1");
+    expect(runInput.prompt).not.toContain(`pinned-${COMMIT_A}`);
+    expect(vi.mocked(harness.dependencies.buildTaskPrompt).mock.calls).toEqual([[task], [task], [task], [task]]);
     expect(runInput.worktreeDirectory).toBe("/synthetic/workspaces/task-1--c1/worktree");
     expect(runInput.environment).toBe(harness.environments.created[0].value.opencode);
     expect(runInput.timeoutMs).toBe(60_000);
