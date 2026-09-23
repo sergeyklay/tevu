@@ -113,6 +113,16 @@ export const JiraTaskSourceSchema = z.strictObject({
   importedDescription: z.string(),
 });
 
+/** One-time GitHub issue snapshot; later GitHub changes never alter the task. */
+export const GitHubIssueTaskSourceSchema = z.strictObject({
+  kind: z.literal("github-issue"),
+  issueKey: z.string().min(1),
+  issueUrl: z.url(),
+  importedAt: z.iso.datetime(),
+  importedSummary: z.string(),
+  importedDescription: z.string(),
+});
+
 /** One acceptance-driven benchmark task pinned to a repository commit. */
 export const TaskDefinitionSchema = z
   .strictObject({
@@ -122,6 +132,7 @@ export const TaskDefinitionSchema = z
     source: z.discriminatedUnion("kind", [
       ManualTaskSourceSchema,
       JiraTaskSourceSchema,
+      GitHubIssueTaskSourceSchema,
     ]),
     description: nonWhitespaceTextSchema,
     prompt: nonWhitespaceTextSchema,
@@ -359,3 +370,6 @@ export type ManualTaskSource = z.infer<typeof ManualTaskSourceSchema>;
 
 /** One-time Jira Cloud import snapshot stored on a task. */
 export type JiraTaskSource = z.infer<typeof JiraTaskSourceSchema>;
+
+/** One-time GitHub issue snapshot stored on a task. */
+export type GitHubIssueTaskSource = z.infer<typeof GitHubIssueTaskSourceSchema>;

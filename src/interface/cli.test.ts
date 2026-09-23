@@ -25,7 +25,7 @@ import type {
   BenchmarkPlan,
   CaseIdentity,
   CaseResult,
-  JiraIssueSnapshot,
+  IssueSnapshot,
   OpenCodeCapabilityReport,
   ReportResult,
   RunFinding,
@@ -316,7 +316,7 @@ function buildReportResult(overrides: Partial<ReportResult> = {}): ReportResult 
   };
 }
 
-function buildJiraIssueSnapshot(overrides: Partial<JiraIssueSnapshot> = {}): JiraIssueSnapshot {
+function buildJiraIssueSnapshot(overrides: Partial<IssueSnapshot> = {}): IssueSnapshot {
   return {
     issueKey: "TEVU-42",
     issueUrl: "https://jira.example.com/browse/TEVU-42",
@@ -380,6 +380,7 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
     configExists: vi.fn(async () => true),
     loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
     importJiraIssue: vi.fn(async () => ({ ok: true as const, value: buildJiraIssueSnapshot() })),
+    importGitHubIssue: vi.fn(async () => ({ ok: true as const, value: buildJiraIssueSnapshot() })),
     createTask: vi.fn(async () => ({ ok: true as const, value: buildTaskDefinition({ id: "task-2" }) })),
     validateConfig: vi.fn(async () => ({ ok: true as const, value: buildValidationReport() })),
     planBenchmark: vi.fn(() => buildBenchmarkPlan(config)),
@@ -670,7 +671,7 @@ describe("tevu CLI", () => {
 
       expect(run?.options.map((option) => option.long)).toEqual(["--config", "--dry-run"]);
       expect(run?.options[0]?.defaultValue).toBe("tevu.yaml");
-      expect(add?.options.map((option) => option.long)).toEqual(["--config", "--jira"]);
+      expect(add?.options.map((option) => option.long)).toEqual(["--config", "--jira", "--github"]);
     });
 
     it("requires both run-id and case-id arguments on assess", () => {
@@ -836,6 +837,8 @@ describe("tevu CLI", () => {
       expect(vi.mocked(operations.validateConfig)).toHaveBeenCalledExactlyOnceWith(
         buildTevuConfig(),
       );
+      expect(operations.importJiraIssue).not.toHaveBeenCalled();
+      expect(operations.importGitHubIssue).not.toHaveBeenCalled();
     });
 
     it("prints the invalid verdict with exit 1 and plans nothing", async () => {
@@ -940,6 +943,7 @@ describe("tevu CLI", () => {
       );
       expect(operations.configExists).not.toHaveBeenCalled();
       expect(operations.importJiraIssue).not.toHaveBeenCalled();
+      expect(operations.importGitHubIssue).not.toHaveBeenCalled();
       expectNoWrites(operations);
       expect(operations.readAssessmentContext).not.toHaveBeenCalled();
     });
@@ -1018,6 +1022,8 @@ describe("tevu CLI", () => {
         loadedConfig,
         "run-1",
       );
+      expect(operations.importJiraIssue).not.toHaveBeenCalled();
+      expect(operations.importGitHubIssue).not.toHaveBeenCalled();
     });
 
     it("wires the shared cancellation and run-id hook and withholds lifecycle progress on non-TTY output", async () => {
@@ -1147,6 +1153,24 @@ describe("tevu CLI", () => {
   });
 
   describe("task add", () => {
+    it("rejects combining --jira and --github before any operation is called", async () => {
+      const operations = createOperations();
+
+      const { code, err } = await runCli(
+        ["task", "add", "--jira", "TEVU-42", "--github", "octo/repo#42"],
+        { operations },
+      );
+
+      expect(code).toBe(1);
+      expect(err[0]).toBe("error: option '--github <reference>' cannot be used with option '--jira <issue-key>'");
+      expect(clack.state.prompts).toEqual([]);
+      expect(operations.configExists).not.toHaveBeenCalled();
+      expect(operations.loadConfig).not.toHaveBeenCalled();
+      expect(operations.importJiraIssue).not.toHaveBeenCalled();
+      expect(operations.importGitHubIssue).not.toHaveBeenCalled();
+      expectNoWrites(operations);
+    });
+
     it("rejects --jira before any question when the configuration has no Jira settings", async () => {
       const operations = createOperations();
 
@@ -1386,6 +1410,103 @@ describe("tevu CLI", () => {
         },
       });
     });
+
+    it("imports a GitHub issue exactly once and travels the snapshot inside the wizard input", async () => {
+      const githubSnapshot = buildJiraIssueSnapshot({
+        issueKey: "octo/repo#42",
+        issueUrl: "https://github.com/octo/repo/issues/42",
+        summary: "Add an export button",
+        description: "Users cannot export the current view.",
+      });
+      const operations = createOperations({
+        importGitHubIssue: vi.fn(async () => ({ ok: true as const, value: githubSnapshot })),
+      });
+      scriptAnswers(
+        "repo-1",
+        "abc123",
+        "task-2",
+        "Export the current view as CSV.",
+        "Implement CSV export for the current view.",
+        "ready-1",
+        "Repository is readable",
+        true,
+        false,
+        "acc-1",
+        "Export produces a CSV",
+        true,
+        "manual",
+        false,
+        "dod-1",
+        "README documents the button",
+        true,
+        "manual",
+        false,
+        true,
+      );
+
+      const { code, out } = await runCli(["task", "add", "--github", "octo/repo#42"], { operations });
+
+      expect(code).toBe(0);
+      expect(out).toEqual(['Task "task-2" added to tevu.yaml.']);
+      expect(vi.mocked(operations.importGitHubIssue)).toHaveBeenCalledExactlyOnceWith("octo/repo#42");
+      expect(operations.importJiraIssue).not.toHaveBeenCalled();
+      expect(clack.state.notes).toContainEqual({
+        title: "Imported octo/repo#42 (one-time snapshot)",
+        message: "Add an export button\n\nUsers cannot export the current view.",
+      });
+      expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.source).toEqual({
+        kind: "github-issue",
+        snapshot: {
+          issueKey: "octo/repo#42",
+          issueUrl: "https://github.com/octo/repo/issues/42",
+          summary: "Add an export button",
+          description: "Users cannot export the current view.",
+          importedAt: "2026-09-23T10:00:00.000Z",
+        },
+      });
+    });
+
+    it.each([
+      {
+        description: "Jira",
+        argv: ["task", "add", "--jira", "TEVU-42"],
+        operationsOverrides: (jiraSettings: JiraCloudConfig) => ({
+          loadConfig: vi.fn(async () => ({
+            ok: true as const,
+            value: buildTevuConfig({ jira: jiraSettings }),
+          })),
+          importJiraIssue: vi.fn(async () => ({
+            ok: false as const,
+            error: { kind: "CancellationError" as const, activeCaseIds: [] },
+          })),
+        }),
+      },
+      {
+        description: "GitHub",
+        argv: ["task", "add", "--github", "octo/repo#42"],
+        operationsOverrides: () => ({
+          importGitHubIssue: vi.fn(async () => ({
+            ok: false as const,
+            error: { kind: "CancellationError" as const, activeCaseIds: [] },
+          })),
+        }),
+      },
+    ])(
+      "converts a $description import cancellation into the standard cancellation exit and message",
+      async ({ argv, operationsOverrides }) => {
+        const operations = createOperations(operationsOverrides(buildJiraCloudSettings()));
+
+        const { code, err } = await runCli(argv, { operations });
+
+        expect(code).toBe(130);
+        expect(err[0]).toBe("Cancelled.");
+        expect(operations.createTask).not.toHaveBeenCalled();
+        expect(clack.state.logs).toContainEqual({
+          kind: "warn",
+          message: "Task creation cancelled; the configuration is unchanged.",
+        });
+      },
+    );
 
     it("cancels at the review confirmation without calling createTask", async () => {
       const operations = createOperations();
@@ -1660,6 +1781,7 @@ describe("tevu CLI", () => {
       expect(operations.readAssessmentContext).not.toHaveBeenCalled();
       expect(operations.applyAssessment).not.toHaveBeenCalled();
       expect(operations.importJiraIssue).not.toHaveBeenCalled();
+      expect(operations.importGitHubIssue).not.toHaveBeenCalled();
       expect(operations.createTask).not.toHaveBeenCalled();
     });
 

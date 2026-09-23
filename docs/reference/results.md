@@ -67,7 +67,7 @@ Files are stored under the configured artifact directory:
 
 Some source files are absent when the corresponding evidence was unavailable; assessments appear after the first assessment. Their absence is recorded rather than treated as a successful measurement.
 
-Reports link to patches, transcripts, and complete evaluator output instead of embedding them. Full task prompts and imported Jira descriptions are omitted from Markdown reports.
+Reports link to patches, transcripts, and complete evaluator output instead of embedding them. Full task prompts and imported issue descriptions are omitted from Markdown reports.
 
 ### Data handling
 
@@ -75,7 +75,7 @@ Configured credential-secret values are redacted before persistent or terminal o
 
 ## Regeneration
 
-`tevu report <run-id>` recomputes normalized results and Markdown from saved evidence and current assessments. It does not start another model session or contact Git or Jira. Unchanged source artifacts produce identical regenerated JSON and Markdown.
+`tevu report <run-id>` recomputes normalized results and Markdown from saved evidence and current assessments. It does not start another model session or contact Git or an issue tracker. Unchanged source artifacts produce identical regenerated JSON and Markdown.
 
 Replacing an assessment retains the old verdict in history. Only current verdicts affect the outcome. Artifacts remain until the operator deletes the run directory; there is no automatic retention or upload.
 

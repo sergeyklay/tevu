@@ -17,14 +17,19 @@ import { pathToFileURL } from "node:url";
 
 import { createArtifactStore, createConfigStore } from "./adapters/artifact-store.ts";
 import { createGitWorkspaceAdapter } from "./adapters/git.ts";
-import { createJiraCloudAdapter } from "./adapters/jira-cloud.ts";
 import { buildTaskPrompt, createOpenCodeAdapter } from "./adapters/opencode.ts";
 import {
   createEnvironmentAdapter,
   createEvaluatorProcessAdapter,
   createPrerequisiteAdapter,
   createRedactor,
+  runManagedProcess,
 } from "./adapters/process.ts";
+import {
+  createGitHubIssuesAdapter,
+  GH_CREDENTIAL_ENVIRONMENT_VARIABLES,
+} from "./adapters/trackers/github-issues.ts";
+import { createJiraCloudAdapter } from "./adapters/trackers/jira-cloud.ts";
 import { assessCase, rebuildReport } from "./application/assess.ts";
 import { createTask } from "./application/create-task.ts";
 import { planBenchmark, runBenchmark } from "./application/run-benchmark.ts";
@@ -111,6 +116,21 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
         getEnvironmentVariable: (name) => process.env[name],
       });
       return jira.readIssue(issueKey);
+    },
+    importGitHubIssue: (reference) => {
+      registry.add(GH_CREDENTIAL_ENVIRONMENT_VARIABLES.map((name) => process.env[name]));
+      const github = createGitHubIssuesAdapter({
+        runGh: (request) =>
+          runManagedProcess({
+            ...request,
+            cwd: process.cwd(),
+            secretValues: registry.read(),
+            stdoutRedaction: "structured",
+          }),
+        parentEnvironment: process.env,
+        cancellation,
+      });
+      return github.readIssue(reference);
     },
     createTask: async (input) => {
       const resolved = resolveWizardRepositoryPaths(input);

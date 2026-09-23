@@ -7,7 +7,7 @@
  * or storage logic and imports no concrete adapter.
  */
 
-import { Command, CommanderError } from "commander";
+import { Command, CommanderError, Option } from "commander";
 
 import { runAssessmentWizard, runTaskWizard } from "./task-wizard.ts";
 
@@ -20,7 +20,7 @@ import type {
   BenchmarkPlan,
   CaseLifecycle,
   CaseResult,
-  JiraIssueSnapshot,
+  IssueSnapshot,
   OpenCodeCapabilityReport,
   ReportResult,
   RunResult,
@@ -59,7 +59,10 @@ export type ProgramOperations = {
   importJiraIssue(
     settings: JiraCloudConfig,
     issueKey: string,
-  ): Promise<TevuResult<JiraIssueSnapshot, "JiraImportError">>;
+  ): Promise<TevuResult<IssueSnapshot, "IssueImportError" | "CancellationError">>;
+  importGitHubIssue(
+    reference: string,
+  ): Promise<TevuResult<IssueSnapshot, "IssueImportError" | "CancellationError">>;
   createTask(
     input: TaskWizardInput,
   ): Promise<
@@ -68,7 +71,7 @@ export type ProgramOperations = {
       | "ConfigParseError"
       | "ConfigValidationError"
       | "SourceMaterializationError"
-      | "JiraImportError"
+      | "IssueImportError"
       | "ArtifactError"
       | "CancellationError"
     >
@@ -133,7 +136,7 @@ export type ProgramDependencies = {
 };
 
 type ConfigOptionValues = { config: string };
-type TaskAddOptionValues = ConfigOptionValues & { jira?: string };
+type TaskAddOptionValues = ConfigOptionValues & { jira?: string; github?: string };
 type RunOptionValues = ConfigOptionValues & { dryRun?: boolean };
 
 type ExitBox = { code: number };
@@ -156,6 +159,7 @@ const HELP_EXAMPLES: Record<string, [string, string][]> = {
   add: [
     ["Define a task interactively", "tevu task add"],
     ["Import a task from Jira", "tevu task add --jira PROJ-123"],
+    ["Import a task from GitHub", "tevu task add --github OWNER/REPO#123"],
   ],
   validate: [
     ["Check the default configuration", "tevu validate"],
@@ -211,6 +215,7 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
     .description("Add a benchmark task")
     .option("--config <path>", "Configuration file path", DEFAULT_CONFIG_PATH)
     .option("--jira <issue-key>", "Import a task from a Jira issue")
+    .addOption(new Option("--github <reference>", "Import a task from a GitHub issue").conflicts("jira"))
     .action(async (options: TaskAddOptionValues) => {
       exit.code = await runTaskAdd(dependencies, options);
     });
@@ -369,7 +374,7 @@ async function runTaskAdd(
   const { out, err } = createLineWriters(dependencies);
   const operations = dependencies.operations;
   const wizard = await runTaskWizard(
-    { configPath: options.config, jiraIssueKey: options.jira },
+    { configPath: options.config, jiraIssueKey: options.jira, githubIssueReference: options.github },
     {
       io: { input: dependencies.io.stdin, output: dependencies.io.stdout },
       readConfig: async (): Promise<TevuResult<TevuConfig | null, LoadConfigErrorKind>> => {
@@ -380,6 +385,7 @@ async function runTaskAdd(
         return operations.loadConfig(options.config);
       },
       importJiraIssue: operations.importJiraIssue,
+      importGitHubIssue: operations.importGitHubIssue,
       now: dependencies.now,
       redact: dependencies.redact,
     },
@@ -603,9 +609,9 @@ function renderTevuError(error: TevuError): string[] {
       return [`error: task "${error.taskId}" source cannot be materialized: ${error.reason}`];
     case "IsolationError":
       return [`error: case "${error.caseId}" isolation failed: ${error.reason}`];
-    case "JiraImportError":
+    case "IssueImportError":
       return [
-        `error: Jira issue "${error.issueKey}" import failed${error.status === undefined ? "" : ` (status ${error.status})`}: ${error.reason}`,
+        `error: ${error.tracker === "jira-cloud" ? "Jira" : "GitHub"} issue "${error.reference}" import failed${error.status === undefined ? "" : ` (status ${error.status})`}: ${error.reason}`,
       ];
     case "OpenCodeProcessError":
       return [

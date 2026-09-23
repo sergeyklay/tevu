@@ -85,7 +85,7 @@ A contender is one model/effort combination. `model` uses `provider/model` synta
 | `id` | Unique task ID |
 | `repositoryId` | An ID from `repositories` |
 | `startCommit` | A commit resolvable in that repository; the wizard records the resolved commit |
-| `source` | A manual source or saved Jira snapshot |
+| `source` | A manual source, a saved Jira snapshot, or a saved GitHub issue snapshot |
 | `description` | Non-whitespace task description |
 | `prompt` | Non-whitespace instructions for the model |
 | `definitionOfReady` | At least one `{id, description, confirmed: true}` prerequisite |
@@ -97,6 +97,8 @@ A contender is one model/effort combination. `model` uses `provider/model` synta
 A manual source has `kind: manual`, `title`, and an optional `reference`.
 
 A Jira snapshot has `kind: jira-cloud`, `issueKey`, `issueUrl`, `importedAt`, `importedSummary`, and `importedDescription`. The wizard fills these from a one-time import. Later changes in Jira do not update the task.
+
+A GitHub issue snapshot has `kind: github-issue`, `issueKey`, `issueUrl`, `importedAt`, `importedSummary`, and `importedDescription`. `importedSummary` is the issue title and `importedDescription` is its Markdown body. The wizard fills these once from `gh issue view`; later changes to the GitHub issue never update the task.
 
 ### Source trees
 
@@ -176,3 +178,9 @@ Agent processes receive the same fixed variable names with their own per-case ho
 Neither Jira credential variable may appear in `evaluatorEnvironment`. Jira import is read-only and uses at most three requests per import, sharing that budget across redirects and retries. Jira Server and Data Center are unsupported.
 
 The [Jira import guide](../guides/import-jira-task.md) describes connection setup and task creation.
+
+## GitHub Issues
+
+GitHub Issues has no configuration fields. `task add --github` needs the GitHub CLI (`gh`) on `PATH`, authenticated for the issue's host: `gh auth login` for `github.com`, or `gh auth login --hostname <host>` for a GitHub Enterprise Server host, because gh never receives `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. tevu reads and stores no GitHub token; gh owns authentication entirely.
+
+Each import makes one `gh issue view` call with a 30-second limit and no retries beyond gh's own. `tevu validate`, `tevu run`, and `tevu report` never run gh.

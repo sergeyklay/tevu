@@ -62,8 +62,12 @@ export type ManagedProcessRequest = {
   stdoutRedaction?: "text" | "structured";
 };
 
-/** Evidence that a process could not be started; the reason is already redacted. */
-export type ManagedProcessLaunchFailure = { launched: false; reason: string };
+/**
+ * Evidence that a process could not be started; the reason is already
+ * redacted. `code` carries the Node.js-specific error code (e.g. `ENOENT`)
+ * when one is available; the `cancelled before launch` result never sets it.
+ */
+export type ManagedProcessLaunchFailure = { launched: false; reason: string; code?: string };
 
 /** Complete evidence for one launched and settled process. */
 export type ManagedProcessCompletion = {
@@ -242,7 +246,7 @@ export async function runManagedProcess(
       stripFinalNewline: false,
     });
   } catch (cause) {
-    return { launched: false, reason: redact(describeError(cause)) };
+    return launchFailure(redact(describeError(cause)), describeErrorCode(cause));
   }
 
   const maxCaptureBytes = request.maxCaptureBytes ?? DEFAULT_MAX_CAPTURE_BYTES;
@@ -316,7 +320,7 @@ export async function runManagedProcess(
   const exitCode = typeof result.exitCode === "number" ? result.exitCode : null;
   const signal = typeof result.signal === "string" ? result.signal : null;
   if (exitCode === null && signal === null) {
-    return { launched: false, reason: redact(describeSpawnFailure(result)) };
+    return launchFailure(redact(describeSpawnFailure(result)), result.code);
   }
 
   const endedAt = new Date();
@@ -546,6 +550,19 @@ function normalizeSecrets(secretValues: readonly string[]): string[] {
 
 function describeError(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+/** Extracts a Node.js-specific error code (e.g. `ENOENT`) from a caught value, when present. */
+function describeErrorCode(cause: unknown): string | undefined {
+  if (typeof cause !== "object" || cause === null || !("code" in cause)) {
+    return undefined;
+  }
+  const code = (cause as { code: unknown }).code;
+  return typeof code === "string" && code.length > 0 ? code : undefined;
+}
+
+function launchFailure(reason: string, code: string | undefined): ManagedProcessLaunchFailure {
+  return code === undefined ? { launched: false, reason } : { launched: false, reason, code };
 }
 
 function describeSpawnFailure(result: {

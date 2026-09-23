@@ -28,6 +28,9 @@ export type ValidationFinding = {
   message: string;
 };
 
+/** Tracker behind an imported task source; each value equals the stored `source.kind`. */
+export type IssueTrackerKind = "jira-cloud" | "github-issue";
+
 /** Exhaustive typed error union for every tevu failure crossing a module boundary. */
 export type TevuError =
   | { kind: "ConfigParseError"; findings: ValidationFinding[] }
@@ -35,7 +38,14 @@ export type TevuError =
   | { kind: "PrerequisiteError"; tool: string; expected: string; actual?: string }
   | { kind: "SourceMaterializationError"; taskId: string; reason: string }
   | { kind: "IsolationError"; caseId: string; reason: string }
-  | { kind: "JiraImportError"; issueKey: string; status?: number; reason: string }
+  | {
+      kind: "IssueImportError";
+      tracker: IssueTrackerKind;
+      reference: string;
+      /** HTTP status; only the Jira Cloud adapter sets it. */
+      status?: number;
+      reason: string;
+    }
   | {
       kind: "OpenCodeProcessError";
       caseId: string;
@@ -468,17 +478,20 @@ export interface OpenCodeAdapter {
   ): Promise<TevuResult<OpenCodeExport, "OpenCodeProcessError" | "OpenCodeProtocolError">>;
 }
 
-/** Plain-text snapshot of one Jira Cloud issue read once during task creation. */
-export type JiraIssueSnapshot = {
+/** One tracker issue read once during task creation. */
+export type IssueSnapshot = {
+  /** Jira: issue key. GitHub: `OWNER/REPO#NUMBER` from gh's `url` field. */
   issueKey: string;
   issueUrl: string;
+  /** Jira: summary. GitHub: title. */
   summary: string;
+  /** Jira: plain-text projection. GitHub: Markdown body, unmodified. */
   description: string;
 };
 
-/** Read-only, one-time Jira Cloud issue import. */
-export interface JiraTaskSourceAdapter {
-  readIssue(issueKey: string): Promise<TevuResult<JiraIssueSnapshot, "JiraImportError">>;
+/** Read-only, one-time issue import shared by every tracker adapter. */
+export interface IssueTrackerAdapter {
+  readIssue(reference: string): Promise<TevuResult<IssueSnapshot, "IssueImportError" | "CancellationError">>;
 }
 
 /** Exclusive assessment lock held across replacement and derived regeneration. */
@@ -588,7 +601,12 @@ export type TaskSourceRequest =
        * present, task creation stores it verbatim instead of reading the
        * issue from Jira a second time.
        */
-      snapshot?: JiraIssueSnapshot & { importedAt: string };
+      snapshot?: IssueSnapshot & { importedAt: string };
+    }
+  | {
+      kind: "github-issue";
+      /** One-time import already taken and displayed by the wizard. */
+      snapshot: IssueSnapshot & { importedAt: string };
     };
 
 /** Complete top-level answers captured by the missing-configuration bootstrap flow. */
@@ -621,7 +639,7 @@ export type TaskWizardInput = {
 export type TaskDependencies = {
   configStore: ConfigStore;
   git: GitWorkspaceAdapter;
-  jira: JiraTaskSourceAdapter | null;
+  jira: IssueTrackerAdapter | null;
   clock: Clock;
   cancellation?: AbortSignal;
 };

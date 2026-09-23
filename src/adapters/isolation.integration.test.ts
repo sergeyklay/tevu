@@ -838,6 +838,20 @@ describe("credential-secret redaction", () => {
 });
 
 describe("process-group termination", () => {
+  it("reports a launch failure with the ENOENT code for a nonexistent executable", async () => {
+    const result = await runManagedProcess({
+      argv: ["definitely-not-installed", "--version"],
+      cwd: testDirectory,
+      environment: { PATH: process.env.PATH ?? "", HOME: testDirectory },
+      timeoutMs: 1_000,
+      terminationGraceMs: 250,
+    });
+
+    expect(result.launched).toBe(false);
+    if (result.launched) return;
+    expect(result.code).toBe("ENOENT");
+  });
+
   it("terminates a timed-out process group gracefully and reaps descendants", async () => {
     const pidFile = join(testDirectory, "pids-graceful.json");
 
