@@ -9,6 +9,7 @@
 
 import { Command, CommanderError, Option } from "commander";
 
+import { CONFIG_TEMPLATE } from "../config/template.ts";
 import { runAssessmentWizard, runTaskWizard } from "./task-wizard.ts";
 
 import type { Readable, Writable } from "node:stream";
@@ -155,6 +156,11 @@ const HELP_EXAMPLES: Record<string, [string, string][]> = {
     ["Preview a benchmark", "tevu run --dry-run"],
     ["Run a benchmark", "tevu run"],
   ],
+  config: [["Start a configuration file from the template", "tevu config example > tevu.yaml"]],
+  example: [
+    ["Print the configuration template", "tevu config example"],
+    ["Start a configuration file from the template", "tevu config example > tevu.yaml"],
+  ],
   task: [["Define a benchmark task", "tevu task add"]],
   add: [
     ["Define a task interactively", "tevu task add"],
@@ -254,6 +260,14 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
     .option("--config <path>", "Configuration file path", DEFAULT_CONFIG_PATH)
     .action(async (runId: string, options: ConfigOptionValues) => {
       exit.code = await runReport(dependencies, runId, options);
+    });
+
+  const config = program.command("config").description("Work with the configuration file");
+  config
+    .command("example")
+    .description("Print a commented configuration template")
+    .action(() => {
+      exit.code = runConfigExample(dependencies);
     });
 
   for (const command of walkCommands(program)) {
@@ -365,6 +379,11 @@ function createLineWriters(dependencies: ProgramDependencies): { out: LineWriter
       dependencies.io.stderr.write(`${dependencies.redact(line)}\n`);
     },
   };
+}
+
+function runConfigExample(dependencies: ProgramDependencies): number {
+  dependencies.io.stdout.write(dependencies.redact(CONFIG_TEMPLATE));
+  return EXIT_COMPLETED;
 }
 
 async function runTaskAdd(

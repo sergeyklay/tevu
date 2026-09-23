@@ -2,7 +2,7 @@
 
 | Path | Responsibility |
 | --- | --- |
-| `src/config` | YAML loading and the strict configuration schema |
+| `src/config` | YAML loading, the strict configuration schema, and the configuration template |
 | `src/domain` | Shared records and dependency contracts |
 | `src/application` | Task creation, validation, orchestration, assessment, and report rebuilding |
 | `src/evaluation` | Checks, metric normalization, and report rendering |

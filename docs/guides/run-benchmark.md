@@ -22,6 +22,8 @@ tevu --help
 
 ## Define a task
 
+To write the configuration by hand instead of answering the setup interview, start from `tevu config example > tevu.yaml`; see the [configuration reference](../reference/configuration.md#example).
+
 Run the wizard in an interactive terminal:
 
 ```sh
