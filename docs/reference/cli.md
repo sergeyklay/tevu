@@ -8,13 +8,15 @@ For the execution workflow, see the [benchmark guide](../guides/run-benchmark.md
 
 | Command | Behavior |
 | --- | --- |
-| `tevu task add [--config <path>] [--jira <issue-key>]` | Interviews for a task and writes one complete configuration update after confirmation. A missing configuration starts a setup interview. Jira is read once for an imported task |
+| `tevu task add [--config <path>] [--jira <issue-key> \| --github <reference>]` | Interviews for a task and writes one complete configuration update after confirmation. A missing configuration starts a setup interview. Jira or GitHub is read once for an imported task; the two options cannot be combined |
 | `tevu validate [--config <path>]` | Checks the configuration, local prerequisites, source commits, variable presence, output-directory access, and agent capabilities without invoking a model |
 | `tevu run [--config <path>] [--dry-run]` | Runs each task/model pair once, with the configured concurrency limit. Dry-run prints the plan without creating run artifacts or workspaces, contacting Jira, or starting a model session |
 | `tevu assess <run-id> <case-id> [--config <path>]` | Records manual verdicts for a saved case, optionally replaces confirmed existing verdicts, and regenerates the report |
-| `tevu report <run-id> [--config <path>]` | Rebuilds normalized results and Markdown from saved run artifacts without Git, Jira, agent, or model calls |
+| `tevu report <run-id> [--config <path>]` | Rebuilds normalized results and Markdown from saved run artifacts without Git, issue tracker, agent, or model calls |
 
 `--config` defaults to `tevu.yaml` in the current directory. Paths inside that file resolve relative to the configuration file. See the [configuration reference](configuration.md).
+
+`<reference>` for `--github` is `OWNER/REPO#NUMBER` or an issue URL (`https://HOST/OWNER/REPO/issues/NUMBER`). `--github` needs the GitHub CLI (`gh`) installed and authenticated for the issue's host; see the [configuration reference](configuration.md#github-issues).
 
 `task add` and `assess` require terminal input and output. The other commands produce plain text when output is redirected. Interactive benchmark progress is prefixed with the case ID.
 

@@ -651,6 +651,26 @@ describe("buildTaskPrompt", () => {
     expect(prompt).not.toContain(contender.variant);
   });
 
+  it("omits GitHub issue identity and imported body from the prompt", () => {
+    const githubTask = buildTask({
+      source: {
+        kind: "github-issue",
+        issueKey: "octo/repo#42",
+        issueUrl: "https://github.com/octo/repo/issues/42",
+        importedAt: "2026-09-22T12:00:00.000Z",
+        importedSummary: "TEVU-GITHUB-SUMMARY",
+        importedDescription: "TEVU-GITHUB-DESCRIPTION",
+      },
+    });
+
+    const prompt = buildTaskPrompt(githubTask);
+
+    expect(prompt).not.toContain("octo/repo#42");
+    expect(prompt).not.toContain("https://github.com/octo/repo/issues/42");
+    expect(prompt).not.toContain("TEVU-GITHUB-SUMMARY");
+    expect(prompt).not.toContain("TEVU-GITHUB-DESCRIPTION");
+  });
+
   it("does not read the task's start commit", () => {
     const first = buildTask({ startCommit: "0123456789abcdef0123456789abcdef01234567" });
     const second = buildTask({ startCommit: "fedcba9876543210fedcba9876543210fedcba98" });

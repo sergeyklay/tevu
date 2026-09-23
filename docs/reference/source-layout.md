@@ -6,7 +6,7 @@
 | `src/domain` | Shared records and dependency contracts |
 | `src/application` | Task creation, validation, orchestration, assessment, and report rebuilding |
 | `src/evaluation` | Checks, metric normalization, and report rendering |
-| `src/adapters` | Git, agent, Jira, process, and artifact I/O |
+| `src/adapters` | Git, agent, issue tracker, process, and artifact I/O |
 | `src/interface` | Command parsing and interactive prompts |
 | `src/index.ts` | Executable entry point and dependency wiring |
 

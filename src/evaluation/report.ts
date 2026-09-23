@@ -47,7 +47,8 @@ export type NormalizedTask = {
   description: string;
   source:
     | { kind: "manual"; reference: string | null; title: string }
-    | { kind: "jira-cloud"; issueKey: string; issueUrl: string };
+    | { kind: "jira-cloud"; issueKey: string; issueUrl: string }
+    | { kind: "github-issue"; issueKey: string; issueUrl: string };
   checks: NormalizedCheckDefinition[];
 };
 
@@ -314,10 +315,14 @@ function formatMetricValue(metric: MetricValue): string {
 }
 
 function describeTaskSource(source: NormalizedTask["source"]): string {
-  if (source.kind === "manual") {
-    return `manual — ${source.title}${source.reference ? ` (${source.reference})` : ""}`;
+  switch (source.kind) {
+    case "manual":
+      return `manual — ${source.title}${source.reference ? ` (${source.reference})` : ""}`;
+    case "jira-cloud":
+      return `Jira snapshot — [${source.issueKey}](${source.issueUrl})`;
+    case "github-issue":
+      return `GitHub issue snapshot — [${source.issueKey}](${source.issueUrl})`;
   }
-  return `Jira snapshot — [${source.issueKey}](${source.issueUrl})`;
 }
 
 function normalizeTask(task: TaskDefinition): NormalizedTask {
@@ -326,15 +331,23 @@ function normalizeTask(task: TaskDefinition): NormalizedTask {
     repositoryId: task.repositoryId,
     startCommit: task.startCommit,
     description: task.description,
-    source:
-      task.source.kind === "manual"
-        ? { kind: "manual", reference: task.source.reference ?? null, title: task.source.title }
-        : { kind: "jira-cloud", issueKey: task.source.issueKey, issueUrl: task.source.issueUrl },
+    source: normalizeTaskSource(task.source),
     checks: [
       ...task.acceptanceCriteria.map((check) => normalizeCheck(check, "acceptance")),
       ...task.definitionOfDone.map((check) => normalizeCheck(check, "definition-of-done")),
     ].sort((a, b) => compareStrings(a.id, b.id)),
   };
+}
+
+function normalizeTaskSource(source: TaskDefinition["source"]): NormalizedTask["source"] {
+  switch (source.kind) {
+    case "manual":
+      return { kind: "manual", reference: source.reference ?? null, title: source.title };
+    case "jira-cloud":
+      return { kind: "jira-cloud", issueKey: source.issueKey, issueUrl: source.issueUrl };
+    case "github-issue":
+      return { kind: "github-issue", issueKey: source.issueKey, issueUrl: source.issueUrl };
+  }
 }
 
 function normalizeCheck(

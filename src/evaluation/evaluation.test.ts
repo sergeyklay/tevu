@@ -52,6 +52,7 @@ import type {
   TevuResult,
 } from "../domain/types.ts";
 import type { CheckEvaluationInput, OrderedCheck } from "./checks.ts";
+import type { ReportInput } from "./report.ts";
 
 const PROVIDER_SECRET = "synthetic-provider-secret-9f2";
 const PROVIDER_ENV_NAME = "TEVU_PROVIDER_KEY";
@@ -1731,6 +1732,10 @@ describe("unavailableBenchmarkMetrics", () => {
   });
 });
 
+const GOLDEN_NORMALIZED_JSON = "{\n  \"assessments\": [],\n  \"capabilities\": null,\n  \"cases\": [\n    {\n      \"artifacts\": {\n        \"assessment\": null,\n        \"checks\": null,\n        \"diagnostics\": null,\n        \"events\": null,\n        \"result\": \"cases/task-1--alpha/result.json\",\n        \"sessionExport\": null,\n        \"solutionPatch\": null\n      },\n      \"checks\": [],\n      \"failure\": null,\n      \"identity\": {\n        \"caseId\": \"task-1--alpha\",\n        \"contenderId\": \"alpha\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-1\",\n        \"variant\": \"effort-high\"\n      },\n      \"lifecycle\": \"completed\",\n      \"metrics\": {\n        \"apiCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"apiErrors\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"cacheReadTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cacheWriteTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cost\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"USD\",\n          \"value\": null\n        },\n        \"elapsed\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"case\",\n          \"unit\": \"millisecond\",\n          \"value\": null\n        },\n        \"inputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"outputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"reasoningTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"skillCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"toolCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"turns\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        }\n      },\n      \"outcome\": \"passed\",\n      \"process\": {\n        \"durationMs\": 1500,\n        \"endedAt\": \"2026-09-23T00:00:01.500Z\",\n        \"exitCode\": 0,\n        \"signal\": null,\n        \"startedAt\": \"2026-09-23T00:00:00.000Z\",\n        \"terminationStage\": \"none\"\n      },\n      \"schemaVersion\": 1\n    },\n    {\n      \"artifacts\": {\n        \"assessment\": null,\n        \"checks\": null,\n        \"diagnostics\": null,\n        \"events\": null,\n        \"result\": \"cases/task-2--alpha/result.json\",\n        \"sessionExport\": null,\n        \"solutionPatch\": null\n      },\n      \"checks\": [],\n      \"failure\": null,\n      \"identity\": {\n        \"caseId\": \"task-2--alpha\",\n        \"contenderId\": \"alpha\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-2\",\n        \"variant\": \"effort-high\"\n      },\n      \"lifecycle\": \"completed\",\n      \"metrics\": {\n        \"apiCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"apiErrors\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"cacheReadTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cacheWriteTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cost\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"USD\",\n          \"value\": null\n        },\n        \"elapsed\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"case\",\n          \"unit\": \"millisecond\",\n          \"value\": null\n        },\n        \"inputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"outputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"reasoningTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"skillCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"toolCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"turns\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        }\n      },\n      \"outcome\": \"passed\",\n      \"process\": {\n        \"durationMs\": 1500,\n        \"endedAt\": \"2026-09-23T00:00:01.500Z\",\n        \"exitCode\": 0,\n        \"signal\": null,\n        \"startedAt\": \"2026-09-23T00:00:00.000Z\",\n        \"terminationStage\": \"none\"\n      },\n      \"schemaVersion\": 1\n    }\n  ],\n  \"contenders\": [],\n  \"exitCode\": 0,\n  \"findings\": [],\n  \"manifest\": {\n    \"cases\": [\n      {\n        \"caseId\": \"task-1--alpha\",\n        \"contenderId\": \"alpha\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-1\",\n        \"variant\": \"effort-high\"\n      },\n      {\n        \"caseId\": \"task-2--alpha\",\n        \"contenderId\": \"alpha\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-2\",\n        \"variant\": \"effort-high\"\n      }\n    ],\n    \"completedAt\": \"2026-01-01T00:05:00.000Z\",\n    \"configDigest\": \"sha256-golden-digest\",\n    \"execution\": {\n      \"caseTimeoutMs\": 1000,\n      \"concurrency\": 1\n    },\n    \"host\": {\n      \"bunVersion\": \"1.4.2\",\n      \"nodeVersion\": \"v24.21.0\",\n      \"platform\": \"linux\"\n    },\n    \"runId\": \"20260101t000000z-golden\",\n    \"schemaVersion\": 1,\n    \"startedAt\": \"2026-01-01T00:00:00.000Z\",\n    \"tools\": {\n      \"gitVersion\": \"git version 2.45.0\",\n      \"opencodeVersion\": null\n    }\n  },\n  \"repositories\": [],\n  \"schemaVersion\": 1,\n  \"tasks\": [\n    {\n      \"checks\": [\n        {\n          \"category\": \"acceptance\",\n          \"description\": \"acceptance command exits zero\",\n          \"evaluator\": \"command\",\n          \"id\": \"acc-acceptance-command\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"manual Definition of Done review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"dod-manual-review\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"optional manual polish review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"man-optional-polish\",\n          \"required\": false\n        }\n      ],\n      \"description\": \"synthetic task description for the welcome route\",\n      \"id\": \"task-1\",\n      \"repositoryId\": \"repo-1\",\n      \"source\": {\n        \"kind\": \"manual\",\n        \"reference\": null,\n        \"title\": \"synthetic manual task\"\n      },\n      \"startCommit\": \"0123456789abcdef0123456789abcdef01234567\"\n    },\n    {\n      \"checks\": [\n        {\n          \"category\": \"acceptance\",\n          \"description\": \"acceptance command exits zero\",\n          \"evaluator\": \"command\",\n          \"id\": \"acc-acceptance-command\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"manual Definition of Done review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"dod-manual-review\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"optional manual polish review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"man-optional-polish\",\n          \"required\": false\n        }\n      ],\n      \"description\": \"synthetic task description for the welcome route\",\n      \"id\": \"task-2\",\n      \"repositoryId\": \"repo-1\",\n      \"source\": {\n        \"issueKey\": \"TEVU-999\",\n        \"issueUrl\": \"https://jira.example.com/browse/TEVU-999\",\n        \"kind\": \"jira-cloud\"\n      },\n      \"startCommit\": \"0123456789abcdef0123456789abcdef01234567\"\n    }\n  ]\n}\n";
+
+const GOLDEN_MARKDOWN = "# tevu run 20260101t000000z-golden\n\n> **Sensitive data:** the tevu configuration file and this artifact directory can contain\n> sensitive private repository, task, Jira, model-output, and evaluator data. They rely on\n> host filesystem access controls.\n>\n> **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,\n> later Git history, host OpenCode state, and benchmark artifacts from normal discovery.\n> It does not claim that a model with shell access cannot probe arbitrary host paths.\n\n## Run\n\n- Configuration digest: `sha256-golden-digest`\n- Started: 2026-01-01T00:00:00.000Z\n- Completed: 2026-01-01T00:05:00.000Z\n- Host: linux, Node.js v24.21.0, Bun 1.4.2, Git git version 2.45.0\n- OpenCode version (detected provenance only): not detected\n- Isolation control (deny outside worktree): not probed\n- Concurrency: 1\n- Case timeout: 1000ms\n- Run exit code: 0\n\n## Task task-1\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: manual — synthetic manual task\n\n| Outcome | Contender | Model | Variant | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|\n| passed | alpha | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-1--alpha\n\n- Contender: alpha (vendor/model-alpha-synth, variant effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-1--alpha/result.json](cases/task-1--alpha/result.json)\n\n## Task task-2\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: Jira snapshot — [TEVU-999](https://jira.example.com/browse/TEVU-999)\n\n| Outcome | Contender | Model | Variant | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|\n| passed | alpha | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-2--alpha\n\n- Contender: alpha (vendor/model-alpha-synth, variant effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-2--alpha/result.json](cases/task-2--alpha/result.json)\n\n---\n\nTask outcome, runtime failure, and run exit status are reported independently.\nCommand check output is configured acceptance evidence, not an additional model-quality metric.\nNo composite score or winner is computed.\n";
+
 describe("deterministic report regeneration", () => {
   it("sorts every collection by stable identity regardless of input order", () => {
     const records = buildSyntheticRecords();
@@ -1775,6 +1780,90 @@ describe("deterministic report regeneration", () => {
     ]);
     expect(serializeNormalizedRun(buildNormalizedRun(reordered))).toBe(serializeNormalizedRun(model));
     expect(buildReport(reordered).markdown).toBe(buildReport(input).markdown);
+  });
+
+  it("renders manual and Jira task sources byte-identically to the pre-GitHub-import report output", () => {
+    const manualTask = buildTask();
+    const jiraTask = buildJiraTask();
+    const manualCase = buildCaseResult();
+    const jiraCase = buildCaseResult({
+      identity: buildCaseIdentity({ caseId: "task-2--alpha", taskId: "task-2", sourceCommit: jiraTask.startCommit }),
+      artifacts: buildArtifactIndex("task-2--alpha", new Set(["result"])),
+    });
+    const manifest: RunManifest = {
+      schemaVersion: 1,
+      runId: "20260101t000000z-golden",
+      configDigest: "sha256-golden-digest",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:05:00.000Z",
+      host: { platform: "linux", nodeVersion: "v24.21.0", bunVersion: "1.4.2" },
+      tools: { gitVersion: "git version 2.45.0", opencodeVersion: null },
+      execution: { concurrency: 1, caseTimeoutMs: 1000 },
+      cases: [manualCase.identity, jiraCase.identity],
+    };
+    const input: ReportInput = {
+      run: { schemaVersion: 1, manifest, cases: [manualCase, jiraCase], findings: [], exitCode: 0 },
+      capabilities: null,
+      tasks: [manualTask, jiraTask],
+      contenders: [],
+      repositories: [],
+      assessments: [],
+    };
+
+    const result = buildReport(input);
+
+    expect(result.normalizedJson).toBe(GOLDEN_NORMALIZED_JSON);
+    expect(result.markdown).toBe(GOLDEN_MARKDOWN);
+  });
+
+  it("renders the GitHub issue source line and result.json entry for a github-issue task", () => {
+    const githubTask = buildTask({
+      id: "task-3",
+      source: {
+        kind: "github-issue",
+        issueKey: "octo/repo#42",
+        issueUrl: "https://github.com/octo/repo/issues/42",
+        importedAt: "2026-01-01T00:00:00.000Z",
+        importedSummary: "golden github summary",
+        importedDescription: "golden github description",
+      },
+    });
+    const githubCase = buildCaseResult({
+      identity: buildCaseIdentity({ caseId: "task-3--alpha", taskId: "task-3", sourceCommit: githubTask.startCommit }),
+      artifacts: buildArtifactIndex("task-3--alpha", new Set(["result"])),
+    });
+    const manifest: RunManifest = {
+      schemaVersion: 1,
+      runId: "20260101t000000z-golden-github",
+      configDigest: "sha256-golden-digest",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:05:00.000Z",
+      host: { platform: "linux", nodeVersion: "v24.21.0", bunVersion: "1.4.2" },
+      tools: { gitVersion: "git version 2.45.0", opencodeVersion: null },
+      execution: { concurrency: 1, caseTimeoutMs: 1000 },
+      cases: [githubCase.identity],
+    };
+    const input: ReportInput = {
+      run: { schemaVersion: 1, manifest, cases: [githubCase], findings: [], exitCode: 0 },
+      capabilities: null,
+      tasks: [githubTask],
+      contenders: [],
+      repositories: [],
+      assessments: [],
+    };
+
+    const result = buildReport(input);
+
+    expect(result.markdown).toContain(
+      "- Source: GitHub issue snapshot — [octo/repo#42](https://github.com/octo/repo/issues/42)",
+    );
+    const normalized = JSON.parse(result.normalizedJson) as { tasks: Array<{ id: string; source: unknown }> };
+    const githubSource = normalized.tasks.find((task) => task.id === "task-3")?.source;
+    expect(githubSource).toEqual({
+      kind: "github-issue",
+      issueKey: "octo/repo#42",
+      issueUrl: "https://github.com/octo/repo/issues/42",
+    });
   });
 
   it("regenerates byte-identical normalized JSON and Markdown from unchanged source artifacts", async () => {
@@ -2435,14 +2524,12 @@ describe("assessCase locking, revision, and recovery", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Credential-secret redaction at serialization boundaries (spec 3.3)
+// Credential-secret redaction at serialization boundaries.
 //
 // Corpus from the JSON/YAML value grammar: a secret containing newline, quote,
 // and backslash (serializers escape it, so a literal byte match on serialized
 // output can never find it), and a digit-only secret equal to a legitimate
 // numeric metric value (byte-level replacement corrupts numbers and framing).
-// ---------------------------------------------------------------------------
 
 const QUOTED_SECRET = 'tevu"sec\\ret\nx';
 const TOKEN_DIGIT_SECRET = "120";

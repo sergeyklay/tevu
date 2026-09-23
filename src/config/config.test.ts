@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTask } from "../application/create-task.ts";
 import { validateConfig } from "../application/validate.ts";
+import { createConfigStore } from "../adapters/artifact-store.ts";
 import { canonicalConfigSerialization, loadConfig } from "./load.ts";
 import { TevuConfigSchema } from "./schema.ts";
 
@@ -15,8 +16,8 @@ import type {
   ConfigStore,
   EnvironmentAdapter,
   GitWorkspaceAdapter,
-  JiraIssueSnapshot,
-  JiraTaskSourceAdapter,
+  IssueSnapshot,
+  IssueTrackerAdapter,
   OpenCodeAdapter,
   OpenCodeCapabilityReport,
   PrerequisiteAdapter,
@@ -181,8 +182,8 @@ function buildWizardInput(overrides: Partial<TaskWizardInput> = {}): TaskWizardI
 }
 
 function buildJiraSnapshot(
-  overrides: Partial<JiraIssueSnapshot & { importedAt: string }> = {},
-): JiraIssueSnapshot & { importedAt: string } {
+  overrides: Partial<IssueSnapshot & { importedAt: string }> = {},
+): IssueSnapshot & { importedAt: string } {
   return {
     issueKey: "PROJ-7",
     issueUrl: "https://jira.example.com/browse/PROJ-7",
@@ -227,7 +228,7 @@ function buildGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspaceAda
   };
 }
 
-function buildJira(overrides: Partial<JiraTaskSourceAdapter> = {}): JiraTaskSourceAdapter {
+function buildJira(overrides: Partial<IssueTrackerAdapter> = {}): IssueTrackerAdapter {
   return {
     readIssue: vi.fn(async (issueKey: string) => ({
       ok: true as const,
@@ -625,6 +626,42 @@ describe("TevuConfigSchema", () => {
 
     expect(expectSchemaAcceptance(config).tasks[0]?.acceptanceCriteria[0]?.evaluator).toEqual({ kind: "manual" });
   });
+
+  it("accepts a task with a github-issue source", () => {
+    const source: TaskDefinition["source"] = {
+      kind: "github-issue",
+      issueKey: "octo/repo#42",
+      issueUrl: "https://github.com/octo/repo/issues/42",
+      importedAt: FIXED_NOW.toISOString(),
+      importedSummary: "Add export button",
+      importedDescription: "Users need an export button",
+    };
+    const config = buildConfig({ tasks: [buildTask({ source })] });
+
+    expect(expectSchemaAcceptance(config).tasks[0]?.source).toEqual(source);
+  });
+
+  it("rejects an unknown field inside a github-issue task source", () => {
+    const config = {
+      ...buildConfig(),
+      tasks: [
+        {
+          ...buildTask(),
+          source: {
+            kind: "github-issue",
+            issueKey: "octo/repo#42",
+            issueUrl: "https://github.com/octo/repo/issues/42",
+            importedAt: FIXED_NOW.toISOString(),
+            importedSummary: "Add export button",
+            importedDescription: "Users need an export button",
+            extra: "field",
+          },
+        },
+      ],
+    };
+
+    expect(TevuConfigSchema.safeParse(config).success).toBe(false);
+  });
 });
 
 describe("loadConfig", () => {
@@ -772,6 +809,32 @@ describe("loadConfig", () => {
       },
     ]);
   });
+
+  it("round-trips a github-issue task source through ConfigStore.replace and read", async () => {
+    const configPath = join(tempDirectory, "tevu.yaml");
+    const source: TaskDefinition["source"] = {
+      kind: "github-issue",
+      issueKey: "octo/repo#42",
+      issueUrl: "https://github.com/octo/repo/issues/42",
+      importedAt: FIXED_NOW.toISOString(),
+      importedSummary: "Add export button",
+      importedDescription: "Users need an export button",
+    };
+    const config = buildConfig({
+      artifacts: { directory: join(tempDirectory, "artifacts") },
+      repositories: [buildRepository({ path: join(tempDirectory, "repo") })],
+      tasks: [buildTask({ source })],
+    });
+    const configStore = createConfigStore({ redact: (text) => text });
+
+    const replaced = await configStore.replace(configPath, config);
+    expect(replaced.ok).toBe(true);
+    const loaded = await configStore.read(configPath);
+
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.value.tasks[0]?.source).toEqual(source);
+  });
 });
 
 describe("canonicalConfigSerialization", () => {
@@ -895,6 +958,27 @@ describe("createTask", () => {
     expect(dependencies.jira?.readIssue).not.toHaveBeenCalled();
   });
 
+  it("stores a wizard-supplied GitHub issue snapshot verbatim without calling any tracker", async () => {
+    const snapshot = buildJiraSnapshot({
+      issueKey: "octo/repo#42",
+      issueUrl: "https://github.com/octo/repo/issues/42",
+    });
+    const dependencies = buildTaskDependencies();
+    const input = buildWizardInput({ source: { kind: "github-issue", snapshot } });
+
+    const task = expectOk(await createTask(input, dependencies));
+
+    expect(task.source).toEqual({
+      kind: "github-issue",
+      issueKey: "octo/repo#42",
+      issueUrl: snapshot.issueUrl,
+      importedAt: snapshot.importedAt,
+      importedSummary: snapshot.summary,
+      importedDescription: snapshot.description,
+    });
+    expect(dependencies.jira?.readIssue).not.toHaveBeenCalled();
+  });
+
   it("imports the issue once with the injected clock when no snapshot exists", async () => {
     const dependencies = buildTaskDependencies();
     const input = buildWizardInput({ source: { kind: "jira-cloud", issueKey: "PROJ-7" } });
@@ -912,13 +996,14 @@ describe("createTask", () => {
     });
   });
 
-  it("returns JiraImportError when the configuration has no Jira settings", async () => {
+  it("returns IssueImportError when the configuration has no Jira settings", async () => {
     const dependencies = buildTaskDependencies({ jira: null });
     const input = buildWizardInput({ source: { kind: "jira-cloud", issueKey: "PROJ-7" } });
 
-    const error = expectFailure(await createTask(input, dependencies), "JiraImportError");
+    const error = expectFailure(await createTask(input, dependencies), "IssueImportError");
 
-    expect(error.issueKey).toBe("PROJ-7");
+    expect(error.tracker).toBe("jira-cloud");
+    expect(error.reference).toBe("PROJ-7");
     expect(dependencies.configStore.replace).not.toHaveBeenCalled();
   });
 

@@ -14,7 +14,7 @@ type CreateTaskErrorKind =
   | "ConfigParseError"
   | "ConfigValidationError"
   | "SourceMaterializationError"
-  | "JiraImportError"
+  | "IssueImportError"
   | "ArtifactError"
   | "CancellationError";
 
@@ -22,11 +22,12 @@ type CreateTaskErrorKind =
  * Creates one benchmark task and atomically appends it to the configuration.
  *
  * Rejects an invalid existing configuration before any source materialization,
- * takes a one-time Jira snapshot when the source is Jira, pins the task to the
- * resolved source commit, validates the complete candidate document, and
- * performs exactly one configuration replacement at the end. Cancellation and
- * every pre-commit failure leave the configuration byte-for-byte unchanged
- * because no write happens before the final replacement.
+ * takes a one-time Jira or GitHub snapshot when the source needs one, pins
+ * the task to the resolved source commit, validates the complete candidate
+ * document, and performs exactly one configuration replacement at the end.
+ * Cancellation and every pre-commit failure leave the configuration
+ * byte-for-byte unchanged because no write happens before the final
+ * replacement.
  */
 export async function createTask(
   input: TaskWizardInput,
@@ -139,12 +140,13 @@ async function loadBaseDocument(
 
 /**
  * Maps the wizard source request to a stored task source, importing Jira once.
- * A wizard-supplied snapshot is stored verbatim without another Jira read.
+ * A wizard-supplied snapshot (Jira or GitHub) is stored verbatim without
+ * another tracker read.
  */
 async function materializeSource(
   request: TaskSourceRequest,
   dependencies: TaskDependencies,
-): Promise<TevuResult<TaskDefinition["source"], "JiraImportError">> {
+): Promise<TevuResult<TaskDefinition["source"], "IssueImportError" | "CancellationError">> {
   if (request.kind === "manual") {
     return {
       ok: true,
@@ -152,6 +154,19 @@ async function materializeSource(
         request.reference === undefined
           ? { kind: "manual", title: request.title }
           : { kind: "manual", reference: request.reference, title: request.title },
+    };
+  }
+  if (request.kind === "github-issue") {
+    return {
+      ok: true,
+      value: {
+        kind: "github-issue",
+        issueKey: request.snapshot.issueKey,
+        issueUrl: request.snapshot.issueUrl,
+        importedAt: request.snapshot.importedAt,
+        importedSummary: request.snapshot.summary,
+        importedDescription: request.snapshot.description,
+      },
     };
   }
   if (request.snapshot !== undefined) {
@@ -171,8 +186,9 @@ async function materializeSource(
     return {
       ok: false,
       error: {
-        kind: "JiraImportError",
-        issueKey: request.issueKey,
+        kind: "IssueImportError",
+        tracker: "jira-cloud",
+        reference: request.issueKey,
         reason: "Jira import is not available because the configuration has no Jira settings",
       },
     };

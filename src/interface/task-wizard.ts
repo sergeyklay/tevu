@@ -36,7 +36,7 @@ import type {
   AssessmentInput,
   AssessmentRecord,
   ConfigBootstrapInput,
-  JiraIssueSnapshot,
+  IssueSnapshot,
   TaskSourceRequest,
   TaskWizardInput,
   TevuResult,
@@ -53,6 +53,7 @@ export type WizardIo = {
 export type TaskWizardRequest = {
   configPath: string;
   jiraIssueKey?: string;
+  githubIssueReference?: string;
 };
 
 /** Injected effects for the task wizard; it performs no write itself. */
@@ -66,7 +67,11 @@ export type TaskWizardDependencies = {
   importJiraIssue: (
     settings: JiraCloudConfig,
     issueKey: string,
-  ) => Promise<TevuResult<JiraIssueSnapshot, "JiraImportError">>;
+  ) => Promise<TevuResult<IssueSnapshot, "IssueImportError" | "CancellationError">>;
+  /** Reads one GitHub issue exactly once through the operator's installed `gh`. */
+  importGitHubIssue: (
+    reference: string,
+  ) => Promise<TevuResult<IssueSnapshot, "IssueImportError" | "CancellationError">>;
   now: () => Date;
   redact: (textContent: string) => string;
 };
@@ -76,7 +81,7 @@ type TaskWizardErrorKind =
   | "ConfigParseError"
   | "ConfigValidationError"
   | "ArtifactError"
-  | "JiraImportError"
+  | "IssueImportError"
   | "PrerequisiteError"
   | "CancellationError";
 
@@ -484,7 +489,7 @@ async function interviewTask(
   dependencies: TaskWizardDependencies,
   existing: TevuConfig | null,
   bootstrap: ConfigBootstrapInput | undefined,
-): Promise<TevuResult<TaskWizardInput, "JiraImportError">> {
+): Promise<TevuResult<TaskWizardInput, "IssueImportError">> {
   const io = dependencies.io;
   const jiraSettings = existing?.jira ?? bootstrap?.jira;
   const source = await interviewSource(request, dependencies, jiraSettings);
@@ -549,29 +554,32 @@ async function interviewTask(
   };
 }
 
-/** Selects manual or Jira source; a Jira issue is imported once and displayed. */
+/** Selects the task source; a Jira or GitHub issue is imported once and displayed. */
 async function interviewSource(
   request: TaskWizardRequest,
   dependencies: TaskWizardDependencies,
   jiraSettings: JiraCloudConfig | undefined,
-): Promise<TevuResult<TaskSourceRequest, "JiraImportError">> {
+): Promise<TevuResult<TaskSourceRequest, "IssueImportError">> {
   const io = dependencies.io;
   const kind =
     request.jiraIssueKey !== undefined
       ? "jira-cloud"
-      : await askSelect<"manual" | "jira-cloud">(io, {
-          message: "Task source",
-          options: [
-            { value: "manual", label: "Manual" },
-            {
-              value: "jira-cloud",
-              label: "Jira Cloud import",
-              ...(jiraSettings === undefined
-                ? { disabled: true, hint: "requires configured Jira settings" }
-                : {}),
-            },
-          ],
-        });
+      : request.githubIssueReference !== undefined
+        ? "github-issue"
+        : await askSelect<"manual" | "jira-cloud" | "github-issue">(io, {
+            message: "Task source",
+            options: [
+              { value: "manual", label: "Manual" },
+              {
+                value: "jira-cloud",
+                label: "Jira Cloud import",
+                ...(jiraSettings === undefined
+                  ? { disabled: true, hint: "requires configured Jira settings" }
+                  : {}),
+              },
+              { value: "github-issue", label: "GitHub issue import" },
+            ],
+          });
   if (kind === "manual") {
     const title = await askText(io, {
       message: "Source title",
@@ -587,14 +595,18 @@ async function interviewSource(
       value: reference === undefined ? { kind: "manual", title } : { kind: "manual", reference, title },
     };
   }
+  if (kind === "github-issue") {
+    return interviewGitHubSource(io, dependencies, request.githubIssueReference);
+  }
   if (jiraSettings === undefined) {
     // Unreachable through prompts (the option is disabled), reachable only
     // with --jira, which the caller validated; keep the abort explicit.
     return {
       ok: false,
       error: {
-        kind: "JiraImportError",
-        issueKey: request.jiraIssueKey ?? "",
+        kind: "IssueImportError",
+        tracker: "jira-cloud",
+        reference: request.jiraIssueKey ?? "",
         reason: "Jira import is not available because no Jira settings are configured",
       },
     };
@@ -607,7 +619,7 @@ async function interviewSource(
         validate: validateNonWhitespace,
       })
     ).trim();
-  const imported = await dependencies.importJiraIssue(jiraSettings, issueKey);
+  const imported = unwrapImportResult(await dependencies.importJiraIssue(jiraSettings, issueKey));
   if (!imported.ok) {
     return imported;
   }
@@ -626,6 +638,36 @@ async function interviewSource(
       issueKey: imported.value.issueKey,
       snapshot: { ...imported.value, importedAt },
     },
+  };
+}
+
+/** Imports one GitHub issue through the operator's installed `gh` and displays it. */
+async function interviewGitHubSource(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+  githubIssueReference: string | undefined,
+): Promise<TevuResult<TaskSourceRequest, "IssueImportError">> {
+  const reference =
+    githubIssueReference ??
+    (
+      await askText(io, {
+        message: "GitHub issue (OWNER/REPO#NUMBER or issue URL)",
+        validate: validateNonWhitespace,
+      })
+    ).trim();
+  const imported = unwrapImportResult(await dependencies.importGitHubIssue(reference));
+  if (!imported.ok) {
+    return imported;
+  }
+  const importedAt = dependencies.now().toISOString();
+  note(
+    dependencies.redact(`${imported.value.summary}\n\n${imported.value.description}`),
+    `Imported ${imported.value.issueKey} (one-time snapshot)`,
+    promptOptions(io),
+  );
+  return {
+    ok: true,
+    value: { kind: "github-issue", snapshot: { ...imported.value, importedAt } },
   };
 }
 
@@ -826,7 +868,7 @@ function renderTaskReview(input: TaskWizardInput): string {
     if (input.source.reference !== undefined) {
       lines.push(`  source reference: ${input.source.reference}`);
     }
-  } else {
+  } else if (input.source.kind === "jira-cloud") {
     lines.push(`  source: jira-cloud ${input.source.issueKey}`);
     if (input.source.snapshot !== undefined) {
       lines.push(
@@ -835,6 +877,13 @@ function renderTaskReview(input: TaskWizardInput): string {
         `  imported description: ${input.source.snapshot.description}`,
       );
     }
+  } else {
+    lines.push(
+      `  source: github-issue ${input.source.snapshot.issueKey}`,
+      `  imported at: ${input.source.snapshot.importedAt}`,
+      `  imported summary: ${input.source.snapshot.summary}`,
+      `  imported description: ${input.source.snapshot.description}`,
+    );
   }
   lines.push(`  description: ${input.description}`, `  prompt: ${input.prompt}`);
   for (const item of input.definitionOfReady) {
@@ -919,6 +968,20 @@ function unwrap<T>(value: T | typeof CANCEL_SYMBOL): T {
     throw new WizardCancelledError();
   }
   return value;
+}
+
+/**
+ * Maps a tracker import's cancellation to the internal sentinel the wizard
+ * entry points catch, so Ctrl+C during an issue import exits like any other
+ * wizard cancellation, never as an `IssueImportError`.
+ */
+function unwrapImportResult<T>(
+  result: TevuResult<T, "IssueImportError" | "CancellationError">,
+): TevuResult<T, "IssueImportError"> {
+  if (result.ok || result.error.kind === "IssueImportError") {
+    return result as TevuResult<T, "IssueImportError">;
+  }
+  throw new WizardCancelledError();
 }
 
 async function askText(

@@ -1,7 +1,13 @@
 import { Buffer } from "node:buffer";
 
-import type { JiraCloudConfig } from "../config/schema.ts";
-import type { JiraIssueSnapshot, JiraTaskSourceAdapter, TevuResult } from "../domain/types.ts";
+import type { IssueSnapshot, IssueTrackerAdapter, TevuResult } from "../../domain/types.ts";
+
+/** Jira Cloud connection settings; credentials are read by environment variable name only. */
+export type JiraCloudSettings = {
+  baseUrl: string;
+  emailEnvironmentVariable: string;
+  tokenEnvironmentVariable: string;
+};
 
 /** Minimal structural response contract so tests can inject plain fakes. */
 export type JiraHttpResponse = {
@@ -40,23 +46,25 @@ const MAX_RETRY_AFTER_SECONDS = 30;
  * fourth request in one import.
  */
 export function createJiraCloudAdapter(
-  config: JiraCloudConfig,
+  settings: JiraCloudSettings,
   dependencies: JiraCloudDependencies,
-): JiraTaskSourceAdapter {
+): IssueTrackerAdapter {
   return {
-    async readIssue(issueKey: string): Promise<TevuResult<JiraIssueSnapshot, "JiraImportError">> {
-      const email = dependencies.getEnvironmentVariable(config.emailEnvironmentVariable);
+    async readIssue(
+      issueKey: string,
+    ): Promise<TevuResult<IssueSnapshot, "IssueImportError" | "CancellationError">> {
+      const email = dependencies.getEnvironmentVariable(settings.emailEnvironmentVariable);
       if (email === undefined || email.length === 0) {
-        return importError(issueKey, undefined, `environment variable "${config.emailEnvironmentVariable}" is not set`);
+        return importError(issueKey, undefined, `environment variable "${settings.emailEnvironmentVariable}" is not set`);
       }
-      const token = dependencies.getEnvironmentVariable(config.tokenEnvironmentVariable);
+      const token = dependencies.getEnvironmentVariable(settings.tokenEnvironmentVariable);
       if (token === undefined || token.length === 0) {
-        return importError(issueKey, undefined, `environment variable "${config.tokenEnvironmentVariable}" is not set`);
+        return importError(issueKey, undefined, `environment variable "${settings.tokenEnvironmentVariable}" is not set`);
       }
 
       let base: URL;
       try {
-        base = new URL(config.baseUrl);
+        base = new URL(settings.baseUrl);
       } catch {
         return importError(issueKey, undefined, "configured Jira base URL is malformed");
       }
@@ -64,7 +72,7 @@ export function createJiraCloudAdapter(
         return importError(issueKey, undefined, "configured Jira base URL must use HTTPS");
       }
 
-      const baseUrl = config.baseUrl.replace(/\/+$/, "");
+      const baseUrl = settings.baseUrl.replace(/\/+$/, "");
       const headers: Record<string, string> = {
         Authorization: `Basic ${Buffer.from(`${email}:${token}`, "utf8").toString("base64")}`,
         Accept: "application/json",
@@ -216,7 +224,7 @@ function decodeIssueResponse(
   baseUrl: string,
   status: number,
   body: unknown,
-): TevuResult<JiraIssueSnapshot, "JiraImportError"> {
+): TevuResult<IssueSnapshot, "IssueImportError"> {
   if (!isRecord(body) || !isRecord(body["fields"])) {
     return importError(requestedKey, status, "issue response shape is malformed");
   }
@@ -260,13 +268,16 @@ function importError(
   issueKey: string,
   status: number | undefined,
   reason: string,
-): { ok: false; error: { kind: "JiraImportError"; issueKey: string; status?: number; reason: string } } {
+): {
+  ok: false;
+  error: { kind: "IssueImportError"; tracker: "jira-cloud"; reference: string; status?: number; reason: string };
+} {
   return {
     ok: false,
     error:
       status === undefined
-        ? { kind: "JiraImportError", issueKey, reason }
-        : { kind: "JiraImportError", issueKey, status, reason },
+        ? { kind: "IssueImportError", tracker: "jira-cloud", reference: issueKey, reason }
+        : { kind: "IssueImportError", tracker: "jira-cloud", reference: issueKey, status, reason },
   };
 }
 
