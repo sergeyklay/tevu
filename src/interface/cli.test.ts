@@ -1,9 +1,13 @@
 // @vitest-environment node
 
+import * as fs from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { Readable, Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { CONFIG_TEMPLATE } from "../config/template.ts";
 import { createProgram, runProgram } from "./program.ts";
 
 import type {
@@ -460,6 +464,42 @@ function expectNoWrites(operations: ProgramOperations): void {
   expect(operations.applyAssessment).not.toHaveBeenCalled();
 }
 
+/**
+ * Reads the fenced `yaml` block under the `## Example` heading of the
+ * configuration reference, resolved from this test file's own module
+ * location rather than the working directory.
+ */
+async function readConfigurationExampleBlock(): Promise<string> {
+  const docsPath = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../docs/reference/configuration.md",
+  );
+  const lines = (await fs.readFile(docsPath, "utf8")).split("\n");
+  const headingIndex = lines.indexOf("## Example");
+  if (headingIndex === -1) {
+    throw new Error('docs/reference/configuration.md is missing the "## Example" heading');
+  }
+  const sectionEndOffset = lines
+    .slice(headingIndex + 1)
+    .findIndex((line) => line.startsWith("## "));
+  const section = lines.slice(
+    headingIndex,
+    sectionEndOffset === -1 ? lines.length : headingIndex + 1 + sectionEndOffset,
+  );
+  const openIndex = section.indexOf("```yaml");
+  if (openIndex === -1) {
+    throw new Error('the "## Example" section has no fenced yaml block');
+  }
+  const closeOffset = section.slice(openIndex + 1).indexOf("```");
+  if (closeOffset === -1) {
+    throw new Error("the fenced yaml block under \"## Example\" has no closing fence");
+  }
+  return section
+    .slice(openIndex + 1, openIndex + 1 + closeOffset)
+    .map((line) => `${line}\n`)
+    .join("");
+}
+
 function taskInterviewAnswers(repositoryChoice: string): unknown[] {
   return [
     "manual",
@@ -513,6 +553,16 @@ const HELP_CASES: Array<{ argv: string[]; description: string; usage: string }> 
     argv: [],
     description: "Compare coding models on your tasks",
     usage: "Usage:\n  tevu [options]\n  tevu <command> [options]",
+  },
+  {
+    argv: ["config"],
+    description: "Work with the configuration file",
+    usage: "Usage:\n  tevu config [options]\n  tevu config <command> [options]",
+  },
+  {
+    argv: ["config", "example"],
+    description: "Print a commented configuration template",
+    usage: "Usage:\n  tevu config example [options]",
   },
   {
     argv: ["task"],
@@ -571,6 +621,16 @@ const USAGE_ERROR_CASES: Array<{ argv: string[]; error: string; usage: string }>
     argv: ["--version"],
     error: "error: unknown option '--version'",
     usage: "Usage: tevu [options] [command]",
+  },
+  {
+    argv: ["config", "example", "extra"],
+    error: "error: too many arguments for 'example'. Expected 0 arguments but got 1: extra.",
+    usage: "Usage: tevu config example [options]",
+  },
+  {
+    argv: ["config", "example", "--config", "x"],
+    error: "error: unknown option '--config'",
+    usage: "Usage: tevu config example [options]",
   },
 ];
 
@@ -651,7 +711,7 @@ describe("tevu CLI", () => {
   });
 
   describe("command surface", () => {
-    it("registers exactly the five top-level commands with task add as the only subcommand", () => {
+    it("registers exactly the six top-level commands with add as the only task subcommand", () => {
       const program = createProgram(createDependencies());
 
       expect(program.commands.map((command) => command.name())).toEqual([
@@ -660,6 +720,7 @@ describe("tevu CLI", () => {
         "run",
         "assess",
         "report",
+        "config",
       ]);
       expect(program.commands[0]?.commands.map((command) => command.name())).toEqual(["add"]);
     });
@@ -694,6 +755,54 @@ describe("tevu CLI", () => {
     });
   });
 
+  describe("config example", () => {
+    function expectNoOperationCalled(operations: ProgramOperations): void {
+      expect(operations.configExists).not.toHaveBeenCalled();
+      expect(operations.loadConfig).not.toHaveBeenCalled();
+      expect(operations.importJiraIssue).not.toHaveBeenCalled();
+      expect(operations.importGitHubIssue).not.toHaveBeenCalled();
+      expect(operations.validateConfig).not.toHaveBeenCalled();
+      expect(operations.planBenchmark).not.toHaveBeenCalled();
+      expect(operations.readAssessmentContext).not.toHaveBeenCalled();
+      expectNoWrites(operations);
+    }
+
+    it.each([
+      { label: "TTY stdout", stdout: true },
+      { label: "non-TTY stdout", stdout: false },
+    ])("prints the template verbatim with exit 0 and no stderr ($label)", async ({ stdout }) => {
+      const operations = createOperations();
+
+      const { code, dependencies, err } = await runCli(["config", "example"], {
+        io: createIo({ stdin: true, stdout }),
+        operations,
+      });
+
+      expect(code).toBe(0);
+      expect((dependencies.io.stdout as MemoryStream).text).toBe(CONFIG_TEMPLATE);
+      expect(err).toEqual([]);
+      expectNoOperationCalled(operations);
+    });
+
+    it("passes the template through the injected redactor", async () => {
+      const { dependencies } = await runCli(["config", "example"], {
+        redact: (text) => text.replaceAll("OPENAI_API_KEY", "[redacted]"),
+      });
+
+      const stdout = (dependencies.io.stdout as MemoryStream).text;
+      expect(stdout).toContain("[redacted]");
+      expect(stdout).not.toContain("OPENAI_API_KEY");
+    });
+
+    it("matches the fenced yaml block under the configuration reference's Example heading byte for byte", async () => {
+      const { dependencies, err } = await runCli(["config", "example"]);
+      const docsBlock = await readConfigurationExampleBlock();
+
+      expect(err).toEqual([]);
+      expect((dependencies.io.stdout as MemoryStream).text).toBe(docsBlock);
+    });
+  });
+
   describe("help", () => {
     it.each(HELP_CASES)("prints description-first help for $description", async ({ argv, description, usage }) => {
       const { code, dependencies, err } = await runCli([...argv, "--help"]);
@@ -716,7 +825,8 @@ describe("tevu CLI", () => {
     });
 
     it.each([
-      { argv: [], names: ["task", "validate", "run", "assess", "report"] },
+      { argv: [], names: ["task", "validate", "run", "assess", "report", "config"] },
+      { argv: ["config"], names: ["example"] },
       { argv: ["task"], names: ["add"] },
     ])("lists only command names in Commands for $argv", async ({ argv, names }) => {
       const { dependencies } = await runCli([...argv, "--help"]);
@@ -757,6 +867,15 @@ describe("tevu CLI", () => {
       expect(code).toBe(1);
       expect(err[0]).toBe("Manage benchmark tasks");
       expect(err.slice(1, 4)).toEqual(["Usage:", "  tevu task [options]", "  tevu task <command> [options]"]);
+      expect(out).toEqual([]);
+    });
+
+    it("prints config help on stderr with exit 1 for a bare config command", async () => {
+      const { code, out, err } = await runCli(["config"]);
+
+      expect(code).toBe(1);
+      expect(err[0]).toBe("Work with the configuration file");
+      expect(err.slice(1, 4)).toEqual(["Usage:", "  tevu config [options]", "  tevu config <command> [options]"]);
       expect(out).toEqual([]);
     });
   });
