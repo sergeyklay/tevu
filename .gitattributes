@@ -1,0 +1,6 @@
+# Defining attributes per path.
+#
+# For more see: https://git-scm.com/docs/gitattributes
+
+# Auto-detect text files, ensure they use LF.
+* text=auto eol=lf
