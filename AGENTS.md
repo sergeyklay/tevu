@@ -42,4 +42,4 @@ Consult these for the area you are working on, not as a blanket prerequisite:
 - `docs/concepts/isolation.md` - why each isolation boundary exists and where it deliberately stops.
 - `docs/reference/configuration.md` - the configuration contract, source-tree rules, and fixed environments.
 - `docs/reference/results.md` - outcomes, metric semantics, artifact files, and regeneration guarantees.
-- `docs/README.md` - full documentation index
+- `docs/README.md` - full documentation index.
