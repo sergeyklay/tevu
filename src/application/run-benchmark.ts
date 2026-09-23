@@ -391,7 +391,7 @@ async function runActiveCase(run: RunContext, active: ActiveCase): Promise<void>
   const outcome = await run.dependencies.opencode.run({
     identity: active.identity,
     executable: run.plan.config.opencode.executable,
-    prompt: run.dependencies.buildTaskPrompt(active.task, active.identity.sourceCommit),
+    prompt: run.dependencies.buildTaskPrompt(active.task),
     worktreeDirectory: active.workspace.worktreeDirectory,
     environment: active.environments.opencode,
     timeoutMs: run.plan.caseTimeoutMs,

@@ -669,7 +669,7 @@ export type RunDependencies = {
   clock: Clock;
   generateRunId: RunIdGenerator;
   configDigest: (config: TevuConfig) => string;
-  buildTaskPrompt: (task: TaskDefinition, sourceCommit: string) => string;
+  buildTaskPrompt: (task: TaskDefinition) => string;
   redact: (text: string) => string;
   cancellation: AbortSignal;
   onLifecycle?: (caseId: string, lifecycle: CaseLifecycle) => void;
