@@ -4,7 +4,7 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 
 ## Commands
 
-- Run tests: `bun run test` (NOT `bun test`, which starts Bun's own runner on the JavaScriptCore runtime instead of Vitest on Node, and fails part of the suite).
+- Run tests: `bun run test` (NOT `bun test`, which starts Bun's own runner on the JavaScriptCore runtime instead of Vitest on Node; from the repository root it prints an error and exits with code 1 before running any test).
 - A change is done when both `bun run typecheck` and `bun run test` pass. Vitest does not type-check.
 
 ## Gotchas
