@@ -1,0 +1,55 @@
+{
+  "info": { "id": "ses-root-0001", "title": "synthetic benchmark session", "additiveInfoField": 7 },
+  "additiveTopLevelField": { "note": "unknown additive fields are tolerated" },
+  "messages": [
+    {
+      "info": { "id": "msg-u1", "sessionID": "ses-root-0001", "role": "user" },
+      "parts": [
+        { "id": "prt-u1", "sessionID": "ses-root-0001", "messageID": "msg-u1", "type": "text" }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg-a1",
+        "sessionID": "ses-root-0001",
+        "role": "assistant",
+        "parentID": "msg-u1",
+        "finish": "stop",
+        "cost": 0.0125,
+        "tokens": { "input": 120, "output": 45, "reasoning": 16, "cache": { "read": 30, "write": 10 } },
+        "additiveAssistantField": "tolerated"
+      },
+      "parts": [
+        { "id": "prt-a1", "sessionID": "ses-root-0001", "messageID": "msg-a1", "type": "tool", "callID": "call-0001", "tool": "bash", "state": { "status": "completed" }, "additivePartField": true },
+        { "id": "prt-a2", "sessionID": "ses-root-0001", "messageID": "msg-a1", "type": "tool", "callID": "call-0002", "tool": "skill", "state": { "status": "completed" } },
+        { "id": "prt-a3", "sessionID": "ses-root-0001", "messageID": "msg-a1", "type": "text" }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg-a1",
+        "sessionID": "ses-root-0001",
+        "role": "assistant",
+        "parentID": "msg-u1",
+        "finish": "stop",
+        "cost": 0.0125,
+        "tokens": { "input": 120, "output": 45, "reasoning": 16, "cache": { "read": 30, "write": 10 } }
+      },
+      "parts": [
+        { "id": "prt-a1", "sessionID": "ses-root-0001", "messageID": "msg-a1", "type": "tool", "callID": "call-0001", "tool": "bash", "state": { "status": "completed" } }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg-a2",
+        "sessionID": "ses-root-0001",
+        "role": "assistant",
+        "parentID": "msg-u1",
+        "error": { "name": "SyntheticProviderError", "message": "synthetic API error" },
+        "cost": 0,
+        "tokens": { "input": 10, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } }
+      },
+      "parts": []
+    }
+  ]
+}

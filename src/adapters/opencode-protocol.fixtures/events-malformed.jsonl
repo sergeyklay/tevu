@@ -1,0 +1,8 @@
+{"type":"text","timestamp":2000,"sessionID":"ses-root-0002","part":{"sessionID":"ses-root-0002","messageID":"msg-b1","type":"text"}}
+{"type":"tool_use","timestamp":2010,"part":{"id":"prt-b2","sessionID":"ses-root-0002","messageID":"msg-b1","type":"tool","callID":"call-b1","tool":"bash","state":{"status":"completed"}}}
+{"type":"step_finish","timestamp":2020,"sessionID":"ses-root-0002","part":{"id":"prt-b3","sessionID":"","messageID":"msg-b1","type":"step-finish"}}
+{"type":"reasoning","timestamp":2030,"sessionID":"ses-root-0002","part":{"id":"prt-b4","sessionID":"ses-root-0002","messageID":"","type":"reasoning"}}
+{"timestamp":2040,"sessionID":"ses-root-0002","part":{"id":"prt-b5","sessionID":"ses-root-0002","messageID":"msg-b1","type":"text"}}
+{"type":"error","timestamp":2050,"error":{"message":"synthetic error without session identity"}}
+{"type":"tool_use","timestamp":2060,"sessionID":"ses-root-0002","part":{"id":"prt-b6","sessionID":"ses-root-0002","messageID":"msg-b1","type":"tool","callID":"call-b2","state":{"status":"completed"}}}
+{"type":"text","timestamp":2070,"sessionID":"ses-root-0002"}

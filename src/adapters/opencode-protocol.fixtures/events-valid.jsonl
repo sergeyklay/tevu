@@ -1,0 +1,9 @@
+{"type":"step_start","timestamp":1000,"sessionID":"ses-root-0001","part":{"id":"prt-0001","sessionID":"ses-root-0001","messageID":"msg-a1","type":"step-start"},"additiveEventField":"tolerated"}
+{"type":"text","timestamp":1005,"sessionID":"ses-root-0001","part":{"id":"prt-0002","sessionID":"ses-root-0001","messageID":"msg-a1","type":"text","additivePartField":true}}
+{"type":"reasoning","timestamp":1010,"sessionID":"ses-root-0001","part":{"id":"prt-0003","sessionID":"ses-root-0001","messageID":"msg-a1","type":"reasoning"}}
+{"type":"tool_use","timestamp":1020,"sessionID":"ses-root-0001","part":{"id":"prt-0004","sessionID":"ses-root-0001","messageID":"msg-a1","type":"tool","callID":"call-0001","tool":"bash","state":{"status":"completed"}}}
+{"type":"tool_use","timestamp":1020,"sessionID":"ses-root-0001","part":{"id":"prt-0004","sessionID":"ses-root-0001","messageID":"msg-a1","type":"tool","callID":"call-0001","tool":"bash","state":{"status":"completed"}}}
+{"type":"tool_use","timestamp":1030,"sessionID":"ses-root-0001","part":{"id":"prt-0005","sessionID":"ses-root-0001","messageID":"msg-a1","type":"tool","callID":"call-0002","tool":"skill","state":{"status":"completed"}}}
+{"type":"step_finish","timestamp":1040,"sessionID":"ses-root-0001","part":{"id":"prt-0006","sessionID":"ses-root-0001","messageID":"msg-a1","type":"step-finish"}}
+{"type":"error","timestamp":1050,"sessionID":"ses-root-0001","error":{"name":"SyntheticProviderError","message":"synthetic rate limit"}}
+{"type":"future_additive_event","timestamp":1060,"sessionID":"ses-root-0001","payload":{"note":"unknown additive record type is not consumed and not an error"}}

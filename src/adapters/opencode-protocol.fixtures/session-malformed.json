@@ -1,0 +1,23 @@
+{
+  "info": { "id": "ses-child-0001", "parentID": "ses-root-0001" },
+  "messages": [
+    {
+      "info": { "id": "", "sessionID": "ses-child-0001", "role": "user" },
+      "parts": []
+    },
+    {
+      "info": {
+        "id": "msg-c1",
+        "sessionID": "ses-child-0001",
+        "role": "assistant",
+        "parentID": "msg-u1",
+        "finish": "stop",
+        "cost": "not-a-number",
+        "tokens": { "input": 1, "output": 2, "reasoning": 0, "cache": { "read": 0, "write": 0 } }
+      },
+      "parts": [
+        { "id": "prt-c1", "sessionID": "ses-child-0001", "messageID": "", "type": "tool", "callID": "call-c1", "state": { "status": "completed" } }
+      ]
+    }
+  ]
+}
