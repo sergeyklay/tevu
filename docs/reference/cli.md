@@ -1,6 +1,6 @@
 # CLI reference
 
-The executable is `tevu`. From the repository checkout, `bun run start --` accepts the same arguments. Every command supports `--help`.
+The executable is `tevu`. See the build and link steps in [Prepare the tools](../guides/run-benchmark.md#prepare-the-tools). Every command supports `--help`.
 
 For the execution workflow, see the [benchmark guide](../guides/run-benchmark.md).
 

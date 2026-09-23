@@ -30,10 +30,14 @@ Product tests use fakes, adjacent protocol fixtures, temporary synthetic Git rep
 ## Check the executable
 
 ```sh
+bun run build
+./dist/index.js --help
+./dist/index.js run --help
 bun run start -- --help
-bun run start -- run --help
 ```
 
 Confirm that help renders and exits successfully without starting a benchmark. The CLI is the public interface; TypeScript module exports are internal.
+
+The last command runs the CLI from sources without a build and fails when a relative import ends in `.js`, which type checking, the tests, and the build all accept.
 
 For module responsibilities, see the [source layout reference](../reference/source-layout.md).
