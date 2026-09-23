@@ -639,6 +639,7 @@ export type ValidationDependencies = {
   opencode: OpenCodeAdapter;
   environments: EnvironmentAdapter;
   prerequisites: PrerequisiteAdapter;
+  buildTaskPrompt: (task: TaskDefinition) => string;
 };
 
 /** Aggregate validation outcome; any error-severity finding makes the configuration invalid. */

@@ -135,6 +135,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
         opencode: opencodeFor(config),
         environments,
         prerequisites,
+        buildTaskPrompt,
       }),
     planBenchmark,
     executeBenchmark: async (plan, hooks) => {

@@ -318,6 +318,7 @@ function buildValidationDependencies(
     opencode: buildOpenCodeAdapter(),
     environments: buildEnvironments(),
     prerequisites: buildPrerequisites(),
+    buildTaskPrompt: vi.fn((task: TaskDefinition) => `prompt:${task.id}`),
     ...overrides,
   };
 }
@@ -1183,6 +1184,66 @@ describe("validateConfig", () => {
     ).toEqual([
       ["sample-repo", first.startCommit],
       ["sample-repo", third.startCommit],
+    ]);
+  });
+
+  it("rejects a task whose prompt names its resolved start commit, including one resolved from the cache", async () => {
+    const resolvedCommit = "abcdef0123456789abcdef0123456789abcdef01";
+    const first = buildTask({ id: "task-one", startCommit: "main" });
+    const second = buildTask({ id: "task-two", startCommit: "main" });
+    const dependencies = buildValidationDependencies({
+      git: buildGit({
+        validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
+          ok: true as const,
+          value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
+        })),
+      }),
+      buildTaskPrompt: vi.fn((task: TaskDefinition) =>
+        task.id === second.id
+          ? "the agent should pin the commit ABCDEF0 for this task"
+          : "unrelated fedcba9876543210fedcba9876543210fedcba98 and deadbeef",
+      ),
+    });
+
+    const report = expectOk(await validateConfig(buildConfig({ tasks: [first, second] }), dependencies));
+
+    expect(report.valid).toBe(false);
+    expect(report.findings).toEqual([
+      {
+        severity: "error",
+        identifier: `tasks.${second.id}`,
+        message: "agent prompt contains resolved start commit abcdef0",
+      },
+    ]);
+  });
+
+  it("rejects a task whose prompt names its resolved start commit on the first, uncached lookup", async () => {
+    const resolvedCommit = "abcdef0123456789abcdef0123456789abcdef01";
+    const first = buildTask({ id: "task-one", startCommit: "main" });
+    const second = buildTask({ id: "task-two", startCommit: "main" });
+    const dependencies = buildValidationDependencies({
+      git: buildGit({
+        validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
+          ok: true as const,
+          value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
+        })),
+      }),
+      buildTaskPrompt: vi.fn((task: TaskDefinition) =>
+        task.id === first.id
+          ? "the agent should pin the commit ABCDEF0 for this task"
+          : "unrelated fedcba9876543210fedcba9876543210fedcba98 and deadbeef",
+      ),
+    });
+
+    const report = expectOk(await validateConfig(buildConfig({ tasks: [first, second] }), dependencies));
+
+    expect(report.valid).toBe(false);
+    expect(report.findings).toEqual([
+      {
+        severity: "error",
+        identifier: `tasks.${first.id}`,
+        message: "agent prompt contains resolved start commit abcdef0",
+      },
     ]);
   });
 });

@@ -92,6 +92,8 @@ A contender is one model/effort combination. `model` uses `provider/model` synta
 | `acceptanceCriteria` | Checks for the solution; at least one must be required |
 | `definitionOfDone` | Completion checks; at least one must be required |
 
+`tevu validate` and `tevu run` reject a task when the prompt tevu sends to the agent contains the first 7 characters of the resolved `startCommit`, in any letter case. This prompt is built from `prompt`, `description`, and the `acceptanceCriteria` and `definitionOfDone` descriptions.
+
 A manual source has `kind: manual`, `title`, and an optional `reference`.
 
 A Jira snapshot has `kind: jira-cloud`, `issueKey`, `issueUrl`, `importedAt`, `importedSummary`, and `importedDescription`. The wizard fills these from a one-time import. Later changes in Jira do not update the task.

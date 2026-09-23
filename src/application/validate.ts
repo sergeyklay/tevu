@@ -1,4 +1,5 @@
 import { TevuConfigSchema } from "../config/schema.ts";
+import { describeSourceCommitInPrompt } from "./source-commit-in-prompt.ts";
 
 import type { TevuConfig } from "../config/schema.ts";
 import type {
@@ -64,7 +65,7 @@ export async function validateConfig(
 }
 
 /**
- * Stages 1 and 2: strict schema, duplicate IDs, and references.
+ * Strict schema validation, covering duplicate IDs and cross-references.
  *
  * The config is re-validated defensively because validateConfig owns schema
  * truth for callers that did not arrive through loadConfig; the schema's
@@ -85,7 +86,7 @@ function collectSchemaFindings(config: TevuConfig): ValidationFinding[] {
   );
 }
 
-/** Stage 3: platform and the pinned Node.js, Bun, and Git toolchain. */
+/** Checks the local platform and the pinned Node.js, Bun, and Git toolchain. */
 async function collectHostFindings(
   dependencies: ValidationDependencies,
 ): Promise<ValidationFinding[]> {
@@ -93,7 +94,7 @@ async function collectHostFindings(
   return host.ok ? [] : [prerequisiteFinding(host.error)];
 }
 
-/** Stage 4: configured variable presence by name, plus the non-empty parent PATH. */
+/** Checks configured variable presence by name, plus the non-empty parent PATH. */
 function collectEnvironmentFindings(
   config: TevuConfig,
   dependencies: ValidationDependencies,
@@ -127,7 +128,10 @@ function collectEnvironmentFindings(
   return findings;
 }
 
-/** Stage 5: start-commit resolution and source-tree inspection per task. */
+/**
+ * Resolves each task's start commit, inspects its source tree, and rejects a
+ * task whose agent prompt names the resolved commit.
+ */
 async function collectSourceFindings(
   config: TevuConfig,
   dependencies: ValidationDependencies,
@@ -157,12 +161,20 @@ async function collectSourceFindings(
         identifier: `tasks.${task.id}.startCommit`,
         message: result.error.reason,
       });
+      continue;
+    }
+    const reason = describeSourceCommitInPrompt(
+      dependencies.buildTaskPrompt(task),
+      result.value.resolvedCommit,
+    );
+    if (reason !== undefined) {
+      findings.push({ severity: "error", identifier: `tasks.${task.id}`, message: reason });
     }
   }
   return findings;
 }
 
-/** Stage 6: artifact destination writability without retained probe files. */
+/** Checks artifact destination writability without retained probe files. */
 async function collectArtifactFindings(
   config: TevuConfig,
   dependencies: ValidationDependencies,
