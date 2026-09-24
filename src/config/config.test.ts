@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -8,35 +9,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTask } from "../application/create-task.ts";
 import { validateConfig } from "../application/validate.ts";
 import { createConfigStore } from "../adapters/artifact-store.ts";
+import { renderConfigDocument } from "./document.ts";
 import { canonicalConfigSerialization, loadConfig } from "./load.ts";
 import { TevuConfigSchema } from "./schema.ts";
 
+import type { TaskDependencies, TaskWizardInput } from "../application/create-task.ts";
 import type {
-  ConfigBootstrapInput,
   ConfigStore,
   EnvironmentAdapter,
   GitWorkspaceAdapter,
-  IssueSnapshot,
-  IssueTrackerAdapter,
   OpenCodeAdapter,
   OpenCodeCapabilityReport,
   PrerequisiteAdapter,
-  TaskDependencies,
-  TaskWizardInput,
   TevuError,
   TevuResult,
   ValidationDependencies,
 } from "../domain/types.ts";
 import type {
-  CheckDefinition,
-  CommandEvaluator,
-  ContenderDefinition,
-  EnvironmentVariableDefinition,
-  ManualEvaluator,
-  ReadyItem,
+  CheckInput,
+  ModelDefinitionInput,
   RepositoryDefinition,
   TaskDefinition,
+  TaskInput,
   TevuConfig,
+  TevuConfigInput,
 } from "./schema.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -47,8 +43,6 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     readFile: vi.fn(actual.readFile),
   };
 });
-
-const FIXED_NOW = new Date("2026-05-01T10:00:00.000Z");
 
 function expectOk<T>(outcome: { ok: true; value: T } | { ok: false; error: TevuError }): T {
   if (outcome.ok) {
@@ -93,138 +87,107 @@ function buildRepository(overrides: Partial<RepositoryDefinition> = {}): Reposit
   return { id: "sample-repo", path: "/tmp/tevu/sample-repo", ...overrides };
 }
 
-function buildContender(overrides: Partial<ContenderDefinition> = {}): ContenderDefinition {
-  return { id: "alpha", model: "openai/gpt-5", variant: "high", ...overrides };
+function buildModel(overrides: Partial<ModelDefinitionInput> = {}): ModelDefinitionInput {
+  return { id: "alpha", model: "openai/gpt-5", effort: "high", ...overrides };
 }
 
-function buildEnvironmentVariable(
-  overrides: Partial<EnvironmentVariableDefinition> = {},
-): EnvironmentVariableDefinition {
-  return { name: "EVAL_TOKEN", classification: "ordinary", ...overrides };
+function buildManualCheck(overrides: Partial<CheckInput> = {}): CheckInput {
+  return { id: "api-returns-200", description: "The API returns 200", manual: true, ...overrides };
 }
 
-function buildCommandEvaluator(overrides: Partial<CommandEvaluator> = {}): CommandEvaluator {
+function buildCommandCheck(overrides: Partial<CheckInput> = {}): CheckInput {
   return {
-    kind: "command",
-    argv: ["node", "check.js"],
-    timeoutMs: 10_000,
-    successExitCodes: [0],
-    environmentAllowlist: [],
+    id: "tests-pass",
+    description: "The tests pass",
+    run: ["npm", "test"],
+    timeout: "1m",
     ...overrides,
   };
 }
 
-function buildManualEvaluator(): ManualEvaluator {
-  return { kind: "manual" };
-}
-
-function buildCheck(overrides: Partial<CheckDefinition> = {}): CheckDefinition {
-  return {
-    id: "api-returns-200",
-    description: "The API returns 200",
-    required: true,
-    evaluator: buildCommandEvaluator(),
-    ...overrides,
-  };
-}
-
-function buildReadyItem(overrides: Partial<ReadyItem> = {}): ReadyItem {
-  return { id: "spec-approved", description: "The spec is approved", confirmed: true, ...overrides };
-}
-
-function buildTask(overrides: Partial<TaskDefinition> = {}): TaskDefinition {
+function buildTaskDefinition(overrides: Partial<TaskInput> = {}): TaskInput {
   return {
     id: "write-report",
-    repositoryId: "sample-repo",
-    startCommit: "0123456789abcdef0123456789abcdef01234567",
-    source: { kind: "manual", title: "Write the report" },
+    title: "Write the report",
+    repo: "sample-repo",
+    base_commit: "0123456789abcdef0123456789abcdef01234567",
     description: "Write a report",
     prompt: "Write the report",
-    definitionOfReady: [buildReadyItem()],
-    acceptanceCriteria: [buildCheck()],
-    definitionOfDone: [buildCheck({ id: "tests-pass", evaluator: buildCommandEvaluator({ argv: ["npm", "test"] }) })],
+    readiness: ["The spec is approved"],
+    checks: {
+      acceptance: [buildManualCheck()],
+      done: [buildCommandCheck()],
+    },
     ...overrides,
   };
 }
 
-function buildExecution(overrides: Partial<TevuConfig["execution"]> = {}): TevuConfig["execution"] {
-  return {
-    concurrency: 2,
-    caseTimeoutMs: 60_000,
-    terminationGraceMs: 5_000,
-    opencodeEnvironment: [],
-    evaluatorEnvironment: [buildEnvironmentVariable()],
-    ...overrides,
-  };
+function buildRunSettings(overrides: Partial<TevuConfigInput["run"]> = {}): TevuConfigInput["run"] {
+  return { output_dir: "/tmp/tevu/runs", concurrency: 2, timeout: "10m", stop_grace: "3s", ...overrides };
 }
 
-function buildConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
+function buildAgents(overrides: Partial<TevuConfigInput["agents"]["opencode"]> = {}): TevuConfigInput["agents"] {
+  return { opencode: { command: "opencode", secrets: [], env: [], ...overrides } };
+}
+
+function buildConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfigInput {
   return {
     version: 1,
-    artifacts: { directory: "/tmp/tevu/artifacts" },
-    execution: buildExecution(),
-    opencode: { executable: "opencode" },
+    run: buildRunSettings(),
+    agents: buildAgents(),
     repositories: [buildRepository()],
-    contenders: [
-      buildContender(),
-      buildContender({ id: "beta", model: "anthropic/claude-4", variant: "max" }),
-    ],
-    tasks: [buildTask()],
+    models: [buildModel(), buildModel({ id: "beta", model: "anthropic/claude-4", effort: "max" })],
+    tasks: [buildTaskDefinition()],
     ...overrides,
   };
 }
 
-function buildWizardInput(overrides: Partial<TaskWizardInput> = {}): TaskWizardInput {
+function buildTaskWizardInput(overrides: Partial<TaskWizardInput> = {}): TaskWizardInput {
   return {
     configPath: "/tmp/tevu/tevu.yaml",
-    repositoryId: "sample-repo",
-    taskId: "new-task",
-    startCommit: "abc123",
-    source: { kind: "manual", title: "New task" },
-    description: "A new task",
-    prompt: "Do the new task",
-    definitionOfReady: [buildReadyItem({ id: "new-ready" })],
-    acceptanceCriteria: [buildCheck({ id: "new-check" })],
-    definitionOfDone: [buildCheck({ id: "new-dod" })],
+    task: buildTaskDefinition({ id: "new-task", title: "New task", base_commit: "abc123" }),
     ...overrides,
   };
 }
 
-function buildJiraSnapshot(
-  overrides: Partial<IssueSnapshot & { importedAt: string }> = {},
-): IssueSnapshot & { importedAt: string } {
-  return {
-    issueKey: "PROJ-7",
-    issueUrl: "https://jira.example.com/browse/PROJ-7",
-    summary: "Add export button",
-    description: "Users need an export button",
-    importedAt: FIXED_NOW.toISOString(),
-    ...overrides,
-  };
+/** A fully valid, rendered base document, used as the default existing-file text in `createTask` tests. */
+function validBaseText(): string {
+  const rendered = renderConfigDocument(buildConfig(), { redact: (text) => text });
+  if (!rendered.ok) {
+    throw new Error("expected the fixture configuration to render");
+  }
+  return rendered.value;
 }
 
 function buildConfigStore(overrides: Partial<ConfigStore> = {}): ConfigStore {
   return {
     exists: vi.fn(async () => true),
     requireDirectory: vi.fn(async () => ({ ok: true as const, value: undefined })),
-    read: vi.fn(async () => ({ ok: true as const, value: buildConfig() })),
-    replace: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    readText: vi.fn(async () => ({ ok: true as const, value: validBaseText() })),
+    replaceText: vi.fn(async () => ({ ok: true as const, value: undefined })),
     ...overrides,
   };
 }
 
-function buildGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspaceAdapter {
+function buildGit(
+  overrides: Partial<Pick<GitWorkspaceAdapter, "validateSource">> = {},
+): Pick<GitWorkspaceAdapter, "validateSource"> {
   return {
-    validateSource: vi.fn(
-      async (repository: RepositoryDefinition, commit: string) => ({
-        ok: true as const,
-        value: {
-          repositoryId: repository.id,
-          requestedCommit: commit,
-          resolvedCommit: `resolved-${commit}`,
-        },
-      }),
-    ),
+    validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
+      ok: true as const,
+      value: {
+        repositoryId: repository.id,
+        requestedCommit: commit,
+        resolvedCommit: `resolved-${commit}`,
+      },
+    })),
+    ...overrides,
+  };
+}
+
+function buildFullGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspaceAdapter {
+  return {
+    ...buildGit(),
     createIsolatedCase: vi.fn(async () => ({
       ok: false as const,
       error: { kind: "IsolationError" as const, caseId: "unused", reason: "not used in these tests" },
@@ -238,27 +201,12 @@ function buildGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspaceAda
   };
 }
 
-function buildJira(overrides: Partial<IssueTrackerAdapter> = {}): IssueTrackerAdapter {
-  return {
-    readIssue: vi.fn(async (issueKey: string) => ({
-      ok: true as const,
-      value: {
-        issueKey,
-        issueUrl: `https://jira.example.com/browse/${issueKey}`,
-        summary: "Issue summary",
-        description: "Issue description",
-      },
-    })),
-    ...overrides,
-  };
-}
-
 function buildTaskDependencies(overrides: Partial<TaskDependencies> = {}): TaskDependencies {
   return {
     configStore: buildConfigStore(),
     git: buildGit(),
-    jira: buildJira(),
-    clock: { now: vi.fn(() => FIXED_NOW) },
+    registerSecrets: vi.fn(),
+    redact: (text: string) => text,
     ...overrides,
   };
 }
@@ -325,7 +273,7 @@ function buildValidationDependencies(
   overrides: Partial<ValidationDependencies> = {},
 ): ValidationDependencies {
   return {
-    git: buildGit(),
+    git: buildFullGit(),
     opencode: buildOpenCodeAdapter(),
     environments: buildEnvironments(),
     prerequisites: buildPrerequisites(),
@@ -335,78 +283,65 @@ function buildValidationDependencies(
 }
 
 function configYaml(options: {
-  artifactsDirectory: string;
+  outputDirectory: string;
   repositoryPath: string;
-  executable: string;
+  command: string;
 }): string {
   return `version: 1
-artifacts:
-  directory: ${options.artifactsDirectory}
-execution:
+run:
+  output_dir: ${options.outputDirectory}
   concurrency: 2
-  caseTimeoutMs: 60000
-  terminationGraceMs: 5000
-  opencodeEnvironment: []
-  evaluatorEnvironment:
-    - name: EVAL_TOKEN
-      classification: ordinary
-opencode:
-  executable: ${options.executable}
+  timeout: 10m
+  stop_grace: 3s
+agents:
+  opencode:
+    command: ${options.command}
+    secrets: []
+    env: []
 repositories:
   - id: sample-repo
     path: ${options.repositoryPath}
-contenders:
+models:
   - id: alpha
     model: openai/gpt-5
-    variant: high
+    effort: high
   - id: beta
     model: anthropic/claude-4
-    variant: max
+    effort: max
 tasks:
   - id: write-report
-    repositoryId: sample-repo
-    startCommit: 0123456789abcdef0123456789abcdef01234567
-    source:
-      kind: manual
-      title: Write the report
+    title: Write the report
+    repo: sample-repo
+    base_commit: "0123456789abcdef0123456789abcdef01234567"
     description: Write a report
     prompt: Write the report
-    definitionOfReady:
-      - id: spec-approved
-        description: The spec is approved
-        confirmed: true
-    acceptanceCriteria:
-      - id: api-returns-200
-        description: The API returns 200
-        required: true
-        evaluator:
-          kind: command
-          argv: [node, check.js]
-          timeoutMs: 10000
-          successExitCodes: [0]
-          environmentAllowlist: [EVAL_TOKEN]
-    definitionOfDone:
-      - id: tests-pass
-        description: The tests pass
-        required: true
-        evaluator:
-          kind: command
-          argv: [npm, test]
-          timeoutMs: 60000
-          successExitCodes: [0]
+    readiness:
+      - The spec is approved
+    checks:
+      acceptance:
+        - id: api-returns-200
+          description: The API returns 200
+          manual: true
+      done:
+        - id: tests-pass
+          description: The tests pass
+          run: [npm, test]
+          timeout: 1m
 `;
 }
 
 describe("TevuConfigSchema", () => {
-  it("accepts a minimal valid configuration unchanged", () => {
+  it("accepts a minimal valid configuration and materializes its defaults", () => {
     const config = buildConfig();
 
-    expect(expectSchemaAcceptance(config)).toEqual(config);
+    const accepted = expectSchemaAcceptance(config);
+    expect(accepted.tasks[0]?.repo).toBe("sample-repo");
+    expect(accepted.models[0]?.agent).toBe("opencode");
   });
 
   it.each([
     { level: "top-level", config: { ...buildConfig(), telemetry: true } },
-    { level: "task", config: { ...buildConfig(), tasks: [{ ...buildTask(), notes: "extra" }] } },
+    { level: "task", config: { ...buildConfig(), tasks: [{ ...buildTaskDefinition(), notes: "extra" }] } },
   ])("rejects an unknown field at the $level", ({ config }) => {
     expect(TevuConfigSchema.safeParse(config).success).toBe(false);
   });
@@ -422,56 +357,31 @@ describe("TevuConfigSchema", () => {
   it.each(["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CI", "XDG_DATA_HOME"])(
     "rejects the fixed environment name %s",
     (name) => {
-      const config = buildConfig({
-        execution: buildExecution({
-          opencodeEnvironment: [buildEnvironmentVariable({ name, classification: "ordinary" })],
-        }),
-      });
+      const config = buildConfig({ agents: buildAgents({ secrets: [name] }) });
 
       expect(TevuConfigSchema.safeParse(config).success).toBe(false);
     },
   );
 
-  it("rejects a non-ordinary classification in evaluatorEnvironment", () => {
-    const config = buildConfig({
-      execution: buildExecution({
-        evaluatorEnvironment: [buildEnvironmentVariable({ name: "PROVIDER_KEY", classification: "provider-credential" })],
-      }),
-    });
-
-    expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
-      "evaluatorEnvironment entries must be classified ordinary",
-    );
-  });
-
   it("rejects duplicate environment names within one collection", () => {
-    const config = buildConfig({
-      execution: buildExecution({
-        opencodeEnvironment: [buildEnvironmentVariable({ name: "SHARED", classification: "ordinary" }), buildEnvironmentVariable({ name: "SHARED", classification: "secret" })],
-      }),
-    });
+    const config = buildConfig({ agents: buildAgents({ secrets: ["SHARED", "SHARED"] }) });
 
     expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
       'duplicate environment variable name "SHARED"',
     );
   });
 
-  it("rejects an environment variable declared for both opencode and evaluator", () => {
-    const config = buildConfig({
-      execution: buildExecution({
-        opencodeEnvironment: [buildEnvironmentVariable({ name: "SHARED", classification: "ordinary" })],
-        evaluatorEnvironment: [buildEnvironmentVariable({ name: "SHARED", classification: "ordinary" })],
-      }),
-    });
+  it("rejects an environment variable declared for both secrets and env", () => {
+    const config = buildConfig({ agents: buildAgents({ secrets: ["SHARED"], env: ["SHARED"] }) });
 
     expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
-      'environment variable "SHARED" appears in both opencodeEnvironment and evaluatorEnvironment',
+      'environment variable "SHARED" appears in both agents.opencode.secrets and agents.opencode.env',
     );
   });
 
   it.each([
     { collection: "repositories", config: { ...buildConfig(), repositories: [] } },
-    { collection: "contenders", config: { ...buildConfig(), contenders: [buildContender()] } },
+    { collection: "models", config: { ...buildConfig(), models: [buildModel()] } },
     { collection: "tasks", config: { ...buildConfig(), tasks: [] } },
   ])("rejects an empty or undersized $collection collection", ({ config }) => {
     expect(TevuConfigSchema.safeParse(config).success).toBe(false);
@@ -479,106 +389,83 @@ describe("TevuConfigSchema", () => {
 
   it.each([
     { collection: "repositories", config: buildConfig({ repositories: [buildRepository({ id: "dup" }), buildRepository({ id: "dup" })] }), path: "repositories.1.id", message: 'duplicate repositories id "dup"' },
-    { collection: "contenders", config: buildConfig({ contenders: [buildContender({ id: "dup" }), buildContender({ id: "dup", model: "other/model", variant: "v" })] }), path: "contenders.1.id", message: 'duplicate contenders id "dup"' },
-    { collection: "tasks", config: buildConfig({ tasks: [buildTask(), buildTask()] }), path: "tasks.1.id", message: 'duplicate tasks id "write-report"' },
+    { collection: "models", config: buildConfig({ models: [buildModel({ id: "dup" }), buildModel({ id: "dup", model: "other/model" })] }), path: "models.1.id", message: 'duplicate models id "dup"' },
+    { collection: "tasks", config: buildConfig({ tasks: [buildTaskDefinition(), buildTaskDefinition()] }), path: "tasks.1.id", message: 'duplicate tasks id "write-report"' },
   ])("rejects duplicate $collection ids", ({ config, path, message }) => {
     expect(expectSchemaRejection(config)).toContainEqual({ path, message });
   });
 
   it("rejects a task referencing an unconfigured repository", () => {
-    const config = buildConfig({ tasks: [buildTask({ repositoryId: "ghost" })] });
+    const config = buildConfig({ tasks: [buildTaskDefinition({ repo: "ghost" })] });
 
     expect(expectSchemaRejection(config)).toContainEqual({
-      path: "tasks.0.repositoryId",
-      message: "repositoryId must reference a configured repository",
+      path: "tasks.0.repo",
+      message: "repo must reference a configured repository",
     });
   });
 
-  it("rejects an environmentAllowlist name outside evaluatorEnvironment", () => {
+  it("rejects a Jira credential variable listed in a check's env", () => {
+    const config = buildConfig({
+      trackers: { jira: { url: "https://jira.example.com", email: "$JIRA_EMAIL", token: "$JIRA_TOKEN" } },
+      tasks: [
+        buildTaskDefinition({
+          checks: {
+            acceptance: [buildManualCheck()],
+            done: [buildCommandCheck({ env: ["JIRA_TOKEN"] })],
+          },
+        }),
+      ],
+    });
+
+    expect(expectSchemaRejection(config)).toContainEqual({
+      path: "tasks.0.checks.done.0.env.0",
+      message: 'Jira credential variable "JIRA_TOKEN" must not be passed to a check',
+    });
+  });
+
+  it("requires at least one required acceptance check", () => {
+    const config = buildConfig({
+      tasks: [buildTaskDefinition({ checks: { acceptance: [buildManualCheck({ required: false })], done: [buildCommandCheck()] } })],
+    });
+
+    expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
+      "at least one acceptance check must be required",
+    );
+  });
+
+  it("requires at least one required done check", () => {
+    const config = buildConfig({
+      tasks: [buildTaskDefinition({ checks: { acceptance: [buildManualCheck()], done: [buildCommandCheck({ required: false })] } })],
+    });
+
+    expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
+      "at least one done check must be required",
+    );
+  });
+
+  it("rejects duplicate check ids across acceptance and done", () => {
     const config = buildConfig({
       tasks: [
-        buildTask({
-          acceptanceCriteria: [
-            buildCheck({ evaluator: buildCommandEvaluator({ environmentAllowlist: ["UNDECLARED_VAR"] }) }),
-          ],
+        buildTaskDefinition({
+          checks: {
+            acceptance: [buildManualCheck({ id: "shared" })],
+            done: [buildCommandCheck({ id: "shared" })],
+          },
         }),
       ],
     });
 
     expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
-      'environmentAllowlist name "UNDECLARED_VAR" is not declared in execution.evaluatorEnvironment',
-    );
-  });
-
-  it("rejects a Jira credential variable listed in evaluatorEnvironment", () => {
-    const config = buildConfig({
-      execution: buildExecution({
-        evaluatorEnvironment: [buildEnvironmentVariable({ name: "JIRA_TOKEN", classification: "ordinary" })],
-      }),
-      jira: {
-        baseUrl: "https://jira.example.com",
-        emailEnvironmentVariable: "JIRA_EMAIL",
-        tokenEnvironmentVariable: "JIRA_TOKEN",
-      },
-    });
-
-    expect(expectSchemaRejection(config)).toContainEqual({
-      path: "jira.tokenEnvironmentVariable",
-      message: 'Jira credential variable "JIRA_TOKEN" must not appear in execution.evaluatorEnvironment',
-    });
-  });
-
-  it("requires at least one required acceptance criterion", () => {
-    const config = buildConfig({
-      tasks: [buildTask({ acceptanceCriteria: [buildCheck({ required: false })] })],
-    });
-
-    expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
-      "at least one acceptance criterion must be required",
-    );
-  });
-
-  it("requires at least one required Definition of Done check", () => {
-    const config = buildConfig({
-      tasks: [buildTask({ definitionOfDone: [buildCheck({ id: "tests-pass", required: false })] })],
-    });
-
-    expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
-      "at least one Definition of Done check must be required",
-    );
-  });
-
-  it("rejects duplicate Definition of Ready ids", () => {
-    const config = buildConfig({
-      tasks: [buildTask({ definitionOfReady: [buildReadyItem(), buildReadyItem()] })],
-    });
-
-    expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
-      'duplicate Definition of Ready id "spec-approved"',
-    );
-  });
-
-  it("rejects duplicate check ids across acceptanceCriteria and definitionOfDone", () => {
-    const config = buildConfig({
-      tasks: [
-        buildTask({
-          acceptanceCriteria: [buildCheck({ id: "shared" })],
-          definitionOfDone: [buildCheck({ id: "shared" })],
-        }),
-      ],
-    });
-
-    expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
-      'duplicate check id "shared" across acceptanceCriteria and definitionOfDone',
+      'duplicate check id "shared" across checks.acceptance and checks.done',
     );
   });
 
   it.each([
-    { field: "importedAt", source: { kind: "jira-cloud", issueKey: "PROJ-1", issueUrl: "https://jira.example.com/browse/PROJ-1", importedAt: "2026-01-01", importedSummary: "s", importedDescription: "d" }, path: "tasks.0.source.importedAt" },
-    { field: "issueUrl", source: { kind: "jira-cloud", issueKey: "PROJ-1", issueUrl: "not-a-url", importedAt: FIXED_NOW.toISOString(), importedSummary: "s", importedDescription: "d" }, path: "tasks.0.source.issueUrl" },
-  ])("rejects an invalid Jira task source $field", ({ source, path }) => {
+    { field: "imported_at", source: { kind: "jira", key: "PROJ-1", url: "https://jira.example.com/browse/PROJ-1", imported_at: "2026-01-01", title: "s", body: "d" }, path: "tasks.0.source.imported_at" },
+    { field: "url", source: { kind: "jira", key: "PROJ-1", url: "not-a-url", imported_at: "2026-01-01T00:00:00Z", title: "s", body: "d" }, path: "tasks.0.source.url" },
+  ])("rejects an invalid imported task source $field", ({ source, path }) => {
     const config = buildConfig({
-      tasks: [buildTask({ source: source as TaskDefinition["source"] })],
+      tasks: [buildTaskDefinition({ source: source as TaskInput["source"] })],
     });
 
     expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain(path);
@@ -588,82 +475,81 @@ describe("TevuConfigSchema", () => {
     { field: "description", value: "   " },
     { field: "prompt", value: "\t " },
   ])("rejects a whitespace-only task $field", ({ field, value }) => {
-    const config = buildConfig({ tasks: [{ ...buildTask(), [field]: value }] });
+    const config = buildConfig({ tasks: [{ ...buildTaskDefinition(), [field]: value }] });
 
     expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain(`tasks.0.${field}`);
   });
 
-  it("rejects a contender model without a namespace separator", () => {
-    const config = { ...buildConfig(), contenders: [{ ...buildContender(), model: "gpt-5" }] };
+  it("rejects a model without a namespace separator", () => {
+    const config = { ...buildConfig(), models: [{ ...buildModel(), model: "gpt-5" }, buildModel({ id: "beta" })] };
 
-    expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain("contenders.0.model");
+    expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain("models.0.model");
   });
 
   it("rejects a non-positive command timeout", () => {
-    const evaluator = { ...buildCommandEvaluator(), timeoutMs: 0 };
     const config = buildConfig({
-      tasks: [buildTask({ acceptanceCriteria: [{ ...buildCheck(), evaluator }] })],
+      tasks: [buildTaskDefinition({ checks: { acceptance: [buildManualCheck()], done: [buildCommandCheck({ timeout: "0m" })] } })],
     });
 
-    expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain("tasks.0.acceptanceCriteria.0.evaluator.timeoutMs");
+    expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain("tasks.0.checks.done.0.timeout");
   });
 
-  it("rejects an empty command success exit code list", () => {
-    const evaluator = { ...buildCommandEvaluator(), successExitCodes: [] };
+  it("rejects an empty exit_codes list", () => {
     const config = buildConfig({
-      tasks: [buildTask({ acceptanceCriteria: [{ ...buildCheck(), evaluator }] })],
+      tasks: [buildTaskDefinition({ checks: { acceptance: [buildManualCheck()], done: [buildCommandCheck({ exit_codes: [] })] } })],
     });
 
-    expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain("tasks.0.acceptanceCriteria.0.evaluator.successExitCodes");
+    expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain("tasks.0.checks.done.0.exit_codes");
   });
 
   it("rejects a non-HTTPS Jira base URL", () => {
     const config = buildConfig({
-      jira: {
-        baseUrl: "http://jira.example.com",
-        emailEnvironmentVariable: "JIRA_EMAIL",
-        tokenEnvironmentVariable: "JIRA_TOKEN",
-      },
+      trackers: { jira: { url: "http://jira.example.com", email: "$JIRA_EMAIL", token: "$JIRA_TOKEN" } },
     });
 
-    expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain("jira.baseUrl");
+    expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain("trackers.jira.url");
   });
 
-  it("accepts a manual evaluator without a command definition", () => {
+  it("accepts a manual check without a command definition", () => {
     const config = buildConfig({
-      tasks: [buildTask({ acceptanceCriteria: [{ ...buildCheck(), evaluator: buildManualEvaluator() }] })],
+      tasks: [buildTaskDefinition({ checks: { acceptance: [buildManualCheck()], done: [buildManualCheck({ id: "docs" })] } })],
     });
 
-    expect(expectSchemaAcceptance(config).tasks[0]?.acceptanceCriteria[0]?.evaluator).toEqual({ kind: "manual" });
+    expect(expectSchemaAcceptance(config).tasks[0]?.checks.acceptance[0]).toEqual({
+      id: "api-returns-200",
+      description: "The API returns 200",
+      manual: true,
+      required: true,
+    });
   });
 
-  it("accepts a task with a github-issue source", () => {
-    const source: TaskDefinition["source"] = {
-      kind: "github-issue",
-      issueKey: "octo/repo#42",
-      issueUrl: "https://github.com/octo/repo/issues/42",
-      importedAt: FIXED_NOW.toISOString(),
-      importedSummary: "Add export button",
-      importedDescription: "Users need an export button",
+  it("accepts a task with a github source", () => {
+    const source: TaskInput["source"] = {
+      kind: "github",
+      key: "octo/repo#42",
+      url: "https://github.com/octo/repo/issues/42",
+      imported_at: "2026-05-01T10:00:00.000Z",
+      title: "Export table as CSV",
+      body: "Users need an export button",
     };
-    const config = buildConfig({ tasks: [buildTask({ source })] });
+    const config = buildConfig({ tasks: [buildTaskDefinition({ source })] });
 
     expect(expectSchemaAcceptance(config).tasks[0]?.source).toEqual(source);
   });
 
-  it("rejects an unknown field inside a github-issue task source", () => {
+  it("rejects an unknown field inside a github task source", () => {
     const config = {
       ...buildConfig(),
       tasks: [
         {
-          ...buildTask(),
+          ...buildTaskDefinition(),
           source: {
-            kind: "github-issue",
-            issueKey: "octo/repo#42",
-            issueUrl: "https://github.com/octo/repo/issues/42",
-            importedAt: FIXED_NOW.toISOString(),
-            importedSummary: "Add export button",
-            importedDescription: "Users need an export button",
+            kind: "github",
+            key: "octo/repo#42",
+            url: "https://github.com/octo/repo/issues/42",
+            imported_at: "2026-05-01T10:00:00.000Z",
+            title: "Export table as CSV",
+            body: "Users need an export button",
             extra: "field",
           },
         },
@@ -672,6 +558,247 @@ describe("TevuConfigSchema", () => {
 
     expect(TevuConfigSchema.safeParse(config).success).toBe(false);
   });
+
+  it("accepts an explicit agent value naming a configured agent", () => {
+    const config = buildConfig({ models: [buildModel({ agent: "opencode" }), buildModel({ id: "beta", model: "anthropic/claude-4", effort: "max" })] });
+
+    expect(expectSchemaAcceptance(config).models[0]?.agent).toBe("opencode");
+  });
+
+  it("rejects a model agent that does not name a configured agent", () => {
+    const config = buildConfig({
+      models: [buildModel({ agent: "claude" }), buildModel({ id: "beta", model: "anthropic/claude-4", effort: "max" })],
+    });
+
+    expect(expectSchemaRejection(config)).toContainEqual({
+      path: "models.0.agent",
+      message: "agent must name a configured agent: opencode",
+    });
+  });
+
+  it("defaults a task's repo to the sole configured repository", () => {
+    const config = buildConfig({ tasks: [{ ...buildTaskDefinition(), repo: undefined }] });
+
+    expect(expectSchemaAcceptance(config).tasks[0]?.repo).toBe("sample-repo");
+  });
+
+  it("requires repo when more than one repository is configured", () => {
+    const config = buildConfig({
+      repositories: [buildRepository(), buildRepository({ id: "second-repo" })],
+      tasks: [{ ...buildTaskDefinition(), repo: undefined }],
+    });
+
+    expect(expectSchemaRejection(config)).toContainEqual({
+      path: "tasks.0.repo",
+      message: "repo is required when more than one repository is configured",
+    });
+  });
+
+  it("rejects a check with neither run nor manual", () => {
+    const config = buildConfig({
+      tasks: [
+        buildTaskDefinition({
+          checks: { acceptance: [{ id: "no-form", description: "x" }], done: [buildCommandCheck()] },
+        }),
+      ],
+    });
+
+    expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
+      "a check needs run (a command) or manual: true",
+    );
+  });
+
+  it("rejects a check with both run and manual", () => {
+    const config = buildConfig({
+      tasks: [
+        buildTaskDefinition({
+          checks: { acceptance: [{ ...buildCommandCheck(), manual: true }], done: [buildCommandCheck()] },
+        }),
+      ],
+    });
+
+    expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
+      "a check has either run or manual: true, not both",
+    );
+  });
+
+  it("rejects manual: false", () => {
+    const config = buildConfig({
+      tasks: [
+        buildTaskDefinition({
+          checks: {
+            acceptance: [{ id: "bad-manual", description: "x", manual: false }],
+            done: [buildCommandCheck()],
+          },
+        }),
+      ],
+    });
+
+    expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
+      "manual must be true; omit it for a command check",
+    );
+  });
+
+  it.each(["timeout", "exit_codes", "env"] as const)(
+    "rejects %s specified on a manual check",
+    (key) => {
+      const overSpecified = {
+        id: "over-specified",
+        description: "x",
+        manual: true,
+        [key]: key === "timeout" ? "1m" : key === "exit_codes" ? [0] : ["NAME"],
+      };
+      const config = buildConfig({
+        tasks: [
+          buildTaskDefinition({
+            checks: { acceptance: [overSpecified], done: [buildCommandCheck()] },
+          }),
+        ],
+      });
+
+      expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
+        `only a command check (with run) accepts ${key}`,
+      );
+    },
+  );
+
+  it("resolves a command check's timeout from run.check_timeout when omitted", () => {
+    const config = buildConfig({
+      run: buildRunSettings({ check_timeout: "5m" }),
+      tasks: [
+        buildTaskDefinition({
+          checks: { acceptance: [buildManualCheck()], done: [buildCommandCheck({ timeout: undefined })] },
+        }),
+      ],
+    });
+
+    expect(expectSchemaAcceptance(config).tasks[0]?.checks.done[0]).toMatchObject({ timeout: "5m" });
+  });
+
+  it("rejects a command check with no timeout and no run.check_timeout", () => {
+    const config = buildConfig({
+      tasks: [
+        buildTaskDefinition({
+          checks: { acceptance: [buildManualCheck()], done: [buildCommandCheck({ timeout: undefined })] },
+        }),
+      ],
+    });
+
+    expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
+      "set timeout on this check or run.check_timeout",
+    );
+  });
+
+  it("rejects a check env variable also passed to the agent", () => {
+    const config = buildConfig({
+      agents: buildAgents({ secrets: ["OPENAI_API_KEY"] }),
+      tasks: [
+        buildTaskDefinition({
+          checks: { acceptance: [buildManualCheck()], done: [buildCommandCheck({ env: ["OPENAI_API_KEY"] })] },
+        }),
+      ],
+    });
+
+    expect(expectSchemaRejection(config)).toContainEqual({
+      path: "tasks.0.checks.done.0.env.0",
+      message: 'environment variable "OPENAI_API_KEY" is passed to the agent and cannot also be passed to a check',
+    });
+  });
+
+  it("rejects a Jira email variable listed in a check's env", () => {
+    const config = buildConfig({
+      trackers: { jira: { url: "https://jira.example.com", email: "$JIRA_EMAIL", token: "$JIRA_TOKEN" } },
+      tasks: [
+        buildTaskDefinition({
+          checks: { acceptance: [buildManualCheck()], done: [buildCommandCheck({ env: ["JIRA_EMAIL"] })] },
+        }),
+      ],
+    });
+
+    expect(expectSchemaRejection(config)).toContainEqual({
+      path: "tasks.0.checks.done.0.env.0",
+      message: 'Jira credential variable "JIRA_EMAIL" must not be passed to a check',
+    });
+  });
+
+  it("rejects duplicate variable names within one check's env", () => {
+    const config = buildConfig({
+      tasks: [
+        buildTaskDefinition({
+          checks: {
+            acceptance: [buildManualCheck()],
+            done: [buildCommandCheck({ env: ["NODE_OPTIONS", "NODE_OPTIONS"] })],
+          },
+        }),
+      ],
+    });
+
+    expect(expectSchemaRejection(config)).toContainEqual({
+      path: "tasks.0.checks.done.0.env.1",
+      message: 'duplicate environment variable name "NODE_OPTIONS" in check env',
+    });
+  });
+
+  it("re-parses its own materialized output to a deeply equal value", () => {
+    const parsedOnce = expectSchemaAcceptance(buildConfig());
+
+    const parsedTwice = expectSchemaAcceptance(parsedOnce);
+
+    expect(parsedTwice).toEqual(parsedOnce);
+  });
+
+  it("accepts a duration at the 2147483647ms bound", () => {
+    const config = buildConfig({ run: buildRunSettings({ timeout: "2147483647ms" }) });
+
+    expect(TevuConfigSchema.safeParse(config).success).toBe(true);
+  });
+
+  it.each(["2147483648ms", "900h"])("rejects the duration %s for exceeding the 2147483647ms bound", (value) => {
+    const config = buildConfig({ run: buildRunSettings({ timeout: value }) });
+
+    expect(expectSchemaRejection(config)).toContainEqual({
+      path: "run.timeout",
+      message: "must be at most 2147483647ms",
+    });
+  });
+
+  it.each(["0s", "01s", "10x", "abc", "5"])(
+    "rejects the malformed duration %s with the grammar message",
+    (value) => {
+      const config = buildConfig({ run: buildRunSettings({ timeout: value }) });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: "run.timeout",
+        message: "must be a positive whole number followed by ms, s, m, or h, for example 30s or 10m",
+      });
+    },
+  );
+
+  it.each(["1bad", "bad-name", "name!", ""])(
+    "rejects the malformed variable name %s with the grammar message",
+    (name) => {
+      const config = buildConfig({ agents: buildAgents({ secrets: [name] }) });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: "agents.opencode.secrets.0",
+        message: "must be a letter or underscore followed by letters, digits, or underscores",
+      });
+    },
+  );
+
+  it.each(["JIRA_EMAIL", "$JIRA-EMAIL", "$1BAD", ""])(
+    "rejects the Jira email value %s that is not a $VARIABLE reference",
+    (value) => {
+      const config = buildConfig({
+        trackers: { jira: { url: "https://jira.example.com", email: value, token: "$JIRA_TOKEN" } },
+      });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: "trackers.jira.email",
+        message: "must be a $VARIABLE reference, for example $JIRA_API_TOKEN; secret values are never written here",
+      });
+    },
+  );
 });
 
 describe("loadConfig", () => {
@@ -693,26 +820,26 @@ describe("loadConfig", () => {
 
   it("reads a valid configuration and resolves relative paths against its directory", async () => {
     const configPath = await writeConfigFile(
-      configYaml({ artifactsDirectory: "./artifacts", repositoryPath: "./repo", executable: "./bin/opencode" }),
+      configYaml({ outputDirectory: "./runs", repositoryPath: "./repo", command: "./bin/opencode" }),
     );
 
     const config = expectOk(await loadConfig(configPath));
 
-    expect(config.artifacts.directory).toBe(join(tempDirectory, "artifacts"));
+    expect(config.run.output_dir).toBe(join(tempDirectory, "runs"));
     expect(config.repositories[0]?.path).toBe(join(tempDirectory, "repo"));
-    expect(config.opencode.executable).toBe(join(tempDirectory, "bin/opencode"));
+    expect(config.agents.opencode.command).toBe(join(tempDirectory, "bin/opencode"));
     expect(config.tasks).toHaveLength(1);
-    expect(config.contenders).toHaveLength(2);
+    expect(config.models).toHaveLength(2);
   });
 
-  it("keeps a bare executable name unresolved", async () => {
+  it("keeps a bare command name unresolved", async () => {
     const configPath = await writeConfigFile(
-      configYaml({ artifactsDirectory: "./artifacts", repositoryPath: "./repo", executable: "opencode" }),
+      configYaml({ outputDirectory: "./runs", repositoryPath: "./repo", command: "opencode" }),
     );
 
     const config = expectOk(await loadConfig(configPath));
 
-    expect(config.opencode.executable).toBe("opencode");
+    expect(config.agents.opencode.command).toBe("opencode");
   });
 
   const isRoot = process.getuid?.() === 0;
@@ -890,13 +1017,13 @@ describe("loadConfig", () => {
 
     const identifiers = error.findings.map((finding) => finding.identifier);
     expect(identifiers).toContain("version");
-    expect(identifiers).toContain("contenders");
+    expect(identifiers).toContain("models");
     expect(identifiers).toContain("tasks");
   });
 
   it("reports unknown top-level fields as unknown configuration fields", async () => {
     const configPath = await writeConfigFile(
-      `${configYaml({ artifactsDirectory: "./artifacts", repositoryPath: "./repo", executable: "opencode" })}\nunknownSection: {}\n`,
+      `${configYaml({ outputDirectory: "./runs", repositoryPath: "./repo", command: "opencode" })}\nunknownSection: {}\n`,
     );
 
     const error = expectFailure(await loadConfig(configPath), "ConfigValidationError");
@@ -908,10 +1035,10 @@ describe("loadConfig", () => {
     });
   });
 
-  it("rejects an artifact directory inside a repository after real-path resolution", async () => {
+  it("rejects a run output directory inside a repository after real-path resolution", async () => {
     await fs.mkdir(join(tempDirectory, "repo"), { recursive: true });
     const configPath = await writeConfigFile(
-      configYaml({ artifactsDirectory: "./repo/.tevu", repositoryPath: "./repo", executable: "opencode" }),
+      configYaml({ outputDirectory: "./repo/.tevu", repositoryPath: "./repo", command: "opencode" }),
     );
 
     const error = expectFailure(await loadConfig(configPath), "ConfigValidationError");
@@ -919,16 +1046,16 @@ describe("loadConfig", () => {
     expect(error.findings).toEqual([
       {
         severity: "error",
-        identifier: "artifacts.directory",
-        message: 'artifacts.directory must be outside repository "sample-repo" after real-path resolution',
+        identifier: "run.output_dir",
+        message: 'run.output_dir must be outside repository "sample-repo" after real-path resolution',
       },
     ]);
   });
 
-  it("rejects a repository inside the artifact directory after real-path resolution", async () => {
-    await fs.mkdir(join(tempDirectory, "artifacts", "repo"), { recursive: true });
+  it("rejects a repository inside the run output directory after real-path resolution", async () => {
+    await fs.mkdir(join(tempDirectory, "runs", "repo"), { recursive: true });
     const configPath = await writeConfigFile(
-      configYaml({ artifactsDirectory: "./artifacts", repositoryPath: "./artifacts/repo", executable: "opencode" }),
+      configYaml({ outputDirectory: "./runs", repositoryPath: "./runs/repo", command: "opencode" }),
     );
 
     const error = expectFailure(await loadConfig(configPath), "ConfigValidationError");
@@ -937,16 +1064,16 @@ describe("loadConfig", () => {
       {
         severity: "error",
         identifier: "repositories.sample-repo.path",
-        message: 'repository "sample-repo" overlaps the artifact directory after real-path resolution',
+        message: 'repository "sample-repo" overlaps the run output directory after real-path resolution',
       },
     ]);
   });
 
-  it("rejects an artifact directory that symlinks into a repository", async () => {
+  it("rejects a run output directory that symlinks into a repository", async () => {
     await fs.mkdir(join(tempDirectory, "repo"), { recursive: true });
-    await fs.symlink(join(tempDirectory, "repo"), join(tempDirectory, "artifacts-link"));
+    await fs.symlink(join(tempDirectory, "repo"), join(tempDirectory, "runs-link"));
     const configPath = await writeConfigFile(
-      configYaml({ artifactsDirectory: "./artifacts-link", repositoryPath: "./repo", executable: "opencode" }),
+      configYaml({ outputDirectory: "./runs-link", repositoryPath: "./repo", command: "opencode" }),
     );
 
     const error = expectFailure(await loadConfig(configPath), "ConfigValidationError");
@@ -954,36 +1081,39 @@ describe("loadConfig", () => {
     expect(error.findings).toEqual([
       {
         severity: "error",
-        identifier: "artifacts.directory",
-        message: 'artifacts.directory must be outside repository "sample-repo" after real-path resolution',
+        identifier: "run.output_dir",
+        message: 'run.output_dir must be outside repository "sample-repo" after real-path resolution',
       },
     ]);
   });
 
-  it("round-trips a github-issue task source through ConfigStore.replace and read", async () => {
+  it("round-trips a github task source through ConfigStore.replaceText and readText", async () => {
     const configPath = join(tempDirectory, "tevu.yaml");
-    const source: TaskDefinition["source"] = {
-      kind: "github-issue",
-      issueKey: "octo/repo#42",
-      issueUrl: "https://github.com/octo/repo/issues/42",
-      importedAt: FIXED_NOW.toISOString(),
-      importedSummary: "Add export button",
-      importedDescription: "Users need an export button",
+    const source: TaskInput["source"] = {
+      kind: "github",
+      key: "octo/repo#42",
+      url: "https://github.com/octo/repo/issues/42",
+      imported_at: "2026-05-01T10:00:00.000Z",
+      title: "Export table as CSV",
+      body: "Users need an export button",
     };
     const config = buildConfig({
-      artifacts: { directory: join(tempDirectory, "artifacts") },
+      run: buildRunSettings({ output_dir: join(tempDirectory, "artifacts") }),
       repositories: [buildRepository({ path: join(tempDirectory, "repo") })],
-      tasks: [buildTask({ source })],
+      tasks: [buildTaskDefinition({ source })],
     });
     const configStore = createConfigStore({ redact: (text) => text });
+    const { renderConfigDocument } = await import("./document.ts");
+    const rendered = renderConfigDocument(config, { redact: (text) => text });
+    if (!rendered.ok) throw new Error("render failed");
 
-    const replaced = await configStore.replace(configPath, config);
+    const replaced = await configStore.replaceText(configPath, rendered.value);
     expect(replaced.ok).toBe(true);
-    const loaded = await configStore.read(configPath);
+    const loaded = await configStore.readText(configPath);
 
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
-    expect(loaded.value.tasks[0]?.source).toEqual(source);
+    expect(loaded.value).toBe(rendered.value);
   });
 });
 
@@ -1098,174 +1228,198 @@ describe("createConfigStore.requireDirectory", () => {
   });
 });
 
+describe("ConfigStore.readText and loadConfig ConfigReadError parity", () => {
+  let tempDirectory: string;
+  const isRoot = process.getuid?.() === 0;
+
+  beforeEach(async () => {
+    tempDirectory = await fs.mkdtemp(join(tmpdir(), "tevu-config-parity-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDirectory, { recursive: true, force: true });
+  });
+
+  async function expectAgreement(requestedPath: string): Promise<void> {
+    const configStore = createConfigStore({ redact: (text) => text });
+
+    const fromStore = await configStore.readText(requestedPath);
+    const fromLoad = await loadConfig(requestedPath);
+
+    expect(fromStore.ok).toBe(false);
+    expect(fromLoad.ok).toBe(false);
+    if (fromStore.ok || fromLoad.ok) return;
+    expect(fromStore.error).toEqual(fromLoad.error);
+  }
+
+  it("agree for a missing file", async () => {
+    await expectAgreement(join(tempDirectory, "missing.yaml"));
+  });
+
+  it("agree for a file under a missing directory", async () => {
+    await expectAgreement(join(tempDirectory, "nonexistent-dir", "tevu.yaml"));
+  });
+
+  it("agree for a directory", async () => {
+    await expectAgreement(tempDirectory);
+  });
+
+  it("agree for a FIFO", async () => {
+    const requestedPath = join(tempDirectory, "config.fifo");
+    execFileSync("mkfifo", [requestedPath]);
+
+    await expectAgreement(requestedPath);
+  });
+
+  it.skipIf(isRoot)("agree for a file without read permission", async () => {
+    const requestedPath = join(tempDirectory, "no-read.yaml");
+    await fs.writeFile(requestedPath, "version: 1\n", "utf8");
+    await fs.chmod(requestedPath, 0o000);
+
+    try {
+      await expectAgreement(requestedPath);
+    } finally {
+      await fs.chmod(requestedPath, 0o644);
+    }
+  });
+});
+
+describe("ConfigStore.replaceText permission preservation", () => {
+  let tempDirectory: string;
+
+  beforeEach(async () => {
+    tempDirectory = await fs.mkdtemp(join(tmpdir(), "tevu-config-permissions-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDirectory, { recursive: true, force: true });
+  });
+
+  async function replaceAndReadMode(configPath: string, content: string): Promise<number> {
+    const configStore = createConfigStore({ redact: (text) => text });
+
+    const replaced = await configStore.replaceText(configPath, content);
+
+    expect(replaced.ok).toBe(true);
+    const stats = await fs.stat(configPath);
+    return stats.mode & 0o777;
+  }
+
+  it("keeps a replaced file's mode 0600 unchanged", async () => {
+    const originalUmask = process.umask(0o022);
+    try {
+      const configPath = join(tempDirectory, "tevu.yaml");
+      await fs.writeFile(configPath, "version: 1\n", "utf8");
+      await fs.chmod(configPath, 0o600);
+
+      expect(await replaceAndReadMode(configPath, "version: 1\nupdated: true\n")).toBe(0o600);
+    } finally {
+      process.umask(originalUmask);
+    }
+  });
+
+  // Documents a known production gap: `atomicReplaceFile` opens the temporary
+  // file with the preserved mode but never bypasses the process umask, so the
+  // kernel still masks a group-write bit the original file carried. See the
+  // testing summary for reproduction evidence; production code is out of
+  // this suite's scope to fix.
+  it("keeps a replaced file's mode 0664 unchanged under umask 022", async () => {
+    const originalUmask = process.umask(0o022);
+    try {
+      const configPath = join(tempDirectory, "tevu.yaml");
+      await fs.writeFile(configPath, "version: 1\n", "utf8");
+      await fs.chmod(configPath, 0o664);
+
+      expect(await replaceAndReadMode(configPath, "version: 1\nupdated: true\n")).toBe(0o664);
+    } finally {
+      process.umask(originalUmask);
+    }
+  });
+
+  it("gives a newly created configuration file mode 0644 under umask 022", async () => {
+    const originalUmask = process.umask(0o022);
+    try {
+      const configPath = join(tempDirectory, "tevu.yaml");
+
+      expect(await replaceAndReadMode(configPath, "version: 1\n")).toBe(0o644);
+    } finally {
+      process.umask(originalUmask);
+    }
+  });
+});
+
 describe("canonicalConfigSerialization", () => {
   it("produces identical output for equivalent configurations with different key insertion order", () => {
-    const ordered = buildConfig();
+    const ordered = expectSchemaAcceptance(buildConfig());
     const reordered = {
       tasks: ordered.tasks,
-      contenders: ordered.contenders,
+      models: ordered.models,
       repositories: ordered.repositories.map((repository) => ({ path: repository.path, id: repository.id })),
-      opencode: ordered.opencode,
-      execution: ordered.execution,
-      artifacts: ordered.artifacts,
+      agents: ordered.agents,
+      run: ordered.run,
       version: ordered.version,
     };
 
-    expect(canonicalConfigSerialization(reordered)).toBe(canonicalConfigSerialization(ordered));
+    expect(canonicalConfigSerialization(reordered as unknown as TevuConfig)).toBe(canonicalConfigSerialization(ordered));
     expect(JSON.parse(canonicalConfigSerialization(ordered))).toEqual(ordered);
   });
 
   it("serializes environment variable names without any environment values", () => {
-    const config = buildConfig({
-      execution: buildExecution({
-        opencodeEnvironment: [buildEnvironmentVariable({ name: "SYNTHETIC_OC_VAR" })],
-      }),
-    });
+    const config = expectSchemaAcceptance(buildConfig({ agents: buildAgents({ secrets: ["SYNTHETIC_OC_VAR"] }) }));
 
     const serialized = canonicalConfigSerialization(config);
-    const parsed = JSON.parse(serialized) as Pick<TevuConfig, "execution">;
+    const parsed = JSON.parse(serialized) as Pick<TevuConfig, "agents">;
 
     expect(serialized).toContain('"SYNTHETIC_OC_VAR"');
-    expect(serialized).toContain('"EVAL_TOKEN"');
-    expect(parsed.execution.opencodeEnvironment[0] && Object.keys(parsed.execution.opencodeEnvironment[0]).sort()).toEqual([
-      "classification",
-      "name",
-    ]);
-    expect(parsed.execution.evaluatorEnvironment[0] && Object.keys(parsed.execution.evaluatorEnvironment[0]).sort()).toEqual([
-      "classification",
-      "name",
-    ]);
+    expect(parsed.agents.opencode.secrets).toEqual(["SYNTHETIC_OC_VAR"]);
+    expect(parsed.agents.opencode.env).toEqual([]);
   });
 });
 
 describe("createTask", () => {
-  it("appends the task and performs exactly one configuration replacement", async () => {
-    const base = buildConfig();
-    const input = buildWizardInput({ source: { kind: "manual", reference: "REF-1", title: "New task" } });
-    const dependencies = buildTaskDependencies({
-      configStore: buildConfigStore({
-        read: vi.fn(async () => ({ ok: true as const, value: base })),
-      }),
-    });
+  it("appends the task text and performs exactly one configuration replacement", async () => {
+    const dependencies = buildTaskDependencies();
 
+    const input = buildTaskWizardInput();
     const task = expectOk(await createTask(input, dependencies));
 
-    expect(task).toEqual({
-      id: "new-task",
-      repositoryId: "sample-repo",
-      startCommit: "resolved-abc123",
-      source: { kind: "manual", reference: "REF-1", title: "New task" },
-      description: "A new task",
-      prompt: "Do the new task",
-      definitionOfReady: input.definitionOfReady,
-      acceptanceCriteria: input.acceptanceCriteria,
-      definitionOfDone: input.definitionOfDone,
-    });
-    const replace = vi.mocked(dependencies.configStore.replace);
-    expect(replace).toHaveBeenCalledTimes(1);
-    expect(replace.mock.calls[0]?.[0]).toBe(input.configPath);
-    expect(replace.mock.calls[0]?.[1]).toEqual({ ...base, tasks: [...base.tasks, task] });
+    expect(task.id).toBe("new-task");
+    expect(task.repo).toBe("sample-repo");
+    expect(task.base_commit).toBe("resolved-abc123");
+    const replaceText = vi.mocked(dependencies.configStore.replaceText);
+    expect(replaceText).toHaveBeenCalledTimes(1);
+    expect(replaceText.mock.calls[0]?.[0]).toBe(input.configPath);
+    expect(replaceText.mock.calls[0]?.[1]).toContain("new-task");
   });
 
   it("pins the task to a newly added repository when one is supplied", async () => {
-    const base = buildConfig();
+    const dependencies = buildTaskDependencies();
     const newRepository = buildRepository({ id: "extra-repo", path: "/repos/extra" });
-    const dependencies = buildTaskDependencies({
-      configStore: buildConfigStore({
-        read: vi.fn(async () => ({ ok: true as const, value: base })),
-      }),
-    });
 
-    const task = expectOk(await createTask(buildWizardInput({ repositoryId: "extra-repo", newRepository }), dependencies));
+    const task = expectOk(
+      await createTask(
+        buildTaskWizardInput({ task: buildTaskDefinition({ id: "new-task", repo: "extra-repo" }), newRepository }),
+        dependencies,
+      ),
+    );
 
-    expect(task.repositoryId).toBe("extra-repo");
-    expect(vi.mocked(dependencies.configStore.replace).mock.calls[0]?.[1]?.repositories).toEqual([
-      ...base.repositories,
-      newRepository,
-    ]);
+    expect(task.repo).toBe("extra-repo");
+    const replaceText = vi.mocked(dependencies.configStore.replaceText);
+    expect(replaceText.mock.calls[0]?.[1]).toContain("extra-repo");
   });
 
-  it("rejects a repositoryId that matches no configured or new repository", async () => {
-    const input = buildWizardInput({ repositoryId: "ghost" });
+  it("rejects a repo that matches no configured or new repository", async () => {
+    const input = buildTaskWizardInput({ task: buildTaskDefinition({ id: "new-task", repo: "ghost" }) });
     const dependencies = buildTaskDependencies();
 
     const error = expectFailure(await createTask(input, dependencies), "ConfigValidationError");
 
     expect(error.findings).toContainEqual({
       severity: "error",
-      identifier: "tasks.new-task.repositoryId",
-      message: 'repositoryId "ghost" does not reference a configured or newly added repository',
+      identifier: "tasks.new-task.repo",
+      message: 'repo "ghost" does not reference a configured or newly added repository',
     });
-    expect(dependencies.configStore.replace).not.toHaveBeenCalled();
-  });
-
-  it("stores a wizard-supplied Jira snapshot verbatim without reading the issue", async () => {
-    const snapshot = buildJiraSnapshot({ issueKey: "PROJ-7" });
-    const dependencies = buildTaskDependencies();
-    const input = buildWizardInput({
-      source: { kind: "jira-cloud", issueKey: snapshot.issueKey, snapshot },
-    });
-
-    const task = expectOk(await createTask(input, dependencies));
-
-    expect(task.source).toEqual({
-      kind: "jira-cloud",
-      issueKey: "PROJ-7",
-      issueUrl: snapshot.issueUrl,
-      importedAt: snapshot.importedAt,
-      importedSummary: snapshot.summary,
-      importedDescription: snapshot.description,
-    });
-    expect(dependencies.jira?.readIssue).not.toHaveBeenCalled();
-  });
-
-  it("stores a wizard-supplied GitHub issue snapshot verbatim without calling any tracker", async () => {
-    const snapshot = buildJiraSnapshot({
-      issueKey: "octo/repo#42",
-      issueUrl: "https://github.com/octo/repo/issues/42",
-    });
-    const dependencies = buildTaskDependencies();
-    const input = buildWizardInput({ source: { kind: "github-issue", snapshot } });
-
-    const task = expectOk(await createTask(input, dependencies));
-
-    expect(task.source).toEqual({
-      kind: "github-issue",
-      issueKey: "octo/repo#42",
-      issueUrl: snapshot.issueUrl,
-      importedAt: snapshot.importedAt,
-      importedSummary: snapshot.summary,
-      importedDescription: snapshot.description,
-    });
-    expect(dependencies.jira?.readIssue).not.toHaveBeenCalled();
-  });
-
-  it("imports the issue once with the injected clock when no snapshot exists", async () => {
-    const dependencies = buildTaskDependencies();
-    const input = buildWizardInput({ source: { kind: "jira-cloud", issueKey: "PROJ-7" } });
-
-    const task = expectOk(await createTask(input, dependencies));
-
-    expect(dependencies.jira?.readIssue).toHaveBeenCalledExactlyOnceWith("PROJ-7");
-    expect(task.source).toEqual({
-      kind: "jira-cloud",
-      issueKey: "PROJ-7",
-      issueUrl: "https://jira.example.com/browse/PROJ-7",
-      importedAt: FIXED_NOW.toISOString(),
-      importedSummary: "Issue summary",
-      importedDescription: "Issue description",
-    });
-  });
-
-  it("returns IssueImportError when the configuration has no Jira settings", async () => {
-    const dependencies = buildTaskDependencies({ jira: null });
-    const input = buildWizardInput({ source: { kind: "jira-cloud", issueKey: "PROJ-7" } });
-
-    const error = expectFailure(await createTask(input, dependencies), "IssueImportError");
-
-    expect(error.tracker).toBe("jira-cloud");
-    expect(error.reference).toBe("PROJ-7");
-    expect(dependencies.configStore.replace).not.toHaveBeenCalled();
+    expect(dependencies.configStore.replaceText).not.toHaveBeenCalled();
   });
 
   it("returns CancellationError with no reads or writes when already cancelled", async () => {
@@ -1273,32 +1427,11 @@ describe("createTask", () => {
     cancellation.abort();
     const dependencies = buildTaskDependencies({ cancellation: cancellation.signal });
 
-    const error = expectFailure(await createTask(buildWizardInput(), dependencies), "CancellationError");
+    const error = expectFailure(await createTask(buildTaskWizardInput(), dependencies), "CancellationError");
 
     expect(error.activeCaseIds).toEqual([]);
     expect(dependencies.configStore.exists).not.toHaveBeenCalled();
-    expect(dependencies.configStore.replace).not.toHaveBeenCalled();
-  });
-
-  it("returns CancellationError before the replacement when cancelled during validation", async () => {
-    const cancellation = new AbortController();
-    const dependencies = buildTaskDependencies({
-      cancellation: cancellation.signal,
-      git: buildGit({
-        validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => {
-          cancellation.abort();
-          return {
-            ok: true as const,
-            value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit: `resolved-${commit}` },
-          };
-        }),
-      }),
-    });
-
-    const error = expectFailure(await createTask(buildWizardInput(), dependencies), "CancellationError");
-
-    expect(error.activeCaseIds).toEqual([]);
-    expect(dependencies.configStore.replace).not.toHaveBeenCalled();
+    expect(dependencies.configStore.replaceText).not.toHaveBeenCalled();
   });
 
   it("returns SourceMaterializationError with the task id when the commit cannot be resolved", async () => {
@@ -1311,64 +1444,59 @@ describe("createTask", () => {
       }),
     });
 
-    const error = expectFailure(await createTask(buildWizardInput(), dependencies), "SourceMaterializationError");
+    const error = expectFailure(await createTask(buildTaskWizardInput(), dependencies), "SourceMaterializationError");
 
     expect(error.taskId).toBe("new-task");
     expect(error.reason).toBe("commit not found");
-    expect(dependencies.configStore.replace).not.toHaveBeenCalled();
+    expect(dependencies.configStore.replaceText).not.toHaveBeenCalled();
   });
 
   it("propagates a base configuration read failure without any write", async () => {
-    const readFailure: TevuResult<TevuConfig, "ConfigValidationError"> = {
+    const readFailure: TevuResult<string, "ConfigReadError"> = {
       ok: false,
-      error: {
-        kind: "ConfigValidationError",
-        findings: [{ severity: "error", identifier: "contenders", message: "too small" }],
-      },
+      error: { kind: "ConfigReadError", path: "/tmp/tevu/tevu.yaml", requestedPath: "tevu.yaml", cause: "not-found" },
     };
     const dependencies = buildTaskDependencies({
-      configStore: buildConfigStore({ read: vi.fn(async () => readFailure) }),
+      configStore: buildConfigStore({ readText: vi.fn(async () => readFailure) }),
     });
 
-    const error = expectFailure(await createTask(buildWizardInput(), dependencies), "ConfigValidationError");
+    const error = expectFailure(await createTask(buildTaskWizardInput(), dependencies), "ConfigReadError");
 
     expect(error).toEqual(readFailure.error);
-    expect(dependencies.configStore.replace).not.toHaveBeenCalled();
+    expect(dependencies.configStore.replaceText).not.toHaveBeenCalled();
   });
 
   it("rejects a candidate that violates the schema and writes nothing", async () => {
-    const input = buildWizardInput({ taskId: "write-report" });
     const dependencies = buildTaskDependencies();
 
-    const error = expectFailure(await createTask(input, dependencies), "ConfigValidationError");
+    const error = expectFailure(
+      await createTask(buildTaskWizardInput({ task: buildTaskDefinition({ id: "write-report" }) }), dependencies),
+      "ConfigValidationError",
+    );
 
-    expect(error.findings).toContainEqual({
-      severity: "error",
-      identifier: "tasks.1.id",
-      message: 'duplicate tasks id "write-report"',
-    });
-    expect(dependencies.configStore.replace).not.toHaveBeenCalled();
+    expect(error.findings).toContainEqual(
+      expect.objectContaining({ message: 'duplicate tasks id "write-report"' }),
+    );
+    expect(dependencies.configStore.replaceText).not.toHaveBeenCalled();
   });
 
   it("bootstraps a new configuration when the file is missing and answers were captured", async () => {
-    const bootstrap: ConfigBootstrapInput = {
-      artifacts: { directory: "/tmp/tevu/artifacts" },
-      execution: buildExecution(),
-      opencode: { executable: "opencode" },
+    const bootstrap: Omit<TevuConfigInput, "version" | "tasks"> = {
+      run: buildRunSettings(),
+      agents: buildAgents(),
       repositories: [buildRepository()],
-      contenders: [buildContender(), buildContender({ id: "beta", model: "anthropic/claude-4", variant: "max" })],
+      models: [buildModel(), buildModel({ id: "beta", model: "anthropic/claude-4", effort: "max" })],
     };
     const dependencies = buildTaskDependencies({
       configStore: buildConfigStore({ exists: vi.fn(async () => false) }),
     });
 
-    const task = expectOk(await createTask(buildWizardInput({ bootstrap }), dependencies));
+    const task = expectOk(await createTask(buildTaskWizardInput({ bootstrap }), dependencies));
 
-    expect(vi.mocked(dependencies.configStore.replace).mock.calls[0]?.[1]).toEqual({
-      version: 1,
-      ...bootstrap,
-      tasks: [task],
-    });
+    expect(task.id).toBe("new-task");
+    const replaceText = vi.mocked(dependencies.configStore.replaceText);
+    expect(replaceText).toHaveBeenCalledTimes(1);
+    expect(replaceText.mock.calls[0]?.[1]).toContain("new-task");
   });
 
   it("reports a missing configuration when no bootstrap answers were captured", async () => {
@@ -1376,14 +1504,14 @@ describe("createTask", () => {
       configStore: buildConfigStore({ exists: vi.fn(async () => false) }),
     });
 
-    const error = expectFailure(await createTask(buildWizardInput(), dependencies), "ConfigValidationError");
+    const error = expectFailure(await createTask(buildTaskWizardInput(), dependencies), "ConfigValidationError");
 
     expect(error.findings).toContainEqual({
       severity: "error",
       identifier: "config",
       message: "configuration file is missing and no bootstrap answers were captured",
     });
-    expect(dependencies.configStore.replace).not.toHaveBeenCalled();
+    expect(dependencies.configStore.replaceText).not.toHaveBeenCalled();
   });
 
   it("propagates a replacement failure as the final write attempt", async () => {
@@ -1392,13 +1520,13 @@ describe("createTask", () => {
       error: { kind: "ArtifactError", operation: "replace-configuration", reason: "disk full" },
     };
     const dependencies = buildTaskDependencies({
-      configStore: buildConfigStore({ replace: vi.fn(async () => replaceFailure) }),
+      configStore: buildConfigStore({ replaceText: vi.fn(async () => replaceFailure) }),
     });
 
-    const error = expectFailure(await createTask(buildWizardInput(), dependencies), "ArtifactError");
+    const error = expectFailure(await createTask(buildTaskWizardInput(), dependencies), "ArtifactError");
 
     expect(error).toEqual(replaceFailure.error);
-    expect(vi.mocked(dependencies.configStore.replace)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(dependencies.configStore.replaceText)).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1406,7 +1534,7 @@ describe("validateConfig", () => {
   it("returns a valid report with the probed capability report when everything passes", async () => {
     const dependencies = buildValidationDependencies();
 
-    const report = expectOk(await validateConfig(buildConfig(), dependencies));
+    const report = expectOk(await validateConfig(expectSchemaAcceptance(buildConfig()), dependencies));
 
     expect(report.valid).toBe(true);
     expect(report.findings).toEqual([]);
@@ -1414,11 +1542,19 @@ describe("validateConfig", () => {
   });
 
   it("retains every independent finding instead of stopping at the first failure", async () => {
-    const config = buildConfig({
-      tasks: [buildTask({ id: "broken-ref", repositoryId: "ghost" }), buildTask({ id: "write-report" })],
-    });
+    const config = expectSchemaAcceptance(
+      buildConfig({
+        tasks: [
+          buildTaskDefinition({ id: "broken-ref" }),
+          buildTaskDefinition({
+            id: "write-report",
+            checks: { acceptance: [buildManualCheck()], done: [buildCommandCheck({ env: ["EVAL_TOKEN"] })] },
+          }),
+        ],
+      }),
+    );
     const dependencies = buildValidationDependencies({
-      git: buildGit({
+      git: buildFullGit({
         validateSource: vi.fn(async () => ({
           ok: false as const,
           error: { kind: "SourceMaterializationError" as const, taskId: "substitute", reason: "commit missing" },
@@ -1443,18 +1579,26 @@ describe("validateConfig", () => {
       }),
     });
 
-    const outcome = await validateConfig(config, dependencies);
+    // The schema cannot itself produce an unresolvable repo reference, so the
+    // first task's repo is patched to "ghost" after acceptance to exercise
+    // validateConfig's own defensive re-validation.
+    const invalidConfig: TevuConfig = {
+      ...config,
+      tasks: [{ ...config.tasks[0]!, repo: "ghost" }, config.tasks[1]!],
+    };
+
+    const outcome = await validateConfig(invalidConfig, dependencies);
 
     expect(outcome.ok).toBe(true);
     const report = expectOk(outcome);
     expect(report.valid).toBe(false);
     expect(report.findings.map((finding) => finding.identifier)).toEqual([
-      "tasks.0.repositoryId",
+      "tasks.0.repo",
       "prerequisites.node",
       "environment.EVAL_TOKEN",
-      "tasks.write-report.startCommit",
+      "tasks.write-report.base_commit",
       "prerequisites.artifacts-directory",
-      "opencode.executable",
+      "agents.opencode.command",
     ]);
     expect(report.findings.find((finding) => finding.identifier === "prerequisites.node")?.message).toBe(
       "expected >=24 <25, actual 18.0.0",
@@ -1463,26 +1607,21 @@ describe("validateConfig", () => {
   });
 
   it("surfaces schema findings when revalidating an invalid configuration", async () => {
-    const config = buildConfig({ contenders: [buildContender()] });
+    const config = { ...expectSchemaAcceptance(buildConfig()), models: [expectSchemaAcceptance(buildConfig()).models[0]!] };
 
     const report = expectOk(await validateConfig(config, buildValidationDependencies()));
 
-    expect(report.findings.map((finding) => finding.identifier)).toContain("contenders");
+    expect(report.findings.map((finding) => finding.identifier)).toContain("models");
     expect(report.valid).toBe(false);
   });
 
-  it("checks every configured variable by name and skips the snapshot when a variable is missing", async () => {
-    const config = buildConfig({
-      execution: buildExecution({
-        opencodeEnvironment: [buildEnvironmentVariable({ name: "OC_VAR", classification: "ordinary" })],
-        evaluatorEnvironment: [buildEnvironmentVariable()],
+  it("checks every agent and check variable by name and skips the snapshot when one is missing", async () => {
+    const config = expectSchemaAcceptance(
+      buildConfig({
+        agents: buildAgents({ env: ["OC_VAR"] }),
+        trackers: { jira: { url: "https://jira.example.com", email: "$JIRA_EMAIL", token: "$JIRA_TOKEN" } },
       }),
-      jira: {
-        baseUrl: "https://jira.example.com",
-        emailEnvironmentVariable: "JIRA_EMAIL",
-        tokenEnvironmentVariable: "JIRA_TOKEN",
-      },
-    });
+    );
     const dependencies = buildValidationDependencies({
       prerequisites: buildPrerequisites({
         hasEnvironmentVariable: vi.fn((name: string) => name !== "OC_VAR"),
@@ -1505,7 +1644,7 @@ describe("validateConfig", () => {
       }),
     });
 
-    const report = expectOk(await validateConfig(buildConfig(), dependencies));
+    const report = expectOk(await validateConfig(expectSchemaAcceptance(buildConfig()), dependencies));
 
     expect(report.findings).toContainEqual({
       severity: "error",
@@ -1516,29 +1655,30 @@ describe("validateConfig", () => {
   });
 
   it("validates each distinct repository-and-commit pair once", async () => {
-    const first = buildTask({ id: "task-one" });
-    const second = buildTask({ id: "task-two" });
-    const third = buildTask({ id: "task-three", startCommit: "ffffff0123456789abcdef0123456789abcdef01" });
+    const first = buildTaskDefinition({ id: "task-one" });
+    const second = buildTaskDefinition({ id: "task-two" });
+    const third = buildTaskDefinition({ id: "task-three", base_commit: "ffffff0123456789abcdef0123456789abcdef01" });
     const dependencies = buildValidationDependencies();
 
-    const report = expectOk(await validateConfig(buildConfig({ tasks: [first, second, third] }), dependencies));
+    const config = expectSchemaAcceptance(buildConfig({ tasks: [first, second, third] }));
+    const report = expectOk(await validateConfig(config, dependencies));
 
     expect(report.valid).toBe(true);
     expect(vi.mocked(dependencies.git.validateSource)).toHaveBeenCalledTimes(2);
     expect(
       vi.mocked(dependencies.git.validateSource).mock.calls.map(([repository, commit]) => [repository.id, commit]),
     ).toEqual([
-      ["sample-repo", first.startCommit],
-      ["sample-repo", third.startCommit],
+      ["sample-repo", first.base_commit],
+      ["sample-repo", third.base_commit],
     ]);
   });
 
-  it("rejects a task whose prompt names its resolved start commit, including one resolved from the cache", async () => {
+  it("rejects a task whose prompt names its resolved base commit, including one resolved from the cache", async () => {
     const resolvedCommit = "abcdef0123456789abcdef0123456789abcdef01";
-    const first = buildTask({ id: "task-one", startCommit: "main" });
-    const second = buildTask({ id: "task-two", startCommit: "main" });
+    const first = buildTaskDefinition({ id: "task-one", base_commit: "main" });
+    const second = buildTaskDefinition({ id: "task-two", base_commit: "main" });
     const dependencies = buildValidationDependencies({
-      git: buildGit({
+      git: buildFullGit({
         validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
           ok: true as const,
           value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
@@ -1551,24 +1691,25 @@ describe("validateConfig", () => {
       ),
     });
 
-    const report = expectOk(await validateConfig(buildConfig({ tasks: [first, second] }), dependencies));
+    const config = expectSchemaAcceptance(buildConfig({ tasks: [first, second] }));
+    const report = expectOk(await validateConfig(config, dependencies));
 
     expect(report.valid).toBe(false);
     expect(report.findings).toEqual([
       {
         severity: "error",
         identifier: `tasks.${second.id}`,
-        message: "agent prompt contains resolved start commit abcdef0",
+        message: "agent prompt contains resolved base commit abcdef0",
       },
     ]);
   });
 
-  it("rejects a task whose prompt names its resolved start commit on the first, uncached lookup", async () => {
+  it("rejects a task whose prompt names its resolved base commit on the first, uncached lookup", async () => {
     const resolvedCommit = "abcdef0123456789abcdef0123456789abcdef01";
-    const first = buildTask({ id: "task-one", startCommit: "main" });
-    const second = buildTask({ id: "task-two", startCommit: "main" });
+    const first = buildTaskDefinition({ id: "task-one", base_commit: "main" });
+    const second = buildTaskDefinition({ id: "task-two", base_commit: "main" });
     const dependencies = buildValidationDependencies({
-      git: buildGit({
+      git: buildFullGit({
         validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
           ok: true as const,
           value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
@@ -1581,14 +1722,15 @@ describe("validateConfig", () => {
       ),
     });
 
-    const report = expectOk(await validateConfig(buildConfig({ tasks: [first, second] }), dependencies));
+    const config = expectSchemaAcceptance(buildConfig({ tasks: [first, second] }));
+    const report = expectOk(await validateConfig(config, dependencies));
 
     expect(report.valid).toBe(false);
     expect(report.findings).toEqual([
       {
         severity: "error",
         identifier: `tasks.${first.id}`,
-        message: "agent prompt contains resolved start commit abcdef0",
+        message: "agent prompt contains resolved base commit abcdef0",
       },
     ]);
   });

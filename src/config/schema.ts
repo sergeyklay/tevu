@@ -1,375 +1,637 @@
+/**
+ * Authoritative strict schema for tevu configuration version 1: snake_case
+ * keys grouped by concern, unit-carrying durations, `$VARIABLE` references,
+ * and adapter-keyed blocks. `TevuConfigSchema` is the single runtime
+ * validation and TypeScript type source; unknown keys fail at every level.
+ */
+
 import { z } from "zod";
 
 /** ID grammar shared by every configuration collection. */
 const ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 
-const idSchema = z
-  .string()
-  .regex(ID_PATTERN, "id must match ^[a-z][a-z0-9-]{0,63}$");
-
-const positiveMillisecondsSchema = z
-  .int("duration must be an integer millisecond value")
-  .positive("duration must be a positive integer millisecond value");
+/** Configuration identifier: lowercase letters, digits, and hyphens, starting with a letter. */
+export const IdSchema = z.string().regex(ID_PATTERN, "id must match ^[a-z][a-z0-9-]{0,63}$");
 
 const nonWhitespaceTextSchema = z
   .string()
   .refine((text) => text.trim().length > 0, "must contain non-whitespace text");
 
+const DURATION_PATTERN = /^([1-9][0-9]*)(ms|s|m|h)$/;
+const DURATION_UNIT_MS: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000 };
+const MAX_DURATION_MS = 2_147_483_647;
+const DURATION_GRAMMAR_MESSAGE =
+  "must be a positive whole number followed by ms, s, m, or h, for example 30s or 10m";
+const DURATION_BOUND_MESSAGE = "must be at most 2147483647ms";
+
+function parseDurationMs(value: string): number | null {
+  const match = DURATION_PATTERN.exec(value);
+  if (match === null) {
+    return null;
+  }
+  const [, digits, unit] = match;
+  if (digits === undefined || unit === undefined) {
+    return null;
+  }
+  return Number(digits) * DURATION_UNIT_MS[unit];
+}
+
+/**
+ * A duration string: a positive integer without leading zeros followed by
+ * exactly one unit (`ms`, `s`, `m`, or `h`), bounded at 2147483647ms so a
+ * configured value never overflows a Node.js timer (E1).
+ */
+export const DurationSchema = z.string().superRefine((value, ctx) => {
+  const ms = parseDurationMs(value);
+  if (ms === null) {
+    ctx.addIssue({ code: "custom", message: DURATION_GRAMMAR_MESSAGE });
+    return;
+  }
+  if (ms > MAX_DURATION_MS) {
+    ctx.addIssue({ code: "custom", message: DURATION_BOUND_MESSAGE });
+  }
+});
+
+/**
+ * Converts a validated duration string to its millisecond value.
+ *
+ * @throws when `value` does not match the duration grammar; callers pass only
+ * values already validated by {@link DurationSchema}.
+ */
+export function durationMs(value: string): number {
+  const ms = parseDurationMs(value);
+  if (ms === null) {
+    throw new Error(`invalid duration value: ${value}`);
+  }
+  return ms;
+}
+
+const VARIABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const VARIABLE_NAME_GRAMMAR_MESSAGE =
+  "must be a letter or underscore followed by letters, digits, or underscores";
+const FIXED_NAME_MESSAGE =
+  "PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract and cannot be configured";
+
 /** Environment names fixed by the isolation contract; configuration must not redefine them. */
-const FIXED_ENVIRONMENT_NAMES = new Set([
-  "PATH",
-  "HOME",
-  "TMPDIR",
-  "LANG",
-  "LC_ALL",
-  "CI",
-]);
+const FIXED_ENVIRONMENT_NAMES = new Set(["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CI"]);
 
 function isFixedEnvironmentName(name: string): boolean {
   return FIXED_ENVIRONMENT_NAMES.has(name) || name.startsWith("XDG_");
 }
 
+/** An environment variable name: a shell-exportable identifier (E2). */
+export const VariableNameSchema = z.string().regex(VARIABLE_NAME_PATTERN, VARIABLE_NAME_GRAMMAR_MESSAGE);
+
+const VARIABLE_REFERENCE_PATTERN = /^\$([A-Za-z_][A-Za-z0-9_]*)$/;
+const VARIABLE_REFERENCE_MESSAGE =
+  "must be a $VARIABLE reference, for example $JIRA_API_TOKEN; secret values are never written here";
+
+/** A `$VARIABLE` reference: a dollar sign followed by a variable name (E2). */
+export const VariableReferenceSchema = z.string().regex(VARIABLE_REFERENCE_PATTERN, VARIABLE_REFERENCE_MESSAGE);
+
 /**
- * Declares one pass-through environment variable by name and classification.
- * Values are never part of the configuration.
+ * Extracts the variable name a `$VARIABLE` reference names.
+ *
+ * @throws when `value` is not a `$VARIABLE` reference; callers pass only
+ * values already validated by {@link VariableReferenceSchema}.
  */
-export const EnvironmentVariableDefinitionSchema = z.strictObject({
-  name: z
-    .string()
-    .min(1)
-    .refine(
-      (name) => !isFixedEnvironmentName(name),
-      "PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract and cannot be configured",
-    ),
-  classification: z.enum(["provider-credential", "secret", "ordinary"]),
+export function referencedVariableName(value: string): string {
+  const name = tryReferencedVariableName(value);
+  if (name === undefined) {
+    throw new Error(`invalid variable reference: ${value}`);
+  }
+  return name;
+}
+
+/**
+ * Extracts the variable name a `$VARIABLE` reference names, or `undefined`
+ * when `value` is not a reference. Used by cross-field checks that may run
+ * before `VariableReferenceSchema` has validated the same value.
+ */
+function tryReferencedVariableName(value: string): string | undefined {
+  const match = VARIABLE_REFERENCE_PATTERN.exec(value);
+  return match === null ? undefined : match[1];
+}
+
+/** Settings shared by every benchmark case. */
+export const RunSettingsSchema = z.strictObject({
+  output_dir: z.string().min(1),
+  concurrency: z.int().min(1).max(32),
+  timeout: DurationSchema,
+  stop_grace: DurationSchema,
+  check_timeout: DurationSchema.optional(),
 });
 
-/** Jira Cloud connection settings; credentials stay in named environment variables. */
-export const JiraCloudConfigSchema = z.strictObject({
-  baseUrl: z.url({ protocol: /^https$/ }),
-  emailEnvironmentVariable: z.string().min(1),
-  tokenEnvironmentVariable: z.string().min(1),
+/** Parsed run settings, all defaults materialized except the genuinely optional `check_timeout`. */
+export type RunSettings = z.infer<typeof RunSettingsSchema>;
+
+/** File-shape run settings; identical to {@link RunSettings} since it declares no local defaults. */
+export type RunSettingsInput = z.input<typeof RunSettingsSchema>;
+
+function checkNoFixedNames(
+  names: readonly string[],
+  ctx: z.RefinementCtx,
+  basePath: readonly (string | number)[],
+): void {
+  names.forEach((name, index) => {
+    if (isFixedEnvironmentName(name)) {
+      ctx.addIssue({ code: "custom", path: [...basePath, index], message: FIXED_NAME_MESSAGE });
+    }
+  });
+}
+
+function checkUniqueStrings(
+  names: readonly string[],
+  ctx: z.RefinementCtx,
+  basePath: readonly (string | number)[],
+  label: string,
+): void {
+  const seen = new Set<string>();
+  names.forEach((name, index) => {
+    if (seen.has(name)) {
+      ctx.addIssue({ code: "custom", path: [...basePath, index], message: `${label} "${name}"` });
+    }
+    seen.add(name);
+  });
+}
+
+/** OpenCode agent settings: the launch command and its two pass-through variable lists. */
+export const OpenCodeAgentSettingsSchema = z
+  .strictObject({
+    command: z.string().min(1),
+    secrets: z.array(VariableNameSchema).default([]),
+    env: z.array(VariableNameSchema).default([]),
+  })
+  .superRefine((value, ctx) => {
+    checkNoFixedNames(value.secrets, ctx, ["secrets"]);
+    checkNoFixedNames(value.env, ctx, ["env"]);
+    checkUniqueStrings(value.secrets, ctx, ["secrets"], "duplicate environment variable name");
+    checkUniqueStrings(value.env, ctx, ["env"], "duplicate environment variable name");
+    const secretNames = new Set(value.secrets);
+    value.env.forEach((name, index) => {
+      if (secretNames.has(name)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["env", index],
+          message: `environment variable "${name}" appears in both agents.opencode.secrets and agents.opencode.env`,
+        });
+      }
+    });
+  });
+
+/** Parsed OpenCode agent settings; `secrets` and `env` default to `[]`. */
+export type OpenCodeAgentSettings = z.infer<typeof OpenCodeAgentSettingsSchema>;
+
+/** File-shape OpenCode agent settings; `secrets` and `env` are optional. */
+export type OpenCodeAgentSettingsInput = z.input<typeof OpenCodeAgentSettingsSchema>;
+
+/** Jira Cloud connection settings; credentials are `$VARIABLE` references, never values. */
+export const JiraTrackerSettingsSchema = z.strictObject({
+  url: z.url({ protocol: /^https$/ }),
+  email: VariableReferenceSchema,
+  token: VariableReferenceSchema,
 });
+
+/** Parsed Jira Cloud connection settings. */
+export type JiraTrackerSettings = z.infer<typeof JiraTrackerSettingsSchema>;
 
 /** One local source repository referenced by tasks. */
 export const RepositoryDefinitionSchema = z.strictObject({
-  id: idSchema,
+  id: IdSchema,
   path: z.string().min(1),
 });
-
-/** One model-plus-effort-variant contender; duplicate models with distinct variants are allowed. */
-export const ContenderDefinitionSchema = z.strictObject({
-  id: idSchema,
-  model: z.templateLiteral([z.string().min(1), "/", z.string().min(1)]),
-  variant: z.string().min(1),
-});
-
-/** Command-based check evaluator using a literal argument vector, never a shell string. */
-export const CommandEvaluatorSchema = z.strictObject({
-  kind: z.literal("command"),
-  argv: z.tuple([z.string().min(1)], z.string()),
-  timeoutMs: positiveMillisecondsSchema,
-  successExitCodes: z.array(z.int()).min(1),
-  environmentAllowlist: z.array(z.string().min(1)).default([]),
-});
-
-/** Manual check evaluator assessed by a human through `tevu assess`. */
-export const ManualEvaluatorSchema = z.strictObject({
-  kind: z.literal("manual"),
-});
-
-/** One acceptance-criterion or Definition of Done check. */
-export const CheckDefinitionSchema = z.strictObject({
-  id: idSchema,
-  description: z.string(),
-  required: z.boolean(),
-  evaluator: z.discriminatedUnion("kind", [
-    CommandEvaluatorSchema,
-    ManualEvaluatorSchema,
-  ]),
-});
-
-/** One confirmed Definition of Ready item. */
-export const ReadyItemSchema = z.strictObject({
-  id: idSchema,
-  description: z.string(),
-  confirmed: z.literal(true),
-});
-
-/** Manually curated task source. */
-export const ManualTaskSourceSchema = z.strictObject({
-  kind: z.literal("manual"),
-  reference: z.string().optional(),
-  title: z.string(),
-});
-
-/** One-time Jira Cloud import snapshot; later Jira changes never alter the task. */
-export const JiraTaskSourceSchema = z.strictObject({
-  kind: z.literal("jira-cloud"),
-  issueKey: z.string().min(1),
-  issueUrl: z.url(),
-  importedAt: z.iso.datetime(),
-  importedSummary: z.string(),
-  importedDescription: z.string(),
-});
-
-/** One-time GitHub issue snapshot; later GitHub changes never alter the task. */
-export const GitHubIssueTaskSourceSchema = z.strictObject({
-  kind: z.literal("github-issue"),
-  issueKey: z.string().min(1),
-  issueUrl: z.url(),
-  importedAt: z.iso.datetime(),
-  importedSummary: z.string(),
-  importedDescription: z.string(),
-});
-
-/** One acceptance-driven benchmark task pinned to a repository commit. */
-export const TaskDefinitionSchema = z
-  .strictObject({
-    id: idSchema,
-    repositoryId: idSchema,
-    startCommit: z.string().min(1),
-    source: z.discriminatedUnion("kind", [
-      ManualTaskSourceSchema,
-      JiraTaskSourceSchema,
-      GitHubIssueTaskSourceSchema,
-    ]),
-    description: nonWhitespaceTextSchema,
-    prompt: nonWhitespaceTextSchema,
-    definitionOfReady: z.array(ReadyItemSchema).min(1),
-    acceptanceCriteria: z.array(CheckDefinitionSchema).min(1),
-    definitionOfDone: z.array(CheckDefinitionSchema).min(1),
-  })
-  .superRefine((task, ctx) => {
-    if (!task.acceptanceCriteria.some((check) => check.required)) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["acceptanceCriteria"],
-        message: "at least one acceptance criterion must be required",
-      });
-    }
-    if (!task.definitionOfDone.some((check) => check.required)) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["definitionOfDone"],
-        message: "at least one Definition of Done check must be required",
-      });
-    }
-    const readyIds = new Set<string>();
-    task.definitionOfReady.forEach((item, index) => {
-      if (readyIds.has(item.id)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["definitionOfReady", index, "id"],
-          message: `duplicate Definition of Ready id "${item.id}"`,
-        });
-      }
-      readyIds.add(item.id);
-    });
-    const checkIds = new Set<string>();
-    const collections = [
-      ["acceptanceCriteria", task.acceptanceCriteria],
-      ["definitionOfDone", task.definitionOfDone],
-    ] as const;
-    for (const [collection, checks] of collections) {
-      checks.forEach((check, index) => {
-        if (checkIds.has(check.id)) {
-          ctx.addIssue({
-            code: "custom",
-            path: [collection, index, "id"],
-            message: `duplicate check id "${check.id}" across acceptanceCriteria and definitionOfDone`,
-          });
-        }
-        checkIds.add(check.id);
-      });
-    }
-  });
-
-const executionSchema = z
-  .strictObject({
-    concurrency: z.int().min(1).max(32),
-    caseTimeoutMs: positiveMillisecondsSchema,
-    terminationGraceMs: positiveMillisecondsSchema,
-    opencodeEnvironment: z.array(EnvironmentVariableDefinitionSchema),
-    evaluatorEnvironment: z.array(EnvironmentVariableDefinitionSchema),
-  })
-  .superRefine((execution, ctx) => {
-    execution.evaluatorEnvironment.forEach((entry, index) => {
-      if (entry.classification !== "ordinary") {
-        ctx.addIssue({
-          code: "custom",
-          path: ["evaluatorEnvironment", index, "classification"],
-          message: "evaluatorEnvironment entries must be classified ordinary",
-        });
-      }
-    });
-    const seenByCollection = {
-      opencodeEnvironment: new Set<string>(),
-      evaluatorEnvironment: new Set<string>(),
-    };
-    for (const collection of [
-      "opencodeEnvironment",
-      "evaluatorEnvironment",
-    ] as const) {
-      execution[collection].forEach((entry, index) => {
-        if (seenByCollection[collection].has(entry.name)) {
-          ctx.addIssue({
-            code: "custom",
-            path: [collection, index, "name"],
-            message: `duplicate environment variable name "${entry.name}"`,
-          });
-        }
-        seenByCollection[collection].add(entry.name);
-      });
-    }
-    execution.evaluatorEnvironment.forEach((entry, index) => {
-      if (seenByCollection.opencodeEnvironment.has(entry.name)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["evaluatorEnvironment", index, "name"],
-          message: `environment variable "${entry.name}" appears in both opencodeEnvironment and evaluatorEnvironment`,
-        });
-      }
-    });
-  });
-
-/**
- * Authoritative strict schema for tevu configuration version 1.
- * It is the single runtime validation and TypeScript type source; unknown keys
- * fail at every level and no OpenCode release constraint exists.
- */
-export const TevuConfigSchema = z
-  .strictObject({
-    version: z.literal(1),
-    artifacts: z.strictObject({
-      directory: z.string().min(1),
-    }),
-    execution: executionSchema,
-    opencode: z.strictObject({
-      executable: z.string().min(1),
-    }),
-    jira: JiraCloudConfigSchema.optional(),
-    repositories: z.array(RepositoryDefinitionSchema).min(1),
-    contenders: z.array(ContenderDefinitionSchema).min(2),
-    tasks: z.array(TaskDefinitionSchema).min(1),
-  })
-  .superRefine((config, ctx) => {
-    const collections = [
-      ["repositories", config.repositories],
-      ["contenders", config.contenders],
-      ["tasks", config.tasks],
-    ] as const;
-    for (const [collection, entries] of collections) {
-      const ids = new Set<string>();
-      entries.forEach((entry, index) => {
-        if (ids.has(entry.id)) {
-          ctx.addIssue({
-            code: "custom",
-            path: [collection, index, "id"],
-            message: `duplicate ${collection} id "${entry.id}"`,
-          });
-        }
-        ids.add(entry.id);
-      });
-    }
-
-    const evaluatorNames = new Set(
-      config.execution.evaluatorEnvironment.map((entry) => entry.name),
-    );
-    const repositoryIds = new Set(config.repositories.map((repository) => repository.id));
-
-    if (config.jira !== undefined) {
-      const jiraNames = [
-        ["emailEnvironmentVariable", config.jira.emailEnvironmentVariable],
-        ["tokenEnvironmentVariable", config.jira.tokenEnvironmentVariable],
-      ] as const;
-      for (const [field, name] of jiraNames) {
-        if (evaluatorNames.has(name)) {
-          ctx.addIssue({
-            code: "custom",
-            path: ["jira", field],
-            message: `Jira credential variable "${name}" must not appear in execution.evaluatorEnvironment`,
-          });
-        }
-      }
-    }
-
-    config.tasks.forEach((task, taskIndex) => {
-      if (!repositoryIds.has(task.repositoryId)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["tasks", taskIndex, "repositoryId"],
-          message: "repositoryId must reference a configured repository",
-        });
-      }
-      const taskChecks = [
-        ["acceptanceCriteria", task.acceptanceCriteria],
-        ["definitionOfDone", task.definitionOfDone],
-      ] as const;
-      for (const [collection, checks] of taskChecks) {
-        checks.forEach((check, checkIndex) => {
-          if (check.evaluator.kind !== "command") {
-            return;
-          }
-          check.evaluator.environmentAllowlist.forEach((name, nameIndex) => {
-            if (!evaluatorNames.has(name)) {
-              ctx.addIssue({
-                code: "custom",
-                path: [
-                  "tasks",
-                  taskIndex,
-                  collection,
-                  checkIndex,
-                  "evaluator",
-                  "environmentAllowlist",
-                  nameIndex,
-                ],
-                message: `environmentAllowlist name "${name}" is not declared in execution.evaluatorEnvironment`,
-              });
-            }
-          });
-        });
-      }
-    });
-  });
-
-/** Validated tevu configuration, inferred from the authoritative Zod schema. */
-export type TevuConfig = z.infer<typeof TevuConfigSchema>;
-
-/** Jira Cloud connection settings. */
-export type JiraCloudConfig = z.infer<typeof JiraCloudConfigSchema>;
 
 /** One configured source repository. */
 export type RepositoryDefinition = z.infer<typeof RepositoryDefinitionSchema>;
 
-/** One model-plus-variant contender. */
-export type ContenderDefinition = z.infer<typeof ContenderDefinitionSchema>;
+/** File-shape repository entry; identical to {@link RepositoryDefinition}. */
+export type RepositoryInput = z.input<typeof RepositoryDefinitionSchema>;
 
-/** One declared pass-through environment variable. */
-export type EnvironmentVariableDefinition = z.infer<
-  typeof EnvironmentVariableDefinitionSchema
->;
+/** One benchmark model entry, before its `agent` default is resolved against the configured agents. */
+export const ModelDefinitionSchema = z.strictObject({
+  id: IdSchema,
+  model: z.templateLiteral([z.string().min(1), "/", z.string().min(1)]),
+  effort: z.string().min(1),
+  agent: z.string().min(1).optional(),
+});
 
-/** One benchmark task definition. */
-export type TaskDefinition = z.infer<typeof TaskDefinitionSchema>;
+/** File-shape model entry; `agent` defaults to the sole configured agent. */
+export type ModelDefinitionInput = z.input<typeof ModelDefinitionSchema>;
 
-/** One confirmed Definition of Ready item. */
-export type ReadyItem = z.infer<typeof ReadyItemSchema>;
+/** One resolved benchmark model entry: what the benchmark compares. */
+export interface ModelDefinition {
+  id: string;
+  model: `${string}/${string}`;
+  effort: string;
+  agent: string;
+}
 
-/** One acceptance or Definition of Done check. */
-export type CheckDefinition = z.infer<typeof CheckDefinitionSchema>;
+/** One-time tracker import snapshot; later tracker changes never alter the task. */
+export const ImportedTaskSourceSchema = z.strictObject({
+  kind: z.enum(["jira", "github"]),
+  key: z.string().min(1),
+  url: z.url(),
+  imported_at: z.iso.datetime(),
+  title: z.string(),
+  body: z.string(),
+});
 
-/** Command-based check evaluator. */
-export type CommandEvaluator = z.infer<typeof CommandEvaluatorSchema>;
+/** One-time tracker import snapshot stored on a task. */
+export type ImportedTaskSource = z.infer<typeof ImportedTaskSourceSchema>;
 
-/** Manual check evaluator. */
-export type ManualEvaluator = z.infer<typeof ManualEvaluatorSchema>;
+const RawCheckShape = z.strictObject({
+  id: IdSchema,
+  description: z.string(),
+  run: z.tuple([z.string().min(1)], z.string()).optional(),
+  manual: z.boolean().optional(),
+  timeout: DurationSchema.optional(),
+  exit_codes: z.array(z.int()).min(1).optional(),
+  env: z.array(VariableNameSchema).optional(),
+  required: z.boolean().optional(),
+});
 
-/** Manually curated task source. */
-export type ManualTaskSource = z.infer<typeof ManualTaskSourceSchema>;
+type RawCheck = z.infer<typeof RawCheckShape>;
 
-/** One-time Jira Cloud import snapshot stored on a task. */
-export type JiraTaskSource = z.infer<typeof JiraTaskSourceSchema>;
+function refineCheckDiscrimination(check: RawCheck, ctx: z.RefinementCtx): void {
+  const hasRun = check.run !== undefined;
+  const hasManual = check.manual !== undefined;
+  if (!hasRun && !hasManual) {
+    ctx.addIssue({ code: "custom", message: "a check needs run (a command) or manual: true" });
+    return;
+  }
+  if (hasRun && hasManual) {
+    ctx.addIssue({ code: "custom", message: "a check has either run or manual: true, not both" });
+    return;
+  }
+  if (hasManual && check.manual !== true) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["manual"],
+      message: "manual must be true; omit it for a command check",
+    });
+    return;
+  }
+  if (hasManual) {
+    for (const key of ["timeout", "exit_codes", "env"] as const) {
+      if (check[key] !== undefined) {
+        ctx.addIssue({ code: "custom", path: [key], message: `only a command check (with run) accepts ${key}` });
+      }
+    }
+  }
+}
 
-/** One-time GitHub issue snapshot stored on a task. */
-export type GitHubIssueTaskSource = z.infer<typeof GitHubIssueTaskSourceSchema>;
+/** A command check's resolved shape: literal argv, no shell, and every default materialized. */
+export interface CommandCheck {
+  id: string;
+  description: string;
+  run: [string, ...string[]];
+  timeout: string;
+  exit_codes: number[];
+  env: string[];
+  required: boolean;
+}
+
+/** A manual check's resolved shape: assessed by a human through `tevu assess`. */
+export interface ManualCheck {
+  id: string;
+  description: string;
+  manual: true;
+  required: boolean;
+}
+
+/** One acceptance or done check: a command check or a manual check. */
+export type CheckDefinition = CommandCheck | ManualCheck;
+
+/** Field-level materialized schema mirroring {@link CommandCheck}; used to type the leaf shape only. */
+export const CommandCheckSchema = z.strictObject({
+  id: IdSchema,
+  description: z.string(),
+  run: z.tuple([z.string().min(1)], z.string()),
+  timeout: DurationSchema,
+  exit_codes: z.array(z.int()).min(1),
+  env: z.array(VariableNameSchema),
+  required: z.boolean(),
+});
+
+/** Field-level materialized schema mirroring {@link ManualCheck}; used to type the leaf shape only. */
+export const ManualCheckSchema = z.strictObject({
+  id: IdSchema,
+  description: z.string(),
+  manual: z.literal(true),
+  required: z.boolean(),
+});
+
+/** A resolved manual check; identical to {@link ManualCheck}. */
+type PreManualCheck = { id: string; description: string; manual: true; required: boolean };
+
+/** A command check whose `timeout` default is not yet resolved against `run.check_timeout`. */
+type PreCommandCheck = {
+  id: string;
+  description: string;
+  run: [string, ...string[]];
+  timeout?: string;
+  exit_codes: number[];
+  env: string[];
+  required: boolean;
+};
+
+/** A check without its `timeout` default resolved; command checks defer that to `run.check_timeout`. */
+type PreCheck = PreManualCheck | PreCommandCheck;
+
+/**
+ * Validates and normalizes one check: exactly one of `run` or `manual: true`,
+ * `required`/`exit_codes`/`env` defaulted for a command check. Leaves a
+ * command check's `timeout` unresolved; `TevuConfigSchema` applies the
+ * `run.check_timeout` fallback once the sibling `run` block is available.
+ */
+export const CheckDefinitionSchema = RawCheckShape.superRefine(refineCheckDiscrimination).transform(
+  (check): PreCheck => {
+    if (check.manual === true) {
+      return { id: check.id, description: check.description, manual: true, required: check.required ?? true };
+    }
+    const run = check.run;
+    if (run === undefined) {
+      throw new Error("unreachable: refineCheckDiscrimination guarantees a command check declares run");
+    }
+    return {
+      id: check.id,
+      description: check.description,
+      run,
+      ...(check.timeout === undefined ? {} : { timeout: check.timeout }),
+      exit_codes: check.exit_codes ?? [0],
+      env: check.env ?? [],
+      required: check.required ?? true,
+    };
+  },
+);
+
+/** File-shape check entry: a flat object where either `run` or `manual: true` is present. */
+export type CheckInput = z.input<typeof CheckDefinitionSchema>;
+
+function refineTaskChecks(
+  task: { checks: { acceptance: PreCheck[]; done: PreCheck[] } },
+  ctx: z.RefinementCtx,
+): void {
+  if (!task.checks.acceptance.some((check) => check.required)) {
+    ctx.addIssue({ code: "custom", path: ["checks", "acceptance"], message: "at least one acceptance check must be required" });
+  }
+  if (!task.checks.done.some((check) => check.required)) {
+    ctx.addIssue({ code: "custom", path: ["checks", "done"], message: "at least one done check must be required" });
+  }
+  const checkIds = new Set<string>();
+  (["acceptance", "done"] as const).forEach((collection) => {
+    task.checks[collection].forEach((check, index) => {
+      if (checkIds.has(check.id)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["checks", collection, index, "id"],
+          message: `duplicate check id "${check.id}" across checks.acceptance and checks.done`,
+        });
+      }
+      checkIds.add(check.id);
+    });
+  });
+}
+
+/** One acceptance-driven benchmark task, before its `repo` default and check timeouts are resolved. */
+export const TaskDefinitionSchema = z
+  .strictObject({
+    id: IdSchema,
+    title: nonWhitespaceTextSchema,
+    repo: IdSchema.optional(),
+    base_commit: z.string().min(1),
+    prompt: nonWhitespaceTextSchema,
+    description: nonWhitespaceTextSchema,
+    source: ImportedTaskSourceSchema.optional(),
+    readiness: z.array(nonWhitespaceTextSchema).min(1),
+    checks: z.strictObject({
+      acceptance: z.array(CheckDefinitionSchema).min(1),
+      done: z.array(CheckDefinitionSchema).min(1),
+    }),
+  })
+  .superRefine(refineTaskChecks);
+
+type RawTask = z.infer<typeof TaskDefinitionSchema>;
+
+/** File-shape task entry; `repo` is optional and a command check's `timeout` may be absent. */
+export type TaskInput = z.input<typeof TaskDefinitionSchema>;
+
+/** One resolved acceptance-driven benchmark task pinned to a repository commit. */
+export interface TaskDefinition {
+  id: string;
+  title: string;
+  repo: string;
+  base_commit: string;
+  prompt: string;
+  description: string;
+  source?: ImportedTaskSource;
+  readiness: string[];
+  checks: { acceptance: CheckDefinition[]; done: CheckDefinition[] };
+}
+
+function resolveCheck(check: PreCheck, checkTimeout: string | undefined): CheckDefinition {
+  if (!("run" in check)) {
+    return check;
+  }
+  const timeout = check.timeout ?? checkTimeout;
+  if (timeout === undefined) {
+    throw new Error("unreachable: refineTevuConfig guarantees every command check resolves a timeout");
+  }
+  return {
+    id: check.id,
+    description: check.description,
+    run: check.run,
+    timeout,
+    exit_codes: check.exit_codes,
+    env: check.env,
+    required: check.required,
+  };
+}
+
+function checkUniqueIds(
+  entries: readonly { id: string }[],
+  ctx: z.RefinementCtx,
+  collection: "repositories" | "models" | "tasks",
+): void {
+  const seen = new Set<string>();
+  entries.forEach((entry, index) => {
+    if (seen.has(entry.id)) {
+      ctx.addIssue({ code: "custom", path: [collection, index, "id"], message: `duplicate ${collection} id "${entry.id}"` });
+    }
+    seen.add(entry.id);
+  });
+}
+
+const RawTevuConfigShape = z.strictObject({
+  version: z.literal(1),
+  run: RunSettingsSchema,
+  agents: z.strictObject({ opencode: OpenCodeAgentSettingsSchema }),
+  trackers: z.strictObject({ jira: JiraTrackerSettingsSchema.optional() }).optional(),
+  repositories: z.array(RepositoryDefinitionSchema).min(1),
+  models: z.array(ModelDefinitionSchema).min(2),
+  tasks: z.array(TaskDefinitionSchema).min(1),
+});
+
+type RawTevuConfig = z.infer<typeof RawTevuConfigShape>;
+
+function refineTevuConfig(raw: RawTevuConfig, ctx: z.RefinementCtx): void {
+  checkUniqueIds(raw.repositories, ctx, "repositories");
+  checkUniqueIds(raw.models, ctx, "models");
+  checkUniqueIds(raw.tasks, ctx, "tasks");
+
+  const agentKeys = Object.keys(raw.agents);
+  raw.models.forEach((model, index) => {
+    if (model.agent !== undefined && !agentKeys.includes(model.agent)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["models", index, "agent"],
+        message: `agent must name a configured agent: ${agentKeys.join(", ")}`,
+      });
+    }
+  });
+
+  const repositoryIds = new Set(raw.repositories.map((repository) => repository.id));
+  const agentNames = new Set([...raw.agents.opencode.secrets, ...raw.agents.opencode.env]);
+  const jira = raw.trackers?.jira;
+  const jiraEmailName = jira === undefined ? undefined : tryReferencedVariableName(jira.email);
+  const jiraTokenName = jira === undefined ? undefined : tryReferencedVariableName(jira.token);
+
+  raw.tasks.forEach((task: RawTask, taskIndex) => {
+    if (task.repo === undefined) {
+      if (raw.repositories.length > 1) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["tasks", taskIndex, "repo"],
+          message: "repo is required when more than one repository is configured",
+        });
+      }
+    } else if (!repositoryIds.has(task.repo)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["tasks", taskIndex, "repo"],
+        message: "repo must reference a configured repository",
+      });
+    }
+
+    (["acceptance", "done"] as const).forEach((collection) => {
+      task.checks[collection].forEach((check: PreCheck, checkIndex) => {
+        if (!("run" in check)) {
+          return;
+        }
+        if (check.timeout === undefined && raw.run.check_timeout === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["tasks", taskIndex, "checks", collection, checkIndex, "timeout"],
+            message: "set timeout on this check or run.check_timeout",
+          });
+        }
+        const seenNames = new Set<string>();
+        (check.env ?? []).forEach((name, nameIndex) => {
+          const path = ["tasks", taskIndex, "checks", collection, checkIndex, "env", nameIndex];
+          if (seenNames.has(name)) {
+            ctx.addIssue({ code: "custom", path, message: `duplicate environment variable name "${name}" in check env` });
+          }
+          seenNames.add(name);
+          if (agentNames.has(name)) {
+            ctx.addIssue({
+              code: "custom",
+              path,
+              message: `environment variable "${name}" is passed to the agent and cannot also be passed to a check`,
+            });
+          } else if (name === jiraEmailName || name === jiraTokenName) {
+            ctx.addIssue({ code: "custom", path, message: `Jira credential variable "${name}" must not be passed to a check` });
+          }
+        });
+      });
+    });
+  });
+}
+
+function materializeTevuConfig(raw: RawTevuConfig): TevuConfig {
+  const onlyAgentKey = Object.keys(raw.agents)[0] ?? "opencode";
+  const soleRepositoryId = raw.repositories.length === 1 ? raw.repositories[0]?.id : undefined;
+
+  const models: ModelDefinition[] = raw.models.map((model) => ({
+    id: model.id,
+    model: model.model,
+    effort: model.effort,
+    agent: model.agent ?? onlyAgentKey,
+  }));
+
+  const tasks: TaskDefinition[] = raw.tasks.map((task: RawTask) => {
+    const repo = task.repo ?? soleRepositoryId;
+    if (repo === undefined) {
+      throw new Error("unreachable: refineTevuConfig guarantees a resolvable repository id");
+    }
+    return {
+      id: task.id,
+      title: task.title,
+      repo,
+      base_commit: task.base_commit,
+      prompt: task.prompt,
+      description: task.description,
+      ...(task.source === undefined ? {} : { source: task.source }),
+      readiness: task.readiness,
+      checks: {
+        acceptance: task.checks.acceptance.map((check) => resolveCheck(check, raw.run.check_timeout)),
+        done: task.checks.done.map((check) => resolveCheck(check, raw.run.check_timeout)),
+      },
+    };
+  });
+
+  return {
+    version: 1,
+    run: raw.run,
+    agents: raw.agents,
+    ...(raw.trackers === undefined ? {} : { trackers: raw.trackers }),
+    repositories: raw.repositories,
+    models,
+    tasks,
+  };
+}
+
+/** One resolved tevu configuration: every default materialized, ready for its consumers. */
+export interface TevuConfig {
+  version: 1;
+  run: RunSettings;
+  agents: { opencode: OpenCodeAgentSettings };
+  trackers?: { jira?: JiraTrackerSettings };
+  repositories: RepositoryDefinition[];
+  models: ModelDefinition[];
+  tasks: TaskDefinition[];
+}
+
+/**
+ * Parses and validates one tevu configuration document, enforcing the
+ * cross-field rules and defaults of the configuration reference: unique
+ * identifiers, agent and repository references, environment-variable
+ * separation, and check-timeout resolution.
+ */
+export const TevuConfigSchema = RawTevuConfigShape.superRefine(refineTevuConfig).transform(materializeTevuConfig);
+
+/** File-shape tevu configuration; fields with a default are optional. */
+export type TevuConfigInput = z.input<typeof TevuConfigSchema>;
+
+/**
+ * Returns every command check's `env` name across every task, in
+ * first-appearance order (tasks, then acceptance before done, then list
+ * order), for the isolated evaluator environment's ordinary allowlist.
+ */
+export function checkEnvironmentNames(config: TevuConfig): string[] {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const task of config.tasks) {
+    for (const check of [...task.checks.acceptance, ...task.checks.done]) {
+      if (!("run" in check)) {
+        continue;
+      }
+      for (const name of check.env) {
+        if (!seen.has(name)) {
+          seen.add(name);
+          names.push(name);
+        }
+      }
+    }
+  }
+  return names;
+}

@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseDocument } from "yaml";
 
-import { loadConfig } from "./load.ts";
+import { loadConfig, parseConfigText } from "./load.ts";
 import { TevuConfigSchema } from "./schema.ts";
 import { CONFIG_TEMPLATE } from "./template.ts";
+
+const OPTIONAL_LINE_PATTERN = /^( *)# ( *(?:- )?[A-Za-z][A-Za-z0-9_]*:(?: |$))/;
 
 /**
  * Enables every commented-out optional field in a template. Explanatory comments
@@ -18,8 +19,17 @@ import { CONFIG_TEMPLATE } from "./template.ts";
 function uncomment(text: string): string {
   return text
     .split("\n")
-    .map((line) => line.replace(/^( *)# ( *(?:- )?[A-Za-z][A-Za-z0-9]*:(?: |$))/, "$1$2"))
+    .map((line) => line.replace(OPTIONAL_LINE_PATTERN, "$1$2"))
     .join("\n");
+}
+
+/** Re-parses a value the schema already accepted; the output must remain valid input. */
+function reparse(config: unknown): unknown {
+  const result = TevuConfigSchema.safeParse(config);
+  if (!result.success) {
+    throw new Error(`expected the materialized configuration to re-parse: ${JSON.stringify(result.error.issues)}`);
+  }
+  return result.data;
 }
 
 describe("CONFIG_TEMPLATE", () => {
@@ -35,6 +45,26 @@ describe("CONFIG_TEMPLATE", () => {
     }
     expect(CONFIG_TEMPLATE.endsWith("\n")).toBe(true);
     expect(CONFIG_TEMPLATE.endsWith("\n\n")).toBe(false);
+  });
+
+  it("enables exactly twelve commented-out key lines", () => {
+    const enabledCount = CONFIG_TEMPLATE.split("\n").filter((line) => OPTIONAL_LINE_PATTERN.test(line)).length;
+
+    expect(enabledCount).toBe(12);
+  });
+
+  it.each([
+    { description: "as written", text: CONFIG_TEMPLATE },
+    { description: "with every optional line enabled", text: uncomment(CONFIG_TEMPLATE) },
+  ])("re-parses a parsed template $description to a deeply equal value", ({ text }) => {
+    const parsedOnce = parseConfigText(text);
+    if (!parsedOnce.ok) {
+      throw new Error(`expected the template to parse: ${JSON.stringify(parsedOnce.error)}`);
+    }
+
+    const parsedTwice = reparse(parsedOnce.value);
+
+    expect(parsedTwice).toEqual(parsedOnce.value);
   });
 
   describe("loadConfig", () => {
@@ -71,23 +101,14 @@ describe("CONFIG_TEMPLATE", () => {
       if (!result.ok) {
         return;
       }
-      expect(result.value.jira).not.toBeUndefined();
+      expect(result.value.trackers?.jira).not.toBeUndefined();
       const task = result.value.tasks[0];
-      expect(task.source).toMatchObject({ reference: "PROJ-123" });
-      const checkIds = [...task.acceptanceCriteria, ...task.definitionOfDone].map(
+      expect(task?.source).toMatchObject({ kind: "jira", key: "PROJ-123" });
+      const checkIds = [...(task?.checks.acceptance ?? []), ...(task?.checks.done ?? [])].map(
         (check) => check.id,
       );
       expect(checkIds).toContain("csv-content");
       expect(checkIds).toContain("tests");
     });
-  });
-
-  it.each([
-    ["the active template", CONFIG_TEMPLATE],
-    ["the uncommented template", uncomment(CONFIG_TEMPLATE)],
-  ])("matches TevuConfigSchema key order and explicit values for %s", (_label, text) => {
-    const parsed = parseDocument(text, { version: "1.2", schema: "core" }).toJS();
-
-    expect(JSON.stringify(parsed)).toBe(JSON.stringify(TevuConfigSchema.parse(parsed)));
   });
 });

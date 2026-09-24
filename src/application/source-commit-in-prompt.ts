@@ -16,7 +16,7 @@
 export function describeSourceCommitInPrompt(prompt: string, sourceCommit: string): string | undefined {
   const prefix = sourceCommit.slice(0, 7);
   if (prompt.toLowerCase().includes(prefix.toLowerCase())) {
-    return `agent prompt contains resolved start commit ${prefix}`;
+    return `agent prompt contains resolved base commit ${prefix}`;
   }
   return undefined;
 }

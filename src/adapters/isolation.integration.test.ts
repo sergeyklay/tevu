@@ -7,13 +7,14 @@ import { join, resolve } from "node:path";
 import process from "node:process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { TevuConfigSchema } from "../config/schema.ts";
 import { buildCheckEnvironment } from "../evaluation/checks.ts";
 import { createGitWorkspaceAdapter } from "./git.ts";
 import { createEnvironmentAdapter, createRedactor, createStreamingRedactor, runManagedProcess } from "./process.ts";
 
 import type { CaseIdentity, CaseWorkspace, GitWorkspaceAdapter, TevuError, TevuResult } from "../domain/types.ts";
 import type { ManagedProcessResult } from "./process.ts";
-import type { TaskDefinition, TevuConfig } from "../config/schema.ts";
+import type { TaskInput, TevuConfig, TevuConfigInput } from "../config/schema.ts";
 
 const PROVIDER_NAME = "TEVU_IT_PROVIDER_KEY";
 const PROVIDER_VALUE = "synthetic-provider-secret-9f2";
@@ -125,78 +126,62 @@ async function runGit(cwd: string, args: readonly string[]): Promise<GitOutcome>
   };
 }
 
-function buildTask(sourceCommit: string): TaskDefinition {
+function buildTask(sourceCommit: string): TaskInput {
   return {
     id: "task-1",
-    repositoryId: "repo-1",
-    startCommit: sourceCommit,
-    source: { kind: "manual", title: "synthetic manual task" },
+    title: "Synthetic isolation task",
+    repo: "repo-1",
+    base_commit: sourceCommit,
     description: "synthetic task description",
     prompt: "implement the synthetic feature",
-    definitionOfReady: [{ id: "ready-1", description: "synthetic ready item", confirmed: true }],
-    acceptanceCriteria: [
-      {
-        id: "acc-1",
-        description: "acceptance command exits zero",
-        required: true,
-        evaluator: {
-          kind: "command",
-          argv: ["/synthetic/acceptance-probe", "--suite", "synthetic"],
-          timeoutMs: 5_000,
-          successExitCodes: [0],
-          environmentAllowlist: [EVAL_NAME],
+    readiness: ["synthetic ready item"],
+    checks: {
+      acceptance: [
+        {
+          id: "acc-1",
+          description: "acceptance command exits zero",
+          run: ["/synthetic/acceptance-probe", "--suite", "synthetic"],
+          timeout: "5s",
+          exit_codes: [0],
+          env: [EVAL_NAME],
         },
-      },
-    ],
-    definitionOfDone: [
-      {
-        id: "dod-1",
-        description: "Definition of Done command exits zero",
-        required: true,
-        evaluator: {
-          kind: "command",
-          argv: ["/synthetic/dod-probe", "--suite", "synthetic"],
-          timeoutMs: 5_000,
-          successExitCodes: [0],
-          environmentAllowlist: [],
+      ],
+      done: [
+        {
+          id: "dod-1",
+          description: "Definition of Done command exits zero",
+          run: ["/synthetic/dod-probe", "--suite", "synthetic"],
+          timeout: "5s",
+          exit_codes: [0],
         },
-      },
-    ],
+      ],
+    },
   };
 }
 
 function buildConfig(repositoryPath: string, sourceCommit: string): TevuConfig {
-  return {
+  const config: TevuConfigInput = {
     version: 1,
-    artifacts: { directory: join(testDirectory, "artifacts") },
-    execution: {
-      concurrency: 1,
-      caseTimeoutMs: 60_000,
-      terminationGraceMs: 250,
-      opencodeEnvironment: [
-        { name: PROVIDER_NAME, classification: "provider-credential" },
-        { name: SECRET_NAME, classification: "secret" },
-      ],
-      evaluatorEnvironment: [{ name: EVAL_NAME, classification: "ordinary" }],
-    },
-    opencode: { executable: "/synthetic/opencode" },
+    run: { output_dir: join(testDirectory, "artifacts"), concurrency: 1, timeout: "1m", stop_grace: "250ms" },
+    agents: { opencode: { command: "/synthetic/opencode", secrets: [PROVIDER_NAME, SECRET_NAME], env: [] } },
     repositories: [{ id: "repo-1", path: repositoryPath }],
-    contenders: [
-      { id: "c1", model: "synthetic/model-a", variant: "fast" },
-      { id: "c2", model: "synthetic/model-b", variant: "deep" },
+    models: [
+      { id: "c1", model: "synthetic/model-a", effort: "fast" },
+      { id: "c2", model: "synthetic/model-b", effort: "deep" },
     ],
     tasks: [buildTask(sourceCommit)],
   };
+  return TevuConfigSchema.parse(config);
 }
 
 function buildIdentity(caseId: string, sourceCommit: string): CaseIdentity {
   return {
     caseId,
     taskId: "task-1",
-    contenderId: "c1",
+    modelId: "c1",
     sourceCommit,
     model: "synthetic/model-a",
-    variant: "fast",
+    effort: "fast",
   };
 }
 
@@ -650,7 +635,7 @@ describe("isolated case environments", () => {
 
     expect(opencode.variableManifest).toEqual(
       expect.arrayContaining([
-        { name: PROVIDER_NAME, classification: "provider-credential", recipient: "opencode" },
+        { name: PROVIDER_NAME, classification: "secret", recipient: "opencode" },
         { name: SECRET_NAME, classification: "secret", recipient: "opencode" },
       ]),
     );

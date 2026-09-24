@@ -1,4 +1,6 @@
-import type { CheckDefinition, CommandEvaluator, TaskDefinition } from "../config/schema.ts";
+import { durationMs } from "../config/schema.ts";
+
+import type { CheckDefinition, CommandCheck, TaskDefinition } from "../config/schema.ts";
 import type {
   CaseWorkspace,
   CheckResult,
@@ -42,14 +44,12 @@ function isFixedEnvironmentName(name: string): boolean {
 }
 
 /** Projects a task's checks into evaluation order: acceptance criteria, then Definition of Done. */
-export function orderTaskChecks(
-  task: Pick<TaskDefinition, "acceptanceCriteria" | "definitionOfDone">,
-): OrderedCheck[] {
+export function orderTaskChecks(task: Pick<TaskDefinition, "checks">): OrderedCheck[] {
   return [
-    ...task.acceptanceCriteria.map(
+    ...task.checks.acceptance.map(
       (definition): OrderedCheck => ({ definition, category: "acceptance" }),
     ),
-    ...task.definitionOfDone.map(
+    ...task.checks.done.map(
       (definition): OrderedCheck => ({ definition, category: "definition-of-done" }),
     ),
   ];
@@ -104,11 +104,11 @@ export async function evaluateChecks(
     if (input.cancellation?.aborted === true) {
       break;
     }
-    if (check.definition.evaluator.kind === "manual") {
+    if (!("run" in check.definition)) {
       results.push(projectManualCheck(check));
       continue;
     }
-    results.push(await runCommandCheck(input, check, check.definition.evaluator));
+    results.push(await runCommandCheck(input, check, check.definition));
   }
   return { ok: true, value: results };
 }
@@ -116,14 +116,16 @@ export async function evaluateChecks(
 /**
  * Reduces final check verdicts to the case's acceptance outcome. A failed
  * required check fails the case; an unresolved required check leaves it
- * pending; optional verdicts never change a passed outcome.
+ * pending; optional verdicts never change a passed outcome. Accepts both
+ * live `OrderedCheck`s and `CheckRecord`s through one shared `{id, required}`
+ * shape.
  */
 export function reduceRequiredOutcome(
-  checks: readonly OrderedCheck[],
+  checks: readonly { id: string; required: boolean }[],
   results: readonly CheckResult[],
 ): "passed" | "failed" | "pending" {
   const unresolvedRequired = new Set(
-    checks.filter((check) => check.definition.required).map((check) => check.definition.id),
+    checks.filter((check) => check.required).map((check) => check.id),
   );
   let pending = false;
   for (const result of results) {
@@ -144,13 +146,13 @@ export function reduceRequiredOutcome(
 async function runCommandCheck(
   input: CheckEvaluationInput,
   check: OrderedCheck,
-  evaluator: CommandEvaluator,
+  command: CommandCheck,
 ): Promise<CheckResult> {
   const request: EvaluatorProcessRequest = {
-    argv: evaluator.argv,
+    argv: command.run,
     cwd: input.workspace.worktreeDirectory,
-    environment: buildCheckEnvironment(input.environment, input.snapshot, evaluator.environmentAllowlist),
-    timeoutMs: evaluator.timeoutMs,
+    environment: buildCheckEnvironment(input.environment, input.snapshot, command.env),
+    timeoutMs: durationMs(command.timeout),
     terminationGraceMs: input.terminationGraceMs,
     cancellation: input.cancellation,
   };
@@ -178,10 +180,10 @@ async function runCommandCheck(
   const passed =
     !execution.timedOut &&
     execution.exitCode !== null &&
-    evaluator.successExitCodes.includes(execution.exitCode);
+    command.exit_codes.includes(execution.exitCode);
 
   const statusLine = execution.timedOut
-    ? `timed out after ${evaluator.timeoutMs}ms (termination: ${execution.terminationStage})`
+    ? `timed out after ${request.timeoutMs}ms (termination: ${execution.terminationStage})`
     : execution.exitCode !== null
       ? `exit code ${execution.exitCode}${passed ? "" : " (not a declared success exit code)"}`
       : `terminated by signal ${execution.signal ?? "unknown"}`;

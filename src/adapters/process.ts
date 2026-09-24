@@ -13,6 +13,8 @@ import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { execa } from "execa";
 
+import { checkEnvironmentNames, referencedVariableName } from "../config/schema.ts";
+
 import type { TevuConfig } from "../config/schema.ts";
 import type {
   CaseEnvironments,
@@ -397,11 +399,18 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
           recipient: "opencode",
           baseDirectory: join(workspace.runtimeDirectory, "opencode"),
           path: snapshot.path,
-          additions: config.execution.opencodeEnvironment.map((entry) => ({
-            name: entry.name,
-            classification: entry.classification,
-            value: snapshot.opencodeValues[entry.name],
-          })),
+          additions: [
+            ...config.agents.opencode.secrets.map((name) => ({
+              name,
+              classification: "secret" as const,
+              value: snapshot.opencodeValues[name],
+            })),
+            ...config.agents.opencode.env.map((name) => ({
+              name,
+              classification: "ordinary" as const,
+              value: snapshot.opencodeValues[name],
+            })),
+          ],
         });
         const evaluator = await buildIsolatedEnvironment({
           caseId: workspace.caseId,
@@ -411,9 +420,9 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
           // Ordinary evaluator values are added per check by the evaluation
           // module from its declared allowlist, so only their names enter the
           // manifest here and no value enters the fixed base.
-          additions: config.execution.evaluatorEnvironment.map((entry) => ({
-            name: entry.name,
-            classification: entry.classification,
+          additions: checkEnvironmentNames(config).map((name) => ({
+            name,
+            classification: "ordinary" as const,
           })),
         });
         return { ok: true, value: { opencode, evaluator } };
@@ -588,28 +597,34 @@ function snapshotParentEnvironment(
 
   const opencodeValues: Record<string, string> = {};
   const secretValues: string[] = [];
-  for (const entry of config.execution.opencodeEnvironment) {
-    const value = process.env[entry.name];
+  for (const name of config.agents.opencode.secrets) {
+    const value = process.env[name];
     if (value === undefined) {
-      return missingVariableError(entry.name);
+      return missingVariableError(name);
     }
-    opencodeValues[entry.name] = value;
-    if (entry.classification !== "ordinary") {
-      secretValues.push(value);
+    opencodeValues[name] = value;
+    secretValues.push(value);
+  }
+  for (const name of config.agents.opencode.env) {
+    const value = process.env[name];
+    if (value === undefined) {
+      return missingVariableError(name);
     }
+    opencodeValues[name] = value;
   }
 
   const ordinaryEvaluatorValues: Record<string, string> = {};
-  for (const entry of config.execution.evaluatorEnvironment) {
-    const value = process.env[entry.name];
+  for (const name of checkEnvironmentNames(config)) {
+    const value = process.env[name];
     if (value === undefined) {
-      return missingVariableError(entry.name);
+      return missingVariableError(name);
     }
-    ordinaryEvaluatorValues[entry.name] = value;
+    ordinaryEvaluatorValues[name] = value;
   }
 
-  if (config.jira !== undefined) {
-    const token = process.env[config.jira.tokenEnvironmentVariable];
+  const jira = config.trackers?.jira;
+  if (jira !== undefined) {
+    const token = process.env[referencedVariableName(jira.token)];
     if (token !== undefined) {
       secretValues.push(token);
     }
@@ -628,7 +643,7 @@ function snapshotParentEnvironment(
 
 type EnvironmentAddition = {
   name: string;
-  classification: "provider-credential" | "secret" | "ordinary";
+  classification: "secret" | "ordinary";
   value?: string;
 };
 

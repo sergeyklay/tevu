@@ -8,6 +8,7 @@
 
 import pLimit from "p-limit";
 
+import { durationMs } from "../config/schema.ts";
 import { evaluateChecks, orderTaskChecks, reduceRequiredOutcome } from "../evaluation/checks.ts";
 import { normalizeMetrics, unavailableBenchmarkMetrics } from "../evaluation/metrics.ts";
 import { describeSourceCommitInPrompt } from "./source-commit-in-prompt.ts";
@@ -63,24 +64,24 @@ type RunBenchmarkErrorKind =
 export function planBenchmark(config: TevuConfig): BenchmarkPlan {
   const cases: CaseIdentity[] = [];
   for (const task of config.tasks) {
-    for (const contender of config.contenders) {
+    for (const model of config.models) {
       cases.push({
-        caseId: `${task.id}--${contender.id}`,
+        caseId: `${task.id}--${model.id}`,
         taskId: task.id,
-        contenderId: contender.id,
-        sourceCommit: task.startCommit,
-        model: contender.model,
-        variant: contender.variant,
+        modelId: model.id,
+        sourceCommit: task.base_commit,
+        model: model.model,
+        effort: model.effort,
       });
     }
   }
   return {
     config,
     cases,
-    concurrency: config.execution.concurrency,
-    caseTimeoutMs: config.execution.caseTimeoutMs,
-    terminationGraceMs: config.execution.terminationGraceMs,
-    artifactsDirectory: config.artifacts.directory,
+    concurrency: config.run.concurrency,
+    caseTimeoutMs: durationMs(config.run.timeout),
+    terminationGraceMs: durationMs(config.run.stop_grace),
+    artifactsDirectory: config.run.output_dir,
   };
 }
 
@@ -142,7 +143,7 @@ export async function runBenchmark(
   if (!snapshot.ok) {
     return snapshot;
   }
-  const probe = await dependencies.opencode.probe(plan.config.opencode.executable);
+  const probe = await dependencies.opencode.probe(plan.config.agents.opencode.command);
   if (!probe.ok) {
     return probe;
   }
@@ -289,17 +290,17 @@ async function resolvePlannedCases(
     if (task === undefined) {
       return sourceFailure(identity.taskId, "task is not defined in the configuration");
     }
-    const repository = repositories.get(task.repositoryId);
+    const repository = repositories.get(task.repo);
     if (repository === undefined) {
       return sourceFailure(
         task.id,
-        `repository "${task.repositoryId}" is not defined in the configuration`,
+        `repository "${task.repo}" is not defined in the configuration`,
       );
     }
-    const key = `${repository.id}\u0000${task.startCommit}`;
+    const key = `${repository.id}\u0000${task.base_commit}`;
     let commit = resolvedCommits.get(key);
     if (commit === undefined) {
-      const validated = await dependencies.git.validateSource(repository, task.startCommit);
+      const validated = await dependencies.git.validateSource(repository, task.base_commit);
       if (!validated.ok) {
         return { ok: false, error: { ...validated.error, taskId: task.id } };
       }
@@ -396,7 +397,7 @@ async function runActiveCase(run: RunContext, active: ActiveCase): Promise<void>
   emitLifecycle(run, caseId, "running");
   const outcome = await run.dependencies.opencode.run({
     identity: active.identity,
-    executable: run.plan.config.opencode.executable,
+    executable: run.plan.config.agents.opencode.command,
     prompt: run.dependencies.buildTaskPrompt(active.task),
     worktreeDirectory: active.workspace.worktreeDirectory,
     environment: active.environments.opencode,
@@ -626,7 +627,13 @@ function finishCase(
     process: active.evidence?.process ?? null,
     outcome:
       lifecycle === "completed"
-        ? reduceRequiredOutcome(ordered ?? orderTaskChecks(active.task), active.checks)
+        ? reduceRequiredOutcome(
+            (ordered ?? orderTaskChecks(active.task)).map((check) => ({
+              id: check.definition.id,
+              required: check.definition.required,
+            })),
+            active.checks,
+          )
         : "not-evaluated",
     checks: active.checks,
     metrics,

@@ -12,7 +12,7 @@ describe("describeSourceCommitInPrompt", () => {
     { label: "the full SHA", prompt: `text ${SOURCE_COMMIT} more text` },
   ])("returns the reason when the prompt contains $label", ({ prompt }) => {
     expect(describeSourceCommitInPrompt(prompt, SOURCE_COMMIT)).toBe(
-      "agent prompt contains resolved start commit abcdef0",
+      "agent prompt contains resolved base commit abcdef0",
     );
   });
 

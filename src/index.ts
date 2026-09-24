@@ -16,7 +16,7 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 import { createArtifactStore, createConfigStore } from "./adapters/artifact-store.ts";
-import { createGitWorkspaceAdapter } from "./adapters/git.ts";
+import { createGitWorkspaceAdapter, createSourceValidator } from "./adapters/git.ts";
 import { buildTaskPrompt, createOpenCodeAdapter } from "./adapters/opencode.ts";
 import {
   createEnvironmentAdapter,
@@ -30,15 +30,16 @@ import {
   GH_CREDENTIAL_ENVIRONMENT_VARIABLES,
 } from "./adapters/trackers/github-issues.ts";
 import { createJiraCloudAdapter } from "./adapters/trackers/jira-cloud.ts";
-import { assessCase, rebuildReport } from "./application/assess.ts";
+import { assessCase, readAssessmentContext, rebuildReport } from "./application/assess.ts";
 import { createTask } from "./application/create-task.ts";
 import { planBenchmark, runBenchmark } from "./application/run-benchmark.ts";
 import { validateConfig } from "./application/validate.ts";
-import { canonicalConfigSerialization, loadConfig, resolveConfigPath } from "./config/load.ts";
-import { orderTaskChecks } from "./evaluation/checks.ts";
+import { canonicalConfigSerialization, loadConfig } from "./config/load.ts";
+import { referencedVariableName } from "./config/schema.ts";
 import { runProgram } from "./interface/program.ts";
 
-import type { RepositoryDefinition, TevuConfig } from "./config/schema.ts";
+import type { JiraCloudSettings } from "./adapters/trackers/jira-cloud.ts";
+import type { TevuConfig } from "./config/schema.ts";
 import type {
   ArtifactStore,
   Clock,
@@ -46,7 +47,6 @@ import type {
   GitWorkspaceAdapter,
   LoadConfigErrorKind,
   OpenCodeAdapter,
-  TaskWizardInput,
   TevuResult,
 } from "./domain/types.ts";
 import type {
@@ -54,7 +54,6 @@ import type {
   ProgramIo,
   ProgramOperations,
 } from "./interface/program.ts";
-import type { AssessmentCaseContext } from "./interface/task-wizard.ts";
 
 /** Optional overrides for composing the production dependency graph. */
 export type CompositionOptions = {
@@ -101,18 +100,23 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
     createGitWorkspaceAdapter({ config, workspacesDirectory: createWorkspacesRoot() });
 
   const opencodeFor = (config: TevuConfig): OpenCodeAdapter =>
-    createOpenCodeAdapter({ executable: config.opencode.executable, readSecretValues: registry.read });
+    createOpenCodeAdapter({ executable: config.agents.opencode.command, readSecretValues: registry.read });
 
   const storeFor = (config: TevuConfig): ArtifactStore =>
-    createArtifactStore({ artifactsDirectory: config.artifacts.directory, redact: registry.redact });
+    createArtifactStore({ artifactsDirectory: config.run.output_dir, redact: registry.redact });
 
   const operations: ProgramOperations = {
     configExists: (configPath) => configStore.exists(configPath),
     loadConfig: loadConfigAndRegisterSecrets,
     requireConfigDirectory: (configPath) => configStore.requireDirectory(configPath),
     importJiraIssue: (settings, issueKey) => {
-      registry.add([process.env[settings.tokenEnvironmentVariable]]);
-      const jira = createJiraCloudAdapter(settings, {
+      const jiraSettings: JiraCloudSettings = {
+        baseUrl: settings.url,
+        emailEnvironmentVariable: referencedVariableName(settings.email),
+        tokenEnvironmentVariable: referencedVariableName(settings.token),
+      };
+      registry.add([process.env[jiraSettings.tokenEnvironmentVariable]]);
+      const jira = createJiraCloudAdapter(jiraSettings, {
         fetch: (url, init) => globalThis.fetch(url, init),
         sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
         getEnvironmentVariable: (name) => process.env[name],
@@ -134,23 +138,14 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       });
       return github.readIssue(reference);
     },
-    createTask: async (input) => {
-      const resolved = resolveWizardRepositoryPaths(input);
-      const adapterConfig =
-        resolved.bootstrap === undefined
-          ? await loadConfigAndRegisterSecrets(resolved.configPath)
-          : projectBootstrapConfig(resolved.bootstrap);
-      if (!adapterConfig.ok) {
-        return adapterConfig;
-      }
-      return createTask(resolved, {
+    createTask: (input) =>
+      createTask(input, {
         configStore,
-        git: gitFor(adapterConfig.value),
-        jira: null,
-        clock,
+        git: createSourceValidator(),
+        registerSecrets: (names) => registry.add(names.map((name) => process.env[name])),
+        redact: registry.redact,
         cancellation,
-      });
-    },
+      }),
     validateConfig: (config) =>
       validateConfig(config, {
         git: gitFor(config),
@@ -191,7 +186,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
     },
     rebuildRunReport: (config, runId) => rebuildReport(runId, storeFor(config)),
     readAssessmentContext: (config, runId, caseId) =>
-      readAssessmentContext(storeFor(config), runId, caseId),
+      readAssessmentContext(runId, caseId, storeFor(config)),
     applyAssessment: (config, input) => assessCase(input, storeFor(config)),
   };
 
@@ -244,13 +239,12 @@ function createSecretRegistry(): SecretRegistry {
   };
 }
 
-/** Registers the values of credential-classified variables and the Jira token, mirroring the run-level snapshot. */
+/** Registers every agent secret's value and the Jira token, mirroring the run-level snapshot. */
 function registerConfigSecrets(registry: SecretRegistry, config: TevuConfig): void {
-  const names = config.execution.opencodeEnvironment
-    .filter((entry) => entry.classification !== "ordinary")
-    .map((entry) => entry.name);
-  if (config.jira !== undefined) {
-    names.push(config.jira.tokenEnvironmentVariable);
+  const names = [...config.agents.opencode.secrets];
+  const jira = config.trackers?.jira;
+  if (jira !== undefined) {
+    names.push(referencedVariableName(jira.token));
   }
   registry.add(names.map((name) => process.env[name]));
 }
@@ -271,120 +265,6 @@ function wrapEnvironmentAdapter(
     createCaseEnvironments: (workspace, snapshot, config) =>
       adapter.createCaseEnvironments(workspace, snapshot, config),
   };
-}
-
-/**
- * Resolves wizard-captured relative repository and artifact paths against the
- * configuration file directory, matching the loader's path semantics, so Git
- * validation and the single configuration replacement see resolved paths.
- */
-function resolveWizardRepositoryPaths(input: TaskWizardInput): TaskWizardInput {
-  const configDirectory = path.dirname(path.resolve(input.configPath));
-  const resolveRepository = (repository: RepositoryDefinition): RepositoryDefinition => ({
-    ...repository,
-    path: resolveConfigPath(configDirectory, repository.path),
-  });
-  return {
-    ...input,
-    bootstrap:
-      input.bootstrap === undefined
-        ? undefined
-        : {
-            ...input.bootstrap,
-            artifacts: {
-              directory: resolveConfigPath(configDirectory, input.bootstrap.artifacts.directory),
-            },
-            repositories: input.bootstrap.repositories.map(resolveRepository),
-          },
-    newRepository: input.newRepository === undefined ? undefined : resolveRepository(input.newRepository),
-  };
-}
-
-/** Projects bootstrap answers as a configuration value for adapter construction; tasks arrive via `createTask`. */
-function projectBootstrapConfig(
-  bootstrap: NonNullable<TaskWizardInput["bootstrap"]>,
-): TevuResult<TevuConfig, LoadConfigErrorKind> {
-  return {
-    ok: true,
-    value: {
-      version: 1,
-      artifacts: bootstrap.artifacts,
-      execution: bootstrap.execution,
-      opencode: bootstrap.opencode,
-      ...(bootstrap.jira === undefined ? {} : { jira: bootstrap.jira }),
-      repositories: bootstrap.repositories,
-      contenders: bootstrap.contenders,
-      tasks: [],
-    },
-  };
-}
-
-/**
- * Builds the assessment wizard's display context from preserved run artifacts
- * only: the manifest's preserved configuration supplies the manual checks in
- * configuration order, and the current assessment records come from the
- * versioned assessment artifact.
- */
-async function readAssessmentContext(
-  store: ArtifactStore,
-  runId: string,
-  caseId: string,
-): Promise<TevuResult<AssessmentCaseContext, "ConfigValidationError" | "ArtifactError">> {
-  const manifest = await store.readRunManifest(runId);
-  if (!manifest.ok) {
-    return manifest;
-  }
-  const context = manifest.value.context;
-  if (context === undefined) {
-    return {
-      ok: false,
-      error: {
-        kind: "ArtifactError",
-        operation: "read-run-manifest",
-        reason: `run "${runId}" preserves no configuration context; it cannot be assessed`,
-      },
-    };
-  }
-  const identity = manifest.value.cases.find((candidate) => candidate.caseId === caseId);
-  if (identity === undefined) {
-    return {
-      ok: false,
-      error: {
-        kind: "ConfigValidationError",
-        findings: [
-          {
-            severity: "error",
-            identifier: caseId,
-            message: `case "${caseId}" is not part of run "${runId}"`,
-          },
-        ],
-      },
-    };
-  }
-  const task = context.config.tasks.find((candidate) => candidate.id === identity.taskId);
-  if (task === undefined) {
-    return {
-      ok: false,
-      error: {
-        kind: "ArtifactError",
-        operation: "read-run-manifest",
-        reason: `task "${identity.taskId}" is missing from the preserved run configuration`,
-      },
-    };
-  }
-  const manualChecks = orderTaskChecks(task)
-    .filter((check) => check.definition.evaluator.kind === "manual")
-    .map((check) => ({
-      checkId: check.definition.id,
-      category: check.category,
-      description: check.definition.description,
-      required: check.definition.required,
-    }));
-  const assessment = await store.readAssessment(runId, caseId);
-  if (!assessment.ok) {
-    return assessment;
-  }
-  return { ok: true, value: { manualChecks, existing: assessment.value?.current ?? [] } };
 }
 
 /** One private sealed-workspace root per adapter instance, outside repositories and artifacts. */
