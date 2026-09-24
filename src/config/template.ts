@@ -2,7 +2,6 @@
 export const CONFIG_TEMPLATE = `# tevu.yaml: compare coding models on tasks from your own backlog.
 #
 # Conventions used throughout this file:
-#   - keys are snake_case;
 #   - durations are strings with a unit: 500ms, 30s, 10m, 1h;
 #   - relative paths resolve against the directory of this file;
 #   - secrets are never written here: a credential is a $VARIABLE reference or a
