@@ -1,7 +1,7 @@
 // @vitest-environment node
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -38,6 +38,15 @@ import type {
   TaskDefinition,
   TevuConfig,
 } from "./schema.ts";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    stat: vi.fn(actual.stat),
+    readFile: vi.fn(actual.readFile),
+  };
+});
 
 const FIXED_NOW = new Date("2026-05-01T10:00:00.000Z");
 
@@ -197,6 +206,7 @@ function buildJiraSnapshot(
 function buildConfigStore(overrides: Partial<ConfigStore> = {}): ConfigStore {
   return {
     exists: vi.fn(async () => true),
+    requireDirectory: vi.fn(async () => ({ ok: true as const, value: undefined })),
     read: vi.fn(async () => ({ ok: true as const, value: buildConfig() })),
     replace: vi.fn(async () => ({ ok: true as const, value: undefined })),
     ...overrides,
@@ -705,11 +715,151 @@ describe("loadConfig", () => {
     expect(config.opencode.executable).toBe("opencode");
   });
 
-  it("reports an ArtifactError when the configuration file cannot be read", async () => {
-    const error = expectFailure(await loadConfig(join(tempDirectory, "missing.yaml")), "ArtifactError");
+  const isRoot = process.getuid?.() === 0;
 
-    expect(error.operation).toBe("read-configuration");
-    expect(error.reason).toBe("Cannot read configuration file; check the path and access permissions");
+  it.each([
+    {
+      description: "a missing file",
+      buildPath: async (dir: string) => join(dir, "missing.yaml"),
+    },
+    {
+      description: "a file under a missing directory",
+      buildPath: async (dir: string) => join(dir, "nonexistent-dir", "tevu.yaml"),
+    },
+    {
+      description: "a path through a regular file",
+      buildPath: async (dir: string) => {
+        const regularFile = join(dir, "regular-file");
+        await fs.writeFile(regularFile, "not a directory", "utf8");
+        return join(regularFile, "tevu.yaml");
+      },
+    },
+  ])("reports not-found for $description", async ({ buildPath }) => {
+    const requestedPath = await buildPath(tempDirectory);
+
+    const error = expectFailure(await loadConfig(requestedPath), "ConfigReadError");
+
+    expect(error).toEqual({
+      kind: "ConfigReadError",
+      path: resolve(requestedPath),
+      requestedPath,
+      cause: "not-found",
+    });
+  });
+
+  it.each([
+    { description: "a directory", buildPath: async (dir: string) => dir },
+    { description: "a character device", buildPath: async () => "/dev/null" },
+  ])("reports not-a-file for $description", async ({ buildPath }) => {
+    const requestedPath = await buildPath(tempDirectory);
+
+    const error = expectFailure(await loadConfig(requestedPath), "ConfigReadError");
+
+    expect(error).toEqual({
+      kind: "ConfigReadError",
+      path: resolve(requestedPath),
+      requestedPath,
+      cause: "not-a-file",
+    });
+  });
+
+  it.skipIf(isRoot)("reports permission-denied for a file at mode 000", async () => {
+    const requestedPath = join(tempDirectory, "no-read.yaml");
+    await fs.writeFile(requestedPath, "version: 1\n", "utf8");
+    await fs.chmod(requestedPath, 0o000);
+
+    try {
+      const error = expectFailure(await loadConfig(requestedPath), "ConfigReadError");
+
+      expect(error).toEqual({
+        kind: "ConfigReadError",
+        path: resolve(requestedPath),
+        requestedPath,
+        cause: "permission-denied",
+      });
+    } finally {
+      await fs.chmod(requestedPath, 0o644);
+    }
+  });
+
+  it.skipIf(isRoot)("reports permission-denied for a file under a directory at mode 000", async () => {
+    const lockedDirectory = join(tempDirectory, "locked");
+    await fs.mkdir(lockedDirectory);
+    const requestedPath = join(lockedDirectory, "tevu.yaml");
+    await fs.writeFile(requestedPath, "version: 1\n", "utf8");
+    await fs.chmod(lockedDirectory, 0o000);
+
+    try {
+      const error = expectFailure(await loadConfig(requestedPath), "ConfigReadError");
+
+      expect(error).toEqual({
+        kind: "ConfigReadError",
+        path: resolve(requestedPath),
+        requestedPath,
+        cause: "permission-denied",
+      });
+    } finally {
+      await fs.chmod(lockedDirectory, 0o700);
+    }
+  });
+
+  it("reports unreadable for a symbolic link loop", async () => {
+    await fs.symlink("loop-b", join(tempDirectory, "loop-a"));
+    await fs.symlink("loop-a", join(tempDirectory, "loop-b"));
+    const requestedPath = join(tempDirectory, "loop-a");
+
+    const error = expectFailure(await loadConfig(requestedPath), "ConfigReadError");
+
+    expect(error).toEqual({
+      kind: "ConfigReadError",
+      path: resolve(requestedPath),
+      requestedPath,
+      cause: "unreadable",
+    });
+  });
+
+  it("classifies an injected EPERM stat failure as permission-denied", async () => {
+    const requestedPath = join(tempDirectory, "tevu.yaml");
+    vi.mocked(fs.stat).mockRejectedValueOnce(Object.assign(new Error("blocked"), { code: "EPERM" }));
+
+    const error = expectFailure(await loadConfig(requestedPath), "ConfigReadError");
+
+    expect(error).toEqual({
+      kind: "ConfigReadError",
+      path: resolve(requestedPath),
+      requestedPath,
+      cause: "permission-denied",
+    });
+  });
+
+  it("classifies an injected EISDIR readFile failure after a successful regular-file stat as not-a-file", async () => {
+    const requestedPath = await writeConfigFile("version: 1\n");
+    vi.mocked(fs.readFile).mockRejectedValueOnce(
+      Object.assign(new Error("is a directory"), { code: "EISDIR" }),
+    );
+
+    const error = expectFailure(await loadConfig(requestedPath), "ConfigReadError");
+
+    expect(error).toEqual({
+      kind: "ConfigReadError",
+      path: resolve(requestedPath),
+      requestedPath,
+      cause: "not-a-file",
+    });
+  });
+
+  it("classifies an injected failure without a string code as unreadable", async () => {
+    const requestedPath = join(tempDirectory, "tevu.yaml");
+    vi.mocked(fs.stat).mockRejectedValueOnce("boom");
+
+    const error = expectFailure(await loadConfig(requestedPath), "ConfigReadError");
+
+    expect(error).toEqual({
+      kind: "ConfigReadError",
+      path: resolve(requestedPath),
+      requestedPath,
+      cause: "unreadable",
+    });
   });
 
   it("reports a ConfigParseError with a line identifier for malformed YAML", async () => {
@@ -834,6 +984,117 @@ describe("loadConfig", () => {
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
     expect(loaded.value.tasks[0]?.source).toEqual(source);
+  });
+});
+
+describe("createConfigStore.exists", () => {
+  const configStore = createConfigStore({ redact: (text) => text });
+  const isRoot = process.getuid?.() === 0;
+  let tempDirectory: string;
+
+  beforeEach(async () => {
+    tempDirectory = await fs.mkdtemp(join(tmpdir(), "tevu-config-store-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDirectory, { recursive: true, force: true });
+  });
+
+  it("resolves false for a missing file", async () => {
+    await expect(configStore.exists(join(tempDirectory, "missing.yaml"))).resolves.toBe(false);
+  });
+
+  it("resolves false for a file under a missing directory", async () => {
+    await expect(
+      configStore.exists(join(tempDirectory, "nonexistent-dir", "tevu.yaml")),
+    ).resolves.toBe(false);
+  });
+
+  it("resolves true for an existing file", async () => {
+    const filePath = join(tempDirectory, "tevu.yaml");
+    await fs.writeFile(filePath, "version: 1\n", "utf8");
+
+    await expect(configStore.exists(filePath)).resolves.toBe(true);
+  });
+
+  it("resolves true for a directory", async () => {
+    await expect(configStore.exists(tempDirectory)).resolves.toBe(true);
+  });
+
+  it("resolves true for a path through a regular file", async () => {
+    const regularFile = join(tempDirectory, "regular-file");
+    await fs.writeFile(regularFile, "not a directory", "utf8");
+
+    await expect(configStore.exists(join(regularFile, "tevu.yaml"))).resolves.toBe(true);
+  });
+
+  it.skipIf(isRoot)("resolves true for a file under a directory at mode 000", async () => {
+    const lockedDirectory = join(tempDirectory, "locked");
+    await fs.mkdir(lockedDirectory);
+    const filePath = join(lockedDirectory, "tevu.yaml");
+    await fs.writeFile(filePath, "version: 1\n", "utf8");
+    await fs.chmod(lockedDirectory, 0o000);
+
+    try {
+      await expect(configStore.exists(filePath)).resolves.toBe(true);
+    } finally {
+      await fs.chmod(lockedDirectory, 0o700);
+    }
+  });
+
+  it("resolves true for a trailing-slash path and a redundant-segment path when the file exists", async () => {
+    const filePath = join(tempDirectory, "tevu.yaml");
+    await fs.writeFile(filePath, "version: 1\n", "utf8");
+
+    await expect(configStore.exists(`${filePath}/`)).resolves.toBe(true);
+    await expect(
+      configStore.exists(join(tempDirectory, "nodir", "..", "tevu.yaml")),
+    ).resolves.toBe(true);
+  });
+});
+
+describe("createConfigStore.requireDirectory", () => {
+  const configStore = createConfigStore({ redact: (text) => text });
+  let tempDirectory: string;
+
+  beforeEach(async () => {
+    tempDirectory = await fs.mkdtemp(join(tmpdir(), "tevu-config-store-dir-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDirectory, { recursive: true, force: true });
+  });
+
+  it("resolves a PrerequisiteError naming the absolute missing directory for a file under it", async () => {
+    const missingDirectory = join(tempDirectory, "nonexistent-dir");
+    const filePath = join(missingDirectory, "tevu.yaml");
+
+    const result = await configStore.requireDirectory(filePath);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: "PrerequisiteError",
+        tool: "configuration directory",
+        expected: "an existing directory",
+        actual: `${resolve(missingDirectory)} does not exist`,
+      },
+    });
+  });
+
+  it("resolves success for a missing file in an existing directory", async () => {
+    const result = await configStore.requireDirectory(join(tempDirectory, "missing.yaml"));
+
+    expect(result).toEqual({ ok: true, value: undefined });
+  });
+
+  it("resolves success for an existing file", async () => {
+    const filePath = join(tempDirectory, "tevu.yaml");
+    await fs.writeFile(filePath, "version: 1\n", "utf8");
+
+    const result = await configStore.requireDirectory(filePath);
+
+    expect(result).toEqual({ ok: true, value: undefined });
   });
 });
 

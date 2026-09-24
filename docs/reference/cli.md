@@ -15,7 +15,7 @@ For the execution workflow, see the [benchmark guide](../guides/run-benchmark.md
 | `tevu report <run-id> [--config <path>]` | Rebuilds normalized results and Markdown from saved run artifacts without Git, issue tracker, agent, or model calls |
 | `tevu config example` | Prints a commented configuration template to stdout and writes no file; redirect it to create a configuration |
 
-`--config` defaults to `tevu.yaml` in the current directory. Paths inside that file resolve relative to the configuration file. See the [configuration reference](configuration.md).
+`--config` defaults to `tevu.yaml` in the current directory. Paths inside that file resolve relative to the configuration file. See the [configuration reference](configuration.md). `--config` must name a regular file or a symbolic link to one; a directory, FIFO, socket, or device is reported as not a file without being opened. When the configuration file cannot be read, `validate`, `run`, `assess`, and `report` print its absolute path and the reason, and exit with code `1`; when the file does not exist, the error also suggests `tevu task add` and `tevu config example`. `task add` starts its setup interview only when the file does not exist and its directory exists; any other read failure, or a missing directory, ends the command with code `1` before the first question.
 
 `<reference>` for `--github` is `OWNER/REPO#NUMBER` or an issue URL (`https://HOST/OWNER/REPO/issues/NUMBER`). `--github` needs the GitHub CLI (`gh`) installed and authenticated for the issue's host; see the [configuration reference](configuration.md#github-issues).
 

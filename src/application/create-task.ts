@@ -2,6 +2,7 @@ import { TevuConfigSchema } from "../config/schema.ts";
 
 import type { TaskDefinition, TevuConfig } from "../config/schema.ts";
 import type {
+  LoadConfigErrorKind,
   TaskDependencies,
   TaskSourceRequest,
   TaskWizardInput,
@@ -13,6 +14,7 @@ import type {
 type CreateTaskErrorKind =
   | "ConfigParseError"
   | "ConfigValidationError"
+  | "ConfigReadError"
   | "SourceMaterializationError"
   | "IssueImportError"
   | "ArtifactError"
@@ -111,7 +113,7 @@ export async function createTask(
 async function loadBaseDocument(
   input: TaskWizardInput,
   dependencies: TaskDependencies,
-): Promise<TevuResult<TevuConfig, "ConfigParseError" | "ConfigValidationError" | "ArtifactError">> {
+): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>> {
   const exists = await dependencies.configStore.exists(input.configPath);
   if (exists) {
     return dependencies.configStore.read(input.configPath);

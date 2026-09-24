@@ -28,6 +28,12 @@ export type ValidationFinding = {
   message: string;
 };
 
+/** Why the configuration file could not be read. */
+export type ConfigReadCause = "not-found" | "permission-denied" | "not-a-file" | "unreadable";
+
+/** Error kinds a configuration load can produce. */
+export type LoadConfigErrorKind = "ConfigParseError" | "ConfigValidationError" | "ConfigReadError";
+
 /** Tracker behind an imported task source; each value equals the stored `source.kind`. */
 export type IssueTrackerKind = "jira-cloud" | "github-issue";
 
@@ -35,6 +41,14 @@ export type IssueTrackerKind = "jira-cloud" | "github-issue";
 export type TevuError =
   | { kind: "ConfigParseError"; findings: ValidationFinding[] }
   | { kind: "ConfigValidationError"; findings: ValidationFinding[] }
+  | {
+      kind: "ConfigReadError";
+      /** Absolute path the loader probed: `path.resolve(requestedPath)`. */
+      path: string;
+      /** Configuration path exactly as the command received it; the not-found hints embed it. */
+      requestedPath: string;
+      cause: ConfigReadCause;
+    }
   | { kind: "PrerequisiteError"; tool: string; expected: string; actual?: string }
   | { kind: "SourceMaterializationError"; taskId: string; reason: string }
   | { kind: "IsolationError"; caseId: string; reason: string }
@@ -583,10 +597,18 @@ export interface ArtifactStore {
 
 /** Reads and atomically replaces the YAML configuration document. */
 export interface ConfigStore {
+  /**
+   * Resolves `false` only when probing the resolved absolute path fails with
+   * `ENOENT`. Every other failure resolves `true`, so `read` reports the
+   * precise `ConfigReadError`.
+   */
   exists(path: string): Promise<boolean>;
-  read(
-    path: string,
-  ): Promise<TevuResult<TevuConfig, "ConfigParseError" | "ConfigValidationError" | "ArtifactError">>;
+  /**
+   * Fails with `PrerequisiteError` only when probing the directory of the
+   * resolved absolute path fails with `ENOENT`; every other outcome succeeds.
+   */
+  requireDirectory(path: string): Promise<TevuResult<void, "PrerequisiteError">>;
+  read(path: string): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>>;
   replace(path: string, config: TevuConfig): Promise<TevuResult<void, "ArtifactError">>;
 }
 

@@ -44,6 +44,7 @@ import type {
   Clock,
   EnvironmentAdapter,
   GitWorkspaceAdapter,
+  LoadConfigErrorKind,
   OpenCodeAdapter,
   TaskWizardInput,
   TevuResult,
@@ -88,7 +89,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
 
   const loadConfigAndRegisterSecrets = async (
     configPath: string,
-  ): Promise<TevuResult<TevuConfig, "ConfigParseError" | "ConfigValidationError" | "ArtifactError">> => {
+  ): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>> => {
     const loaded = await loadConfig(configPath);
     if (loaded.ok) {
       registerConfigSecrets(registry, loaded.value);
@@ -108,6 +109,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
   const operations: ProgramOperations = {
     configExists: (configPath) => configStore.exists(configPath),
     loadConfig: loadConfigAndRegisterSecrets,
+    requireConfigDirectory: (configPath) => configStore.requireDirectory(configPath),
     importJiraIssue: (settings, issueKey) => {
       registry.add([process.env[settings.tokenEnvironmentVariable]]);
       const jira = createJiraCloudAdapter(settings, {
@@ -301,7 +303,7 @@ function resolveWizardRepositoryPaths(input: TaskWizardInput): TaskWizardInput {
 /** Projects bootstrap answers as a configuration value for adapter construction; tasks arrive via `createTask`. */
 function projectBootstrapConfig(
   bootstrap: NonNullable<TaskWizardInput["bootstrap"]>,
-): TevuResult<TevuConfig, "ConfigParseError" | "ConfigValidationError" | "ArtifactError"> {
+): TevuResult<TevuConfig, LoadConfigErrorKind> {
   return {
     ok: true,
     value: {
