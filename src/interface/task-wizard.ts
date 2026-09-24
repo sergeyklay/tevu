@@ -37,6 +37,7 @@ import type {
   AssessmentRecord,
   ConfigBootstrapInput,
   IssueSnapshot,
+  LoadConfigErrorKind,
   TaskSourceRequest,
   TaskWizardInput,
   TevuResult,
@@ -59,10 +60,8 @@ export type TaskWizardRequest = {
 /** Injected effects for the task wizard; it performs no write itself. */
 export type TaskWizardDependencies = {
   io: WizardIo;
-  /** Reads and validates the existing configuration; `null` means the file is missing. */
-  readConfig: () => Promise<
-    TevuResult<TevuConfig | null, "ConfigParseError" | "ConfigValidationError" | "ArtifactError">
-  >;
+  /** Reads and validates the existing configuration; `null` means the file is missing and its directory exists. */
+  readConfig: () => Promise<TevuResult<TevuConfig | null, LoadConfigErrorKind | "PrerequisiteError">>;
   /** Reads one Jira issue exactly once with the given connection settings. */
   importJiraIssue: (
     settings: JiraCloudConfig,
@@ -80,7 +79,7 @@ export type TaskWizardDependencies = {
 type TaskWizardErrorKind =
   | "ConfigParseError"
   | "ConfigValidationError"
-  | "ArtifactError"
+  | "ConfigReadError"
   | "IssueImportError"
   | "PrerequisiteError"
   | "CancellationError";
@@ -140,10 +139,12 @@ class WizardCancelledError extends Error {
 /**
  * Runs the `tevu task add` interview and returns the typed wizard input.
  *
- * Fails before any question when stdin or stdout is not a TTY or when an
- * existing configuration is invalid. When the configuration file is missing it
- * bootstraps every required top-level setting, at least one repository, and at
- * least two contenders before the first task question. A Jira source is
+ * Fails before any question when stdin or stdout is not a TTY, when an
+ * existing configuration is invalid or cannot be read, or when the
+ * configuration directory does not exist. When the configuration file is
+ * missing and its directory exists, it bootstraps every required top-level
+ * setting, at least one repository, and at least two contenders before the
+ * first task question. A Jira source is
  * imported exactly once and displayed; the snapshot travels inside the
  * returned input so task creation never reads Jira again. The final redacted
  * review must be accepted before the input is returned; the caller then

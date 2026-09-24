@@ -5,10 +5,7 @@ import { parseDocument } from "yaml";
 import { TevuConfigSchema } from "./schema.ts";
 
 import type { TevuConfig } from "./schema.ts";
-import type { TevuResult, ValidationFinding } from "../domain/types.ts";
-
-/** Error kinds a configuration load can produce. */
-type LoadConfigErrorKind = "ConfigParseError" | "ConfigValidationError" | "ArtifactError";
+import type { ConfigReadCause, LoadConfigErrorKind, TevuResult, ValidationFinding } from "../domain/types.ts";
 
 /**
  * Loads and validates the UTF-8 YAML configuration at the given path.
@@ -16,26 +13,30 @@ type LoadConfigErrorKind = "ConfigParseError" | "ConfigValidationError" | "Artif
  * Parses with YAML 1.2 core semantics, validates through the strict
  * authoritative schema, resolves relative paths against the configuration file
  * directory, and enforces real-path separation between the artifact directory
- * and every configured repository. Performs no Git, OpenCode, Jira, wizard, or
- * artifact mutation work.
+ * and every configured repository. Establishes the path names a regular file
+ * through `stat` before ever opening it. Performs no Git, OpenCode, Jira,
+ * wizard, or artifact mutation work.
  */
 export async function loadConfig(
   configPath: string,
 ): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>> {
   const absoluteConfigPath = path.resolve(configPath);
 
+  let stats: Awaited<ReturnType<typeof fs.stat>>;
+  try {
+    stats = await fs.stat(absoluteConfigPath);
+  } catch (cause) {
+    return configReadFailure(absoluteConfigPath, configPath, classify(cause));
+  }
+  if (!stats.isFile()) {
+    return configReadFailure(absoluteConfigPath, configPath, "not-a-file");
+  }
+
   let text: string;
   try {
     text = await fs.readFile(absoluteConfigPath, "utf8");
-  } catch {
-    return {
-      ok: false,
-      error: {
-        kind: "ArtifactError",
-        operation: "read-configuration",
-        reason: "Cannot read configuration file; check the path and access permissions",
-      },
-    };
+  } catch (cause) {
+    return configReadFailure(absoluteConfigPath, configPath, classify(cause));
   }
 
   const document = parseDocument(text, { version: "1.2", schema: "core" });
@@ -195,4 +196,41 @@ function issuePathIdentifier(issuePath: ReadonlyArray<PropertyKey>): string {
   return issuePath
     .map((segment) => (typeof segment === "symbol" ? String(segment.description ?? "symbol") : String(segment)))
     .join(".");
+}
+
+function configReadFailure(
+  absolutePath: string,
+  requestedPath: string,
+  cause: ConfigReadCause,
+): TevuResult<never, "ConfigReadError"> {
+  return { ok: false, error: { kind: "ConfigReadError", path: absolutePath, requestedPath, cause } };
+}
+
+/**
+ * Classifies a `stat`/`readFile` failure by its system error code.
+ *
+ * Duplicated from the adapter layer's own `systemErrorCode`, which `config`
+ * may not import under the project's dependency direction.
+ */
+function classify(cause: unknown): ConfigReadCause {
+  const code = systemErrorCode(cause);
+  switch (code) {
+    case "ENOENT":
+    case "ENOTDIR":
+      return "not-found";
+    case "EACCES":
+    case "EPERM":
+      return "permission-denied";
+    case "EISDIR":
+      return "not-a-file";
+    default:
+      return "unreadable";
+  }
+}
+
+function systemErrorCode(cause: unknown): string | null {
+  if (typeof cause === "object" && cause !== null && "code" in cause && typeof (cause as { code: unknown }).code === "string") {
+    return (cause as { code: string }).code;
+  }
+  return null;
 }

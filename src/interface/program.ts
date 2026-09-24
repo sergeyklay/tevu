@@ -22,6 +22,7 @@ import type {
   CaseLifecycle,
   CaseResult,
   IssueSnapshot,
+  LoadConfigErrorKind,
   OpenCodeCapabilityReport,
   ReportResult,
   RunResult,
@@ -46,9 +47,6 @@ export type BenchmarkExecutionHooks = {
   onLifecycle?: (caseId: string, lifecycle: CaseLifecycle) => void;
 };
 
-/** Error kinds a configuration load can produce. */
-type LoadConfigErrorKind = "ConfigParseError" | "ConfigValidationError" | "ArtifactError";
-
 /**
  * Every effectful operation the command handlers route to. The composition
  * root binds these to the real application use cases and adapters; product
@@ -57,6 +55,7 @@ type LoadConfigErrorKind = "ConfigParseError" | "ConfigValidationError" | "Artif
 export type ProgramOperations = {
   configExists(configPath: string): Promise<boolean>;
   loadConfig(configPath: string): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>>;
+  requireConfigDirectory(configPath: string): Promise<TevuResult<void, "PrerequisiteError">>;
   importJiraIssue(
     settings: JiraCloudConfig,
     issueKey: string,
@@ -71,6 +70,7 @@ export type ProgramOperations = {
       TaskDefinition,
       | "ConfigParseError"
       | "ConfigValidationError"
+      | "ConfigReadError"
       | "SourceMaterializationError"
       | "IssueImportError"
       | "ArtifactError"
@@ -396,9 +396,15 @@ async function runTaskAdd(
     { configPath: options.config, jiraIssueKey: options.jira, githubIssueReference: options.github },
     {
       io: { input: dependencies.io.stdin, output: dependencies.io.stdout },
-      readConfig: async (): Promise<TevuResult<TevuConfig | null, LoadConfigErrorKind>> => {
+      readConfig: async (): Promise<
+        TevuResult<TevuConfig | null, LoadConfigErrorKind | "PrerequisiteError">
+      > => {
         const exists = await operations.configExists(options.config);
         if (!exists) {
+          const directory = await operations.requireConfigDirectory(options.config);
+          if (!directory.ok) {
+            return directory;
+          }
           return { ok: true, value: null };
         }
         return operations.loadConfig(options.config);
@@ -410,11 +416,11 @@ async function runTaskAdd(
     },
   );
   if (!wizard.ok) {
-    return reportFailure(err, wizard.error);
+    return reportFailure(err, wizard.error, dependencies.redact);
   }
   const created = await operations.createTask(wizard.value);
   if (!created.ok) {
-    return reportFailure(err, created.error);
+    return reportFailure(err, created.error, dependencies.redact);
   }
   out(`Task "${created.value.id}" added to ${options.config}.`);
   return EXIT_COMPLETED;
@@ -427,11 +433,11 @@ async function runValidate(
   const { out, err } = createLineWriters(dependencies);
   const loaded = await dependencies.operations.loadConfig(options.config);
   if (!loaded.ok) {
-    return reportFailure(err, loaded.error);
+    return reportFailure(err, loaded.error, dependencies.redact);
   }
   const report = await dependencies.operations.validateConfig(loaded.value);
   if (!report.ok) {
-    return reportFailure(err, report.error);
+    return reportFailure(err, report.error, dependencies.redact);
   }
   printFindings(out, report.value.findings);
   out(report.value.valid ? "Configuration is valid." : "Configuration is invalid.");
@@ -446,11 +452,11 @@ async function runBenchmarkCommand(
   const operations = dependencies.operations;
   const loaded = await operations.loadConfig(options.config);
   if (!loaded.ok) {
-    return reportFailure(err, loaded.error);
+    return reportFailure(err, loaded.error, dependencies.redact);
   }
   const validation = await operations.validateConfig(loaded.value);
   if (!validation.ok) {
-    return reportFailure(err, validation.error);
+    return reportFailure(err, validation.error, dependencies.redact);
   }
   printFindings(out, validation.value.findings);
   if (!validation.value.valid) {
@@ -478,7 +484,7 @@ async function runBenchmarkCommand(
       : undefined,
   });
   if (!executed.ok) {
-    return reportFailure(err, executed.error);
+    return reportFailure(err, executed.error, dependencies.redact);
   }
   const run = executed.value;
   const runId = run.manifest.runId;
@@ -500,7 +506,7 @@ async function runBenchmarkCommand(
   }
   const rebuilt = await operations.rebuildRunReport(loaded.value, runId);
   if (!rebuilt.ok) {
-    for (const line of renderTevuError(rebuilt.error)) {
+    for (const line of renderTevuError(rebuilt.error, dependencies.redact)) {
       err(line);
     }
     err(`The report could not be generated; recover with: tevu report ${runId}`);
@@ -520,7 +526,7 @@ async function runAssess(
   const operations = dependencies.operations;
   const loaded = await operations.loadConfig(options.config);
   if (!loaded.ok) {
-    return reportFailure(err, loaded.error);
+    return reportFailure(err, loaded.error, dependencies.redact);
   }
   const config = loaded.value;
   const wizard = await runAssessmentWizard(
@@ -533,14 +539,14 @@ async function runAssess(
     },
   );
   if (!wizard.ok) {
-    return reportFailure(err, wizard.error);
+    return reportFailure(err, wizard.error, dependencies.redact);
   }
   const applied = await operations.applyAssessment(config, {
     ...wizard.value,
     cancellation: dependencies.cancellation,
   });
   if (!applied.ok) {
-    return reportFailure(err, applied.error);
+    return reportFailure(err, applied.error, dependencies.redact);
   }
   out(`Assessment recorded for case ${caseId}; derived task outcome: ${applied.value.outcome}.`);
   out(`Report: ${config.artifacts.directory}/${runId}/report.md`);
@@ -555,11 +561,11 @@ async function runReport(
   const { out, err } = createLineWriters(dependencies);
   const loaded = await dependencies.operations.loadConfig(options.config);
   if (!loaded.ok) {
-    return reportFailure(err, loaded.error);
+    return reportFailure(err, loaded.error, dependencies.redact);
   }
   const rebuilt = await dependencies.operations.rebuildRunReport(loaded.value, runId);
   if (!rebuilt.ok) {
-    return reportFailure(err, rebuilt.error);
+    return reportFailure(err, rebuilt.error, dependencies.redact);
   }
   out(`Report regenerated: ${loaded.value.artifacts.directory}/${runId}/report.md`);
   return EXIT_COMPLETED;
@@ -607,19 +613,21 @@ function printFindings(out: LineWriter, findings: readonly ValidationFinding[]):
 }
 
 /** Prints one typed failure and returns its mapped exit code. */
-function reportFailure(err: LineWriter, error: TevuError): number {
-  for (const line of renderTevuError(error)) {
+function reportFailure(err: LineWriter, error: TevuError, redact: (text: string) => string): number {
+  for (const line of renderTevuError(error, redact)) {
     err(line);
   }
   return error.kind === "CancellationError" ? EXIT_CANCELLED : EXIT_FAILURE;
 }
 
-function renderTevuError(error: TevuError): string[] {
+function renderTevuError(error: TevuError, redact: (text: string) => string): string[] {
   switch (error.kind) {
     case "ConfigParseError":
       return ["error: the configuration could not be parsed", ...renderFindingLines(error.findings)];
     case "ConfigValidationError":
       return ["error: the configuration is invalid", ...renderFindingLines(error.findings)];
+    case "ConfigReadError":
+      return renderConfigReadError(error, redact);
     case "PrerequisiteError":
       return [
         `error: prerequisite "${error.tool}" is not satisfied; expected ${error.expected}${error.actual === undefined ? "" : `, actual ${error.actual}`}`,
@@ -659,4 +667,46 @@ function renderTevuError(error: TevuError): string[] {
 
 function renderFindingLines(findings: readonly ValidationFinding[]): string[] {
   return findings.map((finding) => `  ${finding.severity} ${finding.identifier}: ${finding.message}`);
+}
+
+/** Renders the cause line and, for a missing file, the two redacted, shell-safe creation hints. */
+function renderConfigReadError(
+  error: Extract<TevuError, { kind: "ConfigReadError" }>,
+  redact: (text: string) => string,
+): string[] {
+  const firstLine = configReadErrorLine(error);
+  if (error.cause !== "not-found") {
+    return [firstLine];
+  }
+  const word = shellWord(redact(error.requestedPath));
+  const taskAddCommand =
+    error.requestedPath === DEFAULT_CONFIG_PATH ? "tevu task add" : `tevu task add --config ${word}`;
+  return [
+    firstLine,
+    `  create one interactively: ${taskAddCommand}`,
+    `  or start from the template: tevu config example > ${word}`,
+  ];
+}
+
+function configReadErrorLine(error: Extract<TevuError, { kind: "ConfigReadError" }>): string {
+  switch (error.cause) {
+    case "not-found":
+      return `error: configuration file not found: ${error.path}`;
+    case "permission-denied":
+      return `error: cannot read configuration file ${error.path}: permission denied`;
+    case "not-a-file":
+      return `error: configuration path is not a file: ${error.path}`;
+    case "unreadable":
+      return `error: cannot read configuration file ${error.path}`;
+  }
+}
+
+const SHELL_SAFE_WORD_PATTERN = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/** Quotes text for safe pasting into a POSIX shell, per the project's shell-word rule. */
+function shellWord(text: string): string {
+  if (SHELL_SAFE_WORD_PATTERN.test(text)) {
+    return text;
+  }
+  return `'${text.replaceAll("'", "'\\''")}'`;
 }

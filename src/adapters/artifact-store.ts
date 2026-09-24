@@ -119,11 +119,30 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
   return {
     async exists(configPath: string): Promise<boolean> {
       try {
-        await fs.access(configPath);
+        await fs.access(path.resolve(configPath));
         return true;
-      } catch {
-        return false;
+      } catch (cause) {
+        return systemErrorCode(cause) !== "ENOENT";
       }
+    },
+    async requireDirectory(configPath: string): Promise<TevuResult<void, "PrerequisiteError">> {
+      const directory = path.dirname(path.resolve(configPath));
+      try {
+        await fs.access(directory);
+      } catch (cause) {
+        if (systemErrorCode(cause) === "ENOENT") {
+          return {
+            ok: false,
+            error: {
+              kind: "PrerequisiteError",
+              tool: "configuration directory",
+              expected: "an existing directory",
+              actual: `${directory} does not exist`,
+            },
+          };
+        }
+      }
+      return okVoid();
     },
     read(configPath: string) {
       return loadConfig(configPath);
