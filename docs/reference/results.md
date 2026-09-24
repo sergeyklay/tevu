@@ -1,6 +1,6 @@
 # Results reference
 
-A run contains one case for each task/contender pair. Each case is identified as `<task-id>--<contender-id>`. The report compares cases per task without selecting a winner or calculating a combined score.
+A run contains one case for each task/model entry pair. Each case is identified as `<task-id>--<model-id>`. The report compares cases per task without selecting a winner or calculating a combined score.
 
 ## Outcomes
 
@@ -42,7 +42,7 @@ Files are stored under the configured artifact directory:
   run.json
   result.json
   report.md
-  cases/<task-id>--<contender-id>/
+  cases/<task-id>--<model-id>/
     events.jsonl
     stderr.log
     session.json
@@ -65,6 +65,8 @@ Files are stored under the configured artifact directory:
 | `assessment.json` | Current manual verdicts, revision, and replacement history |
 | Case `result.json` | Case lifecycle, process result, task outcome, metrics, and evidence paths |
 
+The root `result.json`'s top-level `models` array holds one `{id, model, effort}` entry per configured model entry. Every saved case identity, in `run.json` and both levels of `result.json`, carries `modelId` and `effort` alongside the unchanged `model` string.
+
 Some source files are absent when the corresponding evidence was unavailable; assessments appear after the first assessment. Their absence is recorded rather than treated as a successful measurement.
 
 Reports link to patches, transcripts, and complete evaluator output instead of embedding them. Full task prompts and imported issue descriptions are omitted from Markdown reports.
@@ -76,6 +78,8 @@ Configured credential-secret values are redacted before persistent or terminal o
 ## Regeneration
 
 `tevu report <run-id>` recomputes normalized results and Markdown from saved evidence and current assessments. It does not start another model session or contact Git or an issue tracker. Unchanged source artifacts produce identical regenerated JSON and Markdown.
+
+`tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. A run whose snapshot predates that layout is refused before either command writes anything.
 
 Replacing an assessment retains the old verdict in history. Only current verdicts affect the outcome. Artifacts remain until the operator deletes the run directory; there is no automatic retention or upload.
 
