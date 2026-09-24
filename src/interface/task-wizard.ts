@@ -14,35 +14,36 @@ import {
   intro,
   isCancel,
   log,
-  multiselect,
   note,
   select,
   text,
 } from "@clack/prompts";
 
+import { DurationSchema, VariableNameSchema, referencedVariableName } from "../config/schema.ts";
+
 import type { Readable, Writable } from "node:stream";
 import type { CANCEL_SYMBOL, Option } from "@clack/prompts";
 import type {
-  CheckDefinition,
-  ContenderDefinition,
-  EnvironmentVariableDefinition,
-  JiraCloudConfig,
-  ReadyItem,
+  CheckInput,
+  JiraTrackerSettings,
+  ModelDefinitionInput,
   RepositoryDefinition,
+  RepositoryInput,
+  TaskInput,
   TevuConfig,
+  TevuConfigInput,
 } from "../config/schema.ts";
 import type {
   AssessmentDecision,
   AssessmentInput,
   AssessmentRecord,
-  ConfigBootstrapInput,
   IssueSnapshot,
   LoadConfigErrorKind,
-  TaskSourceRequest,
-  TaskWizardInput,
   TevuResult,
   ValidationFinding,
 } from "../domain/types.ts";
+import type { TaskWizardInput } from "../application/create-task.ts";
+import type { AssessmentCaseContext, ManualCheckSummary } from "../application/assess.ts";
 
 /** Interactive streams the wizards prompt on; both must be TTYs. */
 export type WizardIo = {
@@ -64,7 +65,7 @@ export type TaskWizardDependencies = {
   readConfig: () => Promise<TevuResult<TevuConfig | null, LoadConfigErrorKind | "PrerequisiteError">>;
   /** Reads one Jira issue exactly once with the given connection settings. */
   importJiraIssue: (
-    settings: JiraCloudConfig,
+    settings: JiraTrackerSettings,
     issueKey: string,
   ) => Promise<TevuResult<IssueSnapshot, "IssueImportError" | "CancellationError">>;
   /** Reads one GitHub issue exactly once through the operator's installed `gh`. */
@@ -83,22 +84,6 @@ type TaskWizardErrorKind =
   | "IssueImportError"
   | "PrerequisiteError"
   | "CancellationError";
-
-/** One manual check of the assessed case, in configuration order. */
-export type ManualCheckSummary = {
-  checkId: string;
-  category: "acceptance" | "definition-of-done";
-  description: string;
-  required: boolean;
-};
-
-/** Pre-read display context for one case's manual assessment. */
-export type AssessmentCaseContext = {
-  /** Every manual check of the case's task, in configuration order. */
-  manualChecks: ManualCheckSummary[];
-  /** Current assessment records; replaced ones live in artifact history, not here. */
-  existing: AssessmentRecord[];
-};
 
 /** Command-line facts the assessment wizard starts from. */
 export type AssessmentWizardRequest = {
@@ -143,12 +128,12 @@ class WizardCancelledError extends Error {
  * existing configuration is invalid or cannot be read, or when the
  * configuration directory does not exist. When the configuration file is
  * missing and its directory exists, it bootstraps every required top-level
- * setting, at least one repository, and at least two contenders before the
- * first task question. A Jira source is
- * imported exactly once and displayed; the snapshot travels inside the
- * returned input so task creation never reads Jira again. The final redacted
- * review must be accepted before the input is returned; the caller then
- * delegates the single configuration write to `createTask`.
+ * setting, at least one repository, and at least two models before the first
+ * task question. A Jira source is imported exactly once and displayed; the
+ * snapshot travels inside the returned input so task creation never reads
+ * Jira again. The final redacted review must be accepted before the input is
+ * returned; the caller then delegates the single configuration write to
+ * `createTask`.
  */
 export async function runTaskWizard(
   request: TaskWizardRequest,
@@ -162,12 +147,16 @@ export async function runTaskWizard(
   if (!existing.ok) {
     return existing;
   }
-  if (request.jiraIssueKey !== undefined && existing.value !== null && existing.value.jira === undefined) {
+  if (
+    request.jiraIssueKey !== undefined &&
+    existing.value !== null &&
+    existing.value.trackers?.jira === undefined
+  ) {
     return configValidationFailure([
       {
         severity: "error",
-        identifier: "jira",
-        message: "task add --jira requires Jira settings in the existing configuration",
+        identifier: "trackers.jira",
+        message: "task add --jira requires trackers.jira in the existing configuration",
       },
     ]);
   }
@@ -306,80 +295,79 @@ export async function runAssessmentWizard(
 async function interviewBootstrap(
   io: WizardIo,
   requireJira: boolean,
-): Promise<ConfigBootstrapInput> {
+): Promise<Omit<TevuConfigInput, "version" | "tasks">> {
   log.info(
     "No configuration file exists yet; capturing the complete configuration first.",
     promptOptions(io),
   );
-  const artifactsDirectory = await askText(io, {
-    message: "Artifacts directory (outside every repository)",
+  const outputDirectory = await askText(io, {
+    message: "Run output directory (outside every repository, relative to the configuration file)",
     validate: validateNonWhitespace,
   });
-  const concurrency = await askInteger(io, "Execution concurrency (1-32)", 1, 32);
-  const caseTimeoutMs = await askInteger(io, "Case timeout in milliseconds", 1);
-  const terminationGraceMs = await askInteger(io, "Termination grace in milliseconds", 1);
-  const executable = await askText(io, {
-    message: "OpenCode executable (command name or path)",
+  const concurrency = await askInteger(io, "Concurrent cases (1-32)", 1, 32);
+  const timeout = await askText(io, {
+    message: "Agent time limit per case (for example 10m)",
+    validate: validateDuration,
+  });
+  const stopGrace = await askText(io, {
+    message: "Grace period before a forced stop (for example 3s)",
+    validate: validateDuration,
+  });
+  const checkTimeoutRaw = await askText(io, {
+    message: "Default time limit for command checks (for example 5m; empty to set one per check)",
+    defaultValue: "",
+    validate: (value) => (value === undefined || value.trim().length === 0 ? undefined : validateDuration(value)),
+  });
+  const command = await askText(io, {
+    message: "OpenCode command (name on PATH, or a path relative to the configuration file)",
     validate: validateNonWhitespace,
   });
   const takenNames = new Set<string>();
-  const opencodeEnvironment = await interviewEnvironmentList(io, "OpenCode", false, takenNames);
-  const evaluatorEnvironment = await interviewEnvironmentList(io, "evaluator", true, takenNames);
-  const evaluatorNames = new Set(evaluatorEnvironment.map((entry) => entry.name));
-  const jira = await interviewJiraSettings(io, requireJira, evaluatorNames);
+  const secrets = await interviewVariableList(io, "secret", takenNames);
+  const env = await interviewVariableList(io, "ordinary", takenNames);
+  const agentNames = new Set([...secrets, ...env]);
+  const jira = await interviewJiraSettings(io, requireJira, agentNames);
   const repositories = await interviewRepositories(io);
-  const contenders = await interviewContenders(io);
+  const models = await interviewModels(io);
   return {
-    artifacts: { directory: artifactsDirectory },
-    execution: {
+    run: {
+      output_dir: outputDirectory,
       concurrency,
-      caseTimeoutMs,
-      terminationGraceMs,
-      opencodeEnvironment,
-      evaluatorEnvironment,
+      timeout,
+      stop_grace: stopGrace,
+      ...(checkTimeoutRaw.trim().length === 0 ? {} : { check_timeout: checkTimeoutRaw.trim() }),
     },
-    opencode: { executable },
-    ...(jira === undefined ? {} : { jira }),
+    agents: { opencode: { command, secrets, env } },
+    ...(jira === undefined ? {} : { trackers: { jira } }),
     repositories,
-    contenders,
+    models,
   };
 }
 
-/** Collects one pass-through environment variable list, names and classifications only. */
-async function interviewEnvironmentList(
+/** Collects one pass-through agent variable list, names only, unique across both lists. */
+async function interviewVariableList(
   io: WizardIo,
-  label: string,
-  ordinaryOnly: boolean,
+  kind: "secret" | "ordinary",
   takenNames: Set<string>,
-): Promise<EnvironmentVariableDefinition[]> {
-  const entries: EnvironmentVariableDefinition[] = [];
+): Promise<string[]> {
+  const names: string[] = [];
   for (;;) {
     const wantsEntry = await askConfirm(io, {
       message:
-        entries.length === 0
-          ? `Add a ${label} environment variable (names only, never values)?`
-          : `Add another ${label} environment variable?`,
+        names.length === 0
+          ? `Add a ${kind} variable for the agent${kind === "secret" ? " (name only, never the value)" : ""}?`
+          : `Add another ${kind} variable for the agent?`,
       initialValue: false,
     });
     if (!wantsEntry) {
-      return entries;
+      return names;
     }
     const name = await askText(io, {
-      message: `${label} environment variable name`,
-      validate: validateEnvironmentName(takenNames),
+      message: kind === "secret" ? "Secret variable name" : "Variable name",
+      validate: validateVariableName(takenNames),
     });
-    const classification = ordinaryOnly
-      ? "ordinary"
-      : await askSelect<EnvironmentVariableDefinition["classification"]>(io, {
-          message: `Classification for "${name}"`,
-          options: [
-            { value: "provider-credential", label: "provider-credential" },
-            { value: "secret", label: "secret" },
-            { value: "ordinary", label: "ordinary" },
-          ],
-        });
     takenNames.add(name);
-    entries.push({ name, classification });
+    names.push(name);
   }
 }
 
@@ -387,8 +375,8 @@ async function interviewEnvironmentList(
 async function interviewJiraSettings(
   io: WizardIo,
   requireJira: boolean,
-  evaluatorNames: ReadonlySet<string>,
-): Promise<JiraCloudConfig | undefined> {
+  agentNames: ReadonlySet<string>,
+): Promise<JiraTrackerSettings | undefined> {
   const wantsJira =
     requireJira ||
     (await askConfirm(io, {
@@ -399,34 +387,33 @@ async function interviewJiraSettings(
     return undefined;
   }
   const validateCredentialName = (raw: string | undefined): string | undefined => {
-    const value = raw ?? "";
-    if (value.trim().length === 0) {
-      return "a non-empty environment variable name is required";
+    const grammar = validateVariableNameGrammar(raw ?? "");
+    if (grammar !== undefined) {
+      return grammar;
     }
-    if (evaluatorNames.has(value)) {
-      return "Jira credential variables must not appear in execution.evaluatorEnvironment";
+    if (agentNames.has(raw ?? "")) {
+      return "Jira credential variables must not also be passed to the agent";
     }
     return undefined;
   };
-  return {
-    baseUrl: await askText(io, {
-      message: "Jira Cloud base URL (https)",
-      validate: validateHttpsUrl,
-    }),
-    emailEnvironmentVariable: await askText(io, {
-      message: "Environment variable holding the Jira account email",
-      validate: validateCredentialName,
-    }),
-    tokenEnvironmentVariable: await askText(io, {
-      message: "Environment variable holding the Jira API token",
-      validate: validateCredentialName,
-    }),
-  };
+  const url = await askText(io, {
+    message: "Jira Cloud site URL (https)",
+    validate: validateHttpsUrl,
+  });
+  const email = await askText(io, {
+    message: "Variable holding the Jira account email",
+    validate: validateCredentialName,
+  });
+  const token = await askText(io, {
+    message: "Variable holding the Jira API token",
+    validate: validateCredentialName,
+  });
+  return { url, email: `$${email}`, token: `$${token}` };
 }
 
 /** Collects at least one source repository during bootstrap. */
-async function interviewRepositories(io: WizardIo): Promise<RepositoryDefinition[]> {
-  const repositories: RepositoryDefinition[] = [];
+async function interviewRepositories(io: WizardIo): Promise<RepositoryInput[]> {
+  const repositories: RepositoryInput[] = [];
   const usedIds = new Set<string>();
   do {
     const entry = await interviewRepositoryEntry(io, usedIds);
@@ -454,32 +441,32 @@ async function interviewRepositoryEntry(
   return { id, path };
 }
 
-/** Collects at least two contenders during bootstrap. */
-async function interviewContenders(io: WizardIo): Promise<ContenderDefinition[]> {
-  const contenders: ContenderDefinition[] = [];
+/** Collects at least two model entries during bootstrap. */
+async function interviewModels(io: WizardIo): Promise<ModelDefinitionInput[]> {
+  const models: ModelDefinitionInput[] = [];
   const usedIds = new Set<string>();
   for (;;) {
     const id = await askText(io, {
-      message: "Contender ID",
+      message: "Model entry ID",
       validate: validateId(usedIds),
     });
     const model = await askModel(io, id);
-    const variant = await askText(io, {
-      message: `Effort variant for "${id}"`,
+    const effort = await askText(io, {
+      message: `Reasoning effort for "${id}" (passed to OpenCode as --variant)`,
       validate: validateNonWhitespace,
     });
     usedIds.add(id);
-    contenders.push({ id, model, variant });
-    if (contenders.length < 2) {
-      log.info("A runnable configuration needs at least two contenders.", promptOptions(io));
+    models.push({ id, model, effort });
+    if (models.length < 2) {
+      log.info("A runnable configuration needs at least two model entries.", promptOptions(io));
       continue;
     }
     const wantsMore = await askConfirm(io, {
-      message: "Add another contender?",
+      message: "Add another model?",
       initialValue: false,
     });
     if (!wantsMore) {
-      return contenders;
+      return models;
     }
   }
 }
@@ -489,19 +476,19 @@ async function interviewTask(
   request: TaskWizardRequest,
   dependencies: TaskWizardDependencies,
   existing: TevuConfig | null,
-  bootstrap: ConfigBootstrapInput | undefined,
+  bootstrap: Omit<TevuConfigInput, "version" | "tasks"> | undefined,
 ): Promise<TevuResult<TaskWizardInput, "IssueImportError">> {
   const io = dependencies.io;
-  const jiraSettings = existing?.jira ?? bootstrap?.jira;
+  const jiraSettings = existing?.trackers?.jira ?? bootstrap?.trackers?.jira;
   const source = await interviewSource(request, dependencies, jiraSettings);
   if (!source.ok) {
     return source;
   }
   const repositories = existing?.repositories ?? bootstrap?.repositories ?? [];
-  const { repositoryId, newRepository } = await interviewRepositorySelection(io, repositories);
-  const startCommit = (
+  const { repo, newRepository } = await interviewRepositorySelection(io, repositories);
+  const baseCommit = (
     await askText(io, {
-      message: "Pinned start commit (resolved and pinned during creation)",
+      message: "Base commit (a commit from before the fix; resolved and pinned when saved)",
       validate: validateNonWhitespace,
     })
   ).trim();
@@ -509,95 +496,97 @@ async function interviewTask(
     message: "Task ID",
     validate: validateId(new Set((existing?.tasks ?? []).map((task) => task.id))),
   });
+  const title = await askText(io, {
+    message: "Task title",
+    ...(source.value.importedTitle === undefined ? {} : { initialValue: source.value.importedTitle }),
+    validate: validateNonWhitespace,
+  });
   const description = await askText(io, {
     message: "Task description",
     validate: validateNonWhitespace,
   });
   const prompt = await askText(io, {
-    message: "Task prompt handed to every contender",
+    message: "Task prompt sent to every model",
     validate: validateNonWhitespace,
   });
-  const definitionOfReady = await interviewDefinitionOfReady(io);
+  const readiness = await interviewReadiness(io);
   const usedCheckIds = new Set<string>();
-  const evaluatorNames = (
-    existing?.execution.evaluatorEnvironment ??
-    bootstrap?.execution.evaluatorEnvironment ??
-    []
-  ).map((entry) => entry.name);
-  const acceptanceCriteria = await interviewChecks(
-    io,
-    "acceptance criterion",
-    usedCheckIds,
-    evaluatorNames,
+  const agentNames = new Set([
+    ...(existing?.agents.opencode.secrets ?? bootstrap?.agents.opencode.secrets ?? []),
+    ...(existing?.agents.opencode.env ?? bootstrap?.agents.opencode.env ?? []),
+  ]);
+  const jiraNames = new Set(
+    jiraSettings === undefined
+      ? []
+      : [referencedVariableName(jiraSettings.email), referencedVariableName(jiraSettings.token)],
   );
-  const definitionOfDone = await interviewChecks(
-    io,
-    "Definition of Done check",
-    usedCheckIds,
-    evaluatorNames,
-  );
+  const excludedNames = new Set([...agentNames, ...jiraNames]);
+  const acceptance = await interviewChecks(io, "acceptance", usedCheckIds, excludedNames);
+  const done = await interviewChecks(io, "done", usedCheckIds, excludedNames);
+  const task: TaskInput = {
+    id: taskId,
+    title,
+    repo,
+    base_commit: baseCommit,
+    prompt,
+    description,
+    ...(source.value.source === undefined ? {} : { source: source.value.source }),
+    readiness,
+    checks: { acceptance, done },
+  };
   return {
     ok: true,
     value: {
       configPath: request.configPath,
       ...(bootstrap === undefined ? {} : { bootstrap }),
-      repositoryId,
       ...(newRepository === undefined ? {} : { newRepository }),
-      taskId,
-      startCommit,
-      source: source.value,
-      description,
-      prompt,
-      definitionOfReady,
-      acceptanceCriteria,
-      definitionOfDone,
+      task,
     },
   };
 }
+
+/** One selected task source: the stored `source` block, and an imported title for the title prompt. */
+type SourceSelection = { source: TaskInput["source"]; importedTitle?: string };
 
 /** Selects the task source; a Jira or GitHub issue is imported once and displayed. */
 async function interviewSource(
   request: TaskWizardRequest,
   dependencies: TaskWizardDependencies,
-  jiraSettings: JiraCloudConfig | undefined,
-): Promise<TevuResult<TaskSourceRequest, "IssueImportError">> {
+  jiraSettings: JiraTrackerSettings | undefined,
+): Promise<TevuResult<SourceSelection, "IssueImportError">> {
   const io = dependencies.io;
   const kind =
     request.jiraIssueKey !== undefined
-      ? "jira-cloud"
+      ? "jira"
       : request.githubIssueReference !== undefined
-        ? "github-issue"
-        : await askSelect<"manual" | "jira-cloud" | "github-issue">(io, {
+        ? "github"
+        : await askSelect<"manual" | "jira" | "github">(io, {
             message: "Task source",
             options: [
-              { value: "manual", label: "Manual" },
+              { value: "manual", label: "Written by hand" },
               {
-                value: "jira-cloud",
+                value: "jira",
                 label: "Jira Cloud import",
-                ...(jiraSettings === undefined
-                  ? { disabled: true, hint: "requires configured Jira settings" }
-                  : {}),
+                ...(jiraSettings === undefined ? { disabled: true, hint: "requires trackers.jira" } : {}),
               },
-              { value: "github-issue", label: "GitHub issue import" },
+              { value: "github", label: "GitHub issue import" },
             ],
           });
   if (kind === "manual") {
-    const title = await askText(io, {
-      message: "Source title",
-      validate: validateNonWhitespace,
-    });
-    const rawReference = await askText(io, {
-      message: "Source reference (optional, submit empty to skip)",
-      defaultValue: "",
-    });
-    const reference = rawReference.trim().length === 0 ? undefined : rawReference;
-    return {
-      ok: true,
-      value: reference === undefined ? { kind: "manual", title } : { kind: "manual", reference, title },
-    };
+    return { ok: true, value: { source: undefined } };
   }
-  if (kind === "github-issue") {
-    return interviewGitHubSource(io, dependencies, request.githubIssueReference);
+  if (kind === "github") {
+    return interviewImportedSource(io, dependencies, "github", async () => {
+      const reference =
+        request.githubIssueReference ??
+        (
+          await askText(io, {
+            message: "GitHub issue (OWNER/REPO#NUMBER or issue URL)",
+            validate: validateNonWhitespace,
+          })
+        ).trim();
+      return unwrapImportResult(await dependencies.importGitHubIssue(reference));
+    });
   }
   if (jiraSettings === undefined) {
     // Unreachable through prompts (the option is disabled), reachable only
@@ -612,51 +601,27 @@ async function interviewSource(
       },
     };
   }
-  const issueKey =
-    request.jiraIssueKey ??
-    (
-      await askText(io, {
-        message: "Jira issue key",
-        validate: validateNonWhitespace,
-      })
-    ).trim();
-  const imported = unwrapImportResult(await dependencies.importJiraIssue(jiraSettings, issueKey));
-  if (!imported.ok) {
-    return imported;
-  }
-  const importedAt = dependencies.now().toISOString();
-  note(
-    dependencies.redact(
-      `${imported.value.summary}\n\n${imported.value.description}`,
-    ),
-    `Imported ${imported.value.issueKey} (one-time snapshot)`,
-    promptOptions(io),
-  );
-  return {
-    ok: true,
-    value: {
-      kind: "jira-cloud",
-      issueKey: imported.value.issueKey,
-      snapshot: { ...imported.value, importedAt },
-    },
-  };
+  return interviewImportedSource(io, dependencies, "jira", async () => {
+    const issueKey =
+      request.jiraIssueKey ??
+      (
+        await askText(io, {
+          message: "Jira issue key",
+          validate: validateNonWhitespace,
+        })
+      ).trim();
+    return unwrapImportResult(await dependencies.importJiraIssue(jiraSettings, issueKey));
+  });
 }
 
-/** Imports one GitHub issue through the operator's installed `gh` and displays it. */
-async function interviewGitHubSource(
+/** Imports one tracker issue once, displays it, and builds its stored source block. */
+async function interviewImportedSource(
   io: WizardIo,
   dependencies: TaskWizardDependencies,
-  githubIssueReference: string | undefined,
-): Promise<TevuResult<TaskSourceRequest, "IssueImportError">> {
-  const reference =
-    githubIssueReference ??
-    (
-      await askText(io, {
-        message: "GitHub issue (OWNER/REPO#NUMBER or issue URL)",
-        validate: validateNonWhitespace,
-      })
-    ).trim();
-  const imported = unwrapImportResult(await dependencies.importGitHubIssue(reference));
+  kind: "jira" | "github",
+  importIssue: () => Promise<TevuResult<IssueSnapshot, "IssueImportError">>,
+): Promise<TevuResult<SourceSelection, "IssueImportError">> {
+  const imported = await importIssue();
   if (!imported.ok) {
     return imported;
   }
@@ -668,15 +633,25 @@ async function interviewGitHubSource(
   );
   return {
     ok: true,
-    value: { kind: "github-issue", snapshot: { ...imported.value, importedAt } },
+    value: {
+      source: {
+        kind,
+        key: imported.value.issueKey,
+        url: imported.value.issueUrl,
+        imported_at: importedAt,
+        title: imported.value.summary,
+        body: imported.value.description,
+      },
+      importedTitle: imported.value.summary,
+    },
   };
 }
 
 /** Picks the task repository from configured entries or captures a new one. */
 async function interviewRepositorySelection(
   io: WizardIo,
-  repositories: RepositoryDefinition[],
-): Promise<{ repositoryId: string; newRepository?: RepositoryDefinition }> {
+  repositories: readonly RepositoryDefinition[],
+): Promise<{ repo: string; newRepository?: RepositoryDefinition }> {
   const choice = await askSelect<string>(io, {
     message: "Task repository",
     options: [
@@ -688,47 +663,26 @@ async function interviewRepositorySelection(
     ],
   });
   if (choice !== NEW_REPOSITORY_CHOICE) {
-    return { repositoryId: choice };
+    return { repo: choice };
   }
   const entry = await interviewRepositoryEntry(
     io,
     new Set(repositories.map((repository) => repository.id)),
   );
-  return { repositoryId: entry.id, newRepository: entry };
+  return { repo: entry.id, newRepository: entry };
 }
 
-/** Collects at least one confirmed Definition of Ready item. */
-async function interviewDefinitionOfReady(io: WizardIo): Promise<ReadyItem[]> {
-  const items: ReadyItem[] = [];
-  const usedIds = new Set<string>();
+/** Collects at least one readiness item, never sent to the agent. */
+async function interviewReadiness(io: WizardIo): Promise<string[]> {
+  const items: string[] = [];
   for (;;) {
-    const id = await askText(io, {
-      message: "Definition of Ready item ID",
-      validate: validateId(usedIds),
+    const item = await askText(io, {
+      message: "Readiness item you have confirmed",
+      validate: validateNonWhitespace,
     });
-    const description = await askText(io, {
-      message: `Definition of Ready item "${id}" description`,
-      defaultValue: "",
-    });
-    const confirmed = await askConfirm(io, {
-      message: `Confirm "${id}" is satisfied?`,
-      initialValue: true,
-    });
-    if (!confirmed) {
-      log.warn(
-        "Only confirmed Definition of Ready items can be recorded; the item was discarded.",
-        promptOptions(io),
-      );
-    } else {
-      usedIds.add(id);
-      items.push({ id, description, confirmed: true });
-    }
-    if (items.length === 0) {
-      log.info("At least one confirmed Definition of Ready item is required.", promptOptions(io));
-      continue;
-    }
+    items.push(item);
     const wantsMore = await askConfirm(io, {
-      message: "Add another Definition of Ready item?",
+      message: "Add another readiness item?",
       initialValue: false,
     });
     if (!wantsMore) {
@@ -740,14 +694,14 @@ async function interviewDefinitionOfReady(io: WizardIo): Promise<ReadyItem[]> {
 /** Collects one check collection until it contains at least one required check. */
 async function interviewChecks(
   io: WizardIo,
-  label: string,
+  collection: "acceptance" | "done",
   usedCheckIds: Set<string>,
-  evaluatorNames: string[],
-): Promise<CheckDefinition[]> {
-  const checks: CheckDefinition[] = [];
+  excludedNames: ReadonlySet<string>,
+): Promise<CheckInput[]> {
+  const checks: CheckInput[] = [];
   for (;;) {
     const id = await askText(io, {
-      message: `New ${label} ID`,
+      message: `New ${collection} check ID`,
       validate: validateId(usedCheckIds),
     });
     const description = await askText(io, {
@@ -759,24 +713,24 @@ async function interviewChecks(
       initialValue: true,
     });
     const kind = await askSelect<"command" | "manual">(io, {
-      message: `Evaluator for "${id}"`,
+      message: `How is "${id}" checked?`,
       options: [
         { value: "command", label: "Command (literal argv, no shell)" },
         { value: "manual", label: "Manual (assessed through tevu assess)" },
       ],
     });
-    const evaluator =
+    const check: CheckInput =
       kind === "manual"
-        ? ({ kind: "manual" } as const)
-        : await interviewCommandEvaluator(io, id, evaluatorNames);
+        ? { id, description, manual: true, ...(required ? {} : { required }) }
+        : { id, description, ...(await interviewCommandEvaluator(io, id, excludedNames)), ...(required ? {} : { required }) };
     usedCheckIds.add(id);
-    checks.push({ id, description, required, evaluator });
-    if (!checks.some((check) => check.required)) {
-      log.info(`At least one required ${label} is needed.`, promptOptions(io));
+    checks.push(check);
+    if (!checks.some((candidate) => candidate.required !== false)) {
+      log.info(`At least one required ${collection} check is needed.`, promptOptions(io));
       continue;
     }
     const wantsMore = await askConfirm(io, {
-      message: `Add another ${label}?`,
+      message: `Add another ${collection} check?`,
       initialValue: false,
     });
     if (!wantsMore) {
@@ -785,33 +739,47 @@ async function interviewChecks(
   }
 }
 
-/** Asks argv, timeout, success exit codes, and the ordinary allowlist of one command evaluator. */
+/** Asks argv, timeout, exit codes, and the variable list of one command check. */
 async function interviewCommandEvaluator(
   io: WizardIo,
   checkId: string,
-  evaluatorNames: string[],
-): Promise<CheckDefinition["evaluator"]> {
+  excludedNames: ReadonlySet<string>,
+): Promise<Pick<CheckInput, "run" | "timeout" | "exit_codes" | "env">> {
   const argvText = await askText(io, {
-    message: `Command argv for "${checkId}" as a JSON array, e.g. ["npm","test"]`,
+    message: `Command for "${checkId}" as a JSON array, e.g. ["npm","test"]`,
     validate: validateArgvJson,
   });
-  const argv = JSON.parse(argvText) as [string, ...string[]];
-  const timeoutMs = await askInteger(io, `Timeout for "${checkId}" in milliseconds`, 1);
+  const run = JSON.parse(argvText) as [string, ...string[]];
+  const timeoutRaw = await askText(io, {
+    message: `Time limit for "${checkId}" (for example 2m; empty to use run.check_timeout)`,
+    defaultValue: "",
+    validate: (value) => (value === undefined || value.trim().length === 0 ? undefined : validateDuration(value)),
+  });
   const codesText = await askText(io, {
-    message: `Success exit codes for "${checkId}" (comma-separated integers, e.g. 0)`,
+    message: `Exit codes that count as a pass for "${checkId}" (comma-separated; empty for 0)`,
+    defaultValue: "0",
     validate: validateExitCodes,
   });
-  const successExitCodes = codesText
+  const exitCodes = codesText
     .split(",")
-    .map((token) => Number.parseInt(token.trim(), 10));
-  const environmentAllowlist =
-    evaluatorNames.length === 0
-      ? []
-      : await askMultiselect(io, {
-          message: `Ordinary evaluator variables allowed for "${checkId}"`,
-          options: evaluatorNames.map((name) => ({ value: name, label: name })),
-        });
-  return { kind: "command", argv, timeoutMs, successExitCodes, environmentAllowlist };
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0)
+    .map((token) => Number.parseInt(token, 10));
+  const envText = await askText(io, {
+    message: `Variables for "${checkId}" (comma-separated names; empty for none)`,
+    defaultValue: "",
+    validate: validateCheckVariableList(excludedNames),
+  });
+  const env = envText
+    .split(",")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+  return {
+    run,
+    ...(timeoutRaw.trim().length === 0 ? {} : { timeout: timeoutRaw.trim() }),
+    ...(exitCodes.length === 1 && exitCodes[0] === 0 ? {} : { exit_codes: exitCodes }),
+    ...(env.length === 0 ? {} : { env }),
+  };
 }
 
 /** Shows the single credential-redacted review; declining cancels without a write. */
@@ -837,90 +805,74 @@ function renderTaskReview(input: TaskWizardInput): string {
     const bootstrap = input.bootstrap;
     lines.push(
       "New configuration:",
-      `  artifacts.directory: ${bootstrap.artifacts.directory}`,
-      `  execution.concurrency: ${bootstrap.execution.concurrency}`,
-      `  execution.caseTimeoutMs: ${bootstrap.execution.caseTimeoutMs}`,
-      `  execution.terminationGraceMs: ${bootstrap.execution.terminationGraceMs}`,
-      `  opencode.executable: ${bootstrap.opencode.executable}`,
-      `  opencodeEnvironment: ${renderEnvironmentList(bootstrap.execution.opencodeEnvironment)}`,
-      `  evaluatorEnvironment: ${renderEnvironmentList(bootstrap.execution.evaluatorEnvironment)}`,
+      `  run.output_dir: ${bootstrap.run.output_dir}`,
+      `  run.concurrency: ${bootstrap.run.concurrency}`,
+      `  run.timeout: ${bootstrap.run.timeout}`,
+      `  run.stop_grace: ${bootstrap.run.stop_grace}`,
+      ...(bootstrap.run.check_timeout === undefined ? [] : [`  run.check_timeout: ${bootstrap.run.check_timeout}`]),
+      `  agents.opencode.command: ${bootstrap.agents.opencode.command}`,
+      `  agents.opencode.secrets: ${renderVariableList(bootstrap.agents.opencode.secrets ?? [])}`,
+      `  agents.opencode.env: ${renderVariableList(bootstrap.agents.opencode.env ?? [])}`,
     );
-    if (bootstrap.jira !== undefined) {
+    if (bootstrap.trackers?.jira !== undefined) {
       lines.push(
-        `  jira.baseUrl: ${bootstrap.jira.baseUrl}`,
-        `  jira credentials: ${bootstrap.jira.emailEnvironmentVariable}, ${bootstrap.jira.tokenEnvironmentVariable} (names only)`,
+        `  trackers.jira.url: ${bootstrap.trackers.jira.url}`,
+        `  trackers.jira credentials: ${bootstrap.trackers.jira.email}, ${bootstrap.trackers.jira.token} (names only)`,
       );
     }
     for (const repository of bootstrap.repositories) {
-      lines.push(`  repository ${repository.id}: ${repository.path}`);
+      lines.push(`  repositories: ${repository.id} (${repository.path})`);
     }
-    for (const contender of bootstrap.contenders) {
-      lines.push(`  contender ${contender.id}: ${contender.model} (${contender.variant})`);
+    for (const model of bootstrap.models) {
+      lines.push(`  models: ${model.id}: ${model.model} (effort ${model.effort})`);
     }
     lines.push("");
   }
-  lines.push(`Task ${input.taskId}:`);
+  const task = input.task;
+  lines.push(`Task ${task.id}:`);
   if (input.newRepository !== undefined) {
     lines.push(`  new repository ${input.newRepository.id}: ${input.newRepository.path}`);
   }
-  lines.push(`  repository: ${input.repositoryId}`, `  startCommit: ${input.startCommit}`);
-  if (input.source.kind === "manual") {
-    lines.push(`  source: manual "${input.source.title}"`);
-    if (input.source.reference !== undefined) {
-      lines.push(`  source reference: ${input.source.reference}`);
-    }
-  } else if (input.source.kind === "jira-cloud") {
-    lines.push(`  source: jira-cloud ${input.source.issueKey}`);
-    if (input.source.snapshot !== undefined) {
-      lines.push(
-        `  imported at: ${input.source.snapshot.importedAt}`,
-        `  imported summary: ${input.source.snapshot.summary}`,
-        `  imported description: ${input.source.snapshot.description}`,
-      );
-    }
+  lines.push(`  repo: ${task.repo}`, `  base_commit: ${task.base_commit}`, `  title: ${task.title}`);
+  if (task.source === undefined) {
+    lines.push("  source: (written by hand)");
   } else {
     lines.push(
-      `  source: github-issue ${input.source.snapshot.issueKey}`,
-      `  imported at: ${input.source.snapshot.importedAt}`,
-      `  imported summary: ${input.source.snapshot.summary}`,
-      `  imported description: ${input.source.snapshot.description}`,
+      `  source: ${task.source.kind} ${task.source.key}`,
+      `  imported at: ${task.source.imported_at}`,
+      `  imported title: ${task.source.title}`,
+      `  imported body: ${task.source.body}`,
     );
   }
-  lines.push(`  description: ${input.description}`, `  prompt: ${input.prompt}`);
-  for (const item of input.definitionOfReady) {
-    lines.push(`  ready ${item.id}: ${item.description} (confirmed)`);
+  lines.push(`  description: ${task.description}`, `  prompt: ${task.prompt}`);
+  for (const item of task.readiness) {
+    lines.push(`  readiness: ${item}`);
   }
-  for (const [title, checks] of [
-    ["acceptance", input.acceptanceCriteria],
-    ["definition of done", input.definitionOfDone],
+  for (const [label, checks] of [
+    ["acceptance", task.checks.acceptance],
+    ["done", task.checks.done],
   ] as const) {
     for (const check of checks) {
-      lines.push(`  ${title} ${check.id}: ${renderCheck(check)}`);
+      lines.push(`  ${label} ${check.id}: ${renderCheck(check)}`);
     }
   }
   return lines.join("\n");
 }
 
-function renderEnvironmentList(entries: EnvironmentVariableDefinition[]): string {
-  if (entries.length === 0) {
-    return "(none)";
-  }
-  return entries.map((entry) => `${entry.name} [${entry.classification}]`).join(", ");
+function renderVariableList(names: readonly string[]): string {
+  return names.length === 0 ? "(none)" : names.join(", ");
 }
 
-function renderCheck(check: CheckDefinition): string {
-  const requirement = check.required ? "required" : "optional";
-  if (check.evaluator.kind === "manual") {
+function renderCheck(check: CheckInput): string {
+  const requirement = check.required === false ? "optional" : "required";
+  if (check.manual === true) {
     return `${check.description} (${requirement}, manual)`;
   }
-  const allowlist =
-    check.evaluator.environmentAllowlist.length === 0
-      ? ""
-      : `, allowlist ${check.evaluator.environmentAllowlist.join(",")}`;
+  const env = check.env === undefined || check.env.length === 0 ? "" : `, variables ${check.env.join(",")}`;
   return (
-    `${check.description} (${requirement}, command ${JSON.stringify(check.evaluator.argv)}, ` +
-    `timeout ${check.evaluator.timeoutMs}ms, ` +
-    `success codes ${check.evaluator.successExitCodes.join(",")}${allowlist})`
+    `${check.description} (${requirement}, command ${JSON.stringify(check.run)}, ` +
+    `timeout ${check.timeout ?? "run.check_timeout"}, ` +
+    `exit codes ${(check.exit_codes ?? [0]).join(",")}${env})`
   );
 }
 
@@ -990,6 +942,7 @@ async function askText(
   options: {
     message: string;
     defaultValue?: string;
+    initialValue?: string;
     validate?: (value: string | undefined) => string | undefined;
   },
 ): Promise<string> {
@@ -1011,18 +964,6 @@ async function askSelect<Value extends string>(
   },
 ): Promise<Value> {
   return unwrap(await select<Value>({ ...options, ...promptOptions(io) }));
-}
-
-async function askMultiselect(
-  io: WizardIo,
-  options: {
-    message: string;
-    options: Array<{ value: string; label: string }>;
-  },
-): Promise<string[]> {
-  return unwrap(
-    await multiselect<string>({ ...options, required: false, ...promptOptions(io) }),
-  );
 }
 
 async function askInteger(
@@ -1049,10 +990,10 @@ async function askInteger(
   return Number.parseInt(value.trim(), 10);
 }
 
-async function askModel(io: WizardIo, contenderId: string): Promise<ContenderDefinition["model"]> {
+async function askModel(io: WizardIo, modelEntryId: string): Promise<`${string}/${string}`> {
   for (;;) {
     const value = await askText(io, {
-      message: `Model for "${contenderId}" (provider/model)`,
+      message: `Model for "${modelEntryId}" (provider/model)`,
       validate: validateModel,
     });
     if (isModelIdentifier(value)) {
@@ -1109,7 +1050,7 @@ function validateModel(value: string | undefined): string | undefined {
   return isModelIdentifier(value ?? "") ? undefined : 'model must be "<provider>/<model>"';
 }
 
-function isModelIdentifier(value: string): value is ContenderDefinition["model"] {
+function isModelIdentifier(value: string): value is `${string}/${string}` {
   return /^.+\/.+$/.test(value);
 }
 
@@ -1121,19 +1062,70 @@ function validateHttpsUrl(value: string | undefined): string | undefined {
   }
 }
 
-function validateEnvironmentName(
+/** Reuses the schema's Duration grammar (including the E1 bound) rather than a second regex. */
+function validateDuration(value: string | undefined): string | undefined {
+  const result = DurationSchema.safeParse((value ?? "").trim());
+  if (result.success) {
+    return undefined;
+  }
+  return result.error.issues[0]?.message ?? "invalid duration";
+}
+
+function validateVariableNameGrammar(value: string): string | undefined {
+  const result = VariableNameSchema.safeParse(value);
+  if (result.success) {
+    return undefined;
+  }
+  return result.error.issues[0]?.message ?? "invalid variable name";
+}
+
+function isFixedEnvironmentName(name: string): boolean {
+  return FIXED_ENVIRONMENT_NAMES.has(name) || name.startsWith("XDG_");
+}
+
+function validateVariableName(
   takenNames: ReadonlySet<string>,
 ): (value: string | undefined) => string | undefined {
   return (raw) => {
     const value = raw ?? "";
-    if (value.length === 0) {
-      return "a non-empty environment variable name is required";
+    const grammar = validateVariableNameGrammar(value);
+    if (grammar !== undefined) {
+      return grammar;
     }
-    if (FIXED_ENVIRONMENT_NAMES.has(value) || value.startsWith("XDG_")) {
+    if (isFixedEnvironmentName(value)) {
       return "PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract";
     }
     if (takenNames.has(value)) {
       return `"${value}" is already configured`;
+    }
+    return undefined;
+  };
+}
+
+function validateCheckVariableList(
+  excludedNames: ReadonlySet<string>,
+): (value: string | undefined) => string | undefined {
+  return (raw) => {
+    const names = (raw ?? "")
+      .split(",")
+      .map((token) => token.trim())
+      .filter((token) => token.length > 0);
+    const seen = new Set<string>();
+    for (const name of names) {
+      const grammar = validateVariableNameGrammar(name);
+      if (grammar !== undefined) {
+        return `"${name}": ${grammar}`;
+      }
+      if (isFixedEnvironmentName(name)) {
+        return "PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract";
+      }
+      if (excludedNames.has(name)) {
+        return `"${name}" is passed to the agent or Jira and cannot also be passed to a check`;
+      }
+      if (seen.has(name)) {
+        return `"${name}" is listed more than once`;
+      }
+      seen.add(name);
     }
     return undefined;
   };
@@ -1158,8 +1150,14 @@ function validateArgvJson(value: string | undefined): string | undefined {
 }
 
 function validateExitCodes(value: string | undefined): string | undefined {
-  const tokens = (value ?? "").split(",").map((token) => token.trim());
-  if (tokens.length === 0 || tokens.some((token) => !/^-?\d+$/.test(token))) {
+  const tokens = (value ?? "")
+    .split(",")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+  if (tokens.length === 0) {
+    return undefined;
+  }
+  if (tokens.some((token) => !/^-?\d+$/.test(token))) {
     return "enter one or more comma-separated integers, e.g. 0";
   }
   return undefined;

@@ -16,14 +16,11 @@
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { stringify as stringifyYaml } from "yaml";
 
-import { loadConfig } from "../config/load.ts";
-import { TevuConfigSchema } from "../config/schema.ts";
+import { readConfigText } from "../config/load.ts";
 import { decodeEvent, decodeExport } from "./opencode-protocol.ts";
 import { redactDecodedValue } from "./process.ts";
 
-import type { TevuConfig } from "../config/schema.ts";
 import type {
   ArtifactStore,
   AssessmentArtifact,
@@ -144,37 +141,30 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
       }
       return okVoid();
     },
-    read(configPath: string) {
-      return loadConfig(configPath);
+    readText(configPath: string) {
+      return readConfigText(configPath);
     },
-    async replace(
-      configPath: string,
-      config: TevuConfig,
-    ): Promise<TevuResult<void, "ArtifactError">> {
+    async replaceText(configPath: string, text: string): Promise<TevuResult<void, "ArtifactError">> {
       const operation = "replace-configuration";
-      const parsed = TevuConfigSchema.safeParse(config);
-      if (!parsed.success) {
-        const first = parsed.error.issues[0];
-        return artifactFailure(
-          operation,
-          `configuration failed schema validation before write; first issue: ${first === undefined ? "unknown" : first.message}`,
-        );
-      }
-      const redactedConfig = redactValueForSink(options.redact, operation, parsed.data);
-      if (!redactedConfig.ok) {
-        return redactedConfig;
-      }
-      let yamlText: string;
+      let redactedText: string;
       try {
-        yamlText = stringifyYaml(redactedConfig.value);
+        redactedText = options.redact(text);
       } catch (cause) {
+        return artifactFailure(operation, `redaction failed; write aborted: ${describeCause(cause)}`);
+      }
+      if (redactedText !== text) {
         return artifactFailure(
           operation,
-          `cannot serialize configuration YAML: ${describeCause(cause)}`,
+          "configuration text contains the value of a secret variable; write aborted",
         );
       }
+      const resolvedPath = path.resolve(configPath);
+      const mode = await replacedFileMode(resolvedPath);
+      if (!mode.ok) {
+        return mode;
+      }
       try {
-        await atomicReplaceFile(path.resolve(configPath), yamlText);
+        await atomicReplaceFile(resolvedPath, text, mode.value);
       } catch (cause) {
         return artifactFailure(
           operation,
@@ -184,6 +174,27 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
       return okVoid();
     },
   };
+}
+
+/**
+ * Resolves the permission bits `replaceText` must preserve (E4): the
+ * replaced file's own mode bits, or `undefined` for a new file so the
+ * temporary file keeps its default mode under the process umask. Any other
+ * `stat` failure aborts the write with no mode resolved.
+ */
+async function replacedFileMode(resolvedPath: string): Promise<TevuResult<number | undefined, "ArtifactError">> {
+  try {
+    const stats = await fs.stat(resolvedPath);
+    return { ok: true, value: stats.mode & 0o777 };
+  } catch (cause) {
+    if (systemErrorCode(cause) === "ENOENT") {
+      return { ok: true, value: undefined };
+    }
+    return artifactFailure(
+      "replace-configuration",
+      `cannot read the permissions of the configuration file: ${describeCause(cause)}`,
+    );
+  }
 }
 
 type ActiveRun = {
@@ -1067,11 +1078,18 @@ async function directoryExists(directory: string): Promise<boolean> {
 /**
  * Replaces the target atomically: exclusive temp file in the same directory,
  * fsync, then rename over the target. A failure never leaves a partial target.
+ *
+ * @param mode - Permission bits for the temporary (and so the final) file;
+ * defaults to `0o644` under the process umask for a brand-new target (E4).
  */
-async function atomicReplaceFile(filePath: string, content: string): Promise<void> {
+async function atomicReplaceFile(filePath: string, content: string, preservedMode?: number): Promise<void> {
   const tempPath = `${filePath}.${randomBytes(6).toString("hex")}.tmp`;
-  const handle = await fs.open(tempPath, "wx", 0o644);
+  const handle = await fs.open(tempPath, "wx", preservedMode ?? 0o644);
   try {
+    // The open mode is filtered by the umask, so a preserved mode needs an explicit chmod.
+    if (preservedMode !== undefined) {
+      await handle.chmod(preservedMode);
+    }
     await handle.writeFile(content, "utf8");
     await handle.sync();
   } finally {
@@ -1097,8 +1115,8 @@ function describeManifestDefect(manifest: RunManifest): string | null {
     if (!CASE_ID_PATTERN.test(identity.caseId)) {
       return `case ID "${identity.caseId}" is not a valid identifier`;
     }
-    if (identity.caseId !== `${identity.taskId}--${identity.contenderId}`) {
-      return `case ID "${identity.caseId}" does not equal "<task-id>--<contender-id>"`;
+    if (identity.caseId !== `${identity.taskId}--${identity.modelId}`) {
+      return `case ID "${identity.caseId}" does not equal "<task-id>--<model-id>"`;
     }
     if (seen.has(identity.caseId)) {
       return `case ID "${identity.caseId}" appears more than once`;

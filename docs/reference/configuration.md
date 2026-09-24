@@ -10,175 +10,169 @@ tevu reads UTF-8 YAML with `version: 1`. Unknown fields are rejected at every le
 tevu config example > tevu.yaml
 ```
 
-The shell creates the file, or replaces an existing one, before tevu starts; tevu itself writes no file. This template compares two effort variants on one task using manual checks. The repository path, commit, model identifier, variants, and credential-variable name are illustrative values, not a ready-to-run configuration. The [benchmark guide](../guides/run-benchmark.md) covers setup for a real task.
+The shell creates the file, or replaces an existing one, before tevu starts; tevu itself writes no file. This template compares two model entries at different reasoning efforts on one task using manual checks. The repository path, commit, model identifier, efforts, and credential-variable name are illustrative values, not a ready-to-run configuration. The [benchmark guide](../guides/run-benchmark.md) covers setup for a real task.
 
 ```yaml
-# tevu configuration template, printed by: tevu config example
-# Replace the illustrative values (paths, the credential variable, models, and
-# the example task), then check the file with: tevu validate
-# Optional fields are commented out; delete the leading "# " to enable one.
-# tevu task add rewrites this file without comments and with absolute paths.
+# tevu.yaml: compare coding models on tasks from your own backlog.
+#
+# Conventions used throughout this file:
+#   - durations are strings with a unit: 500ms, 30s, 10m, 1h;
+#   - relative paths resolve against the directory of this file;
+#   - secrets are never written here: a credential is a $VARIABLE reference or a
+#     variable name, and its value is read from the environment at run time;
+#   - a block keyed by an adapter kind (agents.opencode, trackers.jira) holds the
+#     settings of that adapter only, so a new agent or tracker adds a block and
+#     changes nothing else.
 
-# configuration format; must be 1
 version: 1
 
-# where tevu saves run evidence
-artifacts:
-  # outside every repository; relative to this file
-  directory: ../tevu-runs
+# --- Run --------------------------------------------------------------------
+# Settings shared by every case, so every model works under the same rules.
+run:
+  output_dir: ../tevu-runs        # run evidence; must lie outside every repository
+  concurrency: 2                  # cases running at once, 1 to 32
+  timeout: 10m                    # limit for one agent attempt; checks are skipped after it
+  stop_grace: 3s                  # time to exit after a graceful stop before a forced kill
+  check_timeout: 5m               # default limit for a command check without its own timeout
 
-# limits for every benchmark run
-execution:
-  # cases that run at the same time, 1 to 32
-  concurrency: 2
-  # time limit for one agent run, in milliseconds
-  caseTimeoutMs: 600000
-  # wait before a forced stop, in milliseconds
-  terminationGraceMs: 3000
-  # variables passed to the agent; names only, never values
-  opencodeEnvironment:
-    # replace with your provider's credential variable
-    # Possible values for classification: provider-credential, secret, or ordinary
-    - name: OPENAI_API_KEY
-      classification: provider-credential
-  # ordinary variables that command checks may receive
-  evaluatorEnvironment: []
+# --- Agents -----------------------------------------------------------------
+# One block per coding agent, keyed by adapter kind. Only opencode exists today.
+agents:
+  opencode:
+    command: opencode             # name on PATH, or a path relative to this file
+    secrets:                      # passed to the agent, redacted from every artifact
+      - OPENAI_API_KEY
+    env: []                       # ordinary variables passed to the agent as-is
 
-# the coding agent that tevu runs
-opencode:
-  # command name on PATH, or a path relative to this file
-  executable: opencode
+# --- Trackers ---------------------------------------------------------------
+# Used once, by `tevu task add --jira` or `--github`, to import an issue.
+# GitHub import goes through the `gh` CLI and its own login; it needs no block.
+trackers:
+  jira:
+    url: https://your-site.atlassian.net
+    email: $JIRA_EMAIL
+    token: $JIRA_API_TOKEN
 
-# Jira Cloud connection for tevu task add --jira
-# jira:
-#   # HTTPS site URL
-#   baseUrl: https://your-site.atlassian.net
-#   # variable that holds the account email
-#   emailEnvironmentVariable: JIRA_EMAIL
-#   # variable that holds the API token
-#   tokenEnvironmentVariable: JIRA_API_TOKEN
-
-# local Git repositories that tasks start from
+# --- Repositories -----------------------------------------------------------
 repositories:
-  # lowercase letters, digits, and hyphens; starts with a letter
   - id: app
     path: ../your-app
 
-# Should be at least two model and effort combinations to compare
-contenders:
-  - id: low
+# --- Models -----------------------------------------------------------------
+# What the benchmark compares: at least two entries.
+models:
+  - id: gpt-low
+    model: openai/your-model      # as the agent names it
+    effort: low                   # the agent's reasoning effort or variant
+    # agent: opencode             # needed only when more than one agent is configured
+  - id: gpt-high
     model: openai/your-model
-    variant: low
-  - id: high
-    model: openai/your-model
-    variant: high
+    effort: high
 
-# at least one task; tevu task add appends more
+# --- Tasks ------------------------------------------------------------------
 tasks:
   - id: csv-export
-    # id of an entry in repositories
-    repositoryId: app
-    # a commit from before the fix
-    startCommit: "0123456789abcdef0123456789abcdef01234567"
-    # where the task comes from
-    source:
-      # tevu task add --jira or --github records imported issues
-      kind: manual
-      # issue key or URL for your records
-      # reference: PROJ-123
-      # short task title
-      title: Export the current view as CSV
-    # sent to the model
-    description: Users need to download the visible table as a CSV file.
-    # instructions for the model
+    title: Export the current view as CSV
+    repo: app                     # may be omitted while there is one repository
+    base_commit: "0123456789abcdef0123456789abcdef01234567"   # a commit from before the fix
+
+    # Sent to the agent, together with the check descriptions below.
     prompt: Add a CSV export button to the table view.
-    # prerequisites you confirmed before the run
-    definitionOfReady:
-      - id: requirements
-        description: The expected columns and escaping rules are defined.
-        # must be true
-        confirmed: true
-    # checks for the solution; the model sees their descriptions
-    acceptanceCriteria:
-      - id: csv-content
-        description: The CSV contains the visible rows and correctly escapes values.
-        # at least one check in each list must be required
-        required: true
-        # manual, or command as in the commented-out check below
-        evaluator:
-          # you record the verdict with tevu assess
-          kind: manual
-      # a command check runs in the case workspace, without a shell
-      # - id: tests
-      #   description: The target repository's test suite passes.
-      #   required: true
-      #   evaluator:
-      #     kind: command
-      #     # executable, then literal arguments
-      #     argv: [npm, test]
-      #     # time limit for the command, in milliseconds
-      #     timeoutMs: 120000
-      #     # exit codes that count as a pass
-      #     successExitCodes: [0]
-      #     # names from execution.evaluatorEnvironment
-      #     environmentAllowlist: []
-    # completion checks; the model sees their descriptions
-    definitionOfDone:
-      - id: docs
-        description: The export action is documented for users.
-        required: true
-        evaluator:
-          kind: manual
+    description: Users need to download the visible table as a CSV file.
+
+    # Where the task came from. Omit for a task written by hand.
+    # `tevu task add --jira` or `--github` fills this block once;
+    # later edits in the tracker never change the task.
+    # source:
+    #   kind: jira                # jira or github
+    #   key: PROJ-123             # owner/repo#123 for GitHub
+    #   url: https://your-site.atlassian.net/browse/PROJ-123
+    #   imported_at: 2026-09-24T09:00:00Z
+    #   title: Export table as CSV
+    #   body: The imported issue text, kept for the record.
+
+    # Confirmed by you before the task was added; never sent to the agent.
+    readiness:
+      - The expected columns and escaping rules are defined.
+
+    checks:
+      # Does the change solve the task? At least one check must be required.
+      acceptance:
+        - id: csv-content
+          description: The CSV contains the visible rows and correctly escapes values.
+          manual: true            # you record the verdict with `tevu assess`
+        - id: tests
+          description: The repository's test suite passes.
+          run: [npm, test]        # executable and literal arguments, no shell
+          # timeout: 2m           # defaults to run.check_timeout
+          # exit_codes: [0]       # exit codes that count as a pass; defaults to [0]
+          # env: [NODE_OPTIONS]   # ordinary variables this check receives
+          # required: false       # checks are required unless stated otherwise
+      # Is the work complete beyond the fix itself? At least one check must be required.
+      done:
+        - id: docs
+          description: The export action is documented for users.
+          manual: true
 ```
 
-Saving a task with `tevu task add` rewrites the whole file: comments are dropped, keys follow the schema order, every value is written out explicitly (including schema defaults such as `environmentAllowlist: []`), and every path becomes absolute. Adding tasks by editing the file by hand instead keeps the comments.
+`tevu task add` appends to this file: the interviewed task, and a new repository when one was chosen, are added after the existing content of the `tasks` and `repositories` lists. Every other byte, comment, and blank line is kept unchanged. Both lists must stay in block style (one `- ` item per line, never `tasks: [...]`) for the append to succeed; a flow-style list is reported as a finding and nothing is written. A task added by editing the file by hand keeps every comment the same way.
 
 ## Top-level fields
 
 | Field | Contract |
 | --- | --- |
 | `version` | Must be `1` |
-| `artifacts.directory` | Output directory, outside and non-overlapping with configured repositories after resolving symlinks |
-| `execution.concurrency` | Integer from 1 through 32 |
-| `execution.caseTimeoutMs` | Positive integer milliseconds for the managed agent run; a timed-out case skips acceptance checks |
-| `execution.terminationGraceMs` | Positive integer milliseconds between graceful and forced process-group termination |
-| `execution.opencodeEnvironment` | Variables passed to the agent, declared by name and classification |
-| `execution.evaluatorEnvironment` | Ordinary variables available to acceptance commands through per-check allowlists |
-| `opencode.executable` | Non-empty executable name or path; no agent-version constraint is accepted |
-| `jira` | Optional Jira Cloud connection settings |
+| `run.output_dir` | Non-empty; run evidence directory, outside and non-overlapping with configured repositories after resolving symlinks |
+| `run.concurrency` | Integer from 1 through 32 |
+| `run.timeout` | Duration; agent time limit per case; a timed-out case skips its checks |
+| `run.stop_grace` | Duration; delay between graceful and forced process-group termination |
+| `run.check_timeout` | Duration, optional; default time limit for a command check that declares none |
+| `agents.opencode.command` | Non-empty executable name or path; no agent-version constraint is accepted |
+| `agents.opencode.secrets` | Variable names passed to the agent and redacted from every artifact; default `[]` |
+| `agents.opencode.env` | Variable names passed to the agent as-is; default `[]` |
+| `trackers.jira` | Optional Jira Cloud connection settings |
 | `repositories` | At least one `{id, path}` entry |
-| `contenders` | At least two `{id, model, variant}` entries |
+| `models` | At least two `{id, model, effort, agent}` entries |
 | `tasks` | At least one task |
 
 Paths resolve relative to the configuration file. Bare executable names are found through `PATH`. IDs start with a lowercase letter, contain lowercase letters, digits, or hyphens, and have at most 64 characters. IDs are unique within their collection.
 
-A contender is one model/effort combination. `model` uses `provider/model` syntax and `variant` is non-empty. Different contenders may use the same model. The provider determines which model identifiers and variants are supported.
+A block keyed by an adapter kind (`agents.opencode`, `trackers.jira`) holds that adapter's settings only, so a new agent or tracker adds a block and changes nothing else. `opencode` is the only configured agent today, so `models[].agent` defaults to it; a configuration with more than one agent must set `agent` explicitly to a configured agent key.
+
+A model entry is one model/effort combination. `model` uses `provider/model` syntax and `effort` is non-empty. `effort` reaches OpenCode verbatim as its `--variant` argument, so it must name a reasoning-effort variant that the agent supports, either a built-in one or one defined in an `opencode.json` tracked at the task's `base_commit`. Different model entries may share the same `model`. The provider determines which model identifiers and efforts are supported.
+
+## Value grammars
+
+| Name | Rule |
+| --- | --- |
+| Duration | A positive integer without leading zeros followed by exactly one unit: `ms`, `s`, `m`, or `h`, for example `500ms`, `30s`, `10m`, `1h`. At most `2147483647` milliseconds |
+| Variable name | A letter or underscore followed by letters, digits, or underscores. In `agents.opencode.secrets`, `agents.opencode.env`, and a check's `env`, it must not be `PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL`, `CI`, or begin with `XDG_` |
+| `$VARIABLE` reference | A dollar sign followed by a variable name, for example `$JIRA_API_TOKEN`; used only for `trackers.jira.email` and `trackers.jira.token` |
+
+The duration bound keeps a configured value inside what a Node.js timer can schedule; a longer value is rejected rather than silently truncated. Secrets are never written to the configuration file: a credential is a `$VARIABLE` reference or a bare variable name, and its value comes from the environment that launches tevu.
 
 ## Tasks
 
 | Field | Contract |
 | --- | --- |
 | `id` | Unique task ID |
-| `repositoryId` | An ID from `repositories` |
-| `startCommit` | A commit resolvable in that repository; the wizard records the resolved commit |
-| `source` | A manual source, a saved Jira snapshot, or a saved GitHub issue snapshot |
-| `description` | Non-whitespace task description |
-| `prompt` | Non-whitespace instructions for the model |
-| `definitionOfReady` | At least one `{id, description, confirmed: true}` prerequisite |
-| `acceptanceCriteria` | Checks for the solution; at least one must be required |
-| `definitionOfDone` | Completion checks; at least one must be required |
+| `title` | Non-whitespace; shown in the report, never sent to the agent |
+| `repo` | An ID from `repositories`; defaults to the sole repository when exactly one is configured |
+| `base_commit` | A commit resolvable in that repository; `tevu task add` records the resolved commit |
+| `prompt` | Non-whitespace instructions sent to every model |
+| `description` | Non-whitespace task description, sent to every model |
+| `source` | Absent for a task written by hand; otherwise a saved Jira or GitHub import snapshot |
+| `readiness` | At least one non-whitespace prerequisite you confirmed; never sent to the agent |
+| `checks.acceptance` | Checks for the solution; at least one must be required |
+| `checks.done` | Completion checks; at least one must be required |
 
-`tevu validate` and `tevu run` reject a task when the prompt tevu sends to the agent contains the first 7 characters of the resolved `startCommit`, in any letter case. This prompt is built from `prompt`, `description`, and the `acceptanceCriteria` and `definitionOfDone` descriptions.
+`tevu validate` and `tevu run` reject a task when the prompt tevu sends to the agent contains the first 7 characters of the resolved `base_commit`, in any letter case. This prompt is built from `prompt`, `description`, and the `checks.acceptance` and `checks.done` descriptions.
 
-A manual source has `kind: manual`, `title`, and an optional `reference`.
-
-A Jira snapshot has `kind: jira-cloud`, `issueKey`, `issueUrl`, `importedAt`, `importedSummary`, and `importedDescription`. The wizard fills these from a one-time import. Later changes in Jira do not update the task.
-
-A GitHub issue snapshot has `kind: github-issue`, `issueKey`, `issueUrl`, `importedAt`, `importedSummary`, and `importedDescription`. `importedSummary` is the issue title and `importedDescription` is its Markdown body. The wizard fills these once from `gh issue view`; later changes to the GitHub issue never update the task.
+A task written by hand has no `source` block. An imported source has `kind` (`jira` or `github`), `key`, `url`, `imported_at`, `title`, and `body`. `tevu task add --jira` or `--github` fills this block once from a one-time import; later changes in the tracker never update the task.
 
 ### Source trees
 
-The configured source repository is read-only to tevu. Each case receives a sealed repository with one synthetic root commit containing the tracked tree at `startCommit`. Dirty and untracked source-worktree files are excluded.
+The configured source repository is read-only to tevu. Each case receives a sealed repository with one synthetic root commit containing the tracked tree at `base_commit`. Dirty and untracked source-worktree files are excluded.
 
 The case contains no source remotes, later history, tags, stashes, or shared object database. Sibling cases have separate Git metadata and writable directories. The original repository and commit identity are retained separately from the synthetic commit.
 
@@ -186,47 +180,38 @@ Submodules and Git LFS sources are unsupported. Project instructions tracked at 
 
 ## Checks
 
-Each check has `id`, `description`, `required`, and `evaluator`. Check IDs are unique across both check collections within a task. All contenders for a task receive the same checks.
+Each check has `id`, `description`, and `required` (default `true`), plus either `run` or `manual: true`. Check IDs are unique across both check collections within a task. Every model entry for a task receives the same checks.
 
-`evaluator.kind: manual` requires a verdict through `tevu assess`. A command evaluator has the following fields:
+`manual: true` requires a verdict through `tevu assess`. A command check (`run`) has the following fields:
 
 | Field | Contract |
 | --- | --- |
-| `kind` | `command` |
-| `argv` | Non-empty array: executable followed by literal arguments |
-| `timeoutMs` | Positive integer milliseconds |
-| `successExitCodes` | Non-empty array of integer exit codes |
-| `environmentAllowlist` | Optional array of names from `execution.evaluatorEnvironment`; defaults to `[]` |
+| `run` | Non-empty array: executable followed by literal arguments, no shell |
+| `timeout` | Duration; defaults to `run.check_timeout`. Rejected when both are absent |
+| `exit_codes` | Non-empty array of integer exit codes; defaults to `[0]` |
+| `env` | Variable names available to the command; defaults to `[]` |
 
 For example, a task whose target repository uses `npm test` can define:
 
 ```yaml
 id: tests
-description: The target repository's test suite passes.
-required: true
-evaluator:
-  kind: command
-  argv: [npm, test]
-  timeoutMs: 120000
-  successExitCodes: [0]
-  environmentAllowlist: []
+description: The repository's test suite passes.
+run: [npm, test]
+# timeout: 2m           # defaults to run.check_timeout
+# exit_codes: [0]       # exit codes that count as a pass; defaults to [0]
+# env: [NODE_OPTIONS]   # variables this check receives
+# required: false       # checks are required unless stated otherwise
 ```
 
 Commands run sequentially in the case workspace. Arguments are passed directly, without a shell. A target task's test command is independent of tevu's own product-test runner. The solution patch is captured before checks run.
 
 ## Environment variables
 
-Environment entries contain `name` and `classification`, never a value:
+`agents.opencode.secrets` and `agents.opencode.env` name variables by value only: every `secrets` entry is redacted from saved and displayed evidence, and every `env` entry is passed through as-is. A name cannot appear in both lists, and neither list may repeat a name.
 
-| Classification | Agent environment | Acceptance-command environment |
-| --- | --- | --- |
-| `provider-credential` | Allowed | Not allowed |
-| `secret` | Allowed, redacted from saved/displayed evidence | Not allowed |
-| `ordinary` | Allowed | Allowed only when declared for evaluators and selected by the check |
+A check's `env` names ordinary variables available to that command only. A name there must not also appear in `agents.opencode.secrets` or `agents.opencode.env`, and must not be the variable that `trackers.jira.email` or `trackers.jira.token` references. Every declared variable must be present in the launching environment.
 
-Provider credentials are also redacted. A variable name cannot appear in both environment collections. Names must be unique within each collection. Every declared variable must be present in the launching environment.
-
-`PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL`, `CI`, and all `XDG_*` names are supplied by tevu and cannot be configured in these lists. Evaluators receive the fixed environment below, plus only their allowlisted ordinary values.
+`PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL`, `CI`, and all `XDG_*` names are supplied by tevu and cannot be configured in these lists.
 
 ### Fixed evaluator environment
 
@@ -241,22 +226,24 @@ Provider credentials are also redacted. A variable name cannot appear in both en
 
 No other parent variables are inherited. Sequential checks reuse these directories. Evaluator home, state, and temporary directories are separate from the agent's directories.
 
-Agent processes receive the same fixed variable names with their own per-case home, state, and temporary directories, plus the variables declared in `opencodeEnvironment`. Host agent sessions, global configuration, caches, and login stores are not copied.
+Agent processes receive the same fixed variable names with their own per-case home, state, and temporary directories, plus the variables declared in `agents.opencode.secrets` and `agents.opencode.env`. Host agent sessions, global configuration, caches, and login stores are not copied.
 
 ## Jira Cloud
 
 | Field | Contract |
 | --- | --- |
-| `jira.baseUrl` | HTTPS site URL |
-| `jira.emailEnvironmentVariable` | Name of the variable holding the account email |
-| `jira.tokenEnvironmentVariable` | Name of the variable holding the API token |
+| `trackers.jira.url` | HTTPS site URL |
+| `trackers.jira.email` | `$VARIABLE` reference to the account email |
+| `trackers.jira.token` | `$VARIABLE` reference to the API token |
 
-Neither Jira credential variable may appear in `evaluatorEnvironment`. Jira import is read-only and uses at most three requests per import, sharing that budget across redirects and retries. Jira Server and Data Center are unsupported.
+`trackers.jira` is optional. `tevu validate` and `tevu run` check only its structure: the URL is HTTPS and `email`/`token` are `$VARIABLE` references. Neither command checks that the referenced variables are set. `tevu task add --jira` checks both at import time, when it needs their values to call Jira.
+
+Neither Jira credential variable may appear in a check's `env`. Jira import is read-only and uses at most three requests per import, sharing that budget across redirects and retries. Jira Server and Data Center are unsupported.
 
 The [Jira import guide](../guides/import-jira-task.md) describes connection setup and task creation.
 
-## GitHub Issues
+## GitHub issues
 
-GitHub Issues has no configuration fields. `task add --github` needs the GitHub CLI (`gh`) on `PATH`, authenticated for the issue's host: `gh auth login` for `github.com`, or `gh auth login --hostname <host>` for a GitHub Enterprise Server host, because gh never receives `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. tevu reads and stores no GitHub token; gh owns authentication entirely.
+GitHub issues has no configuration fields. `task add --github` needs the GitHub CLI (`gh`) on `PATH`, authenticated for the issue's host: `gh auth login` for `github.com`, or `gh auth login --hostname <host>` for a GitHub Enterprise Server host, because gh never receives `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. tevu reads and stores no GitHub token; gh owns authentication entirely.
 
 Each import makes one `gh issue view` call with a 30-second limit and no retries beyond gh's own. `tevu validate`, `tevu run`, and `tevu report` never run gh.

@@ -14,9 +14,10 @@ import {
   exportPartIdentity,
   listMalformedOptionalMetricFields,
 } from "./opencode-protocol.ts";
+import { TevuConfigSchema } from "../config/schema.ts";
 
 import type { ProtocolContext } from "./opencode-protocol.ts";
-import type { ContenderDefinition, TaskDefinition } from "../config/schema.ts";
+import type { ModelDefinitionInput, TaskDefinition, TaskInput } from "../config/schema.ts";
 import type {
   IsolatedEnvironment,
   OpenCodeAdapter,
@@ -248,43 +249,56 @@ function syntheticEnvironment(extra: Record<string, string>): IsolatedEnvironmen
   };
 }
 
-function buildTask(overrides: Partial<TaskDefinition> = {}): TaskDefinition {
+function buildTask(overrides: Partial<TaskInput> = {}): TaskInput {
   return {
     id: "task-1",
-    repositoryId: "repo-1",
-    startCommit: "0123456789abcdef0123456789abcdef01234567",
-    source: { kind: "manual", title: "synthetic manual task" },
+    title: "Synthetic welcome-route task",
+    repo: "repo-1",
+    base_commit: "0123456789abcdef0123456789abcdef01234567",
     description: "synthetic task description for the welcome route",
     prompt: "TEVU-PROMPT-BODY implement the welcome route",
-    definitionOfReady: [{ id: "ready-1", description: "synthetic ready item", confirmed: true }],
-    acceptanceCriteria: [
-      {
-        id: "acc-acceptance-command",
-        description: "acceptance command exits zero",
-        required: true,
-        evaluator: {
-          kind: "command",
-          argv: ["/synthetic/acceptance-probe", "--suite", "synthetic"],
-          timeoutMs: 5000,
-          successExitCodes: [0],
-          environmentAllowlist: [],
+    readiness: ["synthetic ready item"],
+    checks: {
+      acceptance: [
+        {
+          id: "acc-acceptance-command",
+          description: "acceptance command exits zero",
+          run: ["/synthetic/acceptance-probe", "--suite", "synthetic"],
+          timeout: "5s",
+          exit_codes: [0],
         },
-      },
-    ],
-    definitionOfDone: [
-      {
-        id: "dod-manual-review",
-        description: "manual Definition of Done review",
-        required: true,
-        evaluator: { kind: "manual" },
-      },
-    ],
+      ],
+      done: [
+        {
+          id: "dod-manual-review",
+          description: "manual Definition of Done review",
+          manual: true,
+        },
+      ],
+    },
     ...overrides,
   };
 }
 
-function buildContender(overrides: Partial<ContenderDefinition> = {}): ContenderDefinition {
-  return { id: "alpha", model: "vendor/model-alpha-synth", variant: "effort-high", ...overrides };
+function buildModel(overrides: Partial<ModelDefinitionInput> = {}): ModelDefinitionInput {
+  return { id: "alpha", model: "vendor/model-alpha-synth", effort: "effort-high", ...overrides };
+}
+
+/** Materializes one task through the schema so `buildTaskPrompt` sees every default resolved. */
+function materializeTask(overrides: Partial<TaskInput> = {}): TaskDefinition {
+  const config = TevuConfigSchema.parse({
+    version: 1,
+    run: { output_dir: "/synthetic/artifacts", concurrency: 1, timeout: "1m", stop_grace: "1s" },
+    agents: { opencode: { command: "/synthetic/opencode" } },
+    repositories: [{ id: "repo-1", path: "/synthetic/source" }],
+    models: [buildModel(), buildModel({ id: "beta" })],
+    tasks: [buildTask(overrides)],
+  });
+  const task = config.tasks[0];
+  if (task === undefined) {
+    throw new Error("expected the fixture configuration to materialize its task");
+  }
+  return task;
 }
 
 describe("decodeEvent", () => {
@@ -604,7 +618,7 @@ describe("listMalformedOptionalMetricFields", () => {
 
 describe("buildTaskPrompt", () => {
   it("builds identical prompt bytes for every contender on the same task", () => {
-    const task = buildTask();
+    const task = materializeTask();
 
     const prompt = buildTaskPrompt(task);
 
@@ -612,7 +626,7 @@ describe("buildTaskPrompt", () => {
   });
 
   it("includes the prompt, description, check descriptions, and repository boundary instruction", () => {
-    const task = buildTask();
+    const task = materializeTask();
 
     const prompt = buildTaskPrompt(task);
 
@@ -620,8 +634,8 @@ describe("buildTaskPrompt", () => {
       [
         task.prompt,
         task.description,
-        `Acceptance criteria:\n- ${task.acceptanceCriteria[0].description}`,
-        `Definition of Done:\n- ${task.definitionOfDone[0].description}`,
+        `Acceptance criteria:\n- ${task.checks.acceptance[0]?.description}`,
+        `Definition of Done:\n- ${task.checks.done[0]?.description}`,
         "Work only inside the current repository. Do not read or modify any path outside this repository's working tree.",
       ].join("\n\n"),
     );
@@ -630,36 +644,36 @@ describe("buildTaskPrompt", () => {
   });
 
   it("omits evaluator commands, contender identity, and Jira identity from the prompt", () => {
-    const jiraTask = buildTask({
+    const jiraTask = materializeTask({
       source: {
-        kind: "jira-cloud",
-        issueKey: "TEVU-999",
-        issueUrl: "https://jira.example.com/browse/TEVU-999",
-        importedAt: "2026-09-22T12:00:00.000Z",
-        importedSummary: "TEVU-JIRA-SUMMARY",
-        importedDescription: "TEVU-JIRA-DESCRIPTION",
+        kind: "jira",
+        key: "TEVU-999",
+        url: "https://jira.example.com/browse/TEVU-999",
+        imported_at: "2026-09-22T12:00:00.000Z",
+        title: "TEVU-JIRA-SUMMARY",
+        body: "TEVU-JIRA-DESCRIPTION",
       },
     });
-    const contender: ContenderDefinition = buildContender();
+    const model: ModelDefinitionInput = buildModel();
 
     const prompt = buildTaskPrompt(jiraTask);
 
     expect(prompt).not.toContain("/synthetic/acceptance-probe");
     expect(prompt).not.toContain("TEVU-999");
     expect(prompt).not.toContain("TEVU-JIRA-DESCRIPTION");
-    expect(prompt).not.toContain(contender.model);
-    expect(prompt).not.toContain(contender.variant);
+    expect(prompt).not.toContain(model.model);
+    expect(prompt).not.toContain(model.effort);
   });
 
   it("omits GitHub issue identity and imported body from the prompt", () => {
-    const githubTask = buildTask({
+    const githubTask = materializeTask({
       source: {
-        kind: "github-issue",
-        issueKey: "octo/repo#42",
-        issueUrl: "https://github.com/octo/repo/issues/42",
-        importedAt: "2026-09-22T12:00:00.000Z",
-        importedSummary: "TEVU-GITHUB-SUMMARY",
-        importedDescription: "TEVU-GITHUB-DESCRIPTION",
+        kind: "github",
+        key: "octo/repo#42",
+        url: "https://github.com/octo/repo/issues/42",
+        imported_at: "2026-09-22T12:00:00.000Z",
+        title: "TEVU-GITHUB-SUMMARY",
+        body: "TEVU-GITHUB-DESCRIPTION",
       },
     });
 
@@ -671,9 +685,9 @@ describe("buildTaskPrompt", () => {
     expect(prompt).not.toContain("TEVU-GITHUB-DESCRIPTION");
   });
 
-  it("does not read the task's start commit", () => {
-    const first = buildTask({ startCommit: "0123456789abcdef0123456789abcdef01234567" });
-    const second = buildTask({ startCommit: "fedcba9876543210fedcba9876543210fedcba98" });
+  it("does not read the task's base commit", () => {
+    const first = materializeTask({ base_commit: "0123456789abcdef0123456789abcdef01234567" });
+    const second = materializeTask({ base_commit: "fedcba9876543210fedcba9876543210fedcba98" });
 
     expect(buildTaskPrompt(first)).toBe(buildTaskPrompt(second));
   });
@@ -752,10 +766,10 @@ describe("OpenCode adapter over a synthetic executable", () => {
       identity: {
         caseId: "task-1--alpha",
         taskId: "task-1",
-        contenderId: "alpha",
+        modelId: "alpha",
         sourceCommit: "0123456789abcdef0123456789abcdef01234567",
         model: "vendor/model-alpha-synth",
-        variant: "effort-high",
+        effort: "effort-high",
       },
       executable: syntheticExecutable,
       prompt: "synthetic benchmark prompt",
@@ -830,10 +844,10 @@ describe("OpenCode adapter over a synthetic executable", () => {
       identity: {
         caseId: "task-1--alpha",
         taskId: "task-1",
-        contenderId: "alpha",
+        modelId: "alpha",
         sourceCommit: "0123456789abcdef0123456789abcdef01234567",
         model: "vendor/model-alpha-synth",
-        variant: "effort-high",
+        effort: "effort-high",
       },
       executable: syntheticExecutable,
       prompt: "synthetic benchmark prompt",
@@ -868,10 +882,10 @@ describe("OpenCode adapter over a synthetic executable", () => {
       identity: {
         caseId: "task-1--alpha",
         taskId: "task-1",
-        contenderId: "alpha",
+        modelId: "alpha",
         sourceCommit: "0123456789abcdef0123456789abcdef01234567",
         model: "vendor/model-alpha-synth",
-        variant: "effort-high",
+        effort: "effort-high",
       },
       executable: syntheticExecutable,
       prompt: "synthetic benchmark prompt",
@@ -907,10 +921,10 @@ describe("OpenCode adapter over a synthetic executable", () => {
       identity: {
         caseId: "task-1--alpha",
         taskId: "task-1",
-        contenderId: "alpha",
+        modelId: "alpha",
         sourceCommit: "0123456789abcdef0123456789abcdef01234567",
         model: "vendor/model-alpha-synth",
-        variant: "effort-high",
+        effort: "effort-high",
       },
       executable: syntheticExecutable,
       prompt: "synthetic benchmark prompt",
@@ -939,10 +953,10 @@ describe("OpenCode adapter over a synthetic executable", () => {
       identity: {
         caseId: "task-1--alpha",
         taskId: "task-1",
-        contenderId: "alpha",
+        modelId: "alpha",
         sourceCommit: "0123456789abcdef0123456789abcdef01234567",
         model: "vendor/model-alpha-synth",
-        variant: "effort-high",
+        effort: "effort-high",
       },
       executable: syntheticExecutable,
       prompt: "synthetic benchmark prompt",
@@ -1053,10 +1067,10 @@ describe("OpenCode adapter over a synthetic executable", () => {
       identity: {
         caseId: "task-1--alpha",
         taskId: "task-1",
-        contenderId: "alpha",
+        modelId: "alpha",
         sourceCommit: "0123456789abcdef0123456789abcdef01234567",
         model: "vendor/model-alpha-synth",
-        variant: "effort-high",
+        effort: "effort-high",
       },
       executable: syntheticExecutable,
       prompt: "synthetic benchmark prompt",
@@ -1096,10 +1110,10 @@ describe("credential-secret redaction on OpenCode stdout streams", () => {
       identity: {
         caseId: "task-1--alpha",
         taskId: "task-1",
-        contenderId: "alpha",
+        modelId: "alpha",
         sourceCommit: "0123456789abcdef0123456789abcdef01234567",
         model: "vendor/model-alpha-synth",
-        variant: "effort-high",
+        effort: "effort-high",
       },
       executable: syntheticExecutable,
       prompt: "synthetic benchmark prompt",
@@ -1139,10 +1153,10 @@ describe("credential-secret redaction on OpenCode stdout streams", () => {
       identity: {
         caseId: "task-1--alpha",
         taskId: "task-1",
-        contenderId: "alpha",
+        modelId: "alpha",
         sourceCommit: "0123456789abcdef0123456789abcdef01234567",
         model: "vendor/model-alpha-synth",
-        variant: "effort-high",
+        effort: "effort-high",
       },
       executable: syntheticExecutable,
       prompt: "synthetic benchmark prompt",

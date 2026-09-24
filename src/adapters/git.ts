@@ -52,32 +52,43 @@ const SYNTHETIC_COMMIT_IDENTITY: Record<string, string> = {
  * repository ID in the `taskId` field because the adapter contract carries no
  * task identity at that boundary; callers that know the task may re-attribute.
  */
+/**
+ * Creates the read-only source-validation half of {@link GitWorkspaceAdapter},
+ * needing no configuration: it reads only the `repository`/`commit`
+ * parameters it is called with.
+ */
+export function createSourceValidator(): Pick<GitWorkspaceAdapter, "validateSource"> {
+  return { validateSource };
+}
+
+async function validateSource(
+  repository: RepositoryDefinition,
+  commit: string,
+): Promise<TevuResult<SourceValidation, "SourceMaterializationError">> {
+  const resolvedCommit = await resolveCommit(repository.path, commit);
+  if (resolvedCommit === null) {
+    return sourceError(
+      repository.id,
+      `repository "${repository.id}": "${commit}" is not readable as exactly one commit`,
+    );
+  }
+  const inspection = await inspectSourceTree(repository.path, resolvedCommit);
+  if (!inspection.ok) {
+    return sourceError(repository.id, `repository "${repository.id}": ${inspection.reason}`);
+  }
+  return {
+    ok: true,
+    value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
+  };
+}
+
 export function createGitWorkspaceAdapter(
   options: GitWorkspaceAdapterOptions,
 ): GitWorkspaceAdapter {
   const { config, workspacesDirectory } = options;
 
   return {
-    async validateSource(
-      repository: RepositoryDefinition,
-      commit: string,
-    ): Promise<TevuResult<SourceValidation, "SourceMaterializationError">> {
-      const resolvedCommit = await resolveCommit(repository.path, commit);
-      if (resolvedCommit === null) {
-        return sourceError(
-          repository.id,
-          `repository "${repository.id}": "${commit}" is not readable as exactly one commit`,
-        );
-      }
-      const inspection = await inspectSourceTree(repository.path, resolvedCommit);
-      if (!inspection.ok) {
-        return sourceError(repository.id, `repository "${repository.id}": ${inspection.reason}`);
-      }
-      return {
-        ok: true,
-        value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
-      };
-    },
+    validateSource,
 
     async createIsolatedCase(
       identity: CaseIdentity,
@@ -90,12 +101,12 @@ export function createGitWorkspaceAdapter(
         );
       }
       const repository = config.repositories.find(
-        (candidate) => candidate.id === task.repositoryId,
+        (candidate) => candidate.id === task.repo,
       );
       if (repository === undefined) {
         return sourceError(
           identity.taskId,
-          `repository "${task.repositoryId}" is not defined in the configuration`,
+          `repository "${task.repo}" is not defined in the configuration`,
         );
       }
       const resolvedCommit = await resolveCommit(repository.path, identity.sourceCommit);

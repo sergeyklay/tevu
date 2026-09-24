@@ -6,15 +6,7 @@
  * Execa, Git commands, Jira transport code, or Node.js process globals.
  */
 
-import type {
-  CheckDefinition,
-  ContenderDefinition,
-  JiraCloudConfig,
-  ReadyItem,
-  RepositoryDefinition,
-  TaskDefinition,
-  TevuConfig,
-} from "../config/schema.ts";
+import type { RepositoryDefinition, TaskDefinition, TevuConfig } from "../config/schema.ts";
 
 /** Result of a fallible module contract; errors never cross boundaries as thrown exceptions. */
 export type TevuResult<T, K extends TevuError["kind"]> =
@@ -34,7 +26,7 @@ export type ConfigReadCause = "not-found" | "permission-denied" | "not-a-file" |
 /** Error kinds a configuration load can produce. */
 export type LoadConfigErrorKind = "ConfigParseError" | "ConfigValidationError" | "ConfigReadError";
 
-/** Tracker behind an imported task source; each value equals the stored `source.kind`. */
+/** Tracker behind an imported task source. */
 export type IssueTrackerKind = "jira-cloud" | "github-issue";
 
 /** Exhaustive typed error union for every tevu failure crossing a module boundary. */
@@ -83,14 +75,52 @@ export type TevuError =
   | { kind: "ArtifactError"; operation: string; reason: string }
   | { kind: "CancellationError"; activeCaseIds: string[] };
 
-/** Identity of one benchmark case: one task executed once by one contender. */
+/** Identity of one benchmark case: one task executed once by one model entry. */
 export type CaseIdentity = {
   caseId: string;
   taskId: string;
-  contenderId: string;
+  modelId: string;
   sourceCommit: string;
   model: string;
-  variant: string;
+  effort: string;
+};
+
+/**
+ * Run-scoped projection of a task's stored configuration, read back through
+ * {@link decodeRunConfig} rather than the live schema; see `src/config/run-snapshot.ts`.
+ */
+export type TaskRecord = {
+  id: string;
+  repositoryId: string;
+  startCommit: string;
+  description: string;
+  source:
+    | { kind: "manual"; reference: string | null; title: string }
+    | { kind: "jira-cloud"; issueKey: string; issueUrl: string }
+    | { kind: "github-issue"; issueKey: string; issueUrl: string };
+  checks: CheckRecord[];
+};
+
+/** One task check as preserved for `report` and `assess`, without its command or manual detail. */
+export type CheckRecord = {
+  id: string;
+  category: "acceptance" | "definition-of-done";
+  description: string;
+  required: boolean;
+  evaluator: "command" | "manual";
+};
+
+/** One preserved model entry: id, provider model string, and reasoning effort. */
+export type ModelRecord = { id: string; model: string; effort: string };
+
+/** One preserved repository: id and its resolved path. */
+export type RepositoryRecord = { id: string; path: string };
+
+/** Decoded projection of a run's stored configuration, in snapshot order. */
+export type RunConfigRecord = {
+  tasks: TaskRecord[];
+  models: ModelRecord[];
+  repositories: RepositoryRecord[];
 };
 
 /** Versioned manifest of one benchmark run; `tools.opencodeVersion` is provenance only, never a gate. */
@@ -109,7 +139,8 @@ export type RunManifest = {
   execution: { concurrency: number; caseTimeoutMs: number };
   cases: CaseIdentity[];
   context?: {
-    config: TevuConfig;
+    /** Decode through `decodeRunConfig`; never read directly as a `TevuConfig`. */
+    config: unknown;
     capabilities: OpenCodeCapabilityReport;
   };
 };
@@ -373,7 +404,7 @@ export interface GitWorkspaceAdapter {
 /** Name, classification, and recipient of one passed variable; values are never recorded. */
 export type EnvironmentVariableRecord = {
   name: string;
-  classification: "fixed" | "provider-credential" | "secret" | "ordinary";
+  classification: "fixed" | "secret" | "ordinary";
   recipient: "opencode" | "evaluator";
 };
 
@@ -595,11 +626,11 @@ export interface ArtifactStore {
   replaceAssessment(artifact: AssessmentArtifact): Promise<TevuResult<void, "ArtifactError">>;
 }
 
-/** Reads and atomically replaces the YAML configuration document. */
+/** Reads and atomically replaces the raw configuration document text. */
 export interface ConfigStore {
   /**
    * Resolves `false` only when probing the resolved absolute path fails with
-   * `ENOENT`. Every other failure resolves `true`, so `read` reports the
+   * `ENOENT`. Every other failure resolves `true`, so `readText` reports the
    * precise `ConfigReadError`.
    */
   exists(path: string): Promise<boolean>;
@@ -608,63 +639,9 @@ export interface ConfigStore {
    * resolved absolute path fails with `ENOENT`; every other outcome succeeds.
    */
   requireDirectory(path: string): Promise<TevuResult<void, "PrerequisiteError">>;
-  read(path: string): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>>;
-  replace(path: string, config: TevuConfig): Promise<TevuResult<void, "ArtifactError">>;
+  readText(path: string): Promise<TevuResult<string, "ConfigReadError">>;
+  replaceText(path: string, text: string): Promise<TevuResult<void, "ArtifactError">>;
 }
-
-/** Wizard-selected task source before snapshot materialization. */
-export type TaskSourceRequest =
-  | { kind: "manual"; reference?: string; title: string }
-  | {
-      kind: "jira-cloud";
-      issueKey: string;
-      /**
-       * One-time import already taken and displayed by the wizard; when
-       * present, task creation stores it verbatim instead of reading the
-       * issue from Jira a second time.
-       */
-      snapshot?: IssueSnapshot & { importedAt: string };
-    }
-  | {
-      kind: "github-issue";
-      /** One-time import already taken and displayed by the wizard. */
-      snapshot: IssueSnapshot & { importedAt: string };
-    };
-
-/** Complete top-level answers captured by the missing-configuration bootstrap flow. */
-export type ConfigBootstrapInput = {
-  artifacts: TevuConfig["artifacts"];
-  execution: TevuConfig["execution"];
-  opencode: TevuConfig["opencode"];
-  jira?: JiraCloudConfig;
-  repositories: RepositoryDefinition[];
-  contenders: ContenderDefinition[];
-};
-
-/** Typed wizard answers handed to the task-creation use case, which owns all writes. */
-export type TaskWizardInput = {
-  configPath: string;
-  bootstrap?: ConfigBootstrapInput;
-  repositoryId: string;
-  newRepository?: RepositoryDefinition;
-  taskId: string;
-  startCommit: string;
-  source: TaskSourceRequest;
-  description: string;
-  prompt: string;
-  definitionOfReady: ReadyItem[];
-  acceptanceCriteria: CheckDefinition[];
-  definitionOfDone: CheckDefinition[];
-};
-
-/** Effects injected into the task-creation use case. */
-export type TaskDependencies = {
-  configStore: ConfigStore;
-  git: GitWorkspaceAdapter;
-  jira: IssueTrackerAdapter | null;
-  clock: Clock;
-  cancellation?: AbortSignal;
-};
 
 /** Local prerequisite probes used by validation stages 3, 4, and 6. */
 export interface PrerequisiteAdapter {

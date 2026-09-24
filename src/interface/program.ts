@@ -14,8 +14,9 @@ import { runAssessmentWizard, runTaskWizard } from "./task-wizard.ts";
 
 import type { Readable, Writable } from "node:stream";
 import type { Help } from "commander";
-import type { AssessmentCaseContext } from "./task-wizard.ts";
-import type { JiraCloudConfig, TaskDefinition, TevuConfig } from "../config/schema.ts";
+import type { AssessmentCaseContext } from "../application/assess.ts";
+import type { TaskWizardInput } from "../application/create-task.ts";
+import type { JiraTrackerSettings, TaskDefinition, TevuConfig } from "../config/schema.ts";
 import type {
   AssessmentInput,
   BenchmarkPlan,
@@ -28,7 +29,6 @@ import type {
   RunResult,
   TevuError,
   TevuResult,
-  TaskWizardInput,
   ValidationFinding,
   ValidationReport,
 } from "../domain/types.ts";
@@ -57,7 +57,7 @@ export type ProgramOperations = {
   loadConfig(configPath: string): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>>;
   requireConfigDirectory(configPath: string): Promise<TevuResult<void, "PrerequisiteError">>;
   importJiraIssue(
-    settings: JiraCloudConfig,
+    settings: JiraTrackerSettings,
     issueKey: string,
   ): Promise<TevuResult<IssueSnapshot, "IssueImportError" | "CancellationError">>;
   importGitHubIssue(
@@ -549,7 +549,7 @@ async function runAssess(
     return reportFailure(err, applied.error, dependencies.redact);
   }
   out(`Assessment recorded for case ${caseId}; derived task outcome: ${applied.value.outcome}.`);
-  out(`Report: ${config.artifacts.directory}/${runId}/report.md`);
+  out(`Report: ${config.run.output_dir}/${runId}/report.md`);
   return EXIT_COMPLETED;
 }
 
@@ -567,7 +567,7 @@ async function runReport(
   if (!rebuilt.ok) {
     return reportFailure(err, rebuilt.error, dependencies.redact);
   }
-  out(`Report regenerated: ${loaded.value.artifacts.directory}/${runId}/report.md`);
+  out(`Report regenerated: ${loaded.value.run.output_dir}/${runId}/report.md`);
   return EXIT_COMPLETED;
 }
 
@@ -580,11 +580,11 @@ function printDryRun(
   out(`Planned cases (${plan.cases.length}, execution order):`);
   for (const identity of plan.cases) {
     out(
-      `  ${identity.caseId}: task ${identity.taskId}, contender ${identity.contenderId}, model ${identity.model}, variant ${identity.variant}, commit ${identity.sourceCommit}`,
+      `  ${identity.caseId}: task ${identity.taskId}, model entry ${identity.modelId} (${identity.model}, effort ${identity.effort}), commit ${identity.sourceCommit}`,
     );
   }
   out(
-    `Limits: concurrency ${plan.concurrency}, case timeout ${plan.caseTimeoutMs}ms, termination grace ${plan.terminationGraceMs}ms`,
+    `Limits: concurrency ${plan.concurrency}, timeout ${plan.caseTimeoutMs}ms, stop grace ${plan.terminationGraceMs}ms`,
   );
   out(`Artifact destination: ${plan.artifactsDirectory}`);
   printCapabilities(out, capabilities);

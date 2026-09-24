@@ -9,12 +9,12 @@
  * module; every effect flows through the injected `ArtifactStore`.
  */
 
-import { orderTaskChecks, reduceRequiredOutcome } from "../evaluation/checks.ts";
+import { decodeRunConfig } from "../config/run-snapshot.ts";
+import { reduceRequiredOutcome } from "../evaluation/checks.ts";
 import { normalizeMetrics, unavailableBenchmarkMetrics } from "../evaluation/metrics.ts";
 import { buildReport } from "../evaluation/report.ts";
 import { reduceRunExitCode } from "./run-benchmark.ts";
 
-import type { TaskDefinition } from "../config/schema.ts";
 import type {
   ArtifactStore,
   AssessmentArtifact,
@@ -23,16 +23,33 @@ import type {
   AssessmentRecord,
   BenchmarkMetrics,
   CaseResult,
+  CheckRecord,
   CheckResult,
   OpenCodeExport,
   OpenCodeRunEvent,
   ReportResult,
   RunResult,
+  TaskRecord,
   TevuError,
   TevuResult,
   ValidationFinding,
 } from "../domain/types.ts";
-import type { OrderedCheck } from "../evaluation/checks.ts";
+
+/** One manual check of the assessed case, in configuration order. */
+export type ManualCheckSummary = {
+  checkId: string;
+  category: "acceptance" | "definition-of-done";
+  description: string;
+  required: boolean;
+};
+
+/** Pre-read display context for one case's manual assessment. */
+export type AssessmentCaseContext = {
+  /** Every manual check of the case's task, in configuration order. */
+  manualChecks: ManualCheckSummary[];
+  /** Current assessment records; replaced ones live in artifact history, not here. */
+  existing: AssessmentRecord[];
+};
 
 /** Error kinds the manual assessment contract declares. */
 type AssessCaseErrorKind =
@@ -92,16 +109,18 @@ export async function assessCase(
       },
     ]);
   }
-  const task = context.config.tasks.find((entry) => entry.id === identity.taskId);
+  const decoded = decodeRunConfig(context.config);
+  if (!decoded.ok) {
+    return decoded;
+  }
+  const task = decoded.value.tasks.find((entry) => entry.id === identity.taskId);
   if (task === undefined) {
     return artifactFailure(
       "assess-case",
       `preserved configuration for run "${input.runId}" does not define task "${identity.taskId}"`,
     );
   }
-  const manualChecks = orderTaskChecks(task).filter(
-    (check) => check.definition.evaluator.kind === "manual",
-  );
+  const manualChecks = task.checks.filter((check) => check.evaluator === "manual");
   if (manualChecks.length === 0) {
     return configValidationFailure([
       {
@@ -175,6 +194,60 @@ export async function assessCase(
 }
 
 /**
+ * Reads the assessment wizard's display context from preserved run artifacts
+ * only: the manifest's decoded configuration supplies the manual checks in
+ * configuration order, and the current assessment records come from the
+ * versioned assessment artifact.
+ */
+export async function readAssessmentContext(
+  runId: string,
+  caseId: string,
+  store: ArtifactStore,
+): Promise<TevuResult<AssessmentCaseContext, "ConfigValidationError" | "ArtifactError">> {
+  const manifest = await store.readRunManifest(runId);
+  if (!manifest.ok) {
+    return manifest;
+  }
+  const context = manifest.value.context;
+  if (context === undefined) {
+    return artifactFailure(
+      "read-run-manifest",
+      `run "${runId}" preserves no configuration context; it cannot be assessed`,
+    );
+  }
+  const decoded = decodeRunConfig(context.config);
+  if (!decoded.ok) {
+    return decoded;
+  }
+  const identity = manifest.value.cases.find((candidate) => candidate.caseId === caseId);
+  if (identity === undefined) {
+    return configValidationFailure([
+      { severity: "error", identifier: caseId, message: `case "${caseId}" is not part of run "${runId}"` },
+    ]);
+  }
+  const task = decoded.value.tasks.find((candidate) => candidate.id === identity.taskId);
+  if (task === undefined) {
+    return artifactFailure(
+      "read-run-manifest",
+      `task "${identity.taskId}" is missing from the preserved run configuration`,
+    );
+  }
+  const manualChecks: ManualCheckSummary[] = task.checks
+    .filter((check) => check.evaluator === "manual")
+    .map((check) => ({
+      checkId: check.id,
+      category: check.category,
+      description: check.description,
+      required: check.required,
+    }));
+  const assessment = await store.readAssessment(runId, caseId);
+  if (!assessment.ok) {
+    return assessment;
+  }
+  return { ok: true, value: { manualChecks, existing: assessment.value?.current ?? [] } };
+}
+
+/**
  * Rebuilds the normalized run record and Markdown report of a finalized run
  * solely from versioned artifacts: preserved events, session exports, checks,
  * current assessments, per-case process and failure records, and the manifest
@@ -211,7 +284,11 @@ async function rebuildRunDerived(
       `run "${runId}" manifest does not preserve the configuration context required for regeneration`,
     );
   }
-  const tasksById = new Map(context.config.tasks.map((task) => [task.id, task]));
+  const decoded = decodeRunConfig(context.config);
+  if (!decoded.ok) {
+    return decoded;
+  }
+  const tasksById = new Map(decoded.value.tasks.map((task) => [task.id, task]));
 
   const cases: CaseResult[] = [];
   const assessments: AssessmentArtifact[] = [];
@@ -245,9 +322,9 @@ async function rebuildRunDerived(
   const report = buildReport({
     run,
     capabilities: context.capabilities,
-    tasks: context.config.tasks,
-    contenders: context.config.contenders,
-    repositories: context.config.repositories,
+    tasks: decoded.value.tasks,
+    models: decoded.value.models,
+    repositories: decoded.value.repositories,
     assessments,
   });
   const written = await store.writeReport(runId, report);
@@ -261,7 +338,7 @@ async function rebuildRunDerived(
 async function rebuildCaseResult(
   runId: string,
   caseId: string,
-  tasksById: ReadonlyMap<string, TaskDefinition>,
+  tasksById: ReadonlyMap<string, TaskRecord>,
   store: ArtifactStore,
 ): Promise<
   TevuResult<{ result: CaseResult; assessment: AssessmentArtifact | null }, RebuildReportErrorKind>
@@ -314,7 +391,7 @@ async function rebuildCaseResult(
     ...source,
     outcome:
       source.lifecycle === "completed"
-        ? reduceRequiredOutcome(orderTaskChecks(task), derivedChecks)
+        ? reduceRequiredOutcome(task.checks, derivedChecks)
         : "not-evaluated",
     checks: derivedChecks,
     metrics: recomputeMetrics(source, events, sessionExport),
@@ -392,7 +469,7 @@ function applyCurrentAssessments(
 /** Aggregates every defect of one assessment invocation into findings. */
 function validateAssessmentInput(
   input: AssessmentInput,
-  manualChecks: readonly OrderedCheck[],
+  manualChecks: readonly CheckRecord[],
   currentByCheck: ReadonlyMap<string, AssessmentRecord>,
 ): ValidationFinding[] {
   const findings: ValidationFinding[] = [];
@@ -403,7 +480,7 @@ function validateAssessmentInput(
       message: "assessedAt must be a parseable timestamp supplied by the caller",
     });
   }
-  const manualCheckIds = new Set(manualChecks.map((check) => check.definition.id));
+  const manualCheckIds = new Set(manualChecks.map((check) => check.id));
   const decided = new Set<string>();
   for (const decision of input.decisions) {
     if (decided.has(decision.checkId)) {
@@ -454,7 +531,7 @@ function validateAssessmentInput(
     }
   }
   for (const check of manualChecks) {
-    const checkId = check.definition.id;
+    const checkId = check.id;
     if (!currentByCheck.has(checkId) && !decided.has(checkId)) {
       findings.push({
         severity: "error",
@@ -480,7 +557,7 @@ function validateAssessmentInput(
  */
 function buildNextAssessment(
   input: AssessmentInput,
-  manualChecks: readonly OrderedCheck[],
+  manualChecks: readonly CheckRecord[],
   existing: AssessmentArtifact | null,
 ): AssessmentArtifact {
   const decisionsByCheck = new Map(input.decisions.map((decision) => [decision.checkId, decision]));
@@ -490,7 +567,7 @@ function buildNextAssessment(
   const current: AssessmentRecord[] = [];
   const history = [...(existing?.history ?? [])];
   for (const check of manualChecks) {
-    const checkId = check.definition.id;
+    const checkId = check.id;
     const decision = decisionsByCheck.get(checkId);
     const prior = currentByCheck.get(checkId);
     if (decision === undefined) {

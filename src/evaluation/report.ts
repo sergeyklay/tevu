@@ -1,55 +1,32 @@
 import type {
-  ContenderDefinition,
-  RepositoryDefinition,
-  TaskDefinition,
-} from "../config/schema.ts";
-import type {
   AssessmentArtifact,
   CaseResult,
+  CheckRecord,
   CheckResult,
   MetricValue,
+  ModelRecord,
   OpenCodeCapabilityReport,
   ReportResult,
+  RepositoryRecord,
   RunFinding,
   RunManifest,
   RunResult,
+  TaskRecord,
 } from "../domain/types.ts";
 
 /**
  * Everything report generation consumes: the versioned run record plus the
- * preserved task, contender, repository, capability, and assessment records
+ * preserved task, model, repository, capability, and assessment records
  * needed to distinguish required from optional and manual from command checks.
  * The builder performs no I/O.
  */
 export type ReportInput = {
   run: RunResult;
   capabilities: OpenCodeCapabilityReport | null;
-  tasks: readonly TaskDefinition[];
-  contenders: readonly ContenderDefinition[];
-  repositories: readonly RepositoryDefinition[];
+  tasks: readonly TaskRecord[];
+  models: readonly ModelRecord[];
+  repositories: readonly RepositoryRecord[];
   assessments: readonly AssessmentArtifact[];
-};
-
-/** Sensitive-content-free projection of one configured check for report rendering. */
-export type NormalizedCheckDefinition = {
-  id: string;
-  category: "acceptance" | "definition-of-done";
-  description: string;
-  required: boolean;
-  evaluator: "command" | "manual";
-};
-
-/** Prompt-free, imported-body-free projection of one task. */
-export type NormalizedTask = {
-  id: string;
-  repositoryId: string;
-  startCommit: string;
-  description: string;
-  source:
-    | { kind: "manual"; reference: string | null; title: string }
-    | { kind: "jira-cloud"; issueKey: string; issueUrl: string }
-    | { kind: "github-issue"; issueKey: string; issueUrl: string };
-  checks: NormalizedCheckDefinition[];
 };
 
 /** Deterministic report model; identical source artifacts produce an identical model. */
@@ -59,9 +36,9 @@ export type NormalizedRunModel = {
   exitCode: RunResult["exitCode"];
   findings: RunFinding[];
   capabilities: OpenCodeCapabilityReport | null;
-  repositories: RepositoryDefinition[];
-  contenders: ContenderDefinition[];
-  tasks: NormalizedTask[];
+  repositories: RepositoryRecord[];
+  models: ModelRecord[];
+  tasks: TaskRecord[];
   cases: CaseResult[];
   assessments: AssessmentArtifact[];
 };
@@ -77,8 +54,11 @@ export function buildNormalizedRun(input: ReportInput): NormalizedRunModel {
     ),
     capabilities: input.capabilities,
     repositories: sortById(input.repositories),
-    contenders: sortById(input.contenders),
-    tasks: sortById(input.tasks.map(normalizeTask)),
+    models: sortById(input.models),
+    tasks: sortById(input.tasks).map((task) => ({
+      ...task,
+      checks: [...task.checks].sort((a, b) => compareStrings(a.id, b.id)),
+    })),
     cases: [...input.run.cases]
       .sort((a, b) => compareStrings(a.identity.caseId, b.identity.caseId))
       .map((caseResult) => ({
@@ -185,13 +165,13 @@ export function renderMarkdownReport(model: NormalizedRunModel): string {
     }
 
     lines.push(
-      "| Outcome | Contender | Model | Variant | Lifecycle | Runtime failure | Elapsed |",
+      "| Outcome | Model entry | Model | Effort | Lifecycle | Runtime failure | Elapsed |",
       "|---|---|---|---|---|---|---|",
     );
     for (const caseResult of taskCases) {
       const identity = caseResult.identity;
       lines.push(
-        `| ${caseResult.outcome} | ${cell(identity.contenderId)} | ${cell(identity.model)} | ${cell(identity.variant)} | ${caseResult.lifecycle} | ${caseResult.failure ? cell(caseResult.failure.error.kind) : "none"} | ${cell(formatMetricValue(caseResult.metrics.elapsed))} |`,
+        `| ${caseResult.outcome} | ${cell(identity.modelId)} | ${cell(identity.model)} | ${cell(identity.effort)} | ${caseResult.lifecycle} | ${caseResult.failure ? cell(caseResult.failure.error.kind) : "none"} | ${cell(formatMetricValue(caseResult.metrics.elapsed))} |`,
       );
     }
     lines.push("");
@@ -216,7 +196,7 @@ export function renderMarkdownReport(model: NormalizedRunModel): string {
 function renderCase(
   lines: string[],
   caseResult: CaseResult,
-  task: NormalizedTask | undefined,
+  task: TaskRecord | undefined,
   assessment: AssessmentArtifact | undefined,
 ): void {
   const identity = caseResult.identity;
@@ -225,7 +205,7 @@ function renderCase(
   lines.push(
     `### Case ${identity.caseId}`,
     "",
-    `- Contender: ${identity.contenderId} (${identity.model}, variant ${identity.variant})`,
+    `- Model entry: ${identity.modelId} (${identity.model}, effort ${identity.effort})`,
     `- Lifecycle: ${caseResult.lifecycle}`,
     `- Task outcome: ${caseResult.outcome}`,
   );
@@ -314,7 +294,7 @@ function formatMetricValue(metric: MetricValue): string {
   return `${metric.value} ${metric.unit} (${metric.scope}, source: ${metric.availability.source})`;
 }
 
-function describeTaskSource(source: NormalizedTask["source"]): string {
+function describeTaskSource(source: TaskRecord["source"]): string {
   switch (source.kind) {
     case "manual":
       return `manual — ${source.title}${source.reference ? ` (${source.reference})` : ""}`;
@@ -323,44 +303,6 @@ function describeTaskSource(source: NormalizedTask["source"]): string {
     case "github-issue":
       return `GitHub issue snapshot — [${source.issueKey}](${source.issueUrl})`;
   }
-}
-
-function normalizeTask(task: TaskDefinition): NormalizedTask {
-  return {
-    id: task.id,
-    repositoryId: task.repositoryId,
-    startCommit: task.startCommit,
-    description: task.description,
-    source: normalizeTaskSource(task.source),
-    checks: [
-      ...task.acceptanceCriteria.map((check) => normalizeCheck(check, "acceptance")),
-      ...task.definitionOfDone.map((check) => normalizeCheck(check, "definition-of-done")),
-    ].sort((a, b) => compareStrings(a.id, b.id)),
-  };
-}
-
-function normalizeTaskSource(source: TaskDefinition["source"]): NormalizedTask["source"] {
-  switch (source.kind) {
-    case "manual":
-      return { kind: "manual", reference: source.reference ?? null, title: source.title };
-    case "jira-cloud":
-      return { kind: "jira-cloud", issueKey: source.issueKey, issueUrl: source.issueUrl };
-    case "github-issue":
-      return { kind: "github-issue", issueKey: source.issueKey, issueUrl: source.issueUrl };
-  }
-}
-
-function normalizeCheck(
-  check: TaskDefinition["acceptanceCriteria"][number],
-  category: CheckResult["category"],
-): NormalizedCheckDefinition {
-  return {
-    id: check.id,
-    category,
-    description: check.description,
-    required: check.required,
-    evaluator: check.evaluator.kind,
-  };
 }
 
 function evidenceLink(caseResult: CaseResult): string {

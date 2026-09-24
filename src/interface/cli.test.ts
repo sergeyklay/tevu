@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { TevuConfigSchema } from "../config/schema.ts";
 import { CONFIG_TEMPLATE } from "../config/template.ts";
 import { createProgram, runProgram } from "./program.ts";
 
@@ -16,12 +17,16 @@ import type {
   ProgramIo,
   ProgramOperations,
 } from "./program.ts";
-import type { AssessmentCaseContext, ManualCheckSummary } from "./task-wizard.ts";
+import type { AssessmentCaseContext, ManualCheckSummary } from "../application/assess.ts";
+import type { TaskWizardInput } from "../application/create-task.ts";
 import type {
-  CheckDefinition,
-  JiraCloudConfig,
+  CheckInput,
+  JiraTrackerSettings,
+  ModelDefinitionInput,
   TaskDefinition,
+  TaskInput,
   TevuConfig,
+  TevuConfigInput,
 } from "../config/schema.ts";
 import type {
   AssessmentRecord,
@@ -105,60 +110,65 @@ vi.mock("@clack/prompts", () => {
 
 const FIXED_NOW = new Date("2026-09-23T10:00:00.000Z");
 
-function buildJiraCloudSettings(overrides: Partial<JiraCloudConfig> = {}): JiraCloudConfig {
+function buildJiraTrackerSettings(overrides: Partial<JiraTrackerSettings> = {}): JiraTrackerSettings {
   return {
-    baseUrl: "https://jira.example.com",
-    emailEnvironmentVariable: "JIRA_EMAIL",
-    tokenEnvironmentVariable: "JIRA_TOKEN",
+    url: "https://jira.example.com",
+    email: "$JIRA_EMAIL",
+    token: "$JIRA_TOKEN",
     ...overrides,
   };
 }
 
-function buildManualCheck(id: string, overrides: Partial<CheckDefinition> = {}): CheckDefinition {
+function buildManualCheck(id: string, overrides: Partial<CheckInput> = {}): CheckInput {
   return {
     id,
     description: `${id} check`,
-    required: true,
-    evaluator: { kind: "manual" },
+    manual: true,
     ...overrides,
   };
 }
 
-function buildTaskDefinition(overrides: Partial<TaskDefinition> = {}): TaskDefinition {
+function buildTaskDefinition(overrides: Partial<TaskInput> = {}): TaskInput {
   return {
     id: "task-1",
-    repositoryId: "repo-1",
-    startCommit: "abc123",
-    source: { kind: "manual", title: "Fixture task source" },
+    title: "Fixture task title",
+    repo: "repo-1",
+    base_commit: "abc123",
     description: "Fixture task description",
     prompt: "Fixture task prompt",
-    definitionOfReady: [{ id: "ready-1", description: "Repository is readable", confirmed: true }],
-    acceptanceCriteria: [buildManualCheck("acc-1")],
-    definitionOfDone: [buildManualCheck("dod-1")],
+    readiness: ["Repository is readable"],
+    checks: {
+      acceptance: [buildManualCheck("acc-1")],
+      done: [buildManualCheck("dod-1")],
+    },
     ...overrides,
   };
 }
 
-function buildTevuConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
-  return {
+function buildModel(overrides: Partial<ModelDefinitionInput> = {}): ModelDefinitionInput {
+  return { id: "c1", model: "provider/model-a", effort: "high", ...overrides };
+}
+
+function buildTevuConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
+  const config: TevuConfigInput = {
     version: 1,
-    artifacts: { directory: "/tmp/artifacts" },
-    execution: {
-      concurrency: 2,
-      caseTimeoutMs: 600000,
-      terminationGraceMs: 5000,
-      opencodeEnvironment: [],
-      evaluatorEnvironment: [],
-    },
-    opencode: { executable: "opencode" },
+    run: { output_dir: "/tmp/artifacts", concurrency: 2, timeout: "10m", stop_grace: "5s" },
+    agents: { opencode: { command: "opencode", secrets: [], env: [] } },
     repositories: [{ id: "repo-1", path: "../repos/fixture" }],
-    contenders: [
-      { id: "c1", model: "provider/model-a", variant: "high" },
-      { id: "c2", model: "provider/model-b", variant: "low" },
-    ],
+    models: [buildModel(), buildModel({ id: "c2", model: "provider/model-b", effort: "low" })],
     tasks: [buildTaskDefinition()],
     ...overrides,
   };
+  return TevuConfigSchema.parse(config);
+}
+
+/** Materializes one task through the schema so every default (required, evaluator, etc.) is resolved. */
+function buildMaterializedTask(overrides: Partial<TaskInput> = {}): TaskDefinition {
+  const task = buildTevuConfig({ tasks: [buildTaskDefinition(overrides)] }).tasks[0];
+  if (task === undefined) {
+    throw new Error("expected the fixture configuration to materialize its task");
+  }
+  return task;
 }
 
 function buildFinding(overrides: Partial<ValidationFinding> = {}): ValidationFinding {
@@ -198,20 +208,20 @@ function buildBenchmarkPlan(
 ): BenchmarkPlan {
   return {
     config,
-    cases: config.contenders.flatMap((contender) =>
+    cases: config.models.flatMap((model) =>
       config.tasks.map((task) => ({
-        caseId: `case-${contender.id}-${task.id}`,
+        caseId: `case-${model.id}-${task.id}`,
         taskId: task.id,
-        contenderId: contender.id,
+        modelId: model.id,
         sourceCommit: "abc123def",
-        model: contender.model,
-        variant: contender.variant,
+        model: model.model,
+        effort: model.effort,
       })),
     ),
-    concurrency: config.execution.concurrency,
-    caseTimeoutMs: config.execution.caseTimeoutMs,
-    terminationGraceMs: config.execution.terminationGraceMs,
-    artifactsDirectory: config.artifacts.directory,
+    concurrency: config.run.concurrency,
+    caseTimeoutMs: 600_000,
+    terminationGraceMs: 5_000,
+    artifactsDirectory: config.run.output_dir,
     ...overrides,
   };
 }
@@ -220,10 +230,10 @@ function buildCaseIdentity(overrides: Partial<CaseIdentity> = {}): CaseIdentity 
   return {
     caseId: "case-c1-task-1",
     taskId: "task-1",
-    contenderId: "c1",
+    modelId: "c1",
     sourceCommit: "abc123def",
     model: "provider/model-a",
-    variant: "high",
+    effort: "high",
     ...overrides,
   };
 }
@@ -395,7 +405,7 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
     requireConfigDirectory: vi.fn(async () => ({ ok: true as const, value: undefined })),
     importJiraIssue: vi.fn(async () => ({ ok: true as const, value: buildJiraIssueSnapshot() })),
     importGitHubIssue: vi.fn(async () => ({ ok: true as const, value: buildJiraIssueSnapshot() })),
-    createTask: vi.fn(async () => ({ ok: true as const, value: buildTaskDefinition({ id: "task-2" }) })),
+    createTask: vi.fn(async () => ({ ok: true as const, value: buildMaterializedTask({ id: "task-2" }) })),
     validateConfig: vi.fn(async () => ({ ok: true as const, value: buildValidationReport() })),
     planBenchmark: vi.fn(() => buildBenchmarkPlan(config)),
     executeBenchmark: vi.fn(async () => ({ ok: true as const, value: buildRunResult() })),
@@ -513,16 +523,13 @@ async function readConfigurationExampleBlock(): Promise<string> {
 function taskInterviewAnswers(repositoryChoice: string): unknown[] {
   return [
     "manual",
-    "Add an export button",
-    "",
     repositoryChoice,
     "abc123",
     "task-2",
+    "Add an export button",
     "Export the current view as CSV.",
     "Implement CSV export for the current view.",
-    "ready-1",
     "Repository is readable",
-    true,
     false,
     "acc-1",
     "Export produces a CSV",
@@ -538,24 +545,25 @@ function taskInterviewAnswers(repositoryChoice: string): unknown[] {
 }
 
 const BOOTSTRAP_PROMPTS = [
-  "Artifacts directory (outside every repository)",
-  "Execution concurrency (1-32)",
-  "Case timeout in milliseconds",
-  "Termination grace in milliseconds",
-  "OpenCode executable (command name or path)",
-  "Add a OpenCode environment variable (names only, never values)?",
-  "Add a evaluator environment variable (names only, never values)?",
+  "Run output directory (outside every repository, relative to the configuration file)",
+  "Concurrent cases (1-32)",
+  "Agent time limit per case (for example 10m)",
+  "Grace period before a forced stop (for example 3s)",
+  "Default time limit for command checks (for example 5m; empty to set one per check)",
+  "OpenCode command (name on PATH, or a path relative to the configuration file)",
+  "Add a secret variable for the agent (name only, never the value)?",
+  "Add a ordinary variable for the agent?",
   "Configure Jira Cloud issue import?",
   "Repository ID",
   'Local path of repository "alpha"',
   "Add another repository?",
-  "Contender ID",
+  "Model entry ID",
   'Model for "c1" (provider/model)',
-  'Effort variant for "c1"',
-  "Contender ID",
+  'Reasoning effort for "c1" (passed to OpenCode as --variant)',
+  "Model entry ID",
   'Model for "c2" (provider/model)',
-  'Effort variant for "c2"',
-  "Add another contender?",
+  'Reasoning effort for "c2" (passed to OpenCode as --variant)',
+  "Add another model?",
 ];
 
 const HELP_CASES: Array<{ argv: string[]; description: string; usage: string }> = [
@@ -1106,6 +1114,44 @@ describe("tevu CLI", () => {
       expect(code).toBe(0);
       expect(vi.mocked(operations.loadConfig)).toHaveBeenCalledExactlyOnceWith("custom.yaml");
     });
+
+    it.each([
+      {
+        description: "a duration outside its grammar",
+        identifier: "run.timeout",
+        message: "must be a positive whole number followed by ms, s, m, or h, for example 30s or 10m",
+      },
+      {
+        description: "a duration above its millisecond bound",
+        identifier: "run.timeout",
+        message: "must be at most 2147483647ms",
+      },
+      {
+        description: "a variable name outside its grammar",
+        identifier: "agents.opencode.secrets.0",
+        message: "must be a letter or underscore followed by letters, digits, or underscores",
+      },
+      {
+        description: "a Jira credential that is not a $VARIABLE reference",
+        identifier: "trackers.jira.token",
+        message: "must be a $VARIABLE reference, for example $JIRA_API_TOKEN; secret values are never written here",
+      },
+    ])("renders the $description finding message from a failed configuration load", async ({ identifier, message }) => {
+      const operations = createOperations({
+        loadConfig: vi.fn(async () => ({
+          ok: false as const,
+          error: {
+            kind: "ConfigValidationError" as const,
+            findings: [{ severity: "error" as const, identifier, message }],
+          },
+        })),
+      });
+
+      const { code, err } = await runCli(["validate"], { operations });
+
+      expect(code).toBe(1);
+      expect(err).toEqual(["error: the configuration is invalid", `  error ${identifier}: ${message}`]);
+    });
   });
 
   describe("run dry-run", () => {
@@ -1116,9 +1162,9 @@ describe("tevu CLI", () => {
       expect(out).toEqual([
         "Dry run: no artifact, workspace, Jira call, or OpenCode model session is created.",
         "Planned cases (2, execution order):",
-        "  case-c1-task-1: task task-1, contender c1, model provider/model-a, variant high, commit abc123def",
-        "  case-c2-task-1: task task-1, contender c2, model provider/model-b, variant low, commit abc123def",
-        "Limits: concurrency 2, case timeout 600000ms, termination grace 5000ms",
+        "  case-c1-task-1: task task-1, model entry c1 (provider/model-a, effort high), commit abc123def",
+        "  case-c2-task-1: task task-1, model entry c2 (provider/model-b, effort low), commit abc123def",
+        "Limits: concurrency 2, timeout 600000ms, stop grace 5000ms",
         "Artifact destination: /tmp/artifacts",
         "OpenCode capabilities (opencode, detected version: 1.18.32):",
         "  run command: available",
@@ -1403,7 +1449,7 @@ describe("tevu CLI", () => {
       expect(code).toBe(1);
       expect(err).toEqual([
         "error: the configuration is invalid",
-        "  error jira: task add --jira requires Jira settings in the existing configuration",
+        "  error trackers.jira: task add --jira requires trackers.jira in the existing configuration",
       ]);
       expect(clack.state.prompts).toEqual([]);
       expect(operations.importJiraIssue).not.toHaveBeenCalled();
@@ -1415,8 +1461,9 @@ describe("tevu CLI", () => {
       scriptAnswers(
         "/tmp/bench-artifacts",
         "4",
-        "600000",
-        "5000",
+        "10m",
+        "5s",
+        "",
         "opencode",
         false,
         false,
@@ -1458,8 +1505,9 @@ describe("tevu CLI", () => {
         "/tmp/bench-artifacts",
         { invalid: "abc" },
         "4",
-        "600000",
-        "5000",
+        "10m",
+        "5s",
+        "",
         "opencode",
         false,
         false,
@@ -1485,7 +1533,7 @@ describe("tevu CLI", () => {
       expect(clack.state.rejections).toEqual([
         {
           kind: "text",
-          message: "Execution concurrency (1-32)",
+          message: "Concurrent cases (1-32)",
           reason: "enter an integer from 1 through 32",
         },
       ]);
@@ -1494,46 +1542,27 @@ describe("tevu CLI", () => {
       expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]).toEqual({
         configPath: "tevu.yaml",
         bootstrap: {
-          artifacts: { directory: "/tmp/bench-artifacts" },
-          execution: {
-            concurrency: 4,
-            caseTimeoutMs: 600000,
-            terminationGraceMs: 5000,
-            opencodeEnvironment: [],
-            evaluatorEnvironment: [],
-          },
-          opencode: { executable: "opencode" },
+          run: { output_dir: "/tmp/bench-artifacts", concurrency: 4, timeout: "10m", stop_grace: "5s" },
+          agents: { opencode: { command: "opencode", secrets: [], env: [] } },
           repositories: [{ id: "alpha", path: "../repos/alpha" }],
-          contenders: [
-            { id: "c1", model: "provider/model-a", variant: "high" },
-            { id: "c2", model: "provider/model-b", variant: "low" },
+          models: [
+            { id: "c1", model: "provider/model-a", effort: "high" },
+            { id: "c2", model: "provider/model-b", effort: "low" },
           ],
         },
-        repositoryId: "alpha",
-        taskId: "task-2",
-        startCommit: "abc123",
-        source: { kind: "manual", title: "Add an export button" },
-        description: "Export the current view as CSV.",
-        prompt: "Implement CSV export for the current view.",
-        definitionOfReady: [
-          { id: "ready-1", description: "Repository is readable", confirmed: true },
-        ],
-        acceptanceCriteria: [
-          {
-            id: "acc-1",
-            description: "Export produces a CSV",
-            required: true,
-            evaluator: { kind: "manual" },
+        task: {
+          id: "task-2",
+          title: "Add an export button",
+          repo: "alpha",
+          base_commit: "abc123",
+          description: "Export the current view as CSV.",
+          prompt: "Implement CSV export for the current view.",
+          readiness: ["Repository is readable"],
+          checks: {
+            acceptance: [{ id: "acc-1", description: "Export produces a CSV", manual: true }],
+            done: [{ id: "dod-1", description: "README documents the button", manual: true }],
           },
-        ],
-        definitionOfDone: [
-          {
-            id: "dod-1",
-            description: "README documents the button",
-            required: true,
-            evaluator: { kind: "manual" },
-          },
-        ],
+        },
       });
     });
 
@@ -1551,51 +1580,38 @@ describe("tevu CLI", () => {
       expect(vi.mocked(operations.createTask)).toHaveBeenCalledOnce();
       expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]).toEqual({
         configPath: "tevu.yaml",
-        repositoryId: "repo-1",
-        taskId: "task-2",
-        startCommit: "abc123",
-        source: { kind: "manual", title: "Add an export button" },
-        description: "Export the current view as CSV.",
-        prompt: "Implement CSV export for the current view.",
-        definitionOfReady: [
-          { id: "ready-1", description: "Repository is readable", confirmed: true },
-        ],
-        acceptanceCriteria: [
-          {
-            id: "acc-1",
-            description: "Export produces a CSV",
-            required: true,
-            evaluator: { kind: "manual" },
+        task: {
+          id: "task-2",
+          title: "Add an export button",
+          repo: "repo-1",
+          base_commit: "abc123",
+          description: "Export the current view as CSV.",
+          prompt: "Implement CSV export for the current view.",
+          readiness: ["Repository is readable"],
+          checks: {
+            acceptance: [{ id: "acc-1", description: "Export produces a CSV", manual: true }],
+            done: [{ id: "dod-1", description: "README documents the button", manual: true }],
           },
-        ],
-        definitionOfDone: [
-          {
-            id: "dod-1",
-            description: "README documents the button",
-            required: true,
-            evaluator: { kind: "manual" },
-          },
-        ],
+        },
       });
     });
 
     it("imports a Jira issue exactly once and travels the snapshot inside the wizard input", async () => {
-      const jiraSettings = buildJiraCloudSettings();
+      const jiraSettings = buildJiraTrackerSettings();
       const operations = createOperations({
         loadConfig: vi.fn(async () => ({
           ok: true as const,
-          value: buildTevuConfig({ jira: jiraSettings }),
+          value: buildTevuConfig({ trackers: { jira: jiraSettings } }),
         })),
       });
       scriptAnswers(
         "repo-1",
         "abc123",
         "task-2",
+        "Add an export button",
         "Export the current view as CSV.",
         "Implement CSV export for the current view.",
-        "ready-1",
         "Repository is readable",
-        true,
         false,
         "acc-1",
         "Export produces a CSV",
@@ -1622,16 +1638,13 @@ describe("tevu CLI", () => {
         title: "Imported TEVU-42 (one-time snapshot)",
         message: "Add an export button\n\nUsers cannot export the current view.",
       });
-      expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.source).toEqual({
-        kind: "jira-cloud",
-        issueKey: "TEVU-42",
-        snapshot: {
-          issueKey: "TEVU-42",
-          issueUrl: "https://jira.example.com/browse/TEVU-42",
-          summary: "Add an export button",
-          description: "Users cannot export the current view.",
-          importedAt: "2026-09-23T10:00:00.000Z",
-        },
+      expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task.source).toEqual({
+        kind: "jira",
+        key: "TEVU-42",
+        url: "https://jira.example.com/browse/TEVU-42",
+        imported_at: "2026-09-23T10:00:00.000Z",
+        title: "Add an export button",
+        body: "Users cannot export the current view.",
       });
     });
 
@@ -1649,11 +1662,10 @@ describe("tevu CLI", () => {
         "repo-1",
         "abc123",
         "task-2",
+        "Add an export button",
         "Export the current view as CSV.",
         "Implement CSV export for the current view.",
-        "ready-1",
         "Repository is readable",
-        true,
         false,
         "acc-1",
         "Export produces a CSV",
@@ -1678,15 +1690,13 @@ describe("tevu CLI", () => {
         title: "Imported octo/repo#42 (one-time snapshot)",
         message: "Add an export button\n\nUsers cannot export the current view.",
       });
-      expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.source).toEqual({
-        kind: "github-issue",
-        snapshot: {
-          issueKey: "octo/repo#42",
-          issueUrl: "https://github.com/octo/repo/issues/42",
-          summary: "Add an export button",
-          description: "Users cannot export the current view.",
-          importedAt: "2026-09-23T10:00:00.000Z",
-        },
+      expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task.source).toEqual({
+        kind: "github",
+        key: "octo/repo#42",
+        url: "https://github.com/octo/repo/issues/42",
+        imported_at: "2026-09-23T10:00:00.000Z",
+        title: "Add an export button",
+        body: "Users cannot export the current view.",
       });
     });
 
@@ -1694,10 +1704,10 @@ describe("tevu CLI", () => {
       {
         description: "Jira",
         argv: ["task", "add", "--jira", "TEVU-42"],
-        operationsOverrides: (jiraSettings: JiraCloudConfig) => ({
+        operationsOverrides: (jiraSettings: JiraTrackerSettings) => ({
           loadConfig: vi.fn(async () => ({
             ok: true as const,
-            value: buildTevuConfig({ jira: jiraSettings }),
+            value: buildTevuConfig({ trackers: { jira: jiraSettings } }),
           })),
           importJiraIssue: vi.fn(async () => ({
             ok: false as const,
@@ -1718,7 +1728,7 @@ describe("tevu CLI", () => {
     ])(
       "converts a $description import cancellation into the standard cancellation exit and message",
       async ({ argv, operationsOverrides }) => {
-        const operations = createOperations(operationsOverrides(buildJiraCloudSettings()));
+        const operations = createOperations(operationsOverrides(buildJiraTrackerSettings()));
 
         const { code, err } = await runCli(argv, { operations });
 
@@ -2184,7 +2194,7 @@ describe("tevu CLI", () => {
       const operations = createOperations({
         loadConfig: vi.fn(async () => ({
           ok: true as const,
-          value: buildTevuConfig({ artifacts: { directory: "/tmp/hunter2" } }),
+          value: buildTevuConfig({ run: { output_dir: "/tmp/hunter2", concurrency: 2, timeout: "10m", stop_grace: "5s" } }),
         })),
       });
 

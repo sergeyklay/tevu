@@ -30,7 +30,7 @@ Run the wizard in an interactive terminal:
 tevu task add
 ```
 
-For a missing configuration, the wizard first asks for repositories, model settings, execution limits, and environment-variable names. Declare provider authentication variables as `provider-credential`; enter their names, not their values.
+For a missing configuration, the wizard first asks for the run settings (output directory, concurrency, time limits), the `agents.opencode` command and its secret and ordinary variable names, an optional Jira connection, at least one repository, and at least two model entries with their reasoning efforts. Enter variable names, not their values; tevu reads the values from the environment at run time.
 
 Choose a repository commit from before the task was solved. Describe the task, the instructions for the model, the prerequisites you have checked, the acceptance criteria, and the completion checks. A check can run a command or require your manual verdict. See the [configuration reference](../reference/configuration.md) for the field definitions.
 
@@ -74,5 +74,5 @@ Confirm that required manual checks now have verdicts. Optional checks remain vi
 - **Missing variable:** export the variable named in the error in the same terminal, then rerun validation.
 - **`prerequisites.bun` finding:** `validate` or `run` means `bun --version` fails in the current directory. Make Bun resolvable there; a version manager that pins Bun only inside the tevu checkout does not apply elsewhere.
 - **Unsupported source tree:** choose a commit without submodules or Git LFS content. See the [source-tree reference](../reference/configuration.md#source-trees).
-- **Missing agent capability:** check that `opencode.executable` points to the intended executable and that it supports the required commands and options.
+- **Missing agent capability:** check that `agents.opencode.command` points to the intended executable and that it supports the required commands and options.
 - **Interactive terminal required:** run `task add` or `assess` with both input and output attached to a terminal.

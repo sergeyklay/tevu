@@ -1,4 +1,4 @@
-import { TevuConfigSchema } from "../config/schema.ts";
+import { checkEnvironmentNames, TevuConfigSchema } from "../config/schema.ts";
 import { describeSourceCommitInPrompt } from "./source-commit-in-prompt.ts";
 
 import type { TevuConfig } from "../config/schema.ts";
@@ -43,14 +43,14 @@ export async function validateConfig(
   ];
 
   let capabilities: OpenCodeCapabilityReport | null = null;
-  const probe = await dependencies.opencode.probe(config.opencode.executable);
+  const probe = await dependencies.opencode.probe(config.agents.opencode.command);
   if (probe.ok) {
     capabilities = probe.value;
   } else {
     findings.push(
       probe.error.kind === "PrerequisiteError"
         ? prerequisiteFinding(probe.error)
-        : { severity: "error", identifier: "opencode.executable", message: probe.error.reason },
+        : { severity: "error", identifier: "agents.opencode.command", message: probe.error.reason },
     );
   }
 
@@ -101,11 +101,9 @@ function collectEnvironmentFindings(
 ): ValidationFinding[] {
   const findings: ValidationFinding[] = [];
   const names = new Set([
-    ...config.execution.opencodeEnvironment.map((entry) => entry.name),
-    ...config.execution.evaluatorEnvironment.map((entry) => entry.name),
-    ...(config.jira === undefined
-      ? []
-      : [config.jira.emailEnvironmentVariable, config.jira.tokenEnvironmentVariable]),
+    ...config.agents.opencode.secrets,
+    ...config.agents.opencode.env,
+    ...checkEnvironmentNames(config),
   ]);
   for (const name of names) {
     if (!dependencies.prerequisites.hasEnvironmentVariable(name)) {
@@ -144,21 +142,21 @@ async function collectSourceFindings(
   // tree is scanned once per pinned commit.
   const validated = new Map<string, TevuResult<SourceValidation, "SourceMaterializationError">>();
   for (const task of config.tasks) {
-    const repository = repositories.get(task.repositoryId);
+    const repository = repositories.get(task.repo);
     if (repository === undefined) {
       // A broken reference is already an error finding from the schema stage.
       continue;
     }
-    const key = `${repository.id}\u0000${task.startCommit}`;
+    const key = `${repository.id}\u0000${task.base_commit}`;
     let result = validated.get(key);
     if (result === undefined) {
-      result = await dependencies.git.validateSource(repository, task.startCommit);
+      result = await dependencies.git.validateSource(repository, task.base_commit);
       validated.set(key, result);
     }
     if (!result.ok) {
       findings.push({
         severity: "error",
-        identifier: `tasks.${task.id}.startCommit`,
+        identifier: `tasks.${task.id}.base_commit`,
         message: result.error.reason,
       });
       continue;
@@ -180,7 +178,7 @@ async function collectArtifactFindings(
   dependencies: ValidationDependencies,
 ): Promise<ValidationFinding[]> {
   const writable = await dependencies.prerequisites.probeWritableDirectory(
-    config.artifacts.directory,
+    config.run.output_dir,
   );
   return writable.ok ? [] : [prerequisiteFinding(writable.error)];
 }

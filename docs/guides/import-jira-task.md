@@ -4,9 +4,9 @@ Use this guide to add an issue's title and description to a benchmark task. Run 
 
 ## Configure the connection
 
-For an existing configuration, add the `jira` settings from the [configuration reference](../reference/configuration.md#jira-cloud): the HTTPS site URL and the names of the account-email and API-token environment variables.
+For an existing configuration, add the `trackers.jira` settings from the [configuration reference](../reference/configuration.md#jira-cloud): the HTTPS site URL, and `email` and `token` as `$VARIABLE` references to the account-email and API-token environment variables, for example `email: $JIRA_EMAIL` and `token: $JIRA_API_TOKEN`.
 
-Make those variables available in the terminal that will launch tevu. Store their names, not their values, in the configuration. If the configuration does not exist yet, supply the Jira settings during the wizard's setup interview.
+Make those variables available in the terminal that will launch tevu. The configuration stores only the `$VARIABLE` references, never the values. If the configuration does not exist yet, supply the Jira settings during the wizard's setup interview.
 
 ## Import the issue
 

@@ -8,18 +8,16 @@ import type { TevuConfig } from "./schema.ts";
 import type { ConfigReadCause, LoadConfigErrorKind, TevuResult, ValidationFinding } from "../domain/types.ts";
 
 /**
- * Loads and validates the UTF-8 YAML configuration at the given path.
+ * Reads the UTF-8 configuration text at the given path.
  *
- * Parses with YAML 1.2 core semantics, validates through the strict
- * authoritative schema, resolves relative paths against the configuration file
- * directory, and enforces real-path separation between the artifact directory
- * and every configured repository. Establishes the path names a regular file
- * through `stat` before ever opening it. Performs no Git, OpenCode, Jira,
- * wizard, or artifact mutation work.
+ * Establishes the path names a regular file through `stat` before ever
+ * opening it, so a directory, FIFO, or permission failure is classified
+ * consistently for every caller (`loadConfig` and `ConfigStore.readText`
+ * share this helper so their `ConfigReadError` values agree by construction).
  */
-export async function loadConfig(
+export async function readConfigText(
   configPath: string,
-): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>> {
+): Promise<TevuResult<string, "ConfigReadError">> {
   const absoluteConfigPath = path.resolve(configPath);
 
   let stats: Awaited<ReturnType<typeof fs.stat>>;
@@ -32,13 +30,21 @@ export async function loadConfig(
     return configReadFailure(absoluteConfigPath, configPath, "not-a-file");
   }
 
-  let text: string;
   try {
-    text = await fs.readFile(absoluteConfigPath, "utf8");
+    const text = await fs.readFile(absoluteConfigPath, "utf8");
+    return { ok: true, value: text };
   } catch (cause) {
     return configReadFailure(absoluteConfigPath, configPath, classify(cause));
   }
+}
 
+/**
+ * Parses and validates one configuration document's text against the
+ * authoritative schema. Performs no filesystem or path-resolution work.
+ */
+export function parseConfigText(
+  text: string,
+): TevuResult<TevuConfig, "ConfigParseError" | "ConfigValidationError"> {
   const document = parseDocument(text, { version: "1.2", schema: "core" });
   if (document.errors.length > 0) {
     return {
@@ -80,19 +86,34 @@ export async function loadConfig(
       },
     };
   }
+  return { ok: true, value: parsed.data };
+}
 
-  const configDirectory = path.dirname(absoluteConfigPath);
+/**
+ * Resolves a parsed configuration's relative paths against `configPath`'s
+ * directory and enforces real-path separation between the run output
+ * directory and every configured repository.
+ */
+export async function resolveConfig(
+  config: TevuConfig,
+  configPath: string,
+): Promise<TevuResult<TevuConfig, "ConfigValidationError">> {
+  const configDirectory = path.dirname(path.resolve(configPath));
   const resolved: TevuConfig = {
-    ...parsed.data,
-    artifacts: {
-      directory: resolveConfigPath(configDirectory, parsed.data.artifacts.directory),
+    ...config,
+    run: {
+      ...config.run,
+      output_dir: resolveConfigPath(configDirectory, config.run.output_dir),
     },
-    opencode: {
-      executable: parsed.data.opencode.executable.includes(path.sep)
-        ? resolveConfigPath(configDirectory, parsed.data.opencode.executable)
-        : parsed.data.opencode.executable,
+    agents: {
+      opencode: {
+        ...config.agents.opencode,
+        command: config.agents.opencode.command.includes(path.sep)
+          ? resolveConfigPath(configDirectory, config.agents.opencode.command)
+          : config.agents.opencode.command,
+      },
     },
-    repositories: parsed.data.repositories.map((repository) => ({
+    repositories: config.repositories.map((repository) => ({
       ...repository,
       path: resolveConfigPath(configDirectory, repository.path),
     })),
@@ -107,6 +128,29 @@ export async function loadConfig(
   }
 
   return { ok: true, value: resolved };
+}
+
+/**
+ * Loads and validates the UTF-8 YAML configuration at the given path.
+ *
+ * Reads the text, parses and validates it against the strict authoritative
+ * schema, then resolves relative paths against the configuration file
+ * directory and enforces real-path separation between the run output
+ * directory and every configured repository. Performs no Git, OpenCode,
+ * Jira, wizard, or artifact mutation work.
+ */
+export async function loadConfig(
+  configPath: string,
+): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>> {
+  const text = await readConfigText(configPath);
+  if (!text.ok) {
+    return text;
+  }
+  const parsed = parseConfigText(text.value);
+  if (!parsed.ok) {
+    return parsed;
+  }
+  return resolveConfig(parsed.value, configPath);
 }
 
 /** Resolves a configuration-relative path against the configuration file directory. */
@@ -142,20 +186,20 @@ function sortKeysDeep(value: unknown): unknown {
 
 async function collectSeparationFindings(config: TevuConfig): Promise<ValidationFinding[]> {
   const findings: ValidationFinding[] = [];
-  const artifactReal = await canonicalRealPath(config.artifacts.directory);
+  const outputReal = await canonicalRealPath(config.run.output_dir);
   for (const repository of config.repositories) {
     const repositoryReal = await canonicalRealPath(repository.path);
-    if (isSamePathOrInside(repositoryReal, artifactReal)) {
+    if (isSamePathOrInside(repositoryReal, outputReal)) {
       findings.push({
         severity: "error",
-        identifier: "artifacts.directory",
-        message: `artifacts.directory must be outside repository "${repository.id}" after real-path resolution`,
+        identifier: "run.output_dir",
+        message: `run.output_dir must be outside repository "${repository.id}" after real-path resolution`,
       });
-    } else if (isSamePathOrInside(artifactReal, repositoryReal)) {
+    } else if (isSamePathOrInside(outputReal, repositoryReal)) {
       findings.push({
         severity: "error",
         identifier: `repositories.${repository.id}.path`,
-        message: `repository "${repository.id}" overlaps the artifact directory after real-path resolution`,
+        message: `repository "${repository.id}" overlaps the run output directory after real-path resolution`,
       });
     }
   }
@@ -164,7 +208,7 @@ async function collectSeparationFindings(config: TevuConfig): Promise<Validation
 
 /**
  * Resolves symlinks through the nearest existing ancestor so separation holds
- * even when the artifact directory does not exist yet.
+ * even when the run output directory does not exist yet.
  */
 async function canonicalRealPath(target: string): Promise<string> {
   let current = path.resolve(target);

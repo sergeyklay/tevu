@@ -5,7 +5,7 @@ import { planBenchmark, reduceRunExitCode, runBenchmark } from "./run-benchmark.
 import { TevuConfigSchema } from "../config/schema.ts";
 import { unavailableBenchmarkMetrics } from "../evaluation/metrics.ts";
 
-import type { CheckDefinition, CommandEvaluator, TaskDefinition, TevuConfig } from "../config/schema.ts";
+import type { CheckInput, TaskDefinition, TaskInput, TevuConfig, TevuConfigInput } from "../config/schema.ts";
 import type {
   ArtifactStore,
   CaseEnvironments,
@@ -87,63 +87,53 @@ function waitForSignal(signal: AbortSignal): Promise<void> {
   });
 }
 
-function buildCommandEvaluator(overrides: Partial<CommandEvaluator> = {}): CommandEvaluator {
-  return {
-    kind: "command",
-    argv: ["/synthetic/acc-required", "--verify"],
-    timeoutMs: 5_000,
-    successExitCodes: [0],
-    environmentAllowlist: [],
-    ...overrides,
-  };
-}
-
-function buildCheck(overrides: Partial<CheckDefinition> = {}): CheckDefinition {
+function buildCheck(overrides: Partial<CheckInput> = {}): CheckInput {
   return {
     id: "acc-required",
     description: "acceptance command exits zero",
-    required: true,
-    evaluator: buildCommandEvaluator(),
+    run: ["/synthetic/acc-required", "--verify"],
+    timeout: "5s",
+    exit_codes: [0],
+    env: [],
     ...overrides,
   };
 }
 
-function buildTask(overrides: Partial<TaskDefinition> = {}): TaskDefinition {
+function buildTask(overrides: Partial<TaskInput> = {}): TaskInput {
   return {
     id: "task-1",
-    repositoryId: "repo-1",
-    startCommit: COMMIT_A,
-    source: { kind: "manual", title: "synthetic manual task" },
+    title: "Synthetic task",
+    repo: "repo-1",
+    base_commit: COMMIT_A,
     description: "synthetic task description",
     prompt: "implement the synthetic feature",
-    definitionOfReady: [{ id: "ready-1", description: "synthetic ready item", confirmed: true }],
-    acceptanceCriteria: [buildCheck({ id: "acc-required" })],
-    definitionOfDone: [
-      buildCheck({
-        id: "dod-required",
-        evaluator: buildCommandEvaluator({ argv: ["/synthetic/dod-required", "--verify"] }),
-      }),
-    ],
+    readiness: ["synthetic ready item"],
+    checks: {
+      acceptance: [buildCheck({ id: "acc-required" })],
+      done: [
+        buildCheck({
+          id: "dod-required",
+          run: ["/synthetic/dod-required", "--verify"],
+        }),
+      ],
+    },
     ...overrides,
   };
 }
 
-function buildTevuConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
-  const config: TevuConfig = {
+function buildRunSettings(overrides: Partial<TevuConfigInput["run"]> = {}): TevuConfigInput["run"] {
+  return { output_dir: "/synthetic/artifacts", concurrency: 2, timeout: "60s", stop_grace: "500ms", ...overrides };
+}
+
+function buildTevuConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
+  const config: TevuConfigInput = {
     version: 1,
-    artifacts: { directory: "/synthetic/artifacts" },
-    execution: {
-      concurrency: 2,
-      caseTimeoutMs: 60_000,
-      terminationGraceMs: 500,
-      opencodeEnvironment: [{ name: "TEVU_PROVIDER_KEY", classification: "provider-credential" }],
-      evaluatorEnvironment: [{ name: "TEVU_EVAL_VAR", classification: "ordinary" }],
-    },
-    opencode: { executable: "/synthetic/opencode" },
+    run: buildRunSettings(),
+    agents: { opencode: { command: "/synthetic/opencode", secrets: ["TEVU_PROVIDER_KEY"], env: [] } },
     repositories: [{ id: "repo-1", path: "/synthetic/source" }],
-    contenders: [
-      { id: "c1", model: "synthetic/model-a", variant: "fast" },
-      { id: "c2", model: "synthetic/model-b", variant: "deep" },
+    models: [
+      { id: "c1", model: "synthetic/model-a", effort: "fast" },
+      { id: "c2", model: "synthetic/model-b", effort: "deep" },
     ],
     tasks: [buildTask({ id: "task-1" }), buildTask({ id: "task-2" })],
     ...overrides,
@@ -155,10 +145,10 @@ function buildCaseIdentity(caseId = "task-1--c1"): CaseIdentity {
   return {
     caseId,
     taskId: "task-1",
-    contenderId: "c1",
+    modelId: "c1",
     sourceCommit: COMMIT_A,
     model: "synthetic/model-a",
-    variant: "fast",
+    effort: "fast",
   };
 }
 
@@ -288,7 +278,7 @@ function buildFakeEnvironment(
     })),
     ...configuredNames.map((name) => ({
       name,
-      classification: recipient === "opencode" ? ("provider-credential" as const) : ("ordinary" as const),
+      classification: recipient === "opencode" ? ("secret" as const) : ("ordinary" as const),
       recipient,
     })),
   ];
@@ -757,13 +747,7 @@ async function runCancelledDuringEvaluation(): Promise<{
   harness: Harness;
 }> {
   const config = buildTevuConfig({
-    execution: {
-      concurrency: 1,
-      caseTimeoutMs: 60_000,
-      terminationGraceMs: 500,
-      opencodeEnvironment: [{ name: "TEVU_PROVIDER_KEY", classification: "provider-credential" }],
-      evaluatorEnvironment: [{ name: "TEVU_EVAL_VAR", classification: "ordinary" }],
-    },
+    run: buildRunSettings({ concurrency: 1 }),
     tasks: [buildTask()],
   });
   const harness = createHarness(config);
@@ -810,8 +794,8 @@ describe("planBenchmark", () => {
   it("plans the exact task-by-contender matrix in configuration order", () => {
     const config = buildTevuConfig({
       tasks: [
-        buildTask({ id: "task-1", startCommit: COMMIT_A }),
-        buildTask({ id: "task-2", startCommit: COMMIT_B }),
+        buildTask({ id: "task-1", base_commit: COMMIT_A }),
+        buildTask({ id: "task-2", base_commit: COMMIT_B }),
       ],
     });
 
@@ -822,35 +806,50 @@ describe("planBenchmark", () => {
       {
         caseId: "task-1--c1",
         taskId: "task-1",
-        contenderId: "c1",
+        modelId: "c1",
         sourceCommit: COMMIT_A,
         model: "synthetic/model-a",
-        variant: "fast",
+        effort: "fast",
       },
       {
         caseId: "task-1--c2",
         taskId: "task-1",
-        contenderId: "c2",
+        modelId: "c2",
         sourceCommit: COMMIT_A,
         model: "synthetic/model-b",
-        variant: "deep",
+        effort: "deep",
       },
       {
         caseId: "task-2--c1",
         taskId: "task-2",
-        contenderId: "c1",
+        modelId: "c1",
         sourceCommit: COMMIT_B,
         model: "synthetic/model-a",
-        variant: "fast",
+        effort: "fast",
       },
       {
         caseId: "task-2--c2",
         taskId: "task-2",
-        contenderId: "c2",
+        modelId: "c2",
         sourceCommit: COMMIT_B,
         model: "synthetic/model-b",
-        variant: "deep",
+        effort: "deep",
       },
+    ]);
+  });
+
+  it("builds each CaseIdentity with keys in the order caseId, taskId, modelId, sourceCommit, model, effort", () => {
+    const config = buildTevuConfig({ tasks: [buildTask({ id: "task-1", base_commit: COMMIT_A })] });
+
+    const plan = planBenchmark(config);
+
+    expect(Object.keys(plan.cases[0] ?? {})).toEqual([
+      "caseId",
+      "taskId",
+      "modelId",
+      "sourceCommit",
+      "model",
+      "effort",
     ]);
   });
 
@@ -999,34 +998,34 @@ describe("runBenchmark", () => {
       {
         caseId: "task-1--c1",
         taskId: "task-1",
-        contenderId: "c1",
+        modelId: "c1",
         sourceCommit: `pinned-${COMMIT_A}`,
         model: "synthetic/model-a",
-        variant: "fast",
+        effort: "fast",
       },
       {
         caseId: "task-1--c2",
         taskId: "task-1",
-        contenderId: "c2",
+        modelId: "c2",
         sourceCommit: `pinned-${COMMIT_A}`,
         model: "synthetic/model-b",
-        variant: "deep",
+        effort: "deep",
       },
       {
         caseId: "task-2--c1",
         taskId: "task-2",
-        contenderId: "c1",
+        modelId: "c1",
         sourceCommit: `pinned-${COMMIT_A}`,
         model: "synthetic/model-a",
-        variant: "fast",
+        effort: "fast",
       },
       {
         caseId: "task-2--c2",
         taskId: "task-2",
-        contenderId: "c2",
+        modelId: "c2",
         sourceCommit: `pinned-${COMMIT_A}`,
         model: "synthetic/model-b",
-        variant: "deep",
+        effort: "deep",
       },
     ]);
     expect(manifest.context?.config).toBe(config);
@@ -1116,7 +1115,7 @@ describe("runBenchmark", () => {
       error: {
         kind: "SourceMaterializationError",
         taskId: "task-2",
-        reason: "agent prompt contains resolved start commit pinned-",
+        reason: "agent prompt contains resolved base commit pinned-",
       },
     });
     expect(harness.timeline).toEqual(["probeHost", "snapshotParent", "probe", "validateSource:repo-1"]);
@@ -1135,24 +1134,18 @@ describe("runBenchmark", () => {
       error: {
         kind: "SourceMaterializationError",
         taskId: "task-1",
-        reason: "agent prompt contains resolved start commit pinned-",
+        reason: "agent prompt contains resolved base commit pinned-",
       },
     });
     expect(harness.timeline).toEqual(["probeHost", "snapshotParent", "probe", "validateSource:repo-1"]);
   });
 
   it("runs the complete per-case pipeline in order with the patch captured before evaluators", async () => {
-    const task = buildTask();
     const config = buildTevuConfig({
-      execution: {
-        concurrency: 1,
-        caseTimeoutMs: 60_000,
-        terminationGraceMs: 500,
-        opencodeEnvironment: [{ name: "TEVU_PROVIDER_KEY", classification: "provider-credential" }],
-        evaluatorEnvironment: [{ name: "TEVU_EVAL_VAR", classification: "ordinary" }],
-      },
-      tasks: [task],
+      run: buildRunSettings({ concurrency: 1 }),
+      tasks: [buildTask()],
     });
+    const task = config.tasks[0]!;
     const harness = createHarness(config);
 
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
@@ -1272,13 +1265,7 @@ describe("runBenchmark", () => {
 
   it("keeps the concurrency slot held while acceptance checks evaluate", async () => {
     const config = buildTevuConfig({
-      execution: {
-        concurrency: 1,
-        caseTimeoutMs: 60_000,
-        terminationGraceMs: 500,
-        opencodeEnvironment: [{ name: "TEVU_PROVIDER_KEY", classification: "provider-credential" }],
-        evaluatorEnvironment: [{ name: "TEVU_EVAL_VAR", classification: "ordinary" }],
-      },
+      run: buildRunSettings({ concurrency: 1 }),
       tasks: [buildTask()],
     });
     const harness = createHarness(config);
@@ -1483,7 +1470,7 @@ describe("runBenchmark", () => {
   });
 
   it("stops scheduling queued cases after an artifact failure and reports every planned case", async () => {
-    const config = buildTevuConfig({ execution: { ...buildTevuConfig().execution, concurrency: 1 }, tasks: [buildTask()] });
+    const config = buildTevuConfig({ run: buildRunSettings({ concurrency: 1 }), tasks: [buildTask()] });
     const harness = createHarness(config);
     harness.artifacts.failOnce.set("appendEvent:task-1--c1", {
       kind: "ArtifactError",
@@ -1522,13 +1509,7 @@ describe("runBenchmark", () => {
 
   it("finalizes the run with queued-case findings when cancelled during a case", async () => {
     const config = buildTevuConfig({
-      execution: {
-        concurrency: 1,
-        caseTimeoutMs: 60_000,
-        terminationGraceMs: 500,
-        opencodeEnvironment: [{ name: "TEVU_PROVIDER_KEY", classification: "provider-credential" }],
-        evaluatorEnvironment: [{ name: "TEVU_EVAL_VAR", classification: "ordinary" }],
-      },
+      run: buildRunSettings({ concurrency: 1 }),
       tasks: [buildTask()],
     });
     const harness = createHarness(config);
@@ -1668,7 +1649,7 @@ describe("runBenchmark", () => {
   });
 
   it("stops scheduling and retains the workspace when case persistence fails", async () => {
-    const config = buildTevuConfig({ execution: { ...buildTevuConfig().execution, concurrency: 1 }, tasks: [buildTask()] });
+    const config = buildTevuConfig({ run: buildRunSettings({ concurrency: 1 }), tasks: [buildTask()] });
     const harness = createHarness(config);
     harness.artifacts.failOnce.set("finalizeCase:task-1--c1", {
       kind: "ArtifactError",
@@ -1719,16 +1700,12 @@ describe("runBenchmark", () => {
     const config = buildTevuConfig({
       tasks: [
         buildTask({
-          definitionOfDone: manualDefinitionOfDone
-            ? [
-                {
-                  id: "dod-required",
-                  description: "manual Definition of Done review",
-                  required: true,
-                  evaluator: { kind: "manual" },
-                },
-              ]
-            : [buildCheck({ id: "dod-required" })],
+          checks: {
+            acceptance: [buildCheck({ id: "acc-required" })],
+            done: manualDefinitionOfDone
+              ? [{ id: "dod-required", description: "manual Definition of Done review", manual: true }]
+              : [buildCheck({ id: "dod-required", run: ["/synthetic/dod-required", "--verify"] })],
+          },
         }),
       ],
     });

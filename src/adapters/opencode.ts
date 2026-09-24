@@ -55,8 +55,8 @@ const EXPORT_MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
  * network-capable agent find a public repository's later history.
  */
 export function buildTaskPrompt(task: TaskDefinition): string {
-  const acceptance = task.acceptanceCriteria.map((check) => `- ${check.description}`);
-  const definitionOfDone = task.definitionOfDone.map((check) => `- ${check.description}`);
+  const acceptance = task.checks.acceptance.map((check) => `- ${check.description}`);
+  const definitionOfDone = task.checks.done.map((check) => `- ${check.description}`);
   return [
     task.prompt,
     task.description,
@@ -185,7 +185,7 @@ async function runCase(
       "--model",
       input.identity.model,
       "--variant",
-      input.identity.variant,
+      input.identity.effort,
       input.prompt,
     ],
     cwd: input.worktreeDirectory,
