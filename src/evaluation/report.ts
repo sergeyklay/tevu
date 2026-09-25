@@ -237,7 +237,7 @@ function renderMarkdownReport(model: NormalizedRunModel): string {
     `- Configuration digest: \`${manifest.configDigest}\``,
     `- Started: ${manifest.startedAt}`,
     `- Completed: ${manifest.completedAt ?? 'not completed'}`,
-    `- Host: ${manifest.host.platform}, Node.js ${manifest.host.nodeVersion}, Bun ${manifest.host.bunVersion}, Git ${tools.gitVersion}`,
+    `- Host: ${manifest.host.platform}, Node.js ${manifest.host.nodeVersion}, Git ${tools.gitVersion}`,
     ...renderAgentCapabilityLines(tools.agentVersions, model.capabilities),
     `- Concurrency: ${manifest.execution.concurrency}`,
     `- Case timeout: ${manifest.execution.caseTimeoutMs}ms`,

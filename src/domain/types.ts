@@ -146,7 +146,6 @@ export type RunManifest = {
   host: {
     platform: 'linux' | 'darwin';
     nodeVersion: string;
-    bunVersion: string;
   };
   tools: { gitVersion: string; agentVersions: Record<string, string | null> };
   execution: { concurrency: number; caseTimeoutMs: number; repeat: RepeatSetting };
@@ -326,11 +325,10 @@ export interface Clock {
 /** Generates a run ID: UTC basic timestamp plus a collision-resistant lowercase suffix. */
 type RunIdGenerator = (startedAt: Date) => string;
 
-/** Host and pinned-tool facts probed at the adapter boundary for the run manifest. */
+/** Host platform and tool versions probed at the adapter boundary for the run manifest. */
 export type HostProbe = {
   platform: 'linux' | 'darwin';
   nodeVersion: string;
-  bunVersion: string;
   gitVersion: string;
 };
 
