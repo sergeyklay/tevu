@@ -9,13 +9,13 @@ A run contains n cases for each task/model entry pair, where n is the effective 
 | `passed` | Every required check passed |
 | `failed` | A required check failed |
 | `pending` | Required checks still need a manual verdict |
-| `not-evaluated` | Timeout, cancellation, preparation failure, or another failure prevented eligible evaluation |
+| `not-evaluated` | Timeout, cancellation, preparation failure, a repository setup failure, or another failure prevented eligible evaluation |
 
 Optional failed or pending checks remain visible without changing an otherwise passed outcome. Command checks pass only when they finish before their timeout with a declared success exit code.
 
 Process status and task outcome are separate. Checks can run after a nonzero agent exit if the workspace is still readable. The solution may pass, but the runtime failure remains in the report and makes `run` return `2`. See [CLI exit codes](cli.md#exit-codes).
 
-Timeout and cancellation terminate the managed process group, escalating to forced termination after the configured grace period. A timed-out case skips acceptance checks. Successful finalization removes its workspace; a cleanup failure records a warning with the retained path.
+Timeout and cancellation terminate the managed process group, escalating to forced termination after the configured grace period. A timed-out case skips acceptance checks and `setup.before_checks`. Successful finalization removes its workspace; a cleanup failure records a warning with the retained path.
 
 ### Pair summary
 
@@ -45,7 +45,7 @@ Unavailable measurements are shown as unavailable with a reason, never as zero. 
 
 The adapter named by a case's `agent` derives token, activity, reliability, and cost metrics from that case's saved records; elapsed time comes from process timing for every agent. For the OpenCode adapter, the root session export is the primary source; events provide a fallback when the export is unavailable. Duplicate records are counted once by identity. A turn is an assistant record with a non-empty finish field; an API call is an assistant record with a finish or error field. Tool and skill calls come from tool records.
 
-Model metrics cover the root session only, not a total across child sessions. Elapsed time covers the case's agent process. Acceptance-command results are check verdicts, not additional model-quality metrics.
+Model metrics cover the root session only, not a total across child sessions. Elapsed time covers the case's agent process. Acceptance-command results are check verdicts, not additional model-quality metrics. Repository setup time and output enter no metric.
 
 ## Saved files
 
@@ -64,6 +64,8 @@ Files are stored under the configured artifact directory:
     checks.json
     assessment.json
     result.json
+    setup-before-agent.log
+    setup-before-checks.log
 ```
 
 | File | Contents |
@@ -74,10 +76,12 @@ Files are stored under the configured artifact directory:
 | `events.jsonl` | Raw agent event records, one JSON value per line; only that case's agent adapter interprets them |
 | `stderr.log` | Process diagnostics, including non-JSON run output |
 | `session.json` | Raw root-session export; only that case's agent adapter interprets it |
-| `solution.patch` | Submitted solution, captured before restore, overlay, and acceptance commands run |
+| `solution.patch` | Submitted solution, captured before restore, overlay, and acceptance commands run, relative to the state `before_agent` left when the repository declares one |
 | `checks.json` | Check verdicts, timing, and evidence |
 | `assessment.json` | Current manual verdicts, revision, and replacement history |
-| Case `result.json` | Case lifecycle, process result, task outcome, metrics, check-state evidence, and evidence paths |
+| Case `result.json` | Case lifecycle, process result, task outcome, metrics, check-state evidence, repository setup evidence, and evidence paths |
+| `setup-before-agent.log` | `before_agent`'s commands, one section each; present only when the repository declares `before_agent` and at least one command started |
+| `setup-before-checks.log` | `before_checks`'s commands, one section each; present only when the repository declares `before_checks` and at least one command started |
 
 The root `result.json`'s top-level `models` array holds one `{id, model, effort}` entry per configured model entry. Every saved case identity, in `run.json` and both levels of `result.json`, carries `modelId`, `effort`, and `attempt` (the attempt number this case represents, 1 through the effective repeat) alongside the unchanged `model` string, plus `agent`: the name of the adapter that ran the case.
 
@@ -99,7 +103,22 @@ A case whose task declares `checks.restore` or `checks.overlay` records what the
 | `checkState.overlay.files[].sha256` | The SHA-256 of that file's bytes as read at run start |
 | `checkState.overlay.removed` | Every blocking entry the overlay step removed |
 
-A restore or overlay failure ends the case with lifecycle `infrastructure-failed` and a `failure` of kind `CheckStateError` carrying `step` (`restore` or `overlay`) and `reason`. The cause can be worktree state the agent left, such as a read-only directory under a matched path, rather than a defect in the setup itself.
+A restore or overlay failure ends the case with lifecycle `infrastructure-failed` and a `failure` of kind `CheckStateError` carrying `step` (`restore` or `overlay`) and `reason`. The cause can be worktree state the agent left, such as a read-only directory under a matched path, rather than a defect in the setup itself. `checkState.restore.removed` can list `before_agent` output when a restore pattern matches it.
+
+### Repository setup
+
+A case whose repository declares `setup` records every started setup command in the case `result.json`'s `setup` field, present only when at least one command started.
+
+| Field | Contents |
+| --- | --- |
+| `setup.logs.beforeAgent`, `setup.logs.beforeChecks` | Run-relative path of that phase's log, or `null` when the phase started no command or its log write failed |
+| `setup.commands[].phase` | `before_agent` or `before_checks` |
+| `setup.commands[].argv` | The command's literal executable and arguments |
+| `setup.commands[].exitCode` | The command's exit code, or `null` when it did not start or ended without one |
+| `setup.commands[].durationMs` | The command's duration, or `null` when it did not start |
+| `setup.commands[].outcome` | `passed`, `failed`, `timed-out`, `launch-failed`, or `cancelled` |
+
+A `before_agent` or `before_checks` command that fails, times out, or does not start ends the case with lifecycle `infrastructure-failed` and a `failure` of kind `SetupError` carrying `phase`, `argv`, and `reason`; a `before_checks` failure replaces a preserved agent failure the same way `CheckStateError` does. A run cancellation during either phase ends the case with lifecycle `cancelled`.
 
 ### Data handling
 
