@@ -50,6 +50,7 @@ import type {
   TevuResult,
 } from '@/domain/types';
 import type { ProgramDependencies, ProgramIo, ProgramOperations } from '@/interface/program';
+import type { Writable } from 'node:stream';
 
 /** Optional overrides for composing the production dependency graph. */
 export type CompositionOptions = {
@@ -220,6 +221,8 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const controller = new AbortController();
   const onInterrupt = createInterruptHandler(controller);
+  ignoreClosedReader(process.stdout);
+  ignoreClosedReader(process.stderr);
   process.on('SIGINT', onInterrupt);
   process.on('SIGTERM', onInterrupt);
   try {
@@ -228,6 +231,19 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     process.off('SIGINT', onInterrupt);
     process.off('SIGTERM', onInterrupt);
   }
+}
+
+/**
+ * Drops output once the reader closes the pipe (`tevu … | head`), so the EPIPE
+ * does not crash Node and the command still finishes its run and artifacts;
+ * any other write error is rethrown.
+ */
+export function ignoreClosedReader(stream: Writable): void {
+  stream.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code !== 'EPIPE') {
+      throw error;
+    }
+  });
 }
 
 /** Repeated interrupts share the same bounded process-group cancellation. */
