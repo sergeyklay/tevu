@@ -34,6 +34,7 @@ const HOST_SENTINEL_NAME = "TEVU_IT_HOST_ONLY";
 const HOST_SENTINEL_VALUE = "host-only-sentinel";
 const UNLISTED_NAME = "TEVU_IT_UNLISTED";
 const UNLISTED_VALUE = "unlisted-parent-value";
+const LAUNCH_FAILURE_SECRET = "synthetic-launch-failure-secret-4c1";
 const HOST_XDG_DATA = "/host/xdg-data-synthetic";
 
 const MANAGED_ENV_KEYS = [
@@ -856,6 +857,22 @@ describe("process-group termination", () => {
     expect(result.launched).toBe(false);
     if (result.launched) return;
     expect(result.code).toBe("ENOENT");
+  });
+
+  it("redacts a secret from a synchronous launch failure", async () => {
+    const result = await runManagedProcess({
+      argv: [process.execPath, `--token=${LAUNCH_FAILURE_SECRET}\0`],
+      cwd: testDirectory,
+      environment: { PATH: process.env.PATH ?? "", HOME: testDirectory },
+      timeoutMs: 1_000,
+      terminationGraceMs: 250,
+      secretValues: [LAUNCH_FAILURE_SECRET],
+    });
+
+    expect(result.launched).toBe(false);
+    if (result.launched) return;
+    expect(result.reason).toContain("[REDACTED]");
+    expect(result.reason).not.toContain(LAUNCH_FAILURE_SECRET);
   });
 
   it("terminates a timed-out process group gracefully and reaps descendants", async () => {

@@ -14,6 +14,7 @@ import process from "node:process";
 import { execa } from "execa";
 
 import { checkEnvironmentNames, referencedVariableName } from "../config/schema.ts";
+import { describeCause } from "../domain/describe-cause.ts";
 import { redactDecodedValue } from "../domain/redaction.ts";
 
 import type { TevuConfig } from "../config/schema.ts";
@@ -112,22 +113,22 @@ export function createStreamingRedactor(secretValues: readonly string[]): Stream
 /**
  * Creates a `SecretRedactor` over the live secret-value accessor and text
  * redactor a caller already maintains, so every agent adapter shares one
- * redaction boundary. `redactValue` never throws: a `redactDecodedValue`
- * failure becomes `ArtifactError` instead.
+ * redaction boundary. `redactValue` never throws: it maps a `RedactionError`
+ * from `redactDecodedValue` to a fixed `ArtifactError`.
  */
 export function createSecretRedactor(secretValues: () => readonly string[], redact: Redactor): SecretRedactor {
   return {
     secretValues,
     redactText: (text) => redact(text),
     redactValue: (value) => {
-      try {
-        return { ok: true, value: redactDecodedValue(redact, value) };
-      } catch {
-        return {
-          ok: false,
-          error: { kind: "ArtifactError", operation: "redact-record", reason: "record redaction failed" },
-        };
+      const result = redactDecodedValue(redact, value);
+      if (result.ok) {
+        return { ok: true, value: result.value };
       }
+      return {
+        ok: false,
+        error: { kind: "ArtifactError", operation: "redact-record", reason: "record redaction failed" },
+      };
     },
   };
 }
@@ -166,7 +167,7 @@ export async function runManagedProcess(
       stripFinalNewline: false,
     });
   } catch (cause) {
-    return launchFailure(redact(describeError(cause)), describeErrorCode(cause));
+    return launchFailure(redact(describeCause(cause)), describeErrorCode(cause));
   }
 
   const maxCaptureBytes = request.maxCaptureBytes ?? DEFAULT_MAX_CAPTURE_BYTES;
@@ -363,7 +364,7 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
           error: {
             kind: "IsolationError",
             caseId: workspace.caseId,
-            reason: describeError(cause),
+            reason: describeCause(cause),
           },
         };
       }
@@ -410,7 +411,7 @@ export function createPrerequisiteAdapter(): PrerequisiteAdapter {
         return prerequisiteError(
           "artifact-directory",
           `writable directory at ${directory}`,
-          describeError(cause),
+          describeCause(cause),
         );
       }
     },
@@ -486,10 +487,6 @@ function normalizeSecrets(secretValues: readonly string[]): string[] {
   return [...new Set(secretValues.filter((value) => value.length > 0))].sort(
     (a, b) => b.length - a.length,
   );
-}
-
-function describeError(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 
 /** Extracts a Node.js-specific error code (e.g. `ENOENT`) from a caught value, when present. */

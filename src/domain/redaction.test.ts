@@ -15,38 +15,98 @@ function buildRedactor(secret: string): Redactor {
   return (text) => text.split(secret).join("[redacted]");
 }
 
+function buildThrowingRedactor(cause: unknown): Redactor {
+  return () => {
+    throw cause;
+  };
+}
+
 describe("redactDecodedValue", () => {
   it("redacts a secret that matches only the JSON-escaped form of a string value", () => {
-    const redacted = redactDecodedValue(buildRedactor(ESCAPED_NEWLINE_SECRET), {
+    const result = redactDecodedValue(buildRedactor(ESCAPED_NEWLINE_SECRET), {
       message: `x ${REAL_NEWLINE_VALUE} y`,
     });
 
-    const serialized = JSON.stringify(redacted);
-
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const serialized = JSON.stringify(result.value);
     expect(serialized).not.toContain(ESCAPED_NEWLINE_SECRET);
     expect(serialized).toContain("[redacted]");
-    expect(redacted).toEqual({ message: "x [redacted] y" });
+    expect(result.value).toEqual({ message: "x [redacted] y" });
   });
 
   it("redacts a secret that matches only the JSON-escaped form of an object key", () => {
-    const redacted = redactDecodedValue(buildRedactor(ESCAPED_NEWLINE_SECRET), {
+    const result = redactDecodedValue(buildRedactor(ESCAPED_NEWLINE_SECRET), {
       [REAL_NEWLINE_VALUE]: "value",
     });
 
-    const serialized = JSON.stringify(redacted);
-
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const serialized = JSON.stringify(result.value);
     expect(serialized).not.toContain(ESCAPED_NEWLINE_SECRET);
-    expect(redacted).toEqual({ "[redacted]": "value" });
+    expect(result.value).toEqual({ "[redacted]": "value" });
   });
 
   it("leaves numbers, booleans, and null untouched next to redacted strings", () => {
-    const redacted = redactDecodedValue(buildRedactor(ESCAPED_NEWLINE_SECRET), {
+    const result = redactDecodedValue(buildRedactor(ESCAPED_NEWLINE_SECRET), {
       [REAL_NEWLINE_VALUE]: [`x ${REAL_NEWLINE_VALUE} y`, 42, true, null],
     });
 
-    expect(redacted).toEqual({
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toEqual({
       "[redacted]": ["x [redacted] y", 42, true, null],
     });
-    expect(JSON.stringify(redacted)).toBe('{"[redacted]":["x [redacted] y",42,true,null]}');
+    expect(JSON.stringify(result.value)).toBe('{"[redacted]":["x [redacted] y",42,true,null]}');
+  });
+
+  it("returns a RedactionError carrying the message of a thrown Error verbatim", () => {
+    const result = redactDecodedValue(buildThrowingRedactor(new Error("synthetic redactor failure")), "value");
+
+    expect(result).toEqual({
+      ok: false,
+      error: { kind: "RedactionError", reason: "synthetic redactor failure" },
+    });
+  });
+
+  it("returns a RedactionError carrying the string form of a thrown non-Error value", () => {
+    const result = redactDecodedValue(buildThrowingRedactor("boom"), "value");
+
+    expect(result).toEqual({
+      ok: false,
+      error: { kind: "RedactionError", reason: "boom" },
+    });
+  });
+
+  it("returns a RedactionError when the redactor returns a non-string", () => {
+    const nonStringRedactor = ((_text: string) => 42) as unknown as Redactor;
+
+    const result = redactDecodedValue(nonStringRedactor, "value");
+
+    expect(result).toEqual({
+      ok: false,
+      error: { kind: "RedactionError", reason: "redaction returned no text" },
+    });
+  });
+
+  it("returns a RedactionError when the value contains a circular reference", () => {
+    const circular: Record<string, unknown> = {};
+    circular["self"] = circular;
+
+    const result = redactDecodedValue(buildRedactor(ESCAPED_NEWLINE_SECRET), circular);
+
+    expect(result).toEqual({
+      ok: false,
+      error: { kind: "RedactionError", reason: "value contains a circular reference" },
+    });
+  });
+
+  it("falls back to the fixed reason when the thrown value cannot be converted to text", () => {
+    const result = redactDecodedValue(buildThrowingRedactor(Object.create(null)), "value");
+
+    expect(result).toEqual({
+      ok: false,
+      error: { kind: "RedactionError", reason: "thrown value cannot be converted to text" },
+    });
   });
 });

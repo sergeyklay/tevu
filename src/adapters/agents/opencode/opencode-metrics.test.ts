@@ -24,7 +24,7 @@ import type {
 } from "../../../domain/types.ts";
 
 const CASE_ID = "task-1--alpha";
-const FIXTURE_DIRECTORY = new URL("./opencode-protocol.fixtures/", import.meta.url);
+const FIXTURE_DIRECTORY = new URL("./fixtures/", import.meta.url);
 
 function readTextFixture(name: string): string {
   return readFileSync(new URL(name, FIXTURE_DIRECTORY), "utf8");

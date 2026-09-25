@@ -1,4 +1,6 @@
-import type { Redactor } from "./types.ts";
+import { describeCause } from "./describe-cause.ts";
+
+import type { Redactor, TevuResult } from "./types.ts";
 
 /**
  * Applies the redactor to every string inside a decoded JSON-like value while
@@ -8,11 +10,16 @@ import type { Redactor } from "./types.ts";
  * JSON-serialized token form, giving the injected redactor visibility of the
  * exact escaped shape the string takes inside a serialized sink.
  *
- * @throws when the redactor throws, returns a non-string, produces a token
- * that no longer decodes to one string, or the value is circular.
+ * Never throws. A throwing or non-text redactor, a second-pass token that
+ * does not decode to one string, a cycle, or any other exception all become a
+ * `RedactionError` result instead.
  */
-export function redactDecodedValue(redact: Redactor, value: unknown): unknown {
-  return redactDecodedNode(redact, value, new WeakSet());
+export function redactDecodedValue(redact: Redactor, value: unknown): TevuResult<unknown, "RedactionError"> {
+  try {
+    return { ok: true, value: redactDecodedNode(redact, value, new WeakSet()) };
+  } catch (cause) {
+    return { ok: false, error: { kind: "RedactionError", reason: describeCause(cause) } };
+  }
 }
 
 function redactDecodedNode(redact: Redactor, value: unknown, path: WeakSet<object>): unknown {

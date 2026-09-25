@@ -7,7 +7,7 @@ import type { ProtocolContext } from "./opencode-protocol.ts";
 import type { OpenCodeRunEvent } from "./opencode-protocol.ts";
 
 const CASE_CONTEXT: ProtocolContext = { phase: "case", caseId: "task-1--alpha" };
-const FIXTURE_DIRECTORY = new URL("./opencode-protocol.fixtures/", import.meta.url);
+const FIXTURE_DIRECTORY = new URL("./fixtures/", import.meta.url);
 
 function readTextFixture(name: string): string {
   return readFileSync(new URL(name, FIXTURE_DIRECTORY), "utf8");

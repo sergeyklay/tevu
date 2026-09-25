@@ -18,6 +18,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { readConfigText } from "../config/load.ts";
+import { describeCause } from "../domain/describe-cause.ts";
 import { redactDecodedValue } from "../domain/redaction.ts";
 
 import type {
@@ -960,10 +961,6 @@ function artifactFailure(
   return { ok: false, error: { kind: "ArtifactError", operation, reason } };
 }
 
-function describeCause(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
-}
-
 function systemErrorCode(cause: unknown): string | null {
   if (isRecord(cause) && typeof cause["code"] === "string") {
     return cause["code"];
@@ -1018,11 +1015,11 @@ function redactValueForSink(
   operation: string,
   value: unknown,
 ): TevuResult<unknown, "ArtifactError"> {
-  try {
-    return { ok: true, value: redactDecodedValue(redact, value) };
-  } catch (cause) {
-    return artifactFailure(operation, `redaction failed; write aborted: ${describeCause(cause)}`);
+  const result = redactDecodedValue(redact, value);
+  if (result.ok) {
+    return { ok: true, value: result.value };
   }
+  return artifactFailure(operation, `redaction failed; write aborted: ${result.error.reason}`);
 }
 
 async function readJsonFile(

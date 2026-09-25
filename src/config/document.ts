@@ -9,6 +9,8 @@
 
 import { Document, Scalar, YAMLSeq, isSeq, parseDocument } from "yaml";
 
+import { describeCause } from "../domain/describe-cause.ts";
+
 import type { Node } from "yaml";
 import type {
   CheckInput,
@@ -415,8 +417,4 @@ function flowStyleFinding(key: string): TevuResult<never, "ConfigValidationError
 
 function artifactFailure(operation: string, reason: string): TevuResult<never, "ArtifactError"> {
   return { ok: false, error: { kind: "ArtifactError", operation, reason } };
-}
-
-function describeCause(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
