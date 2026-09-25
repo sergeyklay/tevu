@@ -26,9 +26,14 @@ import type {
   EnvironmentAdapter,
   HostProbe,
   IsolatedEnvironment,
+  ManagedProcessCompletion,
+  ManagedProcessLaunchFailure,
+  ManagedProcessRequest,
+  ManagedProcessResult,
   ParentEnvironmentSnapshot,
   PrerequisiteAdapter,
   RedactedCapture,
+  SecretRedactor,
   TerminationStage,
   TevuResult,
 } from "../domain/types.ts";
@@ -41,53 +46,6 @@ export type StreamingRedactor = {
   push(chunk: string): string;
   flush(): string;
 };
-
-/** Input for one supervised literal-argv process with a replacement environment. */
-export type ManagedProcessRequest = {
-  argv: [string, ...string[]];
-  cwd: string;
-  environment: Record<string, string>;
-  timeoutMs: number;
-  terminationGraceMs: number;
-  cancellation?: AbortSignal;
-  secretValues?: readonly string[];
-  onStdout?: (text: string) => void;
-  onStderr?: (text: string) => void;
-  maxCaptureBytes?: number;
-  /**
-   * With "structured", stdout bypasses the generic chunk-level text redaction
-   * so structured records can be parsed from unmangled bytes; the caller then
-   * owns redacting every decoded record before any persistent, terminal, or
-   * callback sink. The bounded capture and byte totals stay truthful to the
-   * raw stream. Defaults to "text".
-   */
-  stdoutRedaction?: "text" | "structured";
-};
-
-/**
- * Evidence that a process could not be started; the reason is already
- * redacted. `code` carries the Node.js-specific error code (e.g. `ENOENT`)
- * when one is available; the `cancelled before launch` result never sets it.
- */
-export type ManagedProcessLaunchFailure = { launched: false; reason: string; code?: string };
-
-/** Complete evidence for one launched and settled process. */
-export type ManagedProcessCompletion = {
-  launched: true;
-  exitCode: number | null;
-  signal: string | null;
-  startedAt: string;
-  endedAt: string;
-  durationMs: number;
-  timedOut: boolean;
-  cancelled: boolean;
-  terminationStage: TerminationStage;
-  stdout: RedactedCapture;
-  stderr: RedactedCapture;
-};
-
-/** Outcome of one managed process; launch failure is evidence, not an exception. */
-export type ManagedProcessResult = ManagedProcessCompletion | ManagedProcessLaunchFailure;
 
 const REDACTION_MASK = "[REDACTED]";
 const DEFAULT_MAX_CAPTURE_BYTES = 64 * 1024;
@@ -212,6 +170,29 @@ function ensureRedactedString(candidate: string): string {
     throw new Error("redaction returned no text");
   }
   return candidate;
+}
+
+/**
+ * Creates a `SecretRedactor` over the live secret-value accessor and text
+ * redactor a caller already maintains, so every agent adapter shares one
+ * redaction boundary. `redactValue` never throws: a `redactDecodedValue`
+ * failure becomes `ArtifactError` instead.
+ */
+export function createSecretRedactor(secretValues: () => readonly string[], redact: Redactor): SecretRedactor {
+  return {
+    secretValues,
+    redactText: (text) => redact(text),
+    redactValue: (value) => {
+      try {
+        return { ok: true, value: redactDecodedValue(redact, value) };
+      } catch {
+        return {
+          ok: false,
+          error: { kind: "ArtifactError", operation: "redact-record", reason: "record redaction failed" },
+        };
+      }
+    },
+  };
 }
 
 /**
@@ -379,7 +360,7 @@ export function createEvaluatorProcessAdapter(
 
 /**
  * Creates the environment boundary: one immutable run-level snapshot of the
- * parent PATH and configured variable values, and per-case OpenCode and
+ * parent PATH and configured variable values, and per-case agent and
  * evaluator replacement environments with private home, XDG, and temporary
  * directories under the case runtime directory.
  */
@@ -392,23 +373,36 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
       workspace: CaseWorkspace,
       snapshot: ParentEnvironmentSnapshot,
       config: TevuConfig,
+      agent: string,
     ): Promise<TevuResult<CaseEnvironments, "IsolationError">> {
+      const agentSettings = config.agents[agent];
+      if (agentSettings === undefined) {
+        return {
+          ok: false,
+          error: {
+            kind: "IsolationError",
+            caseId: workspace.caseId,
+            reason: `no agent block is configured for agent "${agent}"`,
+          },
+        };
+      }
       try {
-        const opencode = await buildIsolatedEnvironment({
+        const agentValues = snapshot.agentValues;
+        const agentEnvironment = await buildIsolatedEnvironment({
           caseId: workspace.caseId,
-          recipient: "opencode",
-          baseDirectory: join(workspace.runtimeDirectory, "opencode"),
+          recipient: "agent",
+          baseDirectory: join(workspace.runtimeDirectory, "agent"),
           path: snapshot.path,
           additions: [
-            ...config.agents.opencode.secrets.map((name) => ({
+            ...agentSettings.secrets.map((name) => ({
               name,
               classification: "secret" as const,
-              value: snapshot.opencodeValues[name],
+              value: agentValues[name],
             })),
-            ...config.agents.opencode.env.map((name) => ({
+            ...agentSettings.env.map((name) => ({
               name,
               classification: "ordinary" as const,
-              value: snapshot.opencodeValues[name],
+              value: agentValues[name],
             })),
           ],
         });
@@ -425,7 +419,7 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
             classification: "ordinary" as const,
           })),
         });
-        return { ok: true, value: { opencode, evaluator } };
+        return { ok: true, value: { agent: agentEnvironment, evaluator } };
       } catch (cause) {
         return {
           ok: false,
@@ -595,22 +589,24 @@ function snapshotParentEnvironment(
     return prerequisiteError("environment", "non-empty parent PATH", "empty");
   }
 
-  const opencodeValues: Record<string, string> = {};
+  const agentValues: Record<string, string> = {};
   const secretValues: string[] = [];
-  for (const name of config.agents.opencode.secrets) {
-    const value = process.env[name];
-    if (value === undefined) {
-      return missingVariableError(name);
+  for (const settings of Object.values(config.agents)) {
+    for (const name of settings.secrets) {
+      const value = process.env[name];
+      if (value === undefined) {
+        return missingVariableError(name);
+      }
+      agentValues[name] = value;
+      secretValues.push(value);
     }
-    opencodeValues[name] = value;
-    secretValues.push(value);
-  }
-  for (const name of config.agents.opencode.env) {
-    const value = process.env[name];
-    if (value === undefined) {
-      return missingVariableError(name);
+    for (const name of settings.env) {
+      const value = process.env[name];
+      if (value === undefined) {
+        return missingVariableError(name);
+      }
+      agentValues[name] = value;
     }
-    opencodeValues[name] = value;
   }
 
   const ordinaryEvaluatorValues: Record<string, string> = {};
@@ -634,7 +630,7 @@ function snapshotParentEnvironment(
     ok: true,
     value: {
       path,
-      opencodeValues,
+      agentValues,
       ordinaryEvaluatorValues,
       secretValues: [...new Set(secretValues.filter((value) => value.length > 0))],
     },
@@ -649,7 +645,7 @@ type EnvironmentAddition = {
 
 type IsolatedEnvironmentInput = {
   caseId: string;
-  recipient: "opencode" | "evaluator";
+  recipient: "agent" | "evaluator";
   baseDirectory: string;
   path: string;
   additions: EnvironmentAddition[];

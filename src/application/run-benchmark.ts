@@ -8,13 +8,20 @@
 
 import pLimit from "p-limit";
 
-import { durationMs } from "../config/schema.ts";
+import { agentNamesInUse, durationMs } from "../config/schema.ts";
+import { unavailableBenchmarkMetrics } from "../domain/types.ts";
 import { evaluateChecks, orderTaskChecks, reduceRequiredOutcome } from "../evaluation/checks.ts";
-import { normalizeMetrics, unavailableBenchmarkMetrics } from "../evaluation/metrics.ts";
+import { combineCaseMetrics } from "../evaluation/metrics.ts";
+import { buildTaskPrompt } from "./task-prompt.ts";
 import { describeSourceCommitInPrompt } from "./source-commit-in-prompt.ts";
 
 import type { TaskDefinition, TevuConfig } from "../config/schema.ts";
 import type {
+  AgentCapabilityReport,
+  AgentEventRecord,
+  AgentRegistry,
+  AgentRunResult,
+  AgentSessionExport,
   BenchmarkMetrics,
   BenchmarkPlan,
   CaseEnvironments,
@@ -23,9 +30,6 @@ import type {
   CaseResult,
   CaseWorkspace,
   CheckResult,
-  OpenCodeExport,
-  OpenCodeRunEvent,
-  OpenCodeRunResult,
   ParentEnvironmentSnapshot,
   RunDependencies,
   RunFinding,
@@ -38,10 +42,10 @@ import type { OrderedCheck } from "../evaluation/checks.ts";
 
 type OrderedChecks = readonly OrderedCheck[];
 
-/** Result of the single managed OpenCode process one case owns. */
-type OpenCodeRunOutcome = TevuResult<
-  OpenCodeRunResult,
-  "OpenCodeProcessError" | "OpenCodeProtocolError" | "CaseTimeoutError" | "CancellationError"
+/** Result of the single managed agent process one case owns. */
+type AgentRunOutcome = TevuResult<
+  AgentRunResult,
+  "AgentProcessError" | "AgentProtocolError" | "CaseTimeoutError" | "CancellationError"
 >;
 
 /** Error kinds the benchmark orchestration contract declares. */
@@ -49,8 +53,8 @@ type RunBenchmarkErrorKind =
   | "PrerequisiteError"
   | "SourceMaterializationError"
   | "IsolationError"
-  | "OpenCodeProcessError"
-  | "OpenCodeProtocolError"
+  | "AgentProcessError"
+  | "AgentProtocolError"
   | "CaseTimeoutError"
   | "EvaluationError"
   | "ArtifactError"
@@ -72,6 +76,7 @@ export function planBenchmark(config: TevuConfig): BenchmarkPlan {
         sourceCommit: task.base_commit,
         model: model.model,
         effort: model.effort,
+        agent: model.agent,
       });
     }
   }
@@ -121,7 +126,7 @@ export function reduceRunExitCode(
  * Orchestrates one bounded benchmark run over injected adapters: local
  * prerequisite validation and commit pinning before the first write, one
  * immutable parent-environment snapshot before scheduling, `p-limit` bounded
- * case slots that include acceptance evaluation, exactly one OpenCode process
+ * case slots that include acceptance evaluation, exactly one agent process
  * per planned case with no retry, the binding lifecycle and failure mappings,
  * artifact-failure scheduling stop, and bounded cancellation finalization.
  * After the run directory exists, failures are folded into case results and
@@ -135,6 +140,7 @@ export async function runBenchmark(
   if (dependencies.cancellation.aborted) {
     return cancellationFailure();
   }
+  const agents = dependencies.agents;
   const host = await dependencies.prerequisites.probeHost();
   if (!host.ok) {
     return host;
@@ -143,9 +149,22 @@ export async function runBenchmark(
   if (!snapshot.ok) {
     return snapshot;
   }
-  const probe = await dependencies.opencode.probe(plan.config.agents.opencode.command);
-  if (!probe.ok) {
-    return probe;
+  const capabilities: Record<string, AgentCapabilityReport> = {};
+  const agentVersions: Record<string, string | null> = {};
+  for (const name of agentNamesInUse(plan.config)) {
+    const adapter = agents.get(name);
+    if (adapter === undefined) {
+      return {
+        ok: false,
+        error: { kind: "PrerequisiteError", tool: name, expected: "a registered agent adapter", actual: "none" },
+      };
+    }
+    const report = await adapter.probe();
+    if (!report.ok) {
+      return report;
+    }
+    capabilities[name] = report.value;
+    agentVersions[name] = report.value.detectedVersion;
   }
   const planned = await resolvePlannedCases(plan, dependencies);
   if (!planned.ok) {
@@ -167,10 +186,10 @@ export async function runBenchmark(
       nodeVersion: host.value.nodeVersion,
       bunVersion: host.value.bunVersion,
     },
-    tools: { gitVersion: host.value.gitVersion, opencodeVersion: probe.value.detectedVersion },
+    tools: { gitVersion: host.value.gitVersion, agentVersions },
     execution: { concurrency: plan.concurrency, caseTimeoutMs: plan.caseTimeoutMs },
     cases: planned.value.map((entry) => entry.identity),
-    context: { config: plan.config, capabilities: probe.value },
+    context: { config: plan.config, capabilities },
   };
   const started = await dependencies.artifacts.startRun(manifest);
   if (!started.ok) {
@@ -180,6 +199,7 @@ export async function runBenchmark(
   const run: RunContext = {
     plan,
     dependencies,
+    agents,
     snapshot: snapshot.value,
     findings: [],
     results: new Map(),
@@ -237,6 +257,7 @@ type PlannedCase = {
 type RunContext = {
   plan: BenchmarkPlan;
   dependencies: RunDependencies;
+  agents: AgentRegistry;
   snapshot: ParentEnvironmentSnapshot;
   findings: RunFinding[];
   results: Map<string, CaseResult>;
@@ -251,11 +272,11 @@ type ActiveCase = {
   workspace: CaseWorkspace;
   environments: CaseEnvironments;
   abort: AbortController;
-  events: OpenCodeRunEvent[];
+  events: AgentEventRecord[];
   diagnostics: number;
-  evidence: OpenCodeRunResult | null;
+  evidence: AgentRunResult | null;
   artifactFailure: TevuError | null;
-  sessionExport: OpenCodeExport | null;
+  sessionExport: AgentSessionExport | null;
   exportUnavailableReason: string | undefined;
   patchWritten: boolean;
   checks: CheckResult[];
@@ -307,7 +328,7 @@ async function resolvePlannedCases(
       commit = validated.value.resolvedCommit;
       resolvedCommits.set(key, commit);
     }
-    const reason = describeSourceCommitInPrompt(dependencies.buildTaskPrompt(task), commit);
+    const reason = describeSourceCommitInPrompt(buildTaskPrompt(task), commit);
     if (reason !== undefined) {
       return sourceFailure(task.id, reason);
     }
@@ -353,6 +374,7 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
     workspace.value,
     run.snapshot,
     run.plan.config,
+    entry.identity.agent,
   );
   if (!environments.ok) {
     await persistAndCleanup(
@@ -393,21 +415,21 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
 
 async function runActiveCase(run: RunContext, active: ActiveCase): Promise<void> {
   const caseId = active.identity.caseId;
+  const adapter = requireCaseAgentAdapter(run, active.identity);
 
   emitLifecycle(run, caseId, "running");
-  const outcome = await run.dependencies.opencode.run({
+  const outcome = await adapter.run({
     identity: active.identity,
-    executable: run.plan.config.agents.opencode.command,
-    prompt: run.dependencies.buildTaskPrompt(active.task),
+    prompt: buildTaskPrompt(active.task),
     worktreeDirectory: active.workspace.worktreeDirectory,
-    environment: active.environments.opencode,
+    environment: requireCaseAgentEnvironment(active.environments),
     timeoutMs: run.plan.caseTimeoutMs,
     terminationGraceMs: run.plan.terminationGraceMs,
     cancellation: active.abort.signal,
     onEvent: async (event) => {
       active.events.push(event);
       const appended = await run.dependencies.artifacts.appendEvent(caseId, event);
-      if (!appended.ok && appended.error.kind === "ArtifactError") {
+      if (!appended.ok) {
         recordArtifactFailure(run, active, appended.error);
       }
       return appended;
@@ -428,6 +450,26 @@ async function runActiveCase(run: RunContext, active: ActiveCase): Promise<void>
   await persistAndCleanup(run, result, active.workspace);
 }
 
+/**
+ * Resolves the adapter `runBenchmark` already confirmed registered for this
+ * case's agent while probing every agent in use.
+ */
+function requireCaseAgentAdapter(run: RunContext, identity: CaseIdentity) {
+  const adapter = identity.agent === undefined ? undefined : run.agents.get(identity.agent);
+  if (adapter === undefined) {
+    throw new Error(`unreachable: runBenchmark already validated a registered adapter for agent "${String(identity.agent)}"`);
+  }
+  return adapter;
+}
+
+/** `createCaseEnvironments` always populates `agent`; narrows past its still-optional shim type. */
+function requireCaseAgentEnvironment(environments: CaseEnvironments) {
+  if (environments.agent === undefined) {
+    throw new Error("unreachable: createCaseEnvironments already populates the agent environment");
+  }
+  return environments.agent;
+}
+
 /** Records a mid-case artifact-store failure, terminates the case, and stops scheduling. */
 function recordArtifactFailure(run: RunContext, active: ActiveCase, error: TevuError): void {
   active.artifactFailure ??= error;
@@ -435,11 +477,11 @@ function recordArtifactFailure(run: RunContext, active: ActiveCase, error: TevuE
   active.abort.abort();
 }
 
-/** Maps one finished OpenCode run to the case's terminal result. */
+/** Maps one finished agent run to the case's terminal result. */
 async function concludeCase(
   run: RunContext,
   active: ActiveCase,
-  outcome: OpenCodeRunOutcome,
+  outcome: AgentRunOutcome,
 ): Promise<CaseResult> {
   if (active.artifactFailure !== null) {
     active.exportUnavailableReason =
@@ -506,10 +548,8 @@ async function evaluateReadableCase(
         ? "root session could not be identified"
         : `root session could not be identified after the failure: ${describeError(preservedFailure)}`;
   } else {
-    const exported = await run.dependencies.opencode.exportSession(
-      sessionId,
-      active.environments.opencode,
-    );
+    const adapter = requireCaseAgentAdapter(run, active.identity);
+    const exported = await adapter.exportSession(sessionId, requireCaseAgentEnvironment(active.environments));
     if (exported.ok) {
       const written = await run.dependencies.artifacts.writeSessionExport(caseId, exported.value);
       if (!written.ok) {
@@ -617,7 +657,7 @@ function finishCase(
   ordered?: OrderedChecks,
 ): CaseResult {
   const caseId = active.identity.caseId;
-  const { metrics, protocolFailure } = computeCaseMetrics(active);
+  const { metrics, protocolFailure } = computeCaseMetrics(run, active);
   const preserved = failure ?? protocolFailure;
   const paths = run.dependencies.artifacts.caseArtifactPaths(caseId);
   return {
@@ -654,41 +694,32 @@ function finishCase(
       sourceRepositoryPath: active.workspace.sourceRepositoryPath,
       syntheticCommit: active.workspace.syntheticCommit,
       environment: [
-        ...active.environments.opencode.variableManifest,
+        ...requireCaseAgentEnvironment(active.environments).variableManifest,
         ...active.environments.evaluator.variableManifest,
       ],
     },
   };
 }
 
-/** Normalizes metrics from preserved records; a decoding failure stays truthful and preserved. */
-function computeCaseMetrics(active: ActiveCase): {
+/** Normalizes metrics through the case's own adapter; a decoding failure stays truthful and preserved. */
+function computeCaseMetrics(run: RunContext, active: ActiveCase): {
   metrics: BenchmarkMetrics;
-  protocolFailure: Extract<TevuError, { kind: "OpenCodeProtocolError" }> | null;
+  protocolFailure: Extract<TevuError, { kind: "AgentProtocolError" }> | null;
 } {
+  const adapter = requireCaseAgentAdapter(run, active.identity);
   const durationMs = active.evidence?.process.durationMs ?? null;
-  const normalized = normalizeMetrics({
+  const normalized = adapter.normalizeMetrics({
     caseId: active.identity.caseId,
-    rootSessionId: active.evidence?.sessionId ?? null,
+    sessionId: active.evidence?.sessionId ?? null,
     sessionExport: active.sessionExport,
     events: active.events,
-    elapsedMs: durationMs,
-    elapsedUnavailableReason: "the OpenCode process produced no timing evidence",
     exportUnavailableReason: active.exportUnavailableReason,
   });
-  if (normalized.ok) {
-    return { metrics: normalized.value, protocolFailure: null };
-  }
-  const metrics = unavailableBenchmarkMetrics(normalized.error.reason);
-  if (durationMs !== null) {
-    metrics.elapsed = {
-      value: durationMs,
-      unit: "millisecond",
-      availability: { status: "available", source: "process" },
-      scope: "case",
-    };
-  }
-  return { metrics, protocolFailure: normalized.error };
+  return combineCaseMetrics({
+    durationMs,
+    elapsedUnavailableReason: "the agent process produced no timing evidence",
+    normalized,
+  });
 }
 
 /** Final record for a case whose preparation failed before its process started. */
@@ -770,10 +801,10 @@ function compareStrings(a: string, b: string): number {
 /** Identifier-only description of a typed failure; never includes secret values. */
 function describeError(error: TevuError): string {
   switch (error.kind) {
-    case "OpenCodeProcessError":
-      return `OpenCode process ended with exit code ${String(error.exitCode)} and signal ${String(error.signal)}`;
-    case "OpenCodeProtocolError":
-      return `OpenCode protocol failure: ${error.reason}`;
+    case "AgentProcessError":
+      return `agent "${error.agent}" process ended with exit code ${String(error.exitCode)} and signal ${String(error.signal)}`;
+    case "AgentProtocolError":
+      return `agent "${error.agent}" protocol failure: ${error.reason}`;
     case "CaseTimeoutError":
       return `case timed out after ${error.timeoutMs}ms`;
     case "CancellationError":

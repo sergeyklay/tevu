@@ -173,7 +173,7 @@ describe("decodeRunConfig", () => {
 
   it("projects every model as id, model, and effort", () => {
     const decoded = expectDecoded(
-      decodeRunConfig(buildSnapshot({ models: [buildSnapshotModel({ id: "beta", agent: "opencode" })] })),
+      decodeRunConfig(buildSnapshot({ models: [buildSnapshotModel({ id: "beta", agent: "fake-agent" })] })),
     );
 
     expect(decoded.models).toEqual([{ id: "beta", model: "vendor/model-alpha", effort: "high" }]);
@@ -200,7 +200,7 @@ describe("decodeRunConfig", () => {
           },
         },
       ],
-      models: [{ ...buildSnapshotModel(), agent: "opencode" }],
+      models: [{ ...buildSnapshotModel(), agent: "fake-agent" }],
       repositories: buildSnapshot().repositories,
     };
 

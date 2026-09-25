@@ -11,15 +11,16 @@ import { validateConfig } from "../application/validate.ts";
 import { createConfigStore } from "../adapters/artifact-store.ts";
 import { renderConfigDocument } from "./document.ts";
 import { canonicalConfigSerialization, loadConfig } from "./load.ts";
-import { TevuConfigSchema } from "./schema.ts";
+import { AGENT_NAMES, agentNamesInUse, agentSettingsSchema, TevuConfigSchema } from "./schema.ts";
 
 import type { TaskDependencies, TaskWizardInput } from "../application/create-task.ts";
+import type { AgentName } from "./schema.ts";
 import type {
+  AgentAdapter,
+  AgentCapabilityReport,
   ConfigStore,
   EnvironmentAdapter,
   GitWorkspaceAdapter,
-  OpenCodeAdapter,
-  OpenCodeCapabilityReport,
   PrerequisiteAdapter,
   TevuError,
   TevuResult,
@@ -29,7 +30,6 @@ import type {
   CheckInput,
   ModelDefinitionInput,
   RepositoryDefinition,
-  TaskDefinition,
   TaskInput,
   TevuConfig,
   TevuConfigInput,
@@ -211,12 +211,17 @@ function buildTaskDependencies(overrides: Partial<TaskDependencies> = {}): TaskD
   };
 }
 
-function buildCapabilityReport(executable: string): OpenCodeCapabilityReport {
+function buildAgentCapabilityReport(executable: string): AgentCapabilityReport {
   return {
     executable,
     detectedVersion: "1.0.0",
-    commands: { run: "available", export: "available" },
-    runOptions: { jsonFormat: "available", model: "available", variant: "available" },
+    capabilities: [
+      { name: "run command", required: true, availability: "available" },
+      { name: "export command", required: true, availability: "available" },
+      { name: "run --format json", required: true, availability: "available" },
+      { name: "run --model", required: true, availability: "available" },
+      { name: "run --variant", required: true, availability: "available" },
+    ],
     isolation: { denyOutsideWorktree: "available" },
   };
 }
@@ -233,11 +238,11 @@ function buildPrerequisites(overrides: Partial<PrerequisiteAdapter> = {}): Prere
   };
 }
 
-function buildOpenCodeAdapter(overrides: Partial<OpenCodeAdapter> = {}): OpenCodeAdapter {
+function buildFakeAgentAdapter(overrides: Partial<AgentAdapter> = {}): AgentAdapter {
   return {
-    probe: vi.fn(async (executable: string) => ({
+    probe: vi.fn(async () => ({
       ok: true as const,
-      value: buildCapabilityReport(executable),
+      value: buildAgentCapabilityReport("opencode"),
     })),
     run: vi.fn(async () => ({
       ok: false as const,
@@ -246,7 +251,17 @@ function buildOpenCodeAdapter(overrides: Partial<OpenCodeAdapter> = {}): OpenCod
     exportSession: vi.fn(async () => ({
       ok: false as const,
       error: {
-        kind: "OpenCodeProtocolError" as const,
+        kind: "AgentProtocolError" as const,
+        agent: "opencode",
+        context: { phase: "probe" as const },
+        reason: "not used in these tests",
+      },
+    })),
+    normalizeMetrics: vi.fn(() => ({
+      ok: false as const,
+      error: {
+        kind: "AgentProtocolError" as const,
+        agent: "opencode",
         context: { phase: "probe" as const },
         reason: "not used in these tests",
       },
@@ -259,7 +274,7 @@ function buildEnvironments(overrides: Partial<EnvironmentAdapter> = {}): Environ
   return {
     snapshotParent: vi.fn(() => ({
       ok: true as const,
-      value: { path: "/usr/bin:/bin", opencodeValues: {}, ordinaryEvaluatorValues: {}, secretValues: [] },
+      value: { path: "/usr/bin:/bin", agentValues: {}, ordinaryEvaluatorValues: {}, secretValues: [] },
     })),
     createCaseEnvironments: vi.fn(async () => ({
       ok: false as const,
@@ -274,10 +289,11 @@ function buildValidationDependencies(
 ): ValidationDependencies {
   return {
     git: buildFullGit(),
-    opencode: buildOpenCodeAdapter(),
+    // `validateConfig` re-validates the strict schema, whose only agent key
+    // is `opencode`, so this test registry keeps that schema-declared name.
+    agents: new Map([["opencode", buildFakeAgentAdapter()]]),
     environments: buildEnvironments(),
     prerequisites: buildPrerequisites(),
-    buildTaskPrompt: vi.fn((task: TaskDefinition) => `prompt:${task.id}`),
     ...overrides,
   };
 }
@@ -329,6 +345,53 @@ tasks:
           timeout: 1m
 `;
 }
+
+describe("agentSettingsSchema", () => {
+  it("accepts a minimal agent block and defaults secrets and env to empty arrays", () => {
+    const parsed = agentSettingsSchema("opencode").safeParse({ command: "opencode" });
+
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data).toEqual({ command: "opencode", secrets: [], env: [] });
+  });
+
+  it("names the given agent in the both-lists message", () => {
+    const parsed = agentSettingsSchema("claude").safeParse({
+      command: "claude",
+      secrets: ["SHARED"],
+      env: ["SHARED"],
+    });
+
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues.map((issue) => issue.message)).toContain(
+      'environment variable "SHARED" appears in both agents.claude.secrets and agents.claude.env',
+    );
+  });
+});
+
+describe("AGENT_NAMES", () => {
+  it("lists exactly the strict object's own keys", () => {
+    expect(AGENT_NAMES).toEqual(["opencode"]);
+    const name: AgentName = "opencode";
+    expect(AGENT_NAMES).toContain(name);
+  });
+});
+
+describe("agentNamesInUse", () => {
+  it("returns the distinct models[].agent values in configuration order", () => {
+    const config = expectSchemaAcceptance(
+      buildConfig({
+        models: [
+          buildModel({ id: "alpha", agent: "opencode" }),
+          buildModel({ id: "beta", model: "anthropic/claude-4", effort: "max", agent: "opencode" }),
+        ],
+      }),
+    );
+
+    expect(agentNamesInUse(config)).toEqual(["opencode"]);
+  });
+});
 
 describe("TevuConfigSchema", () => {
   it("accepts a minimal valid configuration and materializes its defaults", () => {
@@ -1392,6 +1455,22 @@ describe("createTask", () => {
     expect(replaceText.mock.calls[0]?.[1]).toContain("new-task");
   });
 
+  it("registers every agent block's secrets and the Jira token as secret variable names", async () => {
+    const config = buildConfig({
+      agents: buildAgents({ secrets: ["OC_API_KEY"] }),
+      trackers: { jira: { url: "https://jira.example.com", email: "$JIRA_EMAIL", token: "$JIRA_TOKEN" } },
+    });
+    const rendered = renderConfigDocument(config, { redact: (text) => text });
+    if (!rendered.ok) throw new Error("expected the fixture configuration to render");
+    const dependencies = buildTaskDependencies({
+      configStore: buildConfigStore({ readText: vi.fn(async () => ({ ok: true as const, value: rendered.value })) }),
+    });
+
+    await createTask(buildTaskWizardInput(), dependencies);
+
+    expect(dependencies.registerSecrets).toHaveBeenCalledExactlyOnceWith(["OC_API_KEY", "JIRA_TOKEN"]);
+  });
+
   it("pins the task to a newly added repository when one is supplied", async () => {
     const dependencies = buildTaskDependencies();
     const newRepository = buildRepository({ id: "extra-repo", path: "/repos/extra" });
@@ -1538,7 +1617,7 @@ describe("validateConfig", () => {
 
     expect(report.valid).toBe(true);
     expect(report.findings).toEqual([]);
-    expect(report.capabilities).toEqual(buildCapabilityReport("opencode"));
+    expect(report.capabilities).toEqual({ opencode: buildAgentCapabilityReport("opencode") });
   });
 
   it("retains every independent finding instead of stopping at the first failure", async () => {
@@ -1571,12 +1650,22 @@ describe("validateConfig", () => {
           error: { kind: "PrerequisiteError" as const, tool: "artifacts-directory", expected: "a writable directory", actual: "/tmp/tevu/artifacts" },
         })),
       }),
-      opencode: buildOpenCodeAdapter({
-        probe: vi.fn(async () => ({
-          ok: false as const,
-          error: { kind: "OpenCodeProtocolError" as const, context: { phase: "probe" as const }, reason: "probe timed out" },
-        })),
-      }),
+      agents: new Map([
+        [
+          "opencode",
+          buildFakeAgentAdapter({
+            probe: vi.fn(async () => ({
+              ok: false as const,
+              error: {
+                kind: "AgentProtocolError" as const,
+                agent: "opencode",
+                context: { phase: "probe" as const },
+                reason: "probe timed out",
+              },
+            })),
+          }),
+        ],
+      ]),
     });
 
     // The schema cannot itself produce an unresolvable repo reference, so the
@@ -1603,7 +1692,52 @@ describe("validateConfig", () => {
     expect(report.findings.find((finding) => finding.identifier === "prerequisites.node")?.message).toBe(
       "expected >=24 <25, actual 18.0.0",
     );
-    expect(report.capabilities).toBeNull();
+    expect(report.capabilities).toEqual({});
+  });
+
+  it("reports a finding naming the agent when no adapter is registered for it, without probing", async () => {
+    const dependencies = buildValidationDependencies({ agents: new Map() });
+
+    const report = expectOk(await validateConfig(expectSchemaAcceptance(buildConfig()), dependencies));
+
+    expect(report.valid).toBe(false);
+    expect(report.findings).toContainEqual({
+      severity: "error",
+      identifier: "agents.opencode",
+      message: "no agent adapter is registered under this name",
+    });
+    expect(report.capabilities).toEqual({});
+  });
+
+  it("reports a prerequisite finding when the agent probe fails with a PrerequisiteError", async () => {
+    const dependencies = buildValidationDependencies({
+      agents: new Map([
+        [
+          "opencode",
+          buildFakeAgentAdapter({
+            probe: vi.fn(async () => ({
+              ok: false as const,
+              error: {
+                kind: "PrerequisiteError" as const,
+                tool: "opencode",
+                expected: "configured executable \"opencode\" starts",
+                actual: "ENOENT",
+              },
+            })),
+          }),
+        ],
+      ]),
+    });
+
+    const report = expectOk(await validateConfig(expectSchemaAcceptance(buildConfig()), dependencies));
+
+    expect(report.valid).toBe(false);
+    expect(report.findings).toContainEqual({
+      severity: "error",
+      identifier: "prerequisites.opencode",
+      message: 'expected configured executable "opencode" starts, actual ENOENT',
+    });
+    expect(report.capabilities).toEqual({});
   });
 
   it("surfaces schema findings when revalidating an invalid configuration", async () => {
@@ -1675,8 +1809,16 @@ describe("validateConfig", () => {
 
   it("rejects a task whose prompt names its resolved base commit, including one resolved from the cache", async () => {
     const resolvedCommit = "abcdef0123456789abcdef0123456789abcdef01";
-    const first = buildTaskDefinition({ id: "task-one", base_commit: "main" });
-    const second = buildTaskDefinition({ id: "task-two", base_commit: "main" });
+    const first = buildTaskDefinition({
+      id: "task-one",
+      base_commit: "main",
+      prompt: "unrelated fedcba9876543210fedcba9876543210fedcba98 and deadbeef",
+    });
+    const second = buildTaskDefinition({
+      id: "task-two",
+      base_commit: "main",
+      prompt: "the agent should pin the commit ABCDEF0 for this task",
+    });
     const dependencies = buildValidationDependencies({
       git: buildFullGit({
         validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
@@ -1684,11 +1826,6 @@ describe("validateConfig", () => {
           value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
         })),
       }),
-      buildTaskPrompt: vi.fn((task: TaskDefinition) =>
-        task.id === second.id
-          ? "the agent should pin the commit ABCDEF0 for this task"
-          : "unrelated fedcba9876543210fedcba9876543210fedcba98 and deadbeef",
-      ),
     });
 
     const config = expectSchemaAcceptance(buildConfig({ tasks: [first, second] }));
@@ -1706,8 +1843,16 @@ describe("validateConfig", () => {
 
   it("rejects a task whose prompt names its resolved base commit on the first, uncached lookup", async () => {
     const resolvedCommit = "abcdef0123456789abcdef0123456789abcdef01";
-    const first = buildTaskDefinition({ id: "task-one", base_commit: "main" });
-    const second = buildTaskDefinition({ id: "task-two", base_commit: "main" });
+    const first = buildTaskDefinition({
+      id: "task-one",
+      base_commit: "main",
+      prompt: "the agent should pin the commit ABCDEF0 for this task",
+    });
+    const second = buildTaskDefinition({
+      id: "task-two",
+      base_commit: "main",
+      prompt: "unrelated fedcba9876543210fedcba9876543210fedcba98 and deadbeef",
+    });
     const dependencies = buildValidationDependencies({
       git: buildFullGit({
         validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
@@ -1715,11 +1860,6 @@ describe("validateConfig", () => {
           value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
         })),
       }),
-      buildTaskPrompt: vi.fn((task: TaskDefinition) =>
-        task.id === first.id
-          ? "the agent should pin the commit ABCDEF0 for this task"
-          : "unrelated fedcba9876543210fedcba9876543210fedcba98 and deadbeef",
-      ),
     });
 
     const config = expectSchemaAcceptance(buildConfig({ tasks: [first, second] }));

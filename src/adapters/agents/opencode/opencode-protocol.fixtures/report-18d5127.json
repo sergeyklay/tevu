@@ -1,0 +1,830 @@
+{
+  "assessments": [
+    {
+      "caseId": "task-1--alpha",
+      "current": [
+        {
+          "assessedAt": "2026-09-23T01:00:00.000Z",
+          "assessor": "curator",
+          "checkId": "dod-manual-review",
+          "note": "confirmed by reviewer",
+          "verdict": "passed"
+        }
+      ],
+      "history": [
+        {
+          "assessedAt": "2026-09-23T00:30:00.000Z",
+          "assessor": "curator",
+          "checkId": "dod-manual-review",
+          "note": "needs rework",
+          "replacedAt": "2026-09-23T01:00:00.000Z",
+          "verdict": "failed"
+        }
+      ],
+      "revision": 2,
+      "runId": "20260923t000000z-synthetic",
+      "schemaVersion": 1
+    }
+  ],
+  "capabilities": {
+    "commands": {
+      "export": "available",
+      "run": "available"
+    },
+    "detectedVersion": "9.9.9-synthetic",
+    "executable": "/synthetic/opencode",
+    "isolation": {
+      "denyOutsideWorktree": "unavailable"
+    },
+    "runOptions": {
+      "jsonFormat": "available",
+      "model": "available",
+      "variant": "available"
+    }
+  },
+  "cases": [
+    {
+      "artifacts": {
+        "assessment": "cases/task-1--alpha/assessment.json",
+        "checks": "cases/task-1--alpha/checks.json",
+        "diagnostics": "cases/task-1--alpha/stderr.log",
+        "events": "cases/task-1--alpha/events.jsonl",
+        "result": "cases/task-1--alpha/result.json",
+        "sessionExport": "cases/task-1--alpha/session.json",
+        "solutionPatch": "cases/task-1--alpha/solution.patch"
+      },
+      "checks": [
+        {
+          "category": "acceptance",
+          "checkId": "acc-acceptance-command",
+          "durationMs": 12,
+          "evidence": "exit code 0",
+          "verdict": "passed"
+        },
+        {
+          "category": "definition-of-done",
+          "checkId": "dod-manual-review",
+          "durationMs": null,
+          "evidence": "manually assessed by curator at 2026-09-23T01:00:00.000Z: confirmed by reviewer",
+          "verdict": "passed"
+        },
+        {
+          "category": "definition-of-done",
+          "checkId": "man-optional-polish",
+          "durationMs": null,
+          "evidence": "awaiting manual assessment",
+          "verdict": "pending"
+        }
+      ],
+      "failure": null,
+      "identity": {
+        "caseId": "task-1--alpha",
+        "effort": "effort-high",
+        "model": "vendor/model-alpha-synth",
+        "modelId": "alpha",
+        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
+        "taskId": "task-1"
+      },
+      "lifecycle": "completed",
+      "metrics": {
+        "apiCalls": {
+          "availability": {
+            "source": "root-session export",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": 2
+        },
+        "apiErrors": {
+          "availability": {
+            "source": "root-session export",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": 1
+        },
+        "cacheReadTokens": {
+          "availability": {
+            "source": "root-session export",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": 30
+        },
+        "cacheWriteTokens": {
+          "availability": {
+            "source": "root-session export",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": 10
+        },
+        "cost": {
+          "availability": {
+            "source": "root-session export",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "USD",
+          "value": 0.0125
+        },
+        "elapsed": {
+          "availability": {
+            "source": "process",
+            "status": "available"
+          },
+          "scope": "case",
+          "unit": "millisecond",
+          "value": 1500
+        },
+        "inputTokens": {
+          "availability": {
+            "source": "root-session export",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": 130
+        },
+        "outputTokens": {
+          "availability": {
+            "source": "root-session export",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": 45
+        },
+        "reasoningTokens": {
+          "availability": {
+            "source": "root-session export",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": 16
+        },
+        "skillCalls": {
+          "availability": {
+            "source": "root-session export",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": 1
+        },
+        "toolCalls": {
+          "availability": {
+            "source": "root-session export",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": 2
+        },
+        "turns": {
+          "availability": {
+            "source": "root-session export",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": 1
+        }
+      },
+      "outcome": "passed",
+      "process": {
+        "durationMs": 1500,
+        "endedAt": "2026-09-23T00:00:01.500Z",
+        "exitCode": 0,
+        "signal": null,
+        "startedAt": "2026-09-23T00:00:00.000Z",
+        "terminationStage": "none"
+      },
+      "schemaVersion": 1
+    },
+    {
+      "artifacts": {
+        "assessment": null,
+        "checks": "cases/task-1--beta/checks.json",
+        "diagnostics": "cases/task-1--beta/stderr.log",
+        "events": "cases/task-1--beta/events.jsonl",
+        "result": "cases/task-1--beta/result.json",
+        "sessionExport": null,
+        "solutionPatch": null
+      },
+      "checks": [
+        {
+          "category": "acceptance",
+          "checkId": "acc-acceptance-command",
+          "durationMs": 12,
+          "evidence": "exit code 1 (not a declared success exit code)",
+          "verdict": "failed"
+        }
+      ],
+      "failure": {
+        "error": {
+          "caseId": "task-1--beta",
+          "exitCode": 1,
+          "kind": "OpenCodeProcessError",
+          "signal": null
+        },
+        "occurredAt": "2026-09-23T00:00:00.950Z"
+      },
+      "identity": {
+        "caseId": "task-1--beta",
+        "effort": "effort-low",
+        "model": "vendor/model-alpha-synth",
+        "modelId": "beta",
+        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
+        "taskId": "task-1"
+      },
+      "lifecycle": "completed",
+      "metrics": {
+        "apiCalls": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": null
+        },
+        "apiErrors": {
+          "availability": {
+            "source": "run events",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": 1
+        },
+        "cacheReadTokens": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": null
+        },
+        "cacheWriteTokens": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": null
+        },
+        "cost": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "USD",
+          "value": null
+        },
+        "elapsed": {
+          "availability": {
+            "source": "process",
+            "status": "available"
+          },
+          "scope": "case",
+          "unit": "millisecond",
+          "value": 900
+        },
+        "inputTokens": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": null
+        },
+        "outputTokens": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": null
+        },
+        "reasoningTokens": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": null
+        },
+        "skillCalls": {
+          "availability": {
+            "source": "run events",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": 0
+        },
+        "toolCalls": {
+          "availability": {
+            "source": "run events",
+            "status": "available"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": 1
+        },
+        "turns": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": null
+        }
+      },
+      "outcome": "failed",
+      "process": {
+        "durationMs": 900,
+        "endedAt": "2026-09-23T00:00:00.900Z",
+        "exitCode": 1,
+        "signal": null,
+        "startedAt": "2026-09-23T00:00:00.000Z",
+        "terminationStage": "none"
+      },
+      "schemaVersion": 1
+    },
+    {
+      "artifacts": {
+        "assessment": null,
+        "checks": null,
+        "diagnostics": null,
+        "events": null,
+        "result": "cases/task-2--alpha/result.json",
+        "sessionExport": null,
+        "solutionPatch": null
+      },
+      "checks": [],
+      "failure": {
+        "error": {
+          "caseId": "task-2--alpha",
+          "kind": "CaseTimeoutError",
+          "timeoutMs": 60000
+        },
+        "occurredAt": "2026-09-23T00:00:42.100Z"
+      },
+      "identity": {
+        "caseId": "task-2--alpha",
+        "effort": "effort-high",
+        "model": "vendor/model-gamma-synth",
+        "modelId": "gamma",
+        "sourceCommit": "fedcba9876543210fedcba9876543210fedcba98",
+        "taskId": "task-2"
+      },
+      "lifecycle": "timed-out",
+      "metrics": {
+        "apiCalls": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export; root session could not be identified",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": null
+        },
+        "apiErrors": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export; root session could not be identified",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": null
+        },
+        "cacheReadTokens": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export; root session could not be identified",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": null
+        },
+        "cacheWriteTokens": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export; root session could not be identified",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": null
+        },
+        "cost": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export; root session could not be identified",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "USD",
+          "value": null
+        },
+        "elapsed": {
+          "availability": {
+            "source": "process",
+            "status": "available"
+          },
+          "scope": "case",
+          "unit": "millisecond",
+          "value": 42000
+        },
+        "inputTokens": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export; root session could not be identified",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": null
+        },
+        "outputTokens": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export; root session could not be identified",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": null
+        },
+        "reasoningTokens": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export; root session could not be identified",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "token",
+          "value": null
+        },
+        "skillCalls": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export; root session could not be identified",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": null
+        },
+        "toolCalls": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export; root session could not be identified",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": null
+        },
+        "turns": {
+          "availability": {
+            "reason": "the preserved case artifacts contain no session export; root session could not be identified",
+            "status": "unavailable"
+          },
+          "scope": "root-session",
+          "unit": "count",
+          "value": null
+        }
+      },
+      "outcome": "not-evaluated",
+      "process": {
+        "durationMs": 42000,
+        "endedAt": "2026-09-23T00:00:42.000Z",
+        "exitCode": null,
+        "signal": "SIGKILL",
+        "startedAt": "2026-09-23T00:00:00.000Z",
+        "terminationStage": "forced"
+      },
+      "schemaVersion": 1
+    }
+  ],
+  "exitCode": 2,
+  "findings": [
+    {
+      "caseId": null,
+      "message": "cleanup warning: retained synthetic path",
+      "severity": "warning"
+    }
+  ],
+  "manifest": {
+    "cases": [
+      {
+        "caseId": "task-1--alpha",
+        "effort": "effort-high",
+        "model": "vendor/model-alpha-synth",
+        "modelId": "alpha",
+        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
+        "taskId": "task-1"
+      },
+      {
+        "caseId": "task-1--beta",
+        "effort": "effort-low",
+        "model": "vendor/model-alpha-synth",
+        "modelId": "beta",
+        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
+        "taskId": "task-1"
+      },
+      {
+        "caseId": "task-2--alpha",
+        "effort": "effort-high",
+        "model": "vendor/model-alpha-synth",
+        "modelId": "alpha",
+        "sourceCommit": "fedcba9876543210fedcba9876543210fedcba98",
+        "taskId": "task-2"
+      }
+    ],
+    "completedAt": null,
+    "configDigest": "sha256-synthetic-digest",
+    "context": {
+      "capabilities": {
+        "commands": {
+          "export": "available",
+          "run": "available"
+        },
+        "detectedVersion": "9.9.9-synthetic",
+        "executable": "/synthetic/opencode",
+        "isolation": {
+          "denyOutsideWorktree": "unavailable"
+        },
+        "runOptions": {
+          "jsonFormat": "available",
+          "model": "available",
+          "variant": "available"
+        }
+      },
+      "config": {
+        "agents": {
+          "opencode": {
+            "command": "/synthetic/opencode",
+            "env": [],
+            "secrets": [
+              "TEVU_PROVIDER_KEY"
+            ]
+          }
+        },
+        "models": [
+          {
+            "agent": "opencode",
+            "effort": "effort-high",
+            "id": "alpha",
+            "model": "vendor/model-alpha-synth"
+          },
+          {
+            "agent": "opencode",
+            "effort": "effort-low",
+            "id": "beta",
+            "model": "vendor/model-alpha-synth"
+          },
+          {
+            "agent": "opencode",
+            "effort": "effort-high",
+            "id": "gamma",
+            "model": "vendor/model-gamma-synth"
+          }
+        ],
+        "repositories": [
+          {
+            "id": "repo-1",
+            "path": "/tevu-synthetic/repo-1"
+          }
+        ],
+        "run": {
+          "concurrency": 2,
+          "output_dir": "/tevu-synthetic/artifacts",
+          "stop_grace": "1s",
+          "timeout": "60s"
+        },
+        "tasks": [
+          {
+            "base_commit": "0123456789abcdef0123456789abcdef01234567",
+            "checks": {
+              "acceptance": [
+                {
+                  "description": "acceptance command exits zero",
+                  "env": [
+                    "TEVU_EVAL_ORDINARY"
+                  ],
+                  "exit_codes": [
+                    0
+                  ],
+                  "id": "acc-acceptance-command",
+                  "required": true,
+                  "run": [
+                    "/synthetic/acceptance-probe",
+                    "--suite",
+                    "synthetic"
+                  ],
+                  "timeout": "5s"
+                }
+              ],
+              "done": [
+                {
+                  "description": "manual Definition of Done review",
+                  "id": "dod-manual-review",
+                  "manual": true,
+                  "required": true
+                },
+                {
+                  "description": "optional manual polish review",
+                  "id": "man-optional-polish",
+                  "manual": true,
+                  "required": false
+                }
+              ]
+            },
+            "description": "synthetic task description for the welcome route",
+            "id": "task-1",
+            "prompt": "TEVU-PROMPT-BODY implement the welcome route",
+            "readiness": [
+              "synthetic ready item"
+            ],
+            "repo": "repo-1",
+            "title": "Synthetic welcome-route task"
+          },
+          {
+            "base_commit": "fedcba9876543210fedcba9876543210fedcba98",
+            "checks": {
+              "acceptance": [
+                {
+                  "description": "acceptance command exits zero",
+                  "env": [
+                    "TEVU_EVAL_ORDINARY"
+                  ],
+                  "exit_codes": [
+                    0
+                  ],
+                  "id": "acc-acceptance-command",
+                  "required": true,
+                  "run": [
+                    "/synthetic/acceptance-probe",
+                    "--suite",
+                    "synthetic"
+                  ],
+                  "timeout": "5s"
+                }
+              ],
+              "done": [
+                {
+                  "description": "manual Definition of Done review",
+                  "id": "dod-manual-review",
+                  "manual": true,
+                  "required": true
+                },
+                {
+                  "description": "optional manual polish review",
+                  "id": "man-optional-polish",
+                  "manual": true,
+                  "required": false
+                }
+              ]
+            },
+            "description": "synthetic task description for the welcome route",
+            "id": "task-2",
+            "prompt": "TEVU-PROMPT-BODY implement the welcome route",
+            "readiness": [
+              "synthetic ready item"
+            ],
+            "repo": "repo-1",
+            "source": {
+              "body": "TEVU-JIRA-DESCRIPTION full imported body",
+              "imported_at": "2026-09-22T12:00:00.000Z",
+              "key": "TEVU-999",
+              "kind": "jira",
+              "title": "TEVU-JIRA-SUMMARY imported issue title",
+              "url": "https://jira.example.com/browse/TEVU-999"
+            },
+            "title": "Synthetic welcome-route task"
+          }
+        ],
+        "version": 1
+      }
+    },
+    "execution": {
+      "caseTimeoutMs": 60000,
+      "concurrency": 2
+    },
+    "host": {
+      "bunVersion": "1.4.2",
+      "nodeVersion": "v24.21.0",
+      "platform": "linux"
+    },
+    "runId": "20260923t000000z-synthetic",
+    "schemaVersion": 1,
+    "startedAt": "2026-09-23T00:00:00.000Z",
+    "tools": {
+      "gitVersion": "git version 2.45.0",
+      "opencodeVersion": "9.9.9-synthetic"
+    }
+  },
+  "models": [
+    {
+      "effort": "effort-high",
+      "id": "alpha",
+      "model": "vendor/model-alpha-synth"
+    },
+    {
+      "effort": "effort-low",
+      "id": "beta",
+      "model": "vendor/model-alpha-synth"
+    },
+    {
+      "effort": "effort-high",
+      "id": "gamma",
+      "model": "vendor/model-gamma-synth"
+    }
+  ],
+  "repositories": [
+    {
+      "id": "repo-1",
+      "path": "/tevu-synthetic/repo-1"
+    }
+  ],
+  "schemaVersion": 1,
+  "tasks": [
+    {
+      "checks": [
+        {
+          "category": "acceptance",
+          "description": "acceptance command exits zero",
+          "evaluator": "command",
+          "id": "acc-acceptance-command",
+          "required": true
+        },
+        {
+          "category": "definition-of-done",
+          "description": "manual Definition of Done review",
+          "evaluator": "manual",
+          "id": "dod-manual-review",
+          "required": true
+        },
+        {
+          "category": "definition-of-done",
+          "description": "optional manual polish review",
+          "evaluator": "manual",
+          "id": "man-optional-polish",
+          "required": false
+        }
+      ],
+      "description": "synthetic task description for the welcome route",
+      "id": "task-1",
+      "repositoryId": "repo-1",
+      "source": {
+        "kind": "manual",
+        "reference": null,
+        "title": "Synthetic welcome-route task"
+      },
+      "startCommit": "0123456789abcdef0123456789abcdef01234567"
+    },
+    {
+      "checks": [
+        {
+          "category": "acceptance",
+          "description": "acceptance command exits zero",
+          "evaluator": "command",
+          "id": "acc-acceptance-command",
+          "required": true
+        },
+        {
+          "category": "definition-of-done",
+          "description": "manual Definition of Done review",
+          "evaluator": "manual",
+          "id": "dod-manual-review",
+          "required": true
+        },
+        {
+          "category": "definition-of-done",
+          "description": "optional manual polish review",
+          "evaluator": "manual",
+          "id": "man-optional-polish",
+          "required": false
+        }
+      ],
+      "description": "synthetic task description for the welcome route",
+      "id": "task-2",
+      "repositoryId": "repo-1",
+      "source": {
+        "issueKey": "TEVU-999",
+        "issueUrl": "https://jira.example.com/browse/TEVU-999",
+        "kind": "jira-cloud"
+      },
+      "startCommit": "fedcba9876543210fedcba9876543210fedcba98"
+    }
+  ]
+}

@@ -18,18 +18,17 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { readConfigText } from "../config/load.ts";
-import { decodeEvent, decodeExport } from "./opencode-protocol.ts";
 import { redactDecodedValue } from "./process.ts";
 
 import type {
+  AgentEventRecord,
+  AgentSessionExport,
   ArtifactStore,
   AssessmentArtifact,
   AssessmentLock,
   CaseResult,
   CheckResult,
   ConfigStore,
-  OpenCodeExport,
-  OpenCodeRunEvent,
   PatchArtifact,
   ReportResult,
   RunManifest,
@@ -292,21 +291,21 @@ class FileArtifactStore implements ArtifactStore {
 
   async appendEvent(
     caseId: string,
-    event: OpenCodeRunEvent,
-  ): Promise<TevuResult<void, "ArtifactError" | "OpenCodeProtocolError">> {
+    event: AgentEventRecord,
+  ): Promise<TevuResult<void, "ArtifactError">> {
     const operation = "append-event";
     const active = this.requireActiveCase(operation, caseId);
     if (!active.ok) {
       return active;
     }
-    // Serializing the raw event first keeps unserializable events a protocol
-    // failure; redaction then works on decoded values so an escape-serialized
-    // secret cannot survive and numeric fields stay numbers.
+    // Serializing the raw event first keeps an unserializable event an
+    // artifact failure; redaction then works on decoded values so an
+    // escape-serialized secret cannot survive and numeric fields stay numbers.
     try {
       JSON.stringify(event);
     } catch (cause) {
-      return caseProtocolFailure(
-        caseId,
+      return artifactFailure(
+        operation,
         `event cannot be serialized as one JSON value: ${describeCause(cause)}`,
       );
     }
@@ -350,7 +349,7 @@ class FileArtifactStore implements ArtifactStore {
 
   async writeSessionExport(
     caseId: string,
-    sessionExport: OpenCodeExport,
+    sessionExport: AgentSessionExport,
   ): Promise<TevuResult<void, "ArtifactError">> {
     const operation = "write-session-export";
     const active = this.requireActiveCase(operation, caseId);
@@ -616,6 +615,7 @@ class FileArtifactStore implements ArtifactStore {
       value["schemaVersion"] !== 1 ||
       !isRecord(value["identity"]) ||
       value["identity"]["caseId"] !== caseId ||
+      !isNonEmptyString(value["identity"]["agent"]) ||
       !isRecord(value["artifacts"])
     ) {
       return artifactFailure(
@@ -629,7 +629,7 @@ class FileArtifactStore implements ArtifactStore {
   async readEvents(
     runId: string,
     caseId: string,
-  ): Promise<TevuResult<OpenCodeRunEvent[], "ArtifactError" | "OpenCodeProtocolError">> {
+  ): Promise<TevuResult<AgentEventRecord[], "ArtifactError">> {
     const operation = "read-events";
     const caseDirectory = this.resolveCaseDirectory(operation, runId, caseId);
     if (!caseDirectory.ok) {
@@ -645,7 +645,7 @@ class FileArtifactStore implements ArtifactStore {
       }
       return artifactFailure(operation, `cannot read events artifact: ${describeCause(cause)}`);
     }
-    const events: OpenCodeRunEvent[] = [];
+    const events: AgentEventRecord[] = [];
     const lines = text.split("\n");
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
@@ -656,15 +656,9 @@ class FileArtifactStore implements ArtifactStore {
       try {
         value = JSON.parse(line);
       } catch {
-        return caseProtocolFailure(caseId, "stored event line is not one valid JSON value", index + 1);
+        return artifactFailure(operation, `stored event line ${index + 1} is not one valid JSON value`);
       }
-      const decoded = decodeEvent(value, { phase: "case", caseId }, index + 1);
-      if (!decoded.ok) {
-        return decoded;
-      }
-      if (decoded.value !== null) {
-        events.push(decoded.value);
-      }
+      events.push(value);
     }
     return { ok: true, value: events };
   }
@@ -672,7 +666,7 @@ class FileArtifactStore implements ArtifactStore {
   async readSessionExport(
     runId: string,
     caseId: string,
-  ): Promise<TevuResult<OpenCodeExport | null, "ArtifactError" | "OpenCodeProtocolError">> {
+  ): Promise<TevuResult<AgentSessionExport | null, "ArtifactError">> {
     const operation = "read-session-export";
     const caseDirectory = this.resolveCaseDirectory(operation, runId, caseId);
     if (!caseDirectory.ok) {
@@ -707,9 +701,12 @@ class FileArtifactStore implements ArtifactStore {
     try {
       value = JSON.parse(text);
     } catch {
-      return caseProtocolFailure(caseId, "stored session export is not valid JSON");
+      return artifactFailure(operation, "stored session export is not valid JSON");
     }
-    return decodeExport(value, { phase: "case", caseId });
+    if (!isRecord(value)) {
+      return artifactFailure(operation, "stored session export is not a JSON object");
+    }
+    return { ok: true, value };
   }
 
   async readChecks(
@@ -965,22 +962,6 @@ function artifactFailure(
   return { ok: false, error: { kind: "ArtifactError", operation, reason } };
 }
 
-function caseProtocolFailure(
-  caseId: string,
-  reason: string,
-  line?: number,
-): { ok: false; error: Extract<TevuError, { kind: "OpenCodeProtocolError" }> } {
-  return {
-    ok: false,
-    error: {
-      kind: "OpenCodeProtocolError",
-      context: { phase: "case", caseId },
-      ...(line === undefined ? {} : { line }),
-      reason,
-    },
-  };
-}
-
 function describeCause(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
@@ -1131,7 +1112,9 @@ function describeStoredManifestDefect(manifest: unknown, runId: string): string 
     !isRecord(manifest) ||
     manifest["schemaVersion"] !== 1 ||
     manifest["runId"] !== runId ||
-    !Array.isArray(manifest["cases"])
+    !Array.isArray(manifest["cases"]) ||
+    !isRecord(manifest["tools"]) ||
+    !isRecord(manifest["tools"]["agentVersions"])
   ) {
     return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
   }

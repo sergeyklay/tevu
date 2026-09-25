@@ -1,11 +1,11 @@
 import type {
+  AgentCapabilityReport,
   AssessmentArtifact,
   CaseResult,
   CheckRecord,
   CheckResult,
   MetricValue,
   ModelRecord,
-  OpenCodeCapabilityReport,
   ReportResult,
   RepositoryRecord,
   RunFinding,
@@ -22,7 +22,7 @@ import type {
  */
 export type ReportInput = {
   run: RunResult;
-  capabilities: OpenCodeCapabilityReport | null;
+  capabilities: Readonly<Record<string, AgentCapabilityReport>>;
   tasks: readonly TaskRecord[];
   models: readonly ModelRecord[];
   repositories: readonly RepositoryRecord[];
@@ -35,7 +35,7 @@ export type NormalizedRunModel = {
   manifest: RunManifest;
   exitCode: RunResult["exitCode"];
   findings: RunFinding[];
-  capabilities: OpenCodeCapabilityReport | null;
+  capabilities: Readonly<Record<string, AgentCapabilityReport>>;
   repositories: RepositoryRecord[];
   models: ModelRecord[];
   tasks: TaskRecord[];
@@ -90,7 +90,7 @@ export function renderSensitiveDataNotice(): string {
     "> host filesystem access controls.",
     ">",
     "> **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,",
-    "> later Git history, host OpenCode state, and benchmark artifacts from normal discovery.",
+    "> later Git history, host agent state, and benchmark artifacts from normal discovery.",
     "> It does not claim that a model with shell access cannot probe arbitrary host paths.",
   ].join("\n");
 }
@@ -113,6 +113,7 @@ export function buildReport(input: ReportInput): ReportResult {
 export function renderMarkdownReport(model: NormalizedRunModel): string {
   const lines: string[] = [];
   const manifest = model.manifest;
+  const tools = manifest.tools;
 
   lines.push(`# tevu run ${manifest.runId}`, "", renderSensitiveDataNotice(), "");
 
@@ -122,9 +123,8 @@ export function renderMarkdownReport(model: NormalizedRunModel): string {
     `- Configuration digest: \`${manifest.configDigest}\``,
     `- Started: ${manifest.startedAt}`,
     `- Completed: ${manifest.completedAt ?? "not completed"}`,
-    `- Host: ${manifest.host.platform}, Node.js ${manifest.host.nodeVersion}, Bun ${manifest.host.bunVersion}, Git ${manifest.tools.gitVersion}`,
-    `- OpenCode version (detected provenance only): ${manifest.tools.opencodeVersion ?? "not detected"}`,
-    `- Isolation control (deny outside worktree): ${model.capabilities?.isolation.denyOutsideWorktree ?? "not probed"}`,
+    `- Host: ${manifest.host.platform}, Node.js ${manifest.host.nodeVersion}, Bun ${manifest.host.bunVersion}, Git ${tools.gitVersion}`,
+    ...renderAgentCapabilityLines(tools.agentVersions, model.capabilities),
     `- Concurrency: ${manifest.execution.concurrency}`,
     `- Case timeout: ${manifest.execution.caseTimeoutMs}ms`,
     `- Run exit code: ${model.exitCode}`,
@@ -191,6 +191,21 @@ export function renderMarkdownReport(model: NormalizedRunModel): string {
   );
 
   return lines.join("\n");
+}
+
+/** Renders one version and isolation line per agent in use, in `compareStrings` order. */
+function renderAgentCapabilityLines(
+  agentVersions: Readonly<Record<string, string | null>>,
+  capabilities: NormalizedRunModel["capabilities"],
+): string[] {
+  const lines: string[] = [];
+  for (const name of Object.keys(agentVersions).sort(compareStrings)) {
+    lines.push(`- Agent "${name}" version (detected provenance only): ${agentVersions[name] ?? "not detected"}`);
+    lines.push(
+      `- Agent "${name}" isolation control (deny outside worktree): ${capabilities[name]?.isolation.denyOutsideWorktree ?? "not probed"}`,
+    );
+  }
+  return lines;
 }
 
 function renderCase(
