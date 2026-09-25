@@ -1,13 +1,13 @@
 # Default owners for everything
-* @sergeyklay
+* @sergeyklay @serghei-dev
 
 # npm dependency files - cicdbot can approve Dependabot PRs
 /package.json @cicdbot
 /bun.lock @cicdbot
 
 # GitHub Actions workflows - bot + human
-/.github/workflows/ @cicdbot @sergeyklay
+/.github/workflows/ @cicdbot @sergeyklay @serghei-dev
 
 # CI/CD config - humans only
-/.github/dependabot.yml @sergeyklay
-/.github/CODEOWNERS @sergeyklay
+/.github/dependabot.yml @sergeyklay @serghei-dev
+/.github/CODEOWNERS @sergeyklay @serghei-dev
