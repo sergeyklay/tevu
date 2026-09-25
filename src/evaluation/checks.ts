@@ -10,11 +10,9 @@ import type {
   IsolatedEnvironment,
   ParentEnvironmentSnapshot,
   RedactedCapture,
+  Redactor,
   TevuResult,
 } from "../domain/types.ts";
-
-/** Redaction boundary applied to evidence before it leaves this module. */
-export type Redactor = (text: string) => string;
 
 /** One configured check paired with the collection it came from. */
 export type OrderedCheck = {
