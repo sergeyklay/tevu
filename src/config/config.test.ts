@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTask } from "../application/create-task.ts";
 import { validateConfig } from "../application/validate.ts";
 import { createConfigStore } from "../adapters/artifact-store.ts";
+import { createGitWorkspaceAdapter } from "../adapters/git.ts";
 import { renderConfigDocument } from "./document.ts";
 import { canonicalConfigSerialization, loadConfig } from "./load.ts";
 import { AGENT_NAMES, agentNamesInUse, agentSettingsSchema, TevuConfigSchema } from "./schema.ts";
@@ -196,6 +197,14 @@ function buildFullGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspac
       ok: false as const,
       error: { kind: "ArtifactError" as const, operation: "capture-patch", reason: "not used in these tests" },
     })),
+    readOverlay: vi.fn(async () => ({
+      ok: false as const,
+      error: { kind: "CheckStateError" as const, step: "overlay" as const, reason: "not used in these tests" },
+    })),
+    applyCheckState: vi.fn(async () => ({
+      ok: false as const,
+      error: { kind: "CheckStateError" as const, step: "restore" as const, reason: "not used in these tests" },
+    })),
     dispose: vi.fn(async () => ({ ok: true as const, value: undefined })),
     ...overrides,
   };
@@ -302,6 +311,8 @@ function configYaml(options: {
   outputDirectory: string;
   repositoryPath: string;
   command: string;
+  /** Extra `checks.*` lines, indented to six spaces, inserted before `acceptance:`. */
+  checksExtra?: string;
 }): string {
   return `version: 1
 run:
@@ -334,7 +345,7 @@ tasks:
     readiness:
       - The spec is approved
     checks:
-      acceptance:
+${options.checksExtra ?? ""}      acceptance:
         - id: api-returns-200
           description: The API returns 200
           manual: true
@@ -1873,5 +1884,194 @@ describe("validateConfig", () => {
         message: "agent prompt contains resolved base commit abcdef0",
       },
     ]);
+  });
+});
+
+describe("check-state configuration rules (P13, AC-3)", () => {
+  let tempDirectory: string;
+
+  beforeEach(async () => {
+    tempDirectory = await fs.mkdtemp(join(tmpdir(), "tevu-config-check-state-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDirectory, { recursive: true, force: true });
+  });
+
+  async function writeConfigFile(content: string): Promise<string> {
+    const filePath = join(tempDirectory, "tevu.yaml");
+    await fs.writeFile(filePath, content, "utf8");
+    return filePath;
+  }
+
+  it("rejects an empty restore pattern from loadConfig (R1)", async () => {
+    const configPath = await writeConfigFile(
+      configYaml({
+        outputDirectory: "./runs",
+        repositoryPath: "./repo",
+        command: "opencode",
+        checksExtra: '      restore: [""]\n',
+      }),
+    );
+
+    const error = expectFailure(await loadConfig(configPath), "ConfigValidationError");
+
+    expect(error.findings).toContainEqual({
+      severity: "error",
+      identifier: "tasks.0.checks.restore.0",
+      message: "restore pattern must not be empty",
+    });
+  });
+
+  it("rejects a restore pattern with a leading / or a .. segment from loadConfig (R2)", async () => {
+    const configPath = await writeConfigFile(
+      configYaml({
+        outputDirectory: "./runs",
+        repositoryPath: "./repo",
+        command: "opencode",
+        checksExtra: '      restore: ["/etc/passwd"]\n',
+      }),
+    );
+
+    const error = expectFailure(await loadConfig(configPath), "ConfigValidationError");
+
+    expect(error.findings).toContainEqual({
+      severity: "error",
+      identifier: "tasks.0.checks.restore.0",
+      message: "restore pattern must be relative to the repository root, without a leading / or a .. segment",
+    });
+  });
+
+  it("rejects an empty overlay string with Zod's own minimum-length message from loadConfig (O1)", async () => {
+    const configPath = await writeConfigFile(
+      configYaml({
+        outputDirectory: "./runs",
+        repositoryPath: "./repo",
+        command: "opencode",
+        checksExtra: '      overlay: ""\n',
+      }),
+    );
+
+    const error = expectFailure(await loadConfig(configPath), "ConfigValidationError");
+
+    expect(error.findings).toContainEqual({
+      severity: "error",
+      identifier: "tasks.0.checks.overlay",
+      message: "Too small: expected string to have >=1 characters",
+    });
+  });
+
+  it("rejects an overlay directory inside a configured repository after real-path resolution from loadConfig (V2)", async () => {
+    await fs.mkdir(join(tempDirectory, "repo", "hidden-checks"), { recursive: true });
+    const configPath = await writeConfigFile(
+      configYaml({
+        outputDirectory: "./runs",
+        repositoryPath: "./repo",
+        command: "opencode",
+        checksExtra: "      overlay: ./repo/hidden-checks\n",
+      }),
+    );
+
+    const error = expectFailure(await loadConfig(configPath), "ConfigValidationError");
+
+    expect(error.findings).toEqual([
+      {
+        severity: "error",
+        identifier: "tasks.write-report.checks.overlay",
+        message: 'overlay must be outside repository "sample-repo" after real-path resolution',
+      },
+    ]);
+  });
+
+  it("rejects an overlay directory that overlaps run.output_dir after real-path resolution from loadConfig (V5)", async () => {
+    await fs.mkdir(join(tempDirectory, "repo"), { recursive: true });
+    await fs.mkdir(join(tempDirectory, "runs", "hidden-checks"), { recursive: true });
+    const configPath = await writeConfigFile(
+      configYaml({
+        outputDirectory: "./runs",
+        repositoryPath: "./repo",
+        command: "opencode",
+        checksExtra: "      overlay: ./runs/hidden-checks\n",
+      }),
+    );
+
+    const error = expectFailure(await loadConfig(configPath), "ConfigValidationError");
+
+    expect(error.findings).toEqual([
+      {
+        severity: "error",
+        identifier: "tasks.write-report.checks.overlay",
+        message: "overlay must not overlap run.output_dir after real-path resolution",
+      },
+    ]);
+  });
+
+  it("rejects a missing overlay directory through validateConfig with the real Git adapter (V1)", async () => {
+    const overlayDirectory = join(tempDirectory, "missing-overlay");
+    const config = expectSchemaAcceptance(
+      buildConfig({
+        tasks: [
+          buildTaskDefinition({ checks: { ...buildTaskDefinition().checks, overlay: overlayDirectory } }),
+        ],
+      }),
+    );
+    const git = createGitWorkspaceAdapter({ config, workspacesDirectory: join(tempDirectory, "workspaces") });
+    const dependencies = buildValidationDependencies({ git });
+
+    const report = expectOk(await validateConfig(config, dependencies));
+
+    expect(report.valid).toBe(false);
+    expect(report.findings).toContainEqual({
+      severity: "error",
+      identifier: "tasks.write-report.checks.overlay",
+      message: `overlay directory "${overlayDirectory}" does not exist`,
+    });
+  });
+
+  it("rejects an overlay directory holding a symbolic link through validateConfig with the real Git adapter (V3)", async () => {
+    const overlayDirectory = join(tempDirectory, "overlay-with-link");
+    await fs.mkdir(overlayDirectory, { recursive: true });
+    await fs.symlink(tempDirectory, join(overlayDirectory, "escape-link"));
+    const config = expectSchemaAcceptance(
+      buildConfig({
+        tasks: [
+          buildTaskDefinition({ checks: { ...buildTaskDefinition().checks, overlay: overlayDirectory } }),
+        ],
+      }),
+    );
+    const git = createGitWorkspaceAdapter({ config, workspacesDirectory: join(tempDirectory, "workspaces") });
+    const dependencies = buildValidationDependencies({ git });
+
+    const report = expectOk(await validateConfig(config, dependencies));
+
+    expect(report.valid).toBe(false);
+    expect(report.findings).toContainEqual({
+      severity: "error",
+      identifier: "tasks.write-report.checks.overlay",
+      message: `overlay directory "${overlayDirectory}" must contain only regular files and directories; "escape-link" is a symbolic link`,
+    });
+  });
+
+  it("rejects an overlay directory containing an entry named .git through validateConfig (V4)", async () => {
+    const overlayDirectory = join(tempDirectory, "overlay-with-git");
+    await fs.mkdir(join(overlayDirectory, ".git"), { recursive: true });
+    const config = expectSchemaAcceptance(
+      buildConfig({
+        tasks: [
+          buildTaskDefinition({ checks: { ...buildTaskDefinition().checks, overlay: overlayDirectory } }),
+        ],
+      }),
+    );
+    const git = createGitWorkspaceAdapter({ config, workspacesDirectory: join(tempDirectory, "workspaces") });
+    const dependencies = buildValidationDependencies({ git });
+
+    const report = expectOk(await validateConfig(config, dependencies));
+
+    expect(report.valid).toBe(false);
+    expect(report.findings).toContainEqual({
+      severity: "error",
+      identifier: "tasks.write-report.checks.overlay",
+      message: `overlay directory "${overlayDirectory}" must not contain an entry named .git; found ".git"`,
+    });
   });
 });

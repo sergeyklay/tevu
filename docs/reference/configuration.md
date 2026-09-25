@@ -96,6 +96,8 @@ tasks:
       - The expected columns and escaping rules are defined.
 
     checks:
+      # restore: ["tests/**", vitest.config.ts]       # reset to base_commit before checks run
+      # overlay: ./hidden-checks/csv-export           # copied onto the repository root before checks run
       # Does the change solve the task? At least one check must be required.
       acceptance:
         - id: csv-content
@@ -163,6 +165,8 @@ The duration bound keeps a configured value inside what a Node.js timer can sche
 | `description` | Non-whitespace task description, sent to every model |
 | `source` | Absent for a task written by hand; otherwise a saved Jira or GitHub import snapshot |
 | `readiness` | At least one non-whitespace prerequisite you confirmed; never sent to the agent |
+| `checks.restore` | Optional list of git `:(glob)` pathspec patterns reset to `base_commit` before checks run; absent or `[]` restores nothing |
+| `checks.overlay` | Optional path to a hidden check-file directory copied onto the worktree root before checks run; resolves relative to the configuration file |
 | `checks.acceptance` | Checks for the solution; at least one must be required |
 | `checks.done` | Completion checks; at least one must be required |
 
@@ -203,7 +207,19 @@ run: [npm, test]
 # required: false       # checks are required unless stated otherwise
 ```
 
-Commands run sequentially in the case workspace. Arguments are passed directly, without a shell. A target task's test command is independent of tevu's own product-test runner. The solution patch is captured before checks run.
+Commands run sequentially in the case workspace. Arguments are passed directly, without a shell. A target task's test command is independent of tevu's own product-test runner. The solution patch is captured before checks run; restore and overlay then run, so command checks see the restored and overlaid worktree rather than the state the agent left.
+
+### Restore and overlay
+
+After the solution patch is captured, tevu resets every path `checks.restore` matches to `base_commit` and then copies `checks.overlay`'s files onto the worktree root, before the first check runs. Both keys are optional and independent; a task can declare either, both, or neither. tevu reads a configured overlay directory once per run, before the run starts, so every case that uses it writes the same snapshot; editing the directory during a run changes no case of that run, and takes effect only in the next run.
+
+`checks.restore` patterns are git pathspecs with `:(glob)` magic: `*`, `?`, and `[...]` do not match `/`; `**/` matches zero or more leading directories; `/**` matches everything inside a directory; a pattern without wildcard characters also matches everything beneath a directory of that name. `restore: []` and an absent `restore` both declare nothing to restore.
+
+Restore returns every matched path in the base tree to the state a checkout of `base_commit` produces, and removes every matched path that is untracked relative to the base tree, including files ignored through `.gitignore` or `info/exclude`. A pattern matching no path restores nothing, leaving the evidence of an agent that changed nothing. Because the untracked listing has no exclude option, a pattern such as `**/*.test.ts` also reaches test files ignored under `node_modules`, and a pattern starting with `**/` makes git traverse every directory; name the directories a pattern means rather than relying on a broad wildcard. A file inside an untracked nested repository (a directory holding `.git`) survives restore unless a pattern matches the repository directory itself (`tests/**` does, `**/conftest.py` does not); `solution.patch` shows such a repository as one `Subproject commit` line, while `checkState.restore.removed` lists every file of a deleted one, `.git` contents included. A check command's own configuration, such as the `package.json` scripts behind `npm test`, stays agent-editable unless a restore pattern names it. A test whose expected result the fix legitimately changes belongs in the overlay instead of `restore`, because restoring it brings back the base expectation, which every correct fix fails.
+
+`checks.overlay` names a directory of regular files and directories only: no symbolic link and no entry named `.git`. Its path must resolve outside every configured repository and must not overlap `run.output_dir`. Overlay files overwrite an existing worktree file, a symbolic link at the destination is replaced without ever being written through, and a blocking entry is removed and recorded.
+
+`tevu validate` and `tevu run` reject a missing, non-directory, or otherwise invalid overlay, a restore pattern that is empty or escapes the repository root (a leading `/` or a `..` segment), an overlay inside a configured repository, and an overlay overlapping `run.output_dir`. A restore or overlay step that fails at run time, for example against worktree state the agent left, ends the case as `infrastructure-failed` with failure kind `CheckStateError`; see the [results reference](results.md#check-state) for the recorded evidence and the [isolation explanation](../concepts/isolation.md#context-isolation-is-not-a-sandbox) for why hidden checks are not a sandbox boundary.
 
 ## Environment variables
 

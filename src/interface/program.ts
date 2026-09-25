@@ -106,6 +106,7 @@ export type ProgramOperations = {
       | "EvaluationError"
       | "ArtifactError"
       | "CancellationError"
+      | "CheckStateError"
     >
   >;
   rebuildRunReport(
@@ -665,6 +666,8 @@ function renderTevuError(error: TevuError, redact: (text: string) => string): st
       return [`error: redaction failed: ${error.reason}`];
     case "CancellationError":
       return ["Cancelled."];
+    case "CheckStateError":
+      return [`error: check-state ${error.step} failed: ${error.reason}`];
   }
 }
 

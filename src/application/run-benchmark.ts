@@ -30,6 +30,10 @@ import type {
   CaseResult,
   CaseWorkspace,
   CheckResult,
+  CheckStateRecord,
+  CheckStateRequest,
+  GitWorkspaceAdapter,
+  OverlaySnapshot,
   ParentEnvironmentSnapshot,
   RunDependencies,
   RunFinding,
@@ -58,7 +62,8 @@ type RunBenchmarkErrorKind =
   | "CaseTimeoutError"
   | "EvaluationError"
   | "ArtifactError"
-  | "CancellationError";
+  | "CancellationError"
+  | "CheckStateError";
 
 /**
  * Builds the deterministic task-by-contender execution plan purely from
@@ -124,11 +129,12 @@ export function reduceRunExitCode(
 
 /**
  * Orchestrates one bounded benchmark run over injected adapters: local
- * prerequisite validation and commit pinning before the first write, one
- * immutable parent-environment snapshot before scheduling, `p-limit` bounded
- * case slots that include acceptance evaluation, exactly one agent process
- * per planned case with no retry, the binding lifecycle and failure mappings,
- * artifact-failure scheduling stop, and bounded cancellation finalization.
+ * prerequisite validation, commit pinning, and overlay pinning before the
+ * first write, one immutable parent-environment snapshot before scheduling,
+ * `p-limit` bounded case slots that include acceptance evaluation, exactly
+ * one agent process per planned case with no retry, the binding lifecycle and
+ * failure mappings, artifact-failure scheduling stop, and bounded
+ * cancellation finalization.
  * After the run directory exists, failures are folded into case results and
  * run findings; only a pre-write failure or a final artifact failure returns
  * an error.
@@ -170,6 +176,10 @@ export async function runBenchmark(
   if (!planned.ok) {
     return planned;
   }
+  const pinned = await pinOverlays(planned.value, dependencies.git);
+  if (!pinned.ok) {
+    return pinned;
+  }
   if (dependencies.cancellation.aborted) {
     return cancellationFailure();
   }
@@ -188,7 +198,7 @@ export async function runBenchmark(
     },
     tools: { gitVersion: host.value.gitVersion, agentVersions },
     execution: { concurrency: plan.concurrency, caseTimeoutMs: plan.caseTimeoutMs },
-    cases: planned.value.map((entry) => entry.identity),
+    cases: pinned.value.map((entry) => entry.identity),
     context: { config: plan.config, capabilities },
   };
   const started = await dependencies.artifacts.startRun(manifest);
@@ -218,14 +228,14 @@ export async function runBenchmark(
     dependencies.cancellation.addEventListener("abort", onRunAbort, { once: true });
   }
 
-  for (const entry of planned.value) {
+  for (const entry of pinned.value) {
     emitLifecycle(run, entry.identity.caseId, "queued");
   }
   const limit = pLimit(plan.concurrency);
-  await Promise.all(planned.value.map((entry) => limit(() => executeCase(run, entry))));
+  await Promise.all(pinned.value.map((entry) => limit(() => executeCase(run, entry))));
   dependencies.cancellation.removeEventListener("abort", onRunAbort);
 
-  const cases = planned.value.flatMap((entry) => {
+  const cases = pinned.value.flatMap((entry) => {
     const result = run.results.get(entry.identity.caseId);
     return result === undefined ? [] : [result];
   });
@@ -247,10 +257,12 @@ export async function runBenchmark(
   return { ok: true, value: result };
 }
 
-/** One planned case with its pinned identity and resolved task definition. */
+/** One planned case with its pinned identity, resolved task definition, and pinned overlay snapshot. */
 type PlannedCase = {
   identity: CaseIdentity;
   task: TaskDefinition;
+  /** The run's snapshot of `task.checks.overlay`; `null` before `pinOverlays` runs or when the task declares none. */
+  overlay: OverlaySnapshot | null;
 };
 
 /** Mutable state shared by every scheduled case of one run. */
@@ -281,6 +293,8 @@ type ActiveCase = {
   patchWritten: boolean;
   checks: CheckResult[];
   checksWritten: boolean;
+  overlay: OverlaySnapshot | null;
+  checkState: CheckStateRecord | null;
 };
 
 function cancellationFailure(): {
@@ -332,7 +346,7 @@ async function resolvePlannedCases(
     if (reason !== undefined) {
       return sourceFailure(task.id, reason);
     }
-    planned.push({ identity: { ...identity, sourceCommit: commit }, task });
+    planned.push({ identity: { ...identity, sourceCommit: commit }, task, overlay: null });
   }
   return { ok: true, value: planned };
 }
@@ -342,6 +356,45 @@ function sourceFailure(
   reason: string,
 ): { ok: false; error: Extract<TevuError, { kind: "SourceMaterializationError" }> } {
   return { ok: false, error: { kind: "SourceMaterializationError", taskId, reason } };
+}
+
+/**
+ * Reads each distinct configured overlay directory once, in plan order, and
+ * sets every planned case's `overlay` to the run's pinned snapshot (`null`
+ * for a task that declares none), so a later edit to the directory reaches no
+ * case of this run.
+ */
+async function pinOverlays(
+  planned: PlannedCase[],
+  git: GitWorkspaceAdapter,
+): Promise<TevuResult<PlannedCase[], "CheckStateError">> {
+  const snapshots = new Map<string, OverlaySnapshot>();
+  for (const entry of planned) {
+    const directory = entry.task.checks.overlay;
+    if (directory === undefined) {
+      continue;
+    }
+    let snapshot = snapshots.get(directory);
+    if (snapshot === undefined) {
+      const read = await git.readOverlay(directory);
+      if (!read.ok) {
+        return read;
+      }
+      snapshot = read.value;
+      snapshots.set(directory, snapshot);
+    }
+    entry.overlay = snapshot;
+  }
+  return { ok: true, value: planned };
+}
+
+/** Builds the check-state setup request for one case, or `null` when neither key is declared. */
+function checkStateRequest(task: TaskDefinition, overlay: OverlaySnapshot | null): CheckStateRequest | null {
+  const restore = task.checks.restore ?? [];
+  if (restore.length === 0 && overlay === null) {
+    return null;
+  }
+  return { restore, overlay };
 }
 
 /** Runs one case inside its concurrency slot from queued skip checks to cleanup. */
@@ -400,6 +453,8 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
     patchWritten: false,
     checks: [],
     checksWritten: false,
+    overlay: entry.overlay,
+    checkState: null,
   };
   run.activeAborts.set(caseId, active.abort);
   if (run.state.cancelled) {
@@ -575,6 +630,15 @@ async function evaluateReadableCase(
     return finishCase(run, active, "cancelled", preservedFailure);
   }
 
+  const request = checkStateRequest(active.task, active.overlay);
+  if (request !== null) {
+    const applied = await run.dependencies.git.applyCheckState(active.workspace, request);
+    if (!applied.ok) {
+      return finishCase(run, active, "infrastructure-failed", applied.error);
+    }
+    active.checkState = applied.value;
+  }
+
   const ordered = orderTaskChecks(active.task);
   const evaluated = await evaluateChecks({
     caseId,
@@ -690,6 +754,7 @@ function finishCase(
       preserved === null
         ? null
         : { error: preserved, occurredAt: run.dependencies.clock.now().toISOString() },
+    ...(active.checkState === null ? {} : { checkState: active.checkState }),
     context: {
       sourceRepositoryPath: active.workspace.sourceRepositoryPath,
       syntheticCommit: active.workspace.syntheticCommit,

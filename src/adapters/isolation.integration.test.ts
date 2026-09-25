@@ -1,5 +1,7 @@
 // @vitest-environment node
 import { execa } from "execa";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -940,5 +942,393 @@ describe("process-group termination", () => {
     expect(outcome.timedOut).toBe(false);
     expect(outcome.terminationStage).toBe("none");
     await waitForDescendantsReaped(pidFile);
+  });
+});
+
+function sha256Hex(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Asserts a `CheckStateRecord` path list is sorted ascending and holds no duplicates. */
+function expectSortedAndDeduplicated(paths: readonly string[]): void {
+  expect(paths).toEqual([...paths].sort());
+  expect(new Set(paths).size).toBe(paths.length);
+}
+
+async function createCheckStateSourceRepository(): Promise<{ path: string; commit: string }> {
+  const path = join(testDirectory, "check-state-source");
+  await mkdir(join(path, "tests"), { recursive: true });
+  await mkdir(join(path, "src"), { recursive: true });
+  await writeFile(join(path, "tests/committed.txt"), "base-committed\n");
+  await writeFile(join(path, "tests/uncommitted.txt"), "base-uncommitted\n");
+  await writeFile(join(path, "tests/deleted.txt"), "base-deleted\n");
+  await writeFile(join(path, "tests/executable.sh"), "#!/bin/sh\necho base\n");
+  await chmod(join(path, "tests/executable.sh"), 0o755);
+  await writeFile(join(path, "tests/target-base.txt"), "base-target\n");
+  await symlink("target-base.txt", join(path, "tests/symlink.txt"));
+  await writeFile(join(path, "src/unmatched.txt"), "base-unmatched\n");
+  await runGit(path, ["init", "--quiet", "-b", "main"]);
+  await runGit(path, ["add", "-A"]);
+  await runGit(path, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "check-state base commit"]);
+  const commit = (await runGit(path, ["rev-parse", "HEAD"])).stdout.trim();
+  return { path, commit };
+}
+
+describe("check-state restore step (P1, P2, P3, P4, P7)", () => {
+  it("resets committed and uncommitted modifications, a deletion, an executable-bit change, and a symlink entry to the base tree, removes matched untracked and gitignored files, and leaves unmatched files and the case repository untouched", async () => {
+    const repository = await createCheckStateSourceRepository();
+    const adapter = createGitAdapter(repository.path, repository.commit);
+    const workspace = unwrapOk(
+      await adapter.createIsolatedCase(buildIdentity("task-1--c1", repository.commit)),
+    );
+
+    await writeFile(join(workspace.worktreeDirectory, "tests/committed.txt"), "committed-modification\n");
+    await runGit(workspace.worktreeDirectory, ["add", "tests/committed.txt"]);
+    await runGit(workspace.worktreeDirectory, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "agent commit"]);
+    await writeFile(join(workspace.worktreeDirectory, "tests/uncommitted.txt"), "uncommitted-modification\n");
+    await rm(join(workspace.worktreeDirectory, "tests/deleted.txt"));
+    await chmod(join(workspace.worktreeDirectory, "tests/executable.sh"), 0o644);
+    await rm(join(workspace.worktreeDirectory, "tests/symlink.txt"));
+    await symlink("other-target.txt", join(workspace.worktreeDirectory, "tests/symlink.txt"));
+    await writeFile(join(workspace.worktreeDirectory, ".gitignore"), "tests/ignored.txt\n");
+    await writeFile(join(workspace.worktreeDirectory, "tests/ignored.txt"), "agent added, gitignored\n");
+    await writeFile(join(workspace.worktreeDirectory, "src/unmatched.txt"), "unmatched-modification\n");
+
+    const indexBefore = await readFile(join(workspace.repositoryDirectory, "index"));
+    const headBefore = await runGit(workspace.worktreeDirectory, ["rev-parse", "HEAD"]);
+    const refsBefore = await runGit(workspace.worktreeDirectory, ["for-each-ref"]);
+
+    const applied = unwrapOk(
+      await adapter.applyCheckState(workspace, { restore: ["tests/**"], overlay: null }),
+    );
+
+    const indexAfter = await readFile(join(workspace.repositoryDirectory, "index"));
+    const headAfter = await runGit(workspace.worktreeDirectory, ["rev-parse", "HEAD"]);
+    const refsAfter = await runGit(workspace.worktreeDirectory, ["for-each-ref"]);
+
+    expect(await readFile(join(workspace.worktreeDirectory, "tests/committed.txt"), "utf8")).toBe(
+      "base-committed\n",
+    );
+    expect(await readFile(join(workspace.worktreeDirectory, "tests/uncommitted.txt"), "utf8")).toBe(
+      "base-uncommitted\n",
+    );
+    expect(await readFile(join(workspace.worktreeDirectory, "tests/deleted.txt"), "utf8")).toBe("base-deleted\n");
+    const executableStat = await stat(join(workspace.worktreeDirectory, "tests/executable.sh"));
+    expect(executableStat.mode & 0o100).not.toBe(0);
+    expect(await readFile(join(workspace.worktreeDirectory, "tests/executable.sh"), "utf8")).toBe(
+      "#!/bin/sh\necho base\n",
+    );
+    const symlinkStat = await lstat(join(workspace.worktreeDirectory, "tests/symlink.txt"));
+    expect(symlinkStat.isSymbolicLink()).toBe(true);
+    await expect(readlink(join(workspace.worktreeDirectory, "tests/symlink.txt"))).resolves.toBe(
+      "target-base.txt",
+    );
+    expect(existsSync(join(workspace.worktreeDirectory, "tests/ignored.txt"))).toBe(false);
+    expect(await readFile(join(workspace.worktreeDirectory, "src/unmatched.txt"), "utf8")).toBe(
+      "unmatched-modification\n",
+    );
+
+    expect(applied.restore).toEqual({
+      restored: [
+        "tests/committed.txt",
+        "tests/deleted.txt",
+        "tests/executable.sh",
+        "tests/symlink.txt",
+        "tests/uncommitted.txt",
+      ],
+      removed: ["tests/ignored.txt"],
+    });
+    expectSortedAndDeduplicated(applied.restore?.restored ?? []);
+    expectSortedAndDeduplicated(applied.restore?.removed ?? []);
+    expect(applied.overlay).toBeNull();
+
+    expect(indexAfter.equals(indexBefore)).toBe(true);
+    expect(headAfter).toEqual(headBefore);
+    expect(refsAfter).toEqual(refsBefore);
+  }, 30_000);
+
+  it("produces base blob bytes despite a case-configured smudge filter, a matching worktree .gitattributes, core.autocrlf, and an agent-created .gitattributes in a directory the base tree has none for (P2)", async () => {
+    const path = join(testDirectory, "smudge-source");
+    await mkdir(join(path, "tests/nested"), { recursive: true });
+    await writeFile(join(path, "tests/smudge.txt"), "base-smudge-content\n");
+    await writeFile(join(path, "tests/nested/eol.txt"), "base-eol-content\n");
+    await runGit(path, ["init", "--quiet", "-b", "main"]);
+    await runGit(path, ["add", "-A"]);
+    await runGit(path, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "smudge base commit"]);
+    const commit = (await runGit(path, ["rev-parse", "HEAD"])).stdout.trim();
+    const adapter = createGitAdapter(path, commit);
+    const workspace = unwrapOk(await adapter.createIsolatedCase(buildIdentity("task-1--c1", commit)));
+
+    await runGit(workspace.worktreeDirectory, [
+      "config",
+      "filter.mangle.smudge",
+      "sed s/base-smudge-content/SMUDGED-BY-FILTER/",
+    ]);
+    await runGit(workspace.worktreeDirectory, ["config", "filter.mangle.clean", "cat"]);
+    await runGit(workspace.worktreeDirectory, ["config", "core.autocrlf", "true"]);
+    await writeFile(join(workspace.worktreeDirectory, "tests/.gitattributes"), "smudge.txt filter=mangle\n");
+    await writeFile(join(workspace.worktreeDirectory, "tests/nested/.gitattributes"), "eol.txt eol=crlf\n");
+    await writeFile(join(workspace.worktreeDirectory, "tests/smudge.txt"), "agent-modified\n");
+    await writeFile(join(workspace.worktreeDirectory, "tests/nested/eol.txt"), "agent-modified\n");
+
+    unwrapOk(await adapter.applyCheckState(workspace, { restore: ["tests/**"], overlay: null }));
+
+    expect(await readFile(join(workspace.worktreeDirectory, "tests/smudge.txt"), "utf8")).toBe(
+      "base-smudge-content\n",
+    );
+    expect(await readFile(join(workspace.worktreeDirectory, "tests/nested/eol.txt"), "utf8")).toBe(
+      "base-eol-content\n",
+    );
+  }, 30_000);
+
+  it("rebuilds a leading directory replaced by a symbolic link to an outside sentinel-holding directory, leaving the sentinel untouched and recording the link's path as removed (P3)", async () => {
+    const path2 = join(testDirectory, "check-state-source-2");
+    await mkdir(join(path2, "tests/nested"), { recursive: true });
+    await writeFile(join(path2, "tests/nested/file.txt"), "base-nested-content\n");
+    await runGit(path2, ["init", "--quiet", "-b", "main"]);
+    await runGit(path2, ["add", "-A"]);
+    await runGit(path2, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "nested base commit"]);
+    const commit = (await runGit(path2, ["rev-parse", "HEAD"])).stdout.trim();
+    const adapter = createGitAdapter(path2, commit);
+    const workspace = unwrapOk(await adapter.createIsolatedCase(buildIdentity("task-1--c1", commit)));
+
+    const outsideDirectory = join(testDirectory, "outside-nested");
+    await mkdir(outsideDirectory, { recursive: true });
+    await writeFile(join(outsideDirectory, "sentinel.txt"), "sentinel-content\n");
+    await rm(join(workspace.worktreeDirectory, "tests/nested"), { recursive: true });
+    await symlink(outsideDirectory, join(workspace.worktreeDirectory, "tests/nested"));
+
+    const applied = unwrapOk(
+      await adapter.applyCheckState(workspace, { restore: ["tests/**"], overlay: null }),
+    );
+
+    const nestedStat = await lstat(join(workspace.worktreeDirectory, "tests/nested"));
+    expect(nestedStat.isDirectory()).toBe(true);
+    expect(nestedStat.isSymbolicLink()).toBe(false);
+    expect(await readFile(join(workspace.worktreeDirectory, "tests/nested/file.txt"), "utf8")).toBe(
+      "base-nested-content\n",
+    );
+    expect(await readFile(join(outsideDirectory, "sentinel.txt"), "utf8")).toBe("sentinel-content\n");
+    expect(applied.restore?.removed).toContain("tests/nested");
+  }, 30_000);
+
+  it("fails with 'worktree root is not a directory' and leaves the target directory untouched when the worktree root is a symbolic link (P3)", async () => {
+    const repository = await createCheckStateSourceRepository();
+    const adapter = createGitAdapter(repository.path, repository.commit);
+    const workspace = unwrapOk(
+      await adapter.createIsolatedCase(buildIdentity("task-1--c1", repository.commit)),
+    );
+    const outsideRoot = join(testDirectory, "outside-root");
+    await mkdir(outsideRoot, { recursive: true });
+    await writeFile(join(outsideRoot, "sentinel.txt"), "root-sentinel\n");
+
+    await rm(workspace.worktreeDirectory, { recursive: true, force: true });
+    await symlink(outsideRoot, workspace.worktreeDirectory);
+
+    const result = await adapter.applyCheckState(workspace, { restore: ["tests/**"], overlay: null });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toEqual({
+        kind: "CheckStateError",
+        step: "restore",
+        reason: "worktree root is not a directory",
+      });
+    }
+    expect(await readFile(join(outsideRoot, "sentinel.txt"), "utf8")).toBe("root-sentinel\n");
+  }, 30_000);
+
+  it("replaces a directory blocking a matched base file path with the restored file, recording the blocked directory's unmatched content as removed (P4)", async () => {
+    const path = join(testDirectory, "blocker-source");
+    await mkdir(join(path, "tests"), { recursive: true });
+    await writeFile(join(path, "tests/blocked.txt"), "base-blocked-content\n");
+    await runGit(path, ["init", "--quiet", "-b", "main"]);
+    await runGit(path, ["add", "-A"]);
+    await runGit(path, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "blocker base commit"]);
+    const commit = (await runGit(path, ["rev-parse", "HEAD"])).stdout.trim();
+    const adapter = createGitAdapter(path, commit);
+    const workspace = unwrapOk(await adapter.createIsolatedCase(buildIdentity("task-1--c1", commit)));
+
+    await rm(join(workspace.worktreeDirectory, "tests/blocked.txt"));
+    await mkdir(join(workspace.worktreeDirectory, "tests/blocked.txt"));
+    await writeFile(
+      join(workspace.worktreeDirectory, "tests/blocked.txt/unmatched-nested.txt"),
+      "nested content\n",
+    );
+
+    const applied = unwrapOk(
+      await adapter.applyCheckState(workspace, { restore: ["tests/blocked.tx?"], overlay: null }),
+    );
+
+    const blockedStat = await lstat(join(workspace.worktreeDirectory, "tests/blocked.txt"));
+    expect(blockedStat.isFile()).toBe(true);
+    expect(await readFile(join(workspace.worktreeDirectory, "tests/blocked.txt"), "utf8")).toBe(
+      "base-blocked-content\n",
+    );
+    expect(applied.restore).toEqual({
+      restored: ["tests/blocked.txt"],
+      removed: ["tests/blocked.txt/unmatched-nested.txt"],
+    });
+  }, 30_000);
+});
+
+describe("check-state overlay step (P5, P7)", () => {
+  it("records every snapshot file's SHA-256, overwrites an existing file, replaces a symbolic link at a destination without writing through it, and creates missing and empty directories", async () => {
+    const overlayDirectory = join(testDirectory, "overlay-source");
+    await mkdir(join(overlayDirectory, "subdir"), { recursive: true });
+    await mkdir(join(overlayDirectory, "subdir-with-file"), { recursive: true });
+    await writeFile(join(overlayDirectory, "file-new.txt"), "new-file-content\n");
+    await writeFile(join(overlayDirectory, "file-overwrite.txt"), "overwrite-content\n");
+    await writeFile(join(overlayDirectory, "subdir-with-file/nested.txt"), "nested-content\n");
+    await writeFile(join(overlayDirectory, "replace-symlink-target.txt"), "replacement-content\n");
+    await writeFile(join(overlayDirectory, "blocked-by-dir.txt"), "blocker-replacement-content\n");
+
+    const workspace = buildFabricatedWorkspace("overlay-c1");
+    await mkdir(workspace.worktreeDirectory, { recursive: true });
+    await mkdir(workspace.runtimeDirectory, { recursive: true });
+    await writeFile(join(workspace.worktreeDirectory, "file-overwrite.txt"), "old-content-to-be-overwritten\n");
+    const outsideSentinel = join(testDirectory, "overlay-outside-sentinel.txt");
+    await writeFile(outsideSentinel, "sentinel-untouched\n");
+    await symlink(outsideSentinel, join(workspace.worktreeDirectory, "replace-symlink-target.txt"));
+    await mkdir(join(workspace.worktreeDirectory, "blocked-by-dir.txt"), { recursive: true });
+    await writeFile(join(workspace.worktreeDirectory, "blocked-by-dir.txt/inner.txt"), "inner\n");
+
+    const adapter = createGitAdapter("/synthetic/unused-source", "f".repeat(40));
+    const snapshot = unwrapOk(await adapter.readOverlay(overlayDirectory));
+    const applied = unwrapOk(await adapter.applyCheckState(workspace, { restore: [], overlay: snapshot }));
+
+    expect(await readFile(join(workspace.worktreeDirectory, "file-new.txt"), "utf8")).toBe("new-file-content\n");
+    expect(await readFile(join(workspace.worktreeDirectory, "file-overwrite.txt"), "utf8")).toBe(
+      "overwrite-content\n",
+    );
+    const subdirStat = await stat(join(workspace.worktreeDirectory, "subdir"));
+    expect(subdirStat.isDirectory()).toBe(true);
+    expect(await readFile(join(workspace.worktreeDirectory, "subdir-with-file/nested.txt"), "utf8")).toBe(
+      "nested-content\n",
+    );
+    const replacedStat = await lstat(join(workspace.worktreeDirectory, "replace-symlink-target.txt"));
+    expect(replacedStat.isSymbolicLink()).toBe(false);
+    expect(replacedStat.isFile()).toBe(true);
+    expect(await readFile(join(workspace.worktreeDirectory, "replace-symlink-target.txt"), "utf8")).toBe(
+      "replacement-content\n",
+    );
+    expect(await readFile(outsideSentinel, "utf8")).toBe("sentinel-untouched\n");
+    const blockedStat = await lstat(join(workspace.worktreeDirectory, "blocked-by-dir.txt"));
+    expect(blockedStat.isFile()).toBe(true);
+    expect(await readFile(join(workspace.worktreeDirectory, "blocked-by-dir.txt"), "utf8")).toBe(
+      "blocker-replacement-content\n",
+    );
+
+    const expectedFiles = [
+      { path: "blocked-by-dir.txt", bytes: "blocker-replacement-content\n" },
+      { path: "file-new.txt", bytes: "new-file-content\n" },
+      { path: "file-overwrite.txt", bytes: "overwrite-content\n" },
+      { path: "replace-symlink-target.txt", bytes: "replacement-content\n" },
+      { path: "subdir-with-file/nested.txt", bytes: "nested-content\n" },
+    ];
+    expect(applied.overlay?.files).toEqual(
+      expectedFiles.map(({ path, bytes }) => ({ path, sha256: sha256Hex(Buffer.from(bytes)) })),
+    );
+    expect(applied.overlay?.removed).toEqual(["blocked-by-dir.txt/inner.txt"]);
+    expectSortedAndDeduplicated(applied.overlay?.files.map((file) => file.path) ?? []);
+    expectSortedAndDeduplicated(applied.overlay?.removed ?? []);
+    expect(applied.restore).toBeNull();
+  }, 30_000);
+});
+
+describe("readOverlay (P6)", () => {
+  const adapter = createGitAdapter("/synthetic/unused-source", "f".repeat(40));
+
+  it("reports a missing overlay directory", async () => {
+    const directory = join(testDirectory, "does-not-exist");
+
+    const result = await adapter.readOverlay(directory);
+
+    expect(result).toEqual({
+      ok: false,
+      error: { kind: "CheckStateError", step: "overlay", reason: `overlay directory "${directory}" does not exist` },
+    });
+  });
+
+  it("reports a regular file in place of a directory", async () => {
+    const filePath = join(testDirectory, "overlay-as-file.txt");
+    await writeFile(filePath, "not a directory\n");
+
+    const result = await adapter.readOverlay(filePath);
+
+    expect(result).toEqual({
+      ok: false,
+      error: { kind: "CheckStateError", step: "overlay", reason: `overlay path "${filePath}" is not a directory` },
+    });
+  });
+
+  it("reports a directory holding a symbolic link", async () => {
+    const directory = join(testDirectory, "overlay-with-link");
+    await mkdir(directory, { recursive: true });
+    await symlink(testDirectory, join(directory, "escape-link"));
+
+    const result = await adapter.readOverlay(directory);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: "CheckStateError",
+        step: "overlay",
+        reason: `overlay directory "${directory}" must contain only regular files and directories; "escape-link" is a symbolic link`,
+      },
+    });
+  });
+
+  it("reports a directory holding a FIFO", async () => {
+    const directory = join(testDirectory, "overlay-with-fifo");
+    await mkdir(directory, { recursive: true });
+    const fifoPath = join(directory, "pipe");
+    execFileSync("mkfifo", [fifoPath]);
+
+    const result = await adapter.readOverlay(directory);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: "CheckStateError",
+        step: "overlay",
+        reason: `overlay directory "${directory}" must contain only regular files and directories; "pipe" is neither a regular file nor a directory`,
+      },
+    });
+  });
+
+  it("reports a directory holding an entry named .git", async () => {
+    const directory = join(testDirectory, "overlay-with-git");
+    await mkdir(join(directory, ".git"), { recursive: true });
+
+    const result = await adapter.readOverlay(directory);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: "CheckStateError",
+        step: "overlay",
+        reason: `overlay directory "${directory}" must not contain an entry named .git; found ".git"`,
+      },
+    });
+  });
+
+  it("returns every regular file and directory sorted by path, with kind and, for a file, the executable bit and bytes", async () => {
+    const directory = join(testDirectory, "overlay-tree");
+    await mkdir(join(directory, "sub"), { recursive: true });
+    await writeFile(join(directory, "a.txt"), "content-a\n");
+    await writeFile(join(directory, "sub/b.sh"), "content-b\n");
+    await chmod(join(directory, "sub/b.sh"), 0o755);
+
+    const result = await adapter.readOverlay(directory);
+
+    expect(result).toEqual({
+      ok: true,
+      value: [
+        { kind: "file", path: "a.txt", executable: false, bytes: Buffer.from("content-a\n") },
+        { kind: "directory", path: "sub" },
+        { kind: "file", path: "sub/b.sh", executable: true, bytes: Buffer.from("content-b\n") },
+      ],
+    });
   });
 });

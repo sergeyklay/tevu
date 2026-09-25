@@ -76,7 +76,8 @@ export type TevuError =
     }
   | { kind: "ArtifactError"; operation: string; reason: string }
   | { kind: "RedactionError"; reason: string }
-  | { kind: "CancellationError"; activeCaseIds: string[] };
+  | { kind: "CancellationError"; activeCaseIds: string[] }
+  | { kind: "CheckStateError"; step: "restore" | "overlay"; reason: string };
 
 /** Identity of one benchmark case: one task executed once by one model entry. */
 export type CaseIdentity = {
@@ -213,6 +214,8 @@ export type CaseResult = {
   metrics: BenchmarkMetrics;
   artifacts: ArtifactIndex;
   failure: FailureRecord | null;
+  /** Present only when the case completed `applyCheckState`; absent for a task that declares neither key. */
+  checkState?: CheckStateRecord;
   context?: {
     sourceRepositoryPath: string;
     syntheticCommit: string;
@@ -346,7 +349,54 @@ export type PatchArtifact = {
   isEmpty: boolean;
 };
 
-/** Sealed Git source validation, case materialization, patch capture, and disposal. */
+/** What `applyCheckState` does to one worktree; built by the orchestrator from the task and the run's overlay snapshot. */
+export type CheckStateRequest = {
+  /** Patterns from `checks.restore`; empty means no restore step. */
+  restore: readonly string[];
+  /** The run's snapshot of `checks.overlay`, or null when the task declares none. */
+  overlay: OverlaySnapshot | null;
+};
+
+/** One overlay directory as `readOverlay` read it, sorted ascending by `path` with `<` comparison. */
+export type OverlaySnapshot = readonly OverlayEntry[];
+
+/** `path` follows the recorded-path rules below; `executable` is the owner-executable bit (`mode & 0o100`). */
+export type OverlayEntry =
+  | { kind: "directory"; path: string }
+  | { kind: "file"; path: string; executable: boolean; bytes: Uint8Array };
+
+/** Check-state evidence; every path list is sorted ascending by `<` comparison and holds no duplicates. */
+export type CheckStateRecord = {
+  /** null when the request's `restore` is empty. */
+  restore: RestoreRecord | null;
+  /** null when the request's `overlay` is null. */
+  overlay: OverlayRecord | null;
+};
+
+/** Restore-step evidence: matched paths returned to the base tree and everything removed. */
+export type RestoreRecord = {
+  /** Matched base-tree paths whose worktree entry differed from the base tree and was rewritten. */
+  restored: string[];
+  /** Every non-directory entry the restore step deleted: matched untracked entries, blockers, and everything beneath deleted directories. */
+  removed: string[];
+};
+
+/** Overlay-step evidence: every file the snapshot wrote and everything removed to make room for it. */
+export type OverlayRecord = {
+  /** Every file entry of the snapshot, with the SHA-256 of the bytes written. */
+  files: OverlayFileRecord[];
+  /** Every non-directory entry the overlay step deleted as a blocker, including everything beneath deleted directories. */
+  removed: string[];
+};
+
+/** One overlay file; `sha256` is 64 lowercase hexadecimal characters. */
+export type OverlayFileRecord = { path: string; sha256: string };
+
+/**
+ * Sealed Git source validation, case materialization, patch capture, disposal,
+ * and the check-state setup (restore and overlay) that runs between patch
+ * capture and acceptance checks.
+ */
 export interface GitWorkspaceAdapter {
   validateSource(
     repository: RepositoryDefinition,
@@ -358,6 +408,13 @@ export interface GitWorkspaceAdapter {
   capturePatch(
     workspace: CaseWorkspace,
   ): Promise<TevuResult<PatchArtifact, "SourceMaterializationError" | "ArtifactError">>;
+  /** Reads an overlay directory into a snapshot without writing; fails with the first defect of the overlay validation rules. */
+  readOverlay(directory: string): Promise<TevuResult<OverlaySnapshot, "CheckStateError">>;
+  /** Restores the request's matched paths to the base tree, then copies the overlay onto the worktree root. */
+  applyCheckState(
+    workspace: CaseWorkspace,
+    request: CheckStateRequest,
+  ): Promise<TevuResult<CheckStateRecord, "CheckStateError">>;
   dispose(workspace: CaseWorkspace): Promise<TevuResult<void, "ArtifactError">>;
   isReadable?(workspace: CaseWorkspace): Promise<boolean>;
 }

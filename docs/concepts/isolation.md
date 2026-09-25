@@ -14,11 +14,13 @@ Tracked project instructions remain part of the task. Host sessions, global prom
 
 The agent needs enough context and credentials to produce a solution. An acceptance command needs the submitted files and its declared test inputs. Sharing the agent's home or authentication state would give the evaluator dependencies that its check definition does not describe.
 
-tevu gives evaluators separate state directories and a fixed environment with explicitly allowed additions. It also captures the solution patch before checks run, so files created by a test command do not become part of the model's submitted solution. The [environment reference](../reference/configuration.md#fixed-evaluator-environment) lists the exact variables.
+tevu gives evaluators separate state directories and a fixed environment with explicitly allowed additions. It also captures the solution patch before checks run, so files created by a test command do not become part of the model's submitted solution. After capturing the patch, tevu can reset configured paths to the starting commit and add hidden check files, so the agent's edits to those paths do not decide the verdict, within the limits the [configuration reference](../reference/configuration.md#restore-and-overlay) lists. The [environment reference](../reference/configuration.md#fixed-evaluator-environment) lists the exact variables.
 
 ## Context isolation is not a sandbox
 
 Separate directories keep sibling outputs and benchmark artifacts out of the context tevu supplies. They do not create an operating-system security boundary: an agent with shell access can still probe other host paths. The current adapter reports its optional outside-worktree restriction as `unavailable`.
+
+Hidden checks are context isolation, not a sandbox. tevu keeps a configured overlay directory out of the prompt and out of the case until checks start, and reads it once when the run starts, so a change to the directory during the run reaches no case of that run. An agent with shell access can still find the overlay directory on disk and read it; hidden checks stop a model from tailoring its edits to a test it never saw, not a model that goes looking for it.
 
 The distinction matters when interpreting a result. tevu controls the starting context and records evidence; it does not establish that untrusted code was contained. The report keeps that limitation visible alongside the comparison.
 

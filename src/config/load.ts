@@ -120,6 +120,14 @@ export async function resolveConfig(
       ...repository,
       path: resolveConfigPath(configDirectory, repository.path),
     })),
+    tasks: config.tasks.map((task) =>
+      task.checks.overlay === undefined
+        ? task
+        : {
+            ...task,
+            checks: { ...task.checks, overlay: resolveConfigPath(configDirectory, task.checks.overlay) },
+          },
+    ),
   };
 
   const separationFindings = await collectSeparationFindings(resolved);
@@ -190,8 +198,10 @@ function sortKeysDeep(value: unknown): unknown {
 async function collectSeparationFindings(config: TevuConfig): Promise<ValidationFinding[]> {
   const findings: ValidationFinding[] = [];
   const outputReal = await canonicalRealPath(config.run.output_dir);
+  const repositoryReals: { id: string; real: string }[] = [];
   for (const repository of config.repositories) {
     const repositoryReal = await canonicalRealPath(repository.path);
+    repositoryReals.push({ id: repository.id, real: repositoryReal });
     if (isSamePathOrInside(repositoryReal, outputReal)) {
       findings.push({
         severity: "error",
@@ -203,6 +213,35 @@ async function collectSeparationFindings(config: TevuConfig): Promise<Validation
         severity: "error",
         identifier: `repositories.${repository.id}.path`,
         message: `repository "${repository.id}" overlaps the run output directory after real-path resolution`,
+      });
+    }
+  }
+
+  for (const task of config.tasks) {
+    if (task.checks.overlay === undefined) {
+      continue;
+    }
+    const overlayReal = await canonicalRealPath(task.checks.overlay);
+    for (const repository of repositoryReals) {
+      if (isSamePathOrInside(repository.real, overlayReal)) {
+        findings.push({
+          severity: "error",
+          identifier: `tasks.${task.id}.checks.overlay`,
+          message: `overlay must be outside repository "${repository.id}" after real-path resolution`,
+        });
+      } else if (isSamePathOrInside(overlayReal, repository.real)) {
+        findings.push({
+          severity: "error",
+          identifier: `tasks.${task.id}.checks.overlay`,
+          message: `overlay contains repository "${repository.id}" after real-path resolution`,
+        });
+      }
+    }
+    if (isSamePathOrInside(outputReal, overlayReal) || isSamePathOrInside(overlayReal, outputReal)) {
+      findings.push({
+        severity: "error",
+        identifier: `tasks.${task.id}.checks.overlay`,
+        message: "overlay must not overlap run.output_dir after real-path resolution",
       });
     }
   }

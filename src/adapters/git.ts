@@ -1,23 +1,47 @@
 /**
  * Git boundary: read-only source validation, sealed per-case repositories with
- * one synthetic root commit, pre-evaluation patch capture, and workspace
- * disposal. Source repositories are never mutated; every case owns a private
- * object database, worktree, and runtime directory with no sibling references.
+ * one synthetic root commit, pre-evaluation patch capture, the check-state
+ * setup (restore and overlay) that runs before acceptance checks, and
+ * workspace disposal. Source repositories are never mutated; every case owns
+ * a private object database, worktree, and runtime directory with no sibling
+ * references.
  */
 
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  readlink,
+  rm,
+  stat,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { basename, join } from "node:path";
 import process from "node:process";
 import { execa } from "execa";
 
 import { describeCause } from "../domain/describe-cause.ts";
 
+import type { Stats } from "node:fs";
 import type { RepositoryDefinition, TevuConfig } from "../config/schema.ts";
 import type {
   CaseIdentity,
   CaseWorkspace,
+  CheckStateRecord,
+  CheckStateRequest,
   GitWorkspaceAdapter,
+  OverlayEntry,
+  OverlayFileRecord,
+  OverlayRecord,
+  OverlaySnapshot,
   PatchArtifact,
+  RestoreRecord,
   SourceValidation,
   TevuResult,
 } from "../domain/types.ts";
@@ -48,13 +72,6 @@ const SYNTHETIC_COMMIT_IDENTITY: Record<string, string> = {
 };
 
 /**
- * Creates the `GitWorkspaceAdapter` implementation over the local Git CLI.
- *
- * `validateSource` reports failures as `SourceMaterializationError` with the
- * repository ID in the `taskId` field because the adapter contract carries no
- * task identity at that boundary; callers that know the task may re-attribute.
- */
-/**
  * Creates the read-only source-validation half of {@link GitWorkspaceAdapter},
  * needing no configuration: it reads only the `repository`/`commit`
  * parameters it is called with.
@@ -84,6 +101,13 @@ async function validateSource(
   };
 }
 
+/**
+ * Creates the `GitWorkspaceAdapter` implementation over the local Git CLI.
+ *
+ * `validateSource` reports failures as `SourceMaterializationError` with the
+ * repository ID in the `taskId` field because the adapter contract carries no
+ * task identity at that boundary; callers that know the task may re-attribute.
+ */
 export function createGitWorkspaceAdapter(
   options: GitWorkspaceAdapterOptions,
 ): GitWorkspaceAdapter {
@@ -91,6 +115,8 @@ export function createGitWorkspaceAdapter(
 
   return {
     validateSource,
+    readOverlay,
+    applyCheckState,
 
     async createIsolatedCase(
       identity: CaseIdentity,
@@ -435,6 +461,8 @@ type GitCommandOutcome = {
 type RunGitOptions = {
   environment?: Record<string, string>;
   keepFinalNewline?: boolean;
+  /** Standard input for a command reading paths from stdin, e.g. `checkout-index --stdin`. */
+  stdin?: string;
 };
 
 async function runGit(
@@ -446,7 +474,7 @@ async function runGit(
     cwd,
     env: { ...baseGitEnvironment(), ...options.environment },
     extendEnv: false,
-    stdin: "ignore",
+    ...(options.stdin === undefined ? { stdin: "ignore" } : { input: options.stdin }),
     reject: false,
     timeout: GIT_COMMAND_TIMEOUT_MS,
     stripFinalNewline: options.keepFinalNewline !== true,
@@ -488,6 +516,660 @@ function describeGitFailure(subcommand: string, outcome: GitCommandOutcome): str
     return `git ${subcommand} could not be started`;
   }
   return `git ${subcommand} exited with code ${outcome.exitCode}`;
+}
+
+/** Which check-state step a failure belongs to. */
+type CheckStateStep = "restore" | "overlay";
+
+/** A regular file's bytes and owner-executable bit, or a symbolic link's target; restore and overlay share `place`. */
+type Source =
+  | { kind: "file"; bytes: Uint8Array; executable: boolean }
+  | { kind: "symlink"; target: string };
+
+function checkStateFailure(
+  step: CheckStateStep,
+  reason: string,
+): { ok: false; error: { kind: "CheckStateError"; step: CheckStateStep; reason: string } } {
+  return { ok: false, error: { kind: "CheckStateError", step, reason } };
+}
+
+/** Node.js system error code of a thrown value, or `null` when it carries none. */
+function systemErrorCode(cause: unknown): string | null {
+  if (
+    typeof cause === "object" &&
+    cause !== null &&
+    "code" in cause &&
+    typeof (cause as { code: unknown }).code === "string"
+  ) {
+    return (cause as { code: string }).code;
+  }
+  return null;
+}
+
+/** Ascending, duplicate-free path list, per the `CheckStateRecord` contract. */
+function sortedUnique(paths: readonly string[]): string[] {
+  return [...new Set(paths)].sort();
+}
+
+/** Splits a `git ... -z` NUL-terminated byte stream into its worktree-relative paths. */
+function splitNulSeparated(text: string): string[] {
+  return text.split("\0").filter((entry) => entry.length > 0);
+}
+
+function sha256Hex(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/**
+ * Deletes one worktree entry recursively without following a symbolic link at
+ * or beneath it, returning every non-directory path it removed.
+ */
+async function deleteEntry(
+  step: CheckStateStep,
+  worktreeDirectory: string,
+  relativePath: string,
+): Promise<TevuResult<string[], "CheckStateError">> {
+  const listed = await listNonDirectoryEntries(step, worktreeDirectory, relativePath);
+  if (!listed.ok) {
+    return listed;
+  }
+  try {
+    await rm(join(worktreeDirectory, relativePath), { recursive: true });
+    return { ok: true, value: listed.value };
+  } catch (cause) {
+    return checkStateFailure(step, `delete failed for "${relativePath}": ${describeCause(cause)}`);
+  }
+}
+
+/**
+ * Lists every non-directory entry at or beneath one worktree path via an
+ * `lstat` walk that never follows a symbolic link.
+ */
+async function listNonDirectoryEntries(
+  step: CheckStateStep,
+  worktreeDirectory: string,
+  relativePath: string,
+): Promise<TevuResult<string[], "CheckStateError">> {
+  const absolutePath = join(worktreeDirectory, relativePath);
+  let entryStat: Stats;
+  try {
+    entryStat = await lstat(absolutePath);
+  } catch (cause) {
+    return checkStateFailure(step, `read failed for "${relativePath}": ${describeCause(cause)}`);
+  }
+  if (!entryStat.isDirectory()) {
+    return { ok: true, value: [relativePath] };
+  }
+  let names: string[];
+  try {
+    names = await readdir(absolutePath);
+  } catch (cause) {
+    return checkStateFailure(step, `read failed for "${relativePath}": ${describeCause(cause)}`);
+  }
+  const collected: string[] = [];
+  for (const name of names) {
+    const childRelative = relativePath.length === 0 ? name : `${relativePath}/${name}`;
+    const nested = await listNonDirectoryEntries(step, worktreeDirectory, childRelative);
+    if (!nested.ok) {
+      return nested;
+    }
+    collected.push(...nested.value);
+  }
+  return { ok: true, value: collected };
+}
+
+/** `lstat`s one worktree path, returning `null` in place of an `ENOENT` failure. */
+async function lstatOrNull(
+  step: CheckStateStep,
+  absolutePath: string,
+  relativePath: string,
+): Promise<TevuResult<Stats | null, "CheckStateError">> {
+  try {
+    return { ok: true, value: await lstat(absolutePath) };
+  } catch (cause) {
+    if (systemErrorCode(cause) === "ENOENT") {
+      return { ok: true, value: null };
+    }
+    return checkStateFailure(step, `read failed for "${relativePath}": ${describeCause(cause)}`);
+  }
+}
+
+async function tryMkdir(
+  step: CheckStateStep,
+  absolutePath: string,
+  relativePath: string,
+): Promise<TevuResult<void, "CheckStateError">> {
+  try {
+    await mkdir(absolutePath);
+    return { ok: true, value: undefined };
+  } catch (cause) {
+    return checkStateFailure(step, `create failed for "${relativePath}": ${describeCause(cause)}`);
+  }
+}
+
+async function tryUnlink(
+  step: CheckStateStep,
+  absolutePath: string,
+  relativePath: string,
+): Promise<TevuResult<void, "CheckStateError">> {
+  try {
+    await unlink(absolutePath);
+    return { ok: true, value: undefined };
+  } catch (cause) {
+    return checkStateFailure(step, `delete failed for "${relativePath}": ${describeCause(cause)}`);
+  }
+}
+
+async function trySymlink(
+  step: CheckStateStep,
+  target: string,
+  absolutePath: string,
+  relativePath: string,
+): Promise<TevuResult<void, "CheckStateError">> {
+  try {
+    await symlink(target, absolutePath);
+    return { ok: true, value: undefined };
+  } catch (cause) {
+    return checkStateFailure(step, `create failed for "${relativePath}": ${describeCause(cause)}`);
+  }
+}
+
+/** Creates one file exclusively (`O_CREAT | O_EXCL`) at the given mode, then writes its bytes. */
+async function tryCreateFile(
+  step: CheckStateStep,
+  absolutePath: string,
+  relativePath: string,
+  bytes: Uint8Array,
+  mode: number,
+): Promise<TevuResult<void, "CheckStateError">> {
+  let handle;
+  try {
+    handle = await open(absolutePath, "wx", mode);
+  } catch (cause) {
+    return checkStateFailure(step, `create failed for "${relativePath}": ${describeCause(cause)}`);
+  }
+  try {
+    await handle.writeFile(bytes);
+    return { ok: true, value: undefined };
+  } catch (cause) {
+    return checkStateFailure(step, `write failed for "${relativePath}": ${describeCause(cause)}`);
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Ensures every leading directory of a worktree path is a real directory,
+ * replacing a non-directory blocker along the way; shared by `place` (parent
+ * directories only) and `placeDirectory` (every component, the last included).
+ */
+async function ensureDirectories(
+  step: CheckStateStep,
+  worktreeDirectory: string,
+  segments: readonly string[],
+): Promise<TevuResult<string[], "CheckStateError">> {
+  const deleted: string[] = [];
+  const accumulated: string[] = [];
+  for (const segment of segments) {
+    accumulated.push(segment);
+    const relativeDir = accumulated.join("/");
+    const absoluteDir = join(worktreeDirectory, relativeDir);
+    const probe = await lstatOrNull(step, absoluteDir, relativeDir);
+    if (!probe.ok) {
+      return probe;
+    }
+    if (probe.value === null) {
+      const created = await tryMkdir(step, absoluteDir, relativeDir);
+      if (!created.ok) {
+        return created;
+      }
+    } else if (!probe.value.isDirectory()) {
+      const removed = await deleteEntry(step, worktreeDirectory, relativeDir);
+      if (!removed.ok) {
+        return removed;
+      }
+      deleted.push(...removed.value);
+      const created = await tryMkdir(step, absoluteDir, relativeDir);
+      if (!created.ok) {
+        return created;
+      }
+    }
+  }
+  return { ok: true, value: deleted };
+}
+
+/**
+ * Writes one path inside the worktree from a restore or overlay source:
+ * ensures every leading directory, replaces whatever entry sits at the final
+ * path, and creates the path exclusively so nothing is ever written through a
+ * symbolic link. Returns every path it deleted to make room.
+ */
+async function place(
+  step: CheckStateStep,
+  worktreeDirectory: string,
+  relativePath: string,
+  source: Source,
+): Promise<TevuResult<string[], "CheckStateError">> {
+  const segments = relativePath.split("/");
+  const parents = await ensureDirectories(step, worktreeDirectory, segments.slice(0, -1));
+  if (!parents.ok) {
+    return parents;
+  }
+  const deleted = [...parents.value];
+  const absolutePath = join(worktreeDirectory, relativePath);
+  const probe = await lstatOrNull(step, absolutePath, relativePath);
+  if (!probe.ok) {
+    return probe;
+  }
+  if (probe.value !== null) {
+    if (probe.value.isDirectory()) {
+      const removed = await deleteEntry(step, worktreeDirectory, relativePath);
+      if (!removed.ok) {
+        return removed;
+      }
+      deleted.push(...removed.value);
+    } else {
+      const unlinked = await tryUnlink(step, absolutePath, relativePath);
+      if (!unlinked.ok) {
+        return unlinked;
+      }
+    }
+  }
+  if (source.kind === "symlink") {
+    const linked = await trySymlink(step, source.target, absolutePath, relativePath);
+    if (!linked.ok) {
+      return linked;
+    }
+  } else {
+    const mode = source.executable ? 0o777 : 0o666;
+    const written = await tryCreateFile(step, absolutePath, relativePath, source.bytes, mode);
+    if (!written.ok) {
+      return written;
+    }
+  }
+  return { ok: true, value: deleted };
+}
+
+/** Ensures one worktree directory exists, replacing a non-directory blocker at any leading component. */
+async function placeDirectory(
+  step: CheckStateStep,
+  worktreeDirectory: string,
+  relativePath: string,
+): Promise<TevuResult<string[], "CheckStateError">> {
+  return ensureDirectories(step, worktreeDirectory, relativePath.split("/"));
+}
+
+/** Reads one path's bytes and owner-executable bit, or its link target, as a restore `Source`. */
+async function readSource(
+  step: CheckStateStep,
+  absolutePath: string,
+  relativePath: string,
+): Promise<TevuResult<Source, "CheckStateError">> {
+  let entryStat: Stats;
+  try {
+    entryStat = await lstat(absolutePath);
+  } catch (cause) {
+    return checkStateFailure(step, `read failed for "${relativePath}": ${describeCause(cause)}`);
+  }
+  if (entryStat.isSymbolicLink()) {
+    try {
+      return { ok: true, value: { kind: "symlink", target: await readlink(absolutePath) } };
+    } catch (cause) {
+      return checkStateFailure(step, `read failed for "${relativePath}": ${describeCause(cause)}`);
+    }
+  }
+  try {
+    const bytes = await readFile(absolutePath);
+    return { ok: true, value: { kind: "file", bytes, executable: (entryStat.mode & 0o100) !== 0 } };
+  } catch (cause) {
+    return checkStateFailure(step, `read failed for "${relativePath}": ${describeCause(cause)}`);
+  }
+}
+
+/**
+ * Reports whether a worktree path already holds the same entry as the base
+ * tree's checked-out copy: every leading directory is a real directory, the
+ * entry has the same type, and a regular file's owner-executable bit and
+ * bytes match, or a symbolic link's target matches.
+ */
+async function sameEntry(expectedPath: string, worktreeDirectory: string, relativePath: string): Promise<boolean> {
+  const segments = relativePath.split("/");
+  const leadingDirs: string[] = [];
+  for (const segment of segments.slice(0, -1)) {
+    leadingDirs.push(segment);
+    try {
+      const dirStat = await lstat(join(worktreeDirectory, leadingDirs.join("/")));
+      if (!dirStat.isDirectory()) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+  let worktreeStat: Stats;
+  let expectedStat: Stats;
+  try {
+    worktreeStat = await lstat(join(worktreeDirectory, relativePath));
+    expectedStat = await lstat(expectedPath);
+  } catch {
+    return false;
+  }
+  if (expectedStat.isSymbolicLink()) {
+    if (!worktreeStat.isSymbolicLink()) {
+      return false;
+    }
+    try {
+      const [expectedTarget, worktreeTarget] = await Promise.all([
+        readlink(expectedPath),
+        readlink(join(worktreeDirectory, relativePath)),
+      ]);
+      return expectedTarget === worktreeTarget;
+    } catch {
+      return false;
+    }
+  }
+  if (!expectedStat.isFile() || !worktreeStat.isFile()) {
+    return false;
+  }
+  if ((expectedStat.mode & 0o100) !== (worktreeStat.mode & 0o100)) {
+    return false;
+  }
+  try {
+    const [expectedBytes, worktreeBytes] = await Promise.all([
+      readFile(expectedPath),
+      readFile(join(worktreeDirectory, relativePath)),
+    ]);
+    return expectedBytes.equals(worktreeBytes);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resets every path matching `patterns` to `workspace.syntheticCommit`'s tree
+ * and removes every untracked path the same patterns match, using a private
+ * index and a scratch checkout so agent-controlled filters, attributes, and
+ * autocrlf never reach the restored bytes.
+ */
+async function restoreStep(
+  workspace: CaseWorkspace,
+  patterns: readonly string[],
+): Promise<TevuResult<RestoreRecord, "CheckStateError">> {
+  const step: CheckStateStep = "restore";
+  let privateDirectory: string;
+  try {
+    privateDirectory = await mkdtemp(join(workspace.runtimeDirectory, "check-state-"));
+  } catch (cause) {
+    return checkStateFailure(step, `create failed for a private restore directory: ${describeCause(cause)}`);
+  }
+  const cleanup = (): Promise<void> => rm(privateDirectory, { recursive: true, force: true }).catch(() => undefined);
+
+  const privateGitDirectory = join(privateDirectory, "git");
+  const initialized = await runGit(privateDirectory, ["init", "--bare", "--quiet", privateGitDirectory]);
+  if (initialized.exitCode !== 0) {
+    await cleanup();
+    return checkStateFailure(step, describeGitFailure("init --bare", initialized));
+  }
+  try {
+    await writeFile(
+      join(privateGitDirectory, "objects", "info", "alternates"),
+      `${workspace.repositoryDirectory}/objects\n`,
+      "utf8",
+    );
+  } catch (cause) {
+    await cleanup();
+    return checkStateFailure(step, `create failed for a private alternates file: ${describeCause(cause)}`);
+  }
+
+  const privateEnvironment = {
+    GIT_DIR: privateGitDirectory,
+    GIT_INDEX_FILE: join(privateGitDirectory, "index"),
+  };
+  const pathspecs = patterns.map((pattern) => `:(glob)${pattern}`);
+
+  const read = await runGit(privateDirectory, ["read-tree", workspace.syntheticCommit], {
+    environment: privateEnvironment,
+  });
+  if (read.exitCode !== 0) {
+    await cleanup();
+    return checkStateFailure(step, describeGitFailure("read-tree", read));
+  }
+
+  const worktreeEnvironment = { ...privateEnvironment, GIT_WORK_TREE: workspace.worktreeDirectory };
+  const cached = await runGit(
+    workspace.worktreeDirectory,
+    ["ls-files", "-z", "--cached", "--", ...pathspecs],
+    { environment: worktreeEnvironment, keepFinalNewline: true },
+  );
+  if (cached.exitCode !== 0) {
+    await cleanup();
+    return checkStateFailure(step, describeGitFailure("ls-files --cached", cached));
+  }
+  const others = await runGit(
+    workspace.worktreeDirectory,
+    ["ls-files", "-z", "--others", "--", ...pathspecs],
+    { environment: worktreeEnvironment, keepFinalNewline: true },
+  );
+  if (others.exitCode !== 0) {
+    await cleanup();
+    return checkStateFailure(step, describeGitFailure("ls-files --others", others));
+  }
+  const matched = splitNulSeparated(cached.stdout);
+  const untracked = splitNulSeparated(others.stdout);
+
+  const baseDirectory = join(privateDirectory, "base");
+  try {
+    await mkdir(baseDirectory);
+  } catch (cause) {
+    await cleanup();
+    return checkStateFailure(step, `create failed for a private base directory: ${describeCause(cause)}`);
+  }
+  const checkedOut = await runGit(baseDirectory, ["checkout-index", "-f", "-z", "--stdin"], {
+    environment: { ...privateEnvironment, GIT_WORK_TREE: baseDirectory },
+    stdin: matched.map((path) => `${path}\0`).join(""),
+  });
+  if (checkedOut.exitCode !== 0) {
+    await cleanup();
+    return checkStateFailure(step, describeGitFailure("checkout-index", checkedOut));
+  }
+
+  const removed: string[] = [];
+  for (const entry of untracked) {
+    const relative = entry.endsWith("/") ? entry.slice(0, -1) : entry;
+    const deleted = await deleteEntry(step, workspace.worktreeDirectory, relative);
+    if (!deleted.ok) {
+      await cleanup();
+      return deleted;
+    }
+    removed.push(...deleted.value);
+  }
+
+  const restored: string[] = [];
+  for (const path of matched) {
+    const expectedPath = join(baseDirectory, path);
+    if (await sameEntry(expectedPath, workspace.worktreeDirectory, path)) {
+      continue;
+    }
+    const source = await readSource(step, expectedPath, path);
+    if (!source.ok) {
+      await cleanup();
+      return source;
+    }
+    const placed = await place(step, workspace.worktreeDirectory, path, source.value);
+    if (!placed.ok) {
+      await cleanup();
+      return placed;
+    }
+    removed.push(...placed.value);
+    restored.push(path);
+  }
+
+  await cleanup();
+  return { ok: true, value: { restored: sortedUnique(restored), removed: sortedUnique(removed) } };
+}
+
+/** Copies one already-sorted overlay snapshot onto the worktree root, hashing every file it writes. */
+async function overlayStep(
+  worktreeDirectory: string,
+  snapshot: OverlaySnapshot,
+): Promise<TevuResult<OverlayRecord, "CheckStateError">> {
+  const step: CheckStateStep = "overlay";
+  const files: OverlayFileRecord[] = [];
+  const removed: string[] = [];
+  for (const entry of snapshot) {
+    if (entry.kind === "directory") {
+      const placed = await placeDirectory(step, worktreeDirectory, entry.path);
+      if (!placed.ok) {
+        return placed;
+      }
+      removed.push(...placed.value);
+    } else {
+      const placed = await place(step, worktreeDirectory, entry.path, {
+        kind: "file",
+        bytes: entry.bytes,
+        executable: entry.executable,
+      });
+      if (!placed.ok) {
+        return placed;
+      }
+      removed.push(...placed.value);
+      files.push({ path: entry.path, sha256: sha256Hex(entry.bytes) });
+    }
+  }
+  return { ok: true, value: { files, removed: sortedUnique(removed) } };
+}
+
+/**
+ * Reads one overlay directory into a snapshot without writing: rejects a
+ * missing or non-directory path, a symbolic link, a non-regular/non-directory
+ * entry, an entry named `.git`, and an unreadable file or directory, then
+ * returns every entry sorted ascending by its path relative to `directory`.
+ */
+async function readOverlay(directory: string): Promise<TevuResult<OverlaySnapshot, "CheckStateError">> {
+  let rootStat: Stats;
+  try {
+    rootStat = await stat(directory);
+  } catch (cause) {
+    const code = systemErrorCode(cause);
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return checkStateFailure("overlay", `overlay directory "${directory}" does not exist`);
+    }
+    return checkStateFailure("overlay", `overlay directory "${directory}" cannot be read: ${describeCause(cause)}`);
+  }
+  if (!rootStat.isDirectory()) {
+    return checkStateFailure("overlay", `overlay path "${directory}" is not a directory`);
+  }
+
+  const entries: OverlayEntry[] = [];
+
+  const walk = async (relative: string): Promise<TevuResult<void, "CheckStateError">> => {
+    const absoluteDirectory = relative.length === 0 ? directory : join(directory, relative);
+    let names: string[];
+    try {
+      names = await readdir(absoluteDirectory);
+    } catch (cause) {
+      return checkStateFailure(
+        "overlay",
+        `overlay directory "${directory}" entry "${relative}" cannot be read: ${describeCause(cause)}`,
+      );
+    }
+    for (const name of [...names].sort()) {
+      const childRelative = relative.length === 0 ? name : `${relative}/${name}`;
+      if (name === ".git") {
+        return checkStateFailure(
+          "overlay",
+          `overlay directory "${directory}" must not contain an entry named .git; found "${childRelative}"`,
+        );
+      }
+      let childStat: Stats;
+      try {
+        childStat = await lstat(join(directory, childRelative));
+      } catch (cause) {
+        return checkStateFailure(
+          "overlay",
+          `overlay directory "${directory}" entry "${childRelative}" cannot be read: ${describeCause(cause)}`,
+        );
+      }
+      if (childStat.isSymbolicLink()) {
+        return checkStateFailure(
+          "overlay",
+          `overlay directory "${directory}" must contain only regular files and directories; "${childRelative}" is a symbolic link`,
+        );
+      }
+      if (childStat.isDirectory()) {
+        entries.push({ kind: "directory", path: childRelative });
+        const nested = await walk(childRelative);
+        if (!nested.ok) {
+          return nested;
+        }
+        continue;
+      }
+      if (!childStat.isFile()) {
+        return checkStateFailure(
+          "overlay",
+          `overlay directory "${directory}" must contain only regular files and directories; "${childRelative}" is neither a regular file nor a directory`,
+        );
+      }
+      try {
+        const bytes = await readFile(join(directory, childRelative));
+        entries.push({ kind: "file", path: childRelative, executable: (childStat.mode & 0o100) !== 0, bytes });
+      } catch (cause) {
+        return checkStateFailure(
+          "overlay",
+          `overlay directory "${directory}" entry "${childRelative}" cannot be read: ${describeCause(cause)}`,
+        );
+      }
+    }
+    return { ok: true, value: undefined };
+  };
+
+  const walked = await walk("");
+  if (!walked.ok) {
+    return walked;
+  }
+  entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return { ok: true, value: entries };
+}
+
+/**
+ * Resets `request.restore`'s matched paths to the base tree, then copies
+ * `request.overlay` onto the worktree root so an overlay file wins over a
+ * restored file at the same path. Checks the worktree root itself before the
+ * first write; every other write and delete stays inside it by construction
+ * of {@link place}, {@link placeDirectory}, and {@link deleteEntry}.
+ */
+async function applyCheckState(
+  workspace: CaseWorkspace,
+  request: CheckStateRequest,
+): Promise<TevuResult<CheckStateRecord, "CheckStateError">> {
+  const first: CheckStateStep = request.restore.length === 0 ? "overlay" : "restore";
+  let rootStat: Stats;
+  try {
+    rootStat = await lstat(workspace.worktreeDirectory);
+  } catch (cause) {
+    return checkStateFailure(first, `read failed for ".": ${describeCause(cause)}`);
+  }
+  if (!rootStat.isDirectory()) {
+    return checkStateFailure(first, "worktree root is not a directory");
+  }
+
+  let restore: RestoreRecord | null = null;
+  if (request.restore.length > 0) {
+    const result = await restoreStep(workspace, request.restore);
+    if (!result.ok) {
+      return result;
+    }
+    restore = result.value;
+  }
+  let overlay: OverlayRecord | null = null;
+  if (request.overlay !== null) {
+    const result = await overlayStep(workspace.worktreeDirectory, request.overlay);
+    if (!result.ok) {
+      return result;
+    }
+    overlay = result.value;
+  }
+  return { ok: true, value: { restore, overlay } };
 }
 
 function sourceError(

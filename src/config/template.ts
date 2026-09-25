@@ -82,6 +82,8 @@ tasks:
       - The expected columns and escaping rules are defined.
 
     checks:
+      # restore: ["tests/**", vitest.config.ts]       # reset to base_commit before checks run
+      # overlay: ./hidden-checks/csv-export           # copied onto the repository root before checks run
       # Does the change solve the task? At least one check must be required.
       acceptance:
         - id: csv-content

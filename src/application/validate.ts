@@ -42,6 +42,7 @@ export async function validateConfig(
     ...(await collectHostFindings(dependencies)),
     ...collectEnvironmentFindings(config, dependencies),
     ...(await collectSourceFindings(config, dependencies)),
+    ...(await collectOverlayFindings(config, dependencies)),
     ...(await collectArtifactFindings(config, dependencies)),
   ];
 
@@ -183,6 +184,38 @@ async function collectSourceFindings(
     );
     if (reason !== undefined) {
       findings.push({ severity: "error", identifier: `tasks.${task.id}`, message: reason });
+    }
+  }
+  return findings;
+}
+
+/**
+ * Reads each distinct configured overlay directory once, discards the
+ * snapshot, and emits one error finding per task, in configuration order,
+ * whose overlay directory failed.
+ */
+async function collectOverlayFindings(
+  config: TevuConfig,
+  dependencies: ValidationDependencies,
+): Promise<ValidationFinding[]> {
+  const findings: ValidationFinding[] = [];
+  const read = new Map<string, TevuResult<unknown, "CheckStateError">>();
+  for (const task of config.tasks) {
+    const directory = task.checks.overlay;
+    if (directory === undefined) {
+      continue;
+    }
+    let result = read.get(directory);
+    if (result === undefined) {
+      result = await dependencies.git.readOverlay(directory);
+      read.set(directory, result);
+    }
+    if (!result.ok) {
+      findings.push({
+        severity: "error",
+        identifier: `tasks.${task.id}.checks.overlay`,
+        message: result.error.reason,
+      });
     }
   }
   return findings;

@@ -20,6 +20,8 @@ import type {
   CaseLifecycle,
   CaseResult,
   CaseWorkspace,
+  CheckStateRecord,
+  CheckStateRequest,
   Clock,
   EnvironmentAdapter,
   EnvironmentVariableRecord,
@@ -30,6 +32,7 @@ import type {
   HostProbe,
   IsolatedEnvironment,
   MetricValue,
+  OverlaySnapshot,
   ParentEnvironmentSnapshot,
   PrerequisiteAdapter,
   ProcessResult,
@@ -413,6 +416,12 @@ function createHarness(config: TevuConfig) {
     createIsolatedCaseError: null as
       | Extract<TevuError, { kind: "SourceMaterializationError" | "IsolationError" }>
       | null,
+    readOverlayCalls: [] as string[],
+    readOverlayError: null as Extract<TevuError, { kind: "CheckStateError" }> | null,
+    readOverlaySnapshots: new Map<string, OverlaySnapshot>(),
+    applyCheckStateCalls: [] as Array<{ caseId: string; request: CheckStateRequest }>,
+    applyCheckStateError: null as Extract<TevuError, { kind: "CheckStateError" }> | null,
+    applyCheckStateResults: new Map<string, CheckStateRecord>(),
   };
 
   const git: GitWorkspaceAdapter = {
@@ -449,6 +458,25 @@ function createHarness(config: TevuConfig) {
     async isReadable(workspace) {
       timeline.push(`isReadable:${workspace.caseId}`);
       return !gitState.unreadableCaseIds.has(workspace.caseId);
+    },
+    async readOverlay(directory) {
+      gitState.readOverlayCalls.push(directory);
+      timeline.push(`readOverlay:${directory}`);
+      if (gitState.readOverlayError !== null) {
+        return { ok: false, error: gitState.readOverlayError };
+      }
+      return { ok: true, value: gitState.readOverlaySnapshots.get(directory) ?? [] };
+    },
+    async applyCheckState(workspace, request) {
+      gitState.applyCheckStateCalls.push({ caseId: workspace.caseId, request });
+      timeline.push(`applyCheckState:${workspace.caseId}`);
+      if (gitState.applyCheckStateError !== null) {
+        return { ok: false, error: gitState.applyCheckStateError };
+      }
+      return {
+        ok: true,
+        value: gitState.applyCheckStateResults.get(workspace.caseId) ?? { restore: null, overlay: null },
+      };
     },
   };
 
@@ -1804,6 +1832,125 @@ describe("runBenchmark", () => {
     expect(caseResult.failure).toBeNull();
     expect(caseResult.process?.exitCode).toBe(0);
     expect(run.exitCode).toBe(2);
+  });
+});
+
+describe("runBenchmark check-state orchestration", () => {
+  function buildOverlaySnapshot(): OverlaySnapshot {
+    return [{ kind: "file", path: "hidden.txt", executable: false, bytes: new Uint8Array([1, 2, 3]) }];
+  }
+
+  it("reads each distinct overlay directory once between the last validateSource call and the run start, and calls applyCheckState once per case between the patch write and the first evaluator process", async () => {
+    const overlaySnapshot = buildOverlaySnapshot();
+    const config = buildTevuConfig({
+      run: buildRunSettings({ concurrency: 1 }),
+      tasks: [
+        buildTask({
+          id: "task-1",
+          checks: { ...buildTask().checks, restore: ["tests/**"], overlay: "/synthetic/overlay-a" },
+        }),
+      ],
+    });
+    const harness = createHarness(config);
+    harness.git.readOverlaySnapshots.set("/synthetic/overlay-a", overlaySnapshot);
+
+    const result = await runBenchmark(planBenchmark(config), harness.dependencies);
+
+    const run = unwrapOk(result);
+    expect(harness.git.readOverlayCalls).toEqual(["/synthetic/overlay-a"]);
+    const readOverlayIndex = harness.timeline.indexOf("readOverlay:/synthetic/overlay-a");
+    const lastValidateSourceIndex = harness.timeline.lastIndexOf("validateSource:repo-1");
+    const startRunIndex = harness.timeline.findIndex((entry) => entry.startsWith("startRun:"));
+    expect(readOverlayIndex).toBeGreaterThan(lastValidateSourceIndex);
+    expect(readOverlayIndex).toBeLessThan(startRunIndex);
+
+    expect(harness.git.applyCheckStateCalls).toHaveLength(2);
+    for (const call of harness.git.applyCheckStateCalls) {
+      expect(call.request).toEqual({ restore: ["tests/**"], overlay: overlaySnapshot });
+    }
+    const firstCaseId = harness.git.applyCheckStateCalls[0]?.caseId;
+    const applyIndex = harness.timeline.indexOf(`applyCheckState:${firstCaseId}`);
+    const patchWriteIndex = harness.timeline.indexOf(`writePatch:${firstCaseId}`);
+    const firstCheckIndex = harness.timeline.findIndex((entry) => entry.startsWith("check:"));
+    expect(applyIndex).toBeGreaterThan(patchWriteIndex);
+    expect(applyIndex).toBeLessThan(firstCheckIndex);
+    expect(run.exitCode).toBe(0);
+  });
+
+  it("ends the case as infrastructure-failed with no checks and no evaluator process when applyCheckState fails", async () => {
+    const config = buildTevuConfig({
+      run: buildRunSettings({ concurrency: 1 }),
+      tasks: [buildTask({ id: "task-1", checks: { ...buildTask().checks, restore: ["tests/**"] } })],
+    });
+    const harness = createHarness(config);
+    const failure: Extract<TevuError, { kind: "CheckStateError" }> = {
+      kind: "CheckStateError",
+      step: "restore",
+      reason: "synthetic restore failure",
+    };
+    harness.git.applyCheckStateError = failure;
+
+    const result = await runBenchmark(planBenchmark(config), harness.dependencies);
+
+    const run = unwrapOk(result);
+    const failedCase = caseResultOf(run, "task-1--c1");
+    expect(failedCase.lifecycle).toBe("infrastructure-failed");
+    expect(failedCase.outcome).toBe("not-evaluated");
+    expect(failedCase.checks).toEqual([]);
+    expect(failedCase.artifacts.checks).toBeNull();
+    expect(failedCase.artifacts.solutionPatch).toBe("task-1--c1/solution.patch");
+    expect(failedCase.failure?.error).toEqual(failure);
+    expect(harness.timeline.filter((entry) => entry.startsWith("check:"))).toEqual([]);
+    expect(run.exitCode).toBe(1);
+  });
+
+  it("never calls applyCheckState or readOverlay, and omits checkState, for a task declaring neither key", async () => {
+    const config = buildTevuConfig({ tasks: [buildTask({ id: "task-1" })] });
+    const harness = createHarness(config);
+
+    const result = await runBenchmark(planBenchmark(config), harness.dependencies);
+
+    const run = unwrapOk(result);
+    expect(harness.git.readOverlayCalls).toEqual([]);
+    expect(harness.git.applyCheckStateCalls).toEqual([]);
+    for (const caseResult of run.cases) {
+      expect(Object.hasOwn(caseResult, "checkState")).toBe(false);
+    }
+  });
+
+  it("never calls applyCheckState and omits checkState for a task declaring an empty restore array without an overlay", async () => {
+    const config = buildTevuConfig({
+      tasks: [buildTask({ id: "task-1", checks: { ...buildTask().checks, restore: [] } })],
+    });
+    const harness = createHarness(config);
+
+    const result = await runBenchmark(planBenchmark(config), harness.dependencies);
+
+    const run = unwrapOk(result);
+    expect(harness.git.applyCheckStateCalls).toEqual([]);
+    expect(Object.hasOwn(caseResultOf(run, "task-1--c1"), "checkState")).toBe(false);
+  });
+
+  it("returns the readOverlay failure unchanged before the run starts, any case is prepared, or any agent runs", async () => {
+    const config = buildTevuConfig({
+      tasks: [
+        buildTask({ id: "task-1", checks: { ...buildTask().checks, overlay: "/synthetic/overlay-a" } }),
+      ],
+    });
+    const harness = createHarness(config);
+    const failure: Extract<TevuError, { kind: "CheckStateError" }> = {
+      kind: "CheckStateError",
+      step: "overlay",
+      reason: "synthetic overlay unreadable",
+    };
+    harness.git.readOverlayError = failure;
+
+    const result = await runBenchmark(planBenchmark(config), harness.dependencies);
+
+    expect(result).toEqual({ ok: false, error: failure });
+    expect(harness.timeline.some((entry) => entry.startsWith("startRun:"))).toBe(false);
+    expect(harness.timeline.some((entry) => entry.startsWith("prepare:"))).toBe(false);
+    expect(harness.agent.runCalls.size).toBe(0);
   });
 });
 
