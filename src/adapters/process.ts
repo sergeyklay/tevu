@@ -13,7 +13,7 @@ import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { execa } from "execa";
 
-import { checkEnvironmentNames, referencedVariableName } from "../config/schema.ts";
+import { evaluatorEnvironmentNames, referencedVariableName } from "../config/schema.ts";
 import { describeCause } from "../domain/describe-cause.ts";
 import { redactDecodedValue } from "../domain/redaction.ts";
 
@@ -261,9 +261,10 @@ export async function runManagedProcess(
 }
 
 /**
- * Creates the benchmark-task acceptance command runner. Secret values are read
- * per launch so the adapter can be constructed before the run-level parent
- * environment snapshot exists.
+ * Creates the benchmark-task acceptance command runner, also used to run
+ * repository setup commands. Secret values are read per launch so the
+ * adapter can be constructed before the run-level parent environment
+ * snapshot exists.
  */
 export function createEvaluatorProcessAdapter(
   readSecretValues: () => readonly string[],
@@ -352,7 +353,7 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
           // Ordinary evaluator values are added per check by the evaluation
           // module from its declared allowlist, so only their names enter the
           // manifest here and no value enters the fixed base.
-          additions: checkEnvironmentNames(config).map((name) => ({
+          additions: evaluatorEnvironmentNames(config).map((name) => ({
             name,
             classification: "ordinary" as const,
           })),
@@ -544,7 +545,7 @@ function snapshotParentEnvironment(
   }
 
   const ordinaryEvaluatorValues: Record<string, string> = {};
-  for (const name of checkEnvironmentNames(config)) {
+  for (const name of evaluatorEnvironmentNames(config)) {
     const value = process.env[name];
     if (value === undefined) {
       return missingVariableError(name);

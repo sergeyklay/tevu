@@ -10,13 +10,14 @@ import pLimit from "p-limit";
 
 import { agentNamesInUse, durationMs } from "../config/schema.ts";
 import { unavailableBenchmarkMetrics } from "../domain/types.ts";
-import { evaluateChecks, orderTaskChecks, reduceRequiredOutcome } from "../evaluation/checks.ts";
+import { buildCheckEnvironment, evaluateChecks, orderTaskChecks, reduceRequiredOutcome } from "../evaluation/checks.ts";
 import { combineCaseMetrics } from "../evaluation/metrics.ts";
 import { compareCaseIds } from "../evaluation/report.ts";
+import { runSetupPhase } from "./repository-setup.ts";
 import { buildTaskPrompt } from "./task-prompt.ts";
 import { describeSourceCommitInPrompt } from "./source-commit-in-prompt.ts";
 
-import type { TaskDefinition, TevuConfig } from "../config/schema.ts";
+import type { RepositorySetup, TaskDefinition, TevuConfig } from "../config/schema.ts";
 import type {
   AgentCapabilityReport,
   AgentEventRecord,
@@ -36,15 +37,19 @@ import type {
   GitWorkspaceAdapter,
   OverlaySnapshot,
   ParentEnvironmentSnapshot,
+  PatchBase,
   RepeatSetting,
   RunDependencies,
   RunFinding,
   RunManifest,
   RunResult,
+  SetupCommandRecord,
+  SetupPhase,
   TevuError,
   TevuResult,
 } from "../domain/types.ts";
 import type { OrderedCheck } from "../evaluation/checks.ts";
+import type { SetupPhaseOutcome } from "./repository-setup.ts";
 
 type OrderedChecks = readonly OrderedCheck[];
 
@@ -281,6 +286,8 @@ type PlannedCase = {
   task: TaskDefinition;
   /** The run's snapshot of `task.checks.overlay`; `null` before `pinOverlays` runs or when the task declares none. */
   overlay: OverlaySnapshot | null;
+  /** The matched repository's `setup` block, or `null` when it declares none. */
+  setup: RepositorySetup | null;
 };
 
 /** Mutable state shared by every scheduled case of one run. */
@@ -313,6 +320,10 @@ type ActiveCase = {
   checksWritten: boolean;
   overlay: OverlaySnapshot | null;
   checkState: CheckStateRecord | null;
+  setup: RepositorySetup | null;
+  setupCommands: SetupCommandRecord[];
+  setupLogs: { beforeAgent: string | null; beforeChecks: string | null };
+  patchBase: PatchBase | null;
 };
 
 function cancellationFailure(): {
@@ -364,7 +375,12 @@ async function resolvePlannedCases(
     if (reason !== undefined) {
       return sourceFailure(task.id, reason);
     }
-    planned.push({ identity: { ...identity, sourceCommit: commit }, task, overlay: null });
+    planned.push({
+      identity: { ...identity, sourceCommit: commit },
+      task,
+      overlay: null,
+      setup: repository.setup ?? null,
+    });
   }
   return { ok: true, value: planned };
 }
@@ -473,6 +489,10 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
     checksWritten: false,
     overlay: entry.overlay,
     checkState: null,
+    setup: entry.setup,
+    setupCommands: [],
+    setupLogs: { beforeAgent: null, beforeChecks: null },
+    patchBase: null,
   };
   run.activeAborts.set(caseId, active.abort);
   if (run.state.cancelled) {
@@ -488,6 +508,15 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
 
 async function runActiveCase(run: RunContext, active: ActiveCase): Promise<void> {
   const caseId = active.identity.caseId;
+
+  if (active.setup?.before_agent !== undefined) {
+    const terminal = await evaluateBeforeAgentSetup(run, active);
+    if (terminal !== null) {
+      await persistAndCleanup(run, terminal, active.workspace);
+      return;
+    }
+  }
+
   const adapter = requireCaseAgentAdapter(run, active.identity);
 
   emitLifecycle(run, caseId, "running");
@@ -521,6 +550,148 @@ async function runActiveCase(run: RunContext, active: ActiveCase): Promise<void>
   });
   const result = await concludeCase(run, active, outcome);
   await persistAndCleanup(run, result, active.workspace);
+}
+
+/** Outcome of {@link runSetup}: the phase outcome, or a log write failure the phase outcome itself cannot carry. */
+type SetupStepResult = SetupPhaseOutcome | { status: "log-failed"; error: Extract<TevuError, { kind: "ArtifactError" }> };
+
+/**
+ * Runs one declared setup phase's commands, shared by step b (`before_agent`)
+ * and step g (`before_checks`). Appends every started command to
+ * `active.setupCommands`, and, when at least one command started, writes the
+ * phase log and records its path on `active.setupLogs`. A log-write failure
+ * stops further case scheduling, as {@link recordArtifactFailure} does for a
+ * mid-case artifact failure.
+ *
+ * @throws when `active.setup` or its `phase` key is undeclared; callers only
+ * invoke this after confirming the phase is declared.
+ */
+async function runSetup(run: RunContext, active: ActiveCase, phase: SetupPhase): Promise<SetupStepResult> {
+  const setup = active.setup;
+  const commands = phase === "before_agent" ? setup?.before_agent : setup?.before_checks;
+  if (setup === null || commands === undefined) {
+    throw new Error(`unreachable: runSetup is only called when active.setup.${phase} is declared`);
+  }
+  const outcome = await runSetupPhase({
+    phase,
+    commands,
+    timeoutMs: durationMs(setup.timeout),
+    terminationGraceMs: run.plan.terminationGraceMs,
+    worktreeDirectory: active.workspace.worktreeDirectory,
+    environment: buildCheckEnvironment(active.environments.evaluator, run.snapshot, setup.env),
+    processes: run.dependencies.evaluatorProcesses,
+    cancellation: active.abort.signal,
+  });
+  active.setupCommands.push(...outcome.commands);
+  if (outcome.commands.length === 0) {
+    return outcome;
+  }
+  const caseId = active.identity.caseId;
+  const written = await run.dependencies.artifacts.writeSetupLog(caseId, phase, outcome.log);
+  if (!written.ok) {
+    run.state.stopScheduling = true;
+    return { status: "log-failed", error: written.error };
+  }
+  const paths = run.dependencies.artifacts.caseArtifactPaths(caseId);
+  if (phase === "before_agent") {
+    active.setupLogs.beforeAgent = paths.setupBeforeAgent;
+  } else {
+    active.setupLogs.beforeChecks = paths.setupBeforeChecks;
+  }
+  return outcome;
+}
+
+/**
+ * Runs step b (`before_agent`) and, on success, records the patch base.
+ * Returns the case's terminal result when the agent must never start, or
+ * `null` when control should reach the agent call (step c).
+ */
+async function evaluateBeforeAgentSetup(run: RunContext, active: ActiveCase): Promise<CaseResult | null> {
+  const cancelledResult = (): CaseResult =>
+    agentNotStartedResult(
+      run,
+      active,
+      "cancelled",
+      { kind: "CancellationError", activeCaseIds: [active.identity.caseId] },
+      "the case was cancelled before the agent started",
+    );
+
+  const step = await runSetup(run, active, "before_agent");
+  if (step.status === "log-failed") {
+    return agentNotStartedResult(
+      run,
+      active,
+      "infrastructure-failed",
+      step.error,
+      "the setup.before_agent log could not be written; the agent did not start",
+    );
+  }
+  if (step.status === "failed") {
+    return agentNotStartedResult(
+      run,
+      active,
+      "infrastructure-failed",
+      step.error,
+      "setup.before_agent failed; the agent did not start",
+    );
+  }
+  if (step.status === "cancelled" || run.state.cancelled) {
+    return cancelledResult();
+  }
+
+  const base = await run.dependencies.git.snapshotPatchBase(active.workspace);
+  if (!base.ok) {
+    return agentNotStartedResult(
+      run,
+      active,
+      "infrastructure-failed",
+      base.error,
+      "the patch base could not be recorded; the agent did not start",
+    );
+  }
+  if (run.state.cancelled) {
+    return cancelledResult();
+  }
+  active.patchBase = base.value;
+  return null;
+}
+
+/**
+ * Builds the terminal case result for a case whose `before_agent` setup
+ * never let the agent start: `adapter.run` is never called. Metrics are
+ * unavailable with the given run-time reason; `setup` is present only when
+ * at least one setup command started.
+ */
+function agentNotStartedResult(
+  run: RunContext,
+  active: ActiveCase,
+  lifecycle: Extract<CaseLifecycle, "infrastructure-failed" | "cancelled">,
+  failure: TevuError,
+  reason: string,
+): CaseResult {
+  const paths = run.dependencies.artifacts.caseArtifactPaths(active.identity.caseId);
+  return {
+    schemaVersion: 1,
+    identity: active.identity,
+    lifecycle,
+    process: null,
+    outcome: "not-evaluated",
+    checks: [],
+    metrics: unavailableBenchmarkMetrics(reason),
+    artifacts: {
+      events: null,
+      diagnostics: null,
+      sessionExport: null,
+      solutionPatch: null,
+      checks: null,
+      assessment: null,
+      result: paths.result,
+    },
+    failure: { error: failure, occurredAt: run.dependencies.clock.now().toISOString() },
+    ...(active.setupCommands.length === 0
+      ? {}
+      : { setup: { logs: active.setupLogs, commands: active.setupCommands } }),
+  };
 }
 
 /**
@@ -657,6 +828,19 @@ async function evaluateReadableCase(
     active.checkState = applied.value;
   }
 
+  if (active.setup?.before_checks !== undefined) {
+    const step = await runSetup(run, active, "before_checks");
+    if (step.status === "log-failed") {
+      return finishCase(run, active, "infrastructure-failed", step.error);
+    }
+    if (step.status === "failed") {
+      return finishCase(run, active, "infrastructure-failed", step.error);
+    }
+    if (step.status === "cancelled" || run.state.cancelled) {
+      return finishCase(run, active, "cancelled", preservedFailure);
+    }
+  }
+
   const ordered = orderTaskChecks(active.task);
   const evaluated = await evaluateChecks({
     caseId,
@@ -690,7 +874,7 @@ async function capturePatch(
   run: RunContext,
   active: ActiveCase,
 ): Promise<{ failure: TevuError | null; storeFailure: boolean }> {
-  const captured = await run.dependencies.git.capturePatch(active.workspace);
+  const captured = await run.dependencies.git.capturePatch(active.workspace, active.patchBase ?? undefined);
   if (!captured.ok) {
     return { failure: captured.error, storeFailure: false };
   }
@@ -773,6 +957,9 @@ function finishCase(
         ? null
         : { error: preserved, occurredAt: run.dependencies.clock.now().toISOString() },
     ...(active.checkState === null ? {} : { checkState: active.checkState }),
+    ...(active.setupCommands.length === 0
+      ? {}
+      : { setup: { logs: active.setupLogs, commands: active.setupCommands } }),
     context: {
       sourceRepositoryPath: active.workspace.sourceRepositoryPath,
       syntheticCommit: active.workspace.syntheticCommit,

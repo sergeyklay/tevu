@@ -453,6 +453,10 @@ function createHarness(config: TevuConfig) {
         value: { caseId: workspace.caseId, content: `synthetic patch ${workspace.caseId}`, isEmpty: false },
       };
     },
+    async snapshotPatchBase(workspace) {
+      timeline.push(`snapshotPatchBase:${workspace.caseId}`);
+      return { ok: true, value: { tree: `tree-${workspace.caseId}`, objectDirectory: `objects-${workspace.caseId}` } };
+    },
     async dispose(workspace) {
       timeline.push(`dispose:${workspace.caseId}`);
       const error = gitState.disposeErrors.get(workspace.caseId);
@@ -570,6 +574,8 @@ function createHarness(config: TevuConfig) {
         checks: `${caseId}/checks.json`,
         assessment: `${caseId}/assessment.json`,
         result: `${caseId}/result.json`,
+        setupBeforeAgent: `${caseId}/setup-before-agent.log`,
+        setupBeforeChecks: `${caseId}/setup-before-checks.log`,
       };
     },
     async startRun(manifest) {
@@ -587,6 +593,9 @@ function createHarness(config: TevuConfig) {
     },
     async writePatch(caseId) {
       return recordArtifactCall("writePatch", caseId);
+    },
+    async writeSetupLog(caseId) {
+      return recordArtifactCall("writeSetupLog", caseId);
     },
     async writeChecks(caseId) {
       return recordArtifactCall("writeChecks", caseId);
@@ -1918,6 +1927,76 @@ describe("runBenchmark", () => {
     expect(caseResult.failure).toBeNull();
     expect(caseResult.process?.exitCode).toBe(0);
     expect(run.exitCode).toBe(2);
+  });
+});
+
+describe("runBenchmark repository setup orchestration (P5, P6, AC-2, AC-3)", () => {
+  it("ends a failing before_agent command as not-evaluated, never starting the agent, and names the phase and command (AC-2, P5)", async () => {
+    const config = buildTevuConfig({
+      run: buildRunSettings({ concurrency: 1 }),
+      repositories: [
+        {
+          id: "repo-1",
+          path: "/synthetic/source",
+          setup: { before_agent: [["/synthetic/setup-before-agent"]], timeout: "5s", env: [] },
+        },
+      ],
+      tasks: [buildTask()],
+    });
+    const harness = createHarness(config);
+    harness.evaluatorProcesses.exitCodes.set("/synthetic/setup-before-agent", 7);
+
+    const run = unwrapOk(await runBenchmark(planBenchmark(config), harness.dependencies));
+
+    const caseResult = caseResultOf(run, "task-1--c1--1");
+    expect(caseResult.lifecycle).toBe("infrastructure-failed");
+    expect(caseResult.outcome).toBe("not-evaluated");
+    expect(harness.agent.runCalls.size).toBe(0);
+    expect(caseResult.failure?.error).toMatchObject({
+      kind: "SetupError",
+      phase: "before_agent",
+      argv: ["/synthetic/setup-before-agent"],
+    });
+    expect(caseResult.setup?.commands).toEqual([
+      expect.objectContaining({
+        phase: "before_agent",
+        argv: ["/synthetic/setup-before-agent"],
+        outcome: "failed",
+      }),
+    ]);
+  });
+
+  it("ends a failing before_checks command as not-evaluated with no check started and the solution patch preserved (AC-3, P6)", async () => {
+    const config = buildTevuConfig({
+      run: buildRunSettings({ concurrency: 1 }),
+      repositories: [
+        {
+          id: "repo-1",
+          path: "/synthetic/source",
+          setup: { before_checks: [["/synthetic/setup-before-checks"]], timeout: "5s", env: [] },
+        },
+      ],
+      tasks: [buildTask()],
+    });
+    const harness = createHarness(config);
+    harness.evaluatorProcesses.exitCodes.set("/synthetic/setup-before-checks", 9);
+
+    const run = unwrapOk(await runBenchmark(planBenchmark(config), harness.dependencies));
+
+    const caseResult = caseResultOf(run, "task-1--c1--1");
+    expect(caseResult.lifecycle).toBe("infrastructure-failed");
+    expect(caseResult.outcome).toBe("not-evaluated");
+    expect(caseResult.artifacts.solutionPatch).toBe("task-1--c1--1/solution.patch");
+    expect(
+      harness.evaluatorProcesses.requests.every(
+        (request) => request.argv[0] !== "/synthetic/acc-required" && request.argv[0] !== "/synthetic/dod-required",
+      ),
+    ).toBe(true);
+    expect(caseResult.failure?.error).toMatchObject({
+      kind: "SetupError",
+      phase: "before_checks",
+      argv: ["/synthetic/setup-before-checks"],
+    });
   });
 });
 

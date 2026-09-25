@@ -58,6 +58,11 @@ trackers:
 repositories:
   - id: app
     path: ../your-app
+    # setup:                        # prepares every case of this repository, without a shell
+    #   before_agent: [[npm, ci]]   # before the agent starts
+    #   before_checks: [[npm, ci]]  # after restore and overlay, before the checks
+    #   timeout: 5m                 # limit for one setup command; required with setup
+    #   env: [NPM_CONFIG_REGISTRY]  # ordinary variables the setup commands receive
 
 # --- Models -----------------------------------------------------------------
 # What the benchmark compares: at least two entries.
@@ -128,14 +133,14 @@ tasks:
 | `run.output_dir` | Non-empty; run evidence directory, outside and non-overlapping with configured repositories after resolving symlinks |
 | `run.concurrency` | Integer from 1 through 32 |
 | `run.repeat` | Integer from 1 through 100, optional, default `1`; attempts per task/model pair, each an independent case; `tevu run --repeat <n>` overrides it for one run |
-| `run.timeout` | Duration; agent time limit per case; a timed-out case skips its checks |
+| `run.timeout` | Duration; agent time limit per case; a timed-out case skips its checks and `setup.before_checks` |
 | `run.stop_grace` | Duration; delay between graceful and forced process-group termination |
 | `run.check_timeout` | Duration, optional; default time limit for a command check that declares none |
 | `agents.opencode.command` | Non-empty executable name or path; no agent-version constraint is accepted |
 | `agents.opencode.secrets` | Variable names passed to the agent and redacted from every artifact; default `[]` |
 | `agents.opencode.env` | Variable names passed to the agent as-is; default `[]` |
 | `trackers.jira` | Optional Jira Cloud connection settings |
-| `repositories` | At least one `{id, path}` entry |
+| `repositories` | At least one `{id, path}` entry, each optionally carrying `setup` |
 | `models` | At least two `{id, model, effort, agent}` entries |
 | `tasks` | At least one task |
 
@@ -150,7 +155,7 @@ A model entry is one model/effort combination. `model` uses `provider/model` syn
 | Name | Rule |
 | --- | --- |
 | Duration | A positive integer without leading zeros followed by exactly one unit: `ms`, `s`, `m`, or `h`, for example `500ms`, `30s`, `10m`, `1h`. At most `2147483647` milliseconds |
-| Variable name | A letter or underscore followed by letters, digits, or underscores. In `agents.opencode.secrets`, `agents.opencode.env`, and a check's `env`, it must not be `PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL`, `CI`, or begin with `XDG_` |
+| Variable name | A letter or underscore followed by letters, digits, or underscores. In `agents.opencode.secrets`, `agents.opencode.env`, a check's `env`, and `setup.env`, it must not be `PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL`, `CI`, or begin with `XDG_` |
 | `$VARIABLE` reference | A dollar sign followed by a variable name, for example `$JIRA_API_TOKEN`; used only for `trackers.jira.email` and `trackers.jira.token` |
 
 The duration bound keeps a configured value inside what a Node.js timer can schedule; a longer value is rejected rather than silently truncated. Secrets are never written to the configuration file: a credential is a `$VARIABLE` reference or a bare variable name, and its value comes from the environment that launches tevu.
@@ -209,11 +214,11 @@ run: [npm, test]
 # required: false       # checks are required unless stated otherwise
 ```
 
-Commands run sequentially in the case workspace. Arguments are passed directly, without a shell. A target task's test command is independent of tevu's own product-test runner. The solution patch is captured before checks run; restore and overlay then run, so command checks see the restored and overlaid worktree rather than the state the agent left.
+Commands run sequentially in the case workspace. Arguments are passed directly, without a shell. A target task's test command is independent of tevu's own product-test runner. The solution patch is captured before checks run, relative to the state `before_agent` left when the repository declares one; restore and overlay then run, followed by `setup.before_checks` when declared, so command checks see the restored and overlaid worktree rather than the state the agent left.
 
 ### Restore and overlay
 
-After the solution patch is captured, tevu resets every path `checks.restore` matches to `base_commit` and then copies `checks.overlay`'s files onto the worktree root, before the first check runs. Both keys are optional and independent; a task can declare either, both, or neither. tevu reads a configured overlay directory once per run, before the run starts, so every case that uses it writes the same snapshot; editing the directory during a run changes no case of that run, and takes effect only in the next run.
+After the solution patch is captured, tevu resets every path `checks.restore` matches to `base_commit` and then copies `checks.overlay`'s files onto the worktree root; `setup.before_checks` runs after this restore and overlay step, and before the first check. Both keys are optional and independent; a task can declare either, both, or neither. tevu reads a configured overlay directory once per run, before the run starts, so every case that uses it writes the same snapshot; editing the directory during a run changes no case of that run, and takes effect only in the next run.
 
 `checks.restore` patterns are git pathspecs with `:(glob)` magic: `*`, `?`, and `[...]` do not match `/`; `**/` matches zero or more leading directories; `/**` matches everything inside a directory; a pattern without wildcard characters also matches everything beneath a directory of that name. `restore: []` and an absent `restore` both declare nothing to restore.
 
@@ -223,11 +228,36 @@ Restore returns every matched path in the base tree to the state a checkout of `
 
 `tevu validate` and `tevu run` reject a missing, non-directory, or otherwise invalid overlay, a restore pattern that is empty or escapes the repository root (a leading `/` or a `..` segment), an overlay inside a configured repository, and an overlay overlapping `run.output_dir`. A restore or overlay step that fails at run time, for example against worktree state the agent left, ends the case as `infrastructure-failed` with failure kind `CheckStateError`; see the [results reference](results.md#check-state) for the recorded evidence and the [isolation explanation](../concepts/isolation.md#context-isolation-is-not-a-sandbox) for why hidden checks are not a sandbox boundary.
 
+## Repository setup
+
+An entry in `repositories` may declare `setup`, which prepares every case that uses it.
+
+| Field | Contract |
+| --- | --- |
+| `setup.before_agent` | List of commands; run once per case after sealing, before the agent starts. `[]` is equivalent to an absent key |
+| `setup.before_checks` | List of commands; run after restore and overlay, before the first check. `[]` is equivalent to an absent key |
+| `setup.timeout` | Duration; limit for one setup command; required whenever `setup` is present, with no fallback to `run.check_timeout` |
+| `setup.env` | Variable names passed as-is to this repository's setup commands; default `[]` |
+
+At least one of `before_agent` and `before_checks` must hold a command. A setup command is the same shape as a check's `run`: a non-empty executable followed by literal string arguments, no shell.
+
+A case with `setup` declared runs these steps, in order: seal the case and build its environments; run `before_agent` and, on success, record the worktree as the patch base, when the repository declares `before_agent`; run the agent; capture the solution patch, relative to the patch base when one was recorded, otherwise relative to the case's synthetic root commit; restore and overlay; run `before_checks`, when the repository declares it; run the checks. Each setup command's environment is the fixed evaluator environment plus `setup.env`, built the same way a check's environment is, and its working directory is the case worktree. Commands of one phase run sequentially in declared order; no agent secret or `agents.opencode.env`/`agents.opencode.secrets` value is ever present.
+
+`before_agent` is the only setup phase that runs before the agent, so whatever it leaves in the worktree, the evaluator home, or the evaluator temporary directory is visible to the agent, which can read and change it before `before_checks` and the checks reuse those directories; restore reaches only the worktree paths `checks.restore` matches. A `setup.env` value is an ordinary variable, not a secret: a setup command that prints it leaves it unredacted in its phase log, and one written to a file the agent reads reaches the agent. There is no `setup.secrets` key; a credential a setup command needs, such as a private registry token, is out of scope.
+
+A setup command's timeout is `setup.timeout`, independent of `run.timeout` and `run.check_timeout`. A `before_agent` or `before_checks` command that fails, times out, or does not start ends the case as `infrastructure-failed` with outcome `not-evaluated`: a `before_agent` failure means the agent never started, and a `before_checks` failure means no check ran. A run cancellation during either phase ends the case as `cancelled`. See the [results reference](results.md#repository-setup) for the recorded evidence.
+
+The patch base records the worktree state `before_agent` left, in a private object directory outside the case repository, so `solution.patch` applies to that state rather than to `base_commit`: a `before_agent` output the agent left unchanged never appears in it. A path an ignore rule keeps out of the base, such as `node_modules`, enters the patch as added only if the agent changes the ignore rules so the rule no longer matches it.
+
+Restore resets every `checks.restore`-matched path to `base_commit` and removes every matched untracked path, so its removed-path evidence can list `before_agent` output. A file `before_checks` reads, such as `package.json`, `package-lock.json`, or `.npmrc`, stays agent-editable unless a restore pattern names it.
+
+`tevu validate` and `tevu run` reject a `setup` block that declares neither phase, a command that is empty or starts with an empty argument, a missing `timeout`, a `setup.env` name shared with an agent's `secrets` or `env`, a Jira credential variable, a duplicate name, or a fixed name.
+
 ## Environment variables
 
 `agents.opencode.secrets` and `agents.opencode.env` name variables by value only: every `secrets` entry is redacted from saved and displayed evidence, and every `env` entry is passed through as-is. A name cannot appear in both lists, and neither list may repeat a name.
 
-A check's `env` names ordinary variables available to that command only. A name there must not also appear in `agents.opencode.secrets` or `agents.opencode.env`, and must not be the variable that `trackers.jira.email` or `trackers.jira.token` references. Every declared variable must be present in the launching environment.
+A check's `env` names ordinary variables available to that command only. A name there must not also appear in `agents.opencode.secrets` or `agents.opencode.env`, and must not be the variable that `trackers.jira.email` or `trackers.jira.token` references. Every declared variable must be present in the launching environment. `setup.env` follows the same rule.
 
 `PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_ALL`, `CI`, and all `XDG_*` names are supplied by tevu and cannot be configured in these lists.
 
@@ -242,7 +272,7 @@ A check's `env` names ordinary variables available to that command only. A name 
 | `LANG`, `LC_ALL` | `C.UTF-8` |
 | `CI` | `1` |
 
-No other parent variables are inherited. Sequential checks reuse these directories. Evaluator home, state, and temporary directories are separate from the agent's directories.
+No other parent variables are inherited. Sequential checks and setup commands reuse these directories. Evaluator home, state, and temporary directories are separate from the agent's directories.
 
 Agent processes receive the same fixed variable names with their own per-case home, state, and temporary directories, plus the variables declared in `agents.opencode.secrets` and `agents.opencode.env`. Host agent sessions, global configuration, caches, and login stores are not copied.
 

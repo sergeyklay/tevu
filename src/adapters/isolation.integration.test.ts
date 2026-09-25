@@ -3,9 +3,9 @@ import { execa } from "execa";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import process from "node:process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -618,6 +618,74 @@ describe("pre-evaluation patch capture", () => {
     const stagedInRealIndex = await runGit(workspace.worktreeDirectory, ["diff", "--cached", "--name-only"]);
     expect(stagedInRealIndex.stdout).toBe("");
   });
+});
+
+/** Recursively hashes every regular file under `root`, keyed by its path relative to `root`. */
+async function snapshotDirectory(root: string): Promise<Record<string, string>> {
+  const files: Record<string, string> = {};
+  async function walk(directory: string): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else if (entry.isFile()) {
+        files[relative(root, fullPath)] = sha256Hex(await readFile(fullPath));
+      }
+    }
+  }
+  await walk(root);
+  return files;
+}
+
+describe("patch base (P2, P3)", () => {
+  it("adds no object, ref, or index change to the sealed repository, and the recorded tree is unreadable without the private object environment", async () => {
+    const { workspace, adapter } = await sealCaseFromSyntheticRepository("task-1--c1");
+    const filesBefore = await snapshotDirectory(workspace.repositoryDirectory);
+
+    await writeFile(join(workspace.worktreeDirectory, "src/welcome.txt"), `${SOURCE_TEXT}setup edit\n`);
+    const statusBefore = await runGit(workspace.worktreeDirectory, [
+      "status",
+      "--porcelain=v1",
+      "--ignored",
+      "--untracked-files=all",
+    ]);
+    const base = unwrapOk(await adapter.snapshotPatchBase(workspace));
+
+    const filesAfter = await snapshotDirectory(workspace.repositoryDirectory);
+    const statusAfter = await runGit(workspace.worktreeDirectory, [
+      "status",
+      "--porcelain=v1",
+      "--ignored",
+      "--untracked-files=all",
+    ]);
+    const rootCount = await runGit(workspace.worktreeDirectory, ["rev-list", "--all", "--count"]);
+    const treeOutsideBase = await runGit(workspace.worktreeDirectory, ["cat-file", "-t", base.tree]);
+
+    expect(filesAfter).toEqual(filesBefore);
+    expect(statusAfter.stdout).toBe(statusBefore.stdout);
+    expect(Number(rootCount.stdout)).toBe(1);
+    expect(treeOutsideBase.exitCode).not.toBe(0);
+  }, 30_000);
+
+  it("keeps a captured patch base usable after the agent commits and prunes the worktree's repository (P3)", async () => {
+    const { workspace, adapter } = await sealCaseFromSyntheticRepository("task-1--c1");
+    const base = unwrapOk(await adapter.snapshotPatchBase(workspace));
+
+    await writeFile(join(workspace.worktreeDirectory, "src/model-added.txt"), "added by the agent\n");
+    await runGit(workspace.worktreeDirectory, ["add", "-A"]);
+    await runGit(workspace.worktreeDirectory, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "agent commit"]);
+    await runGit(workspace.worktreeDirectory, ["gc", "--prune=now"]);
+    await runGit(workspace.worktreeDirectory, ["prune"]);
+
+    const patch = await adapter.capturePatch(workspace, base);
+
+    expect(patch.ok).toBe(true);
+    if (patch.ok) {
+      expect(patch.value.content).toContain("src/model-added.txt");
+      expect(patch.value.isEmpty).toBe(false);
+    }
+  }, 30_000);
 });
 
 describe("isolated case environments", () => {

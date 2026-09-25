@@ -650,7 +650,9 @@ async function interviewImportedSource(
 /** Picks the task repository from configured entries or captures a new one. */
 async function interviewRepositorySelection(
   io: WizardIo,
-  repositories: readonly RepositoryDefinition[],
+  // Accepts both a resolved `TevuConfig`'s repositories and a bootstrap
+  // interview's, which never carry `setup`; only `id` and `path` are read.
+  repositories: readonly Pick<RepositoryDefinition, "id" | "path">[],
 ): Promise<{ repo: string; newRepository?: RepositoryDefinition }> {
   const choice = await askSelect<string>(io, {
     message: "Task repository",

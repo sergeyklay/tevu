@@ -33,7 +33,8 @@ export type TaskWizardInput = {
   configPath: string;
   /** Present only when the configuration file did not exist; `base_commit` as typed, unpinned. */
   bootstrap?: Omit<TevuConfigInput, "version" | "tasks">;
-  newRepository?: RepositoryInput;
+  /** `tevu task add` never interviews for `setup`; a newly added repository never carries it. */
+  newRepository?: Omit<RepositoryInput, "setup">;
   task: TaskInput;
 };
 

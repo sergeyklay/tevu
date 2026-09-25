@@ -47,10 +47,10 @@ describe("CONFIG_TEMPLATE", () => {
     expect(CONFIG_TEMPLATE.endsWith("\n\n")).toBe(false);
   });
 
-  it("enables exactly fifteen commented-out key lines", () => {
+  it("enables exactly twenty commented-out key lines", () => {
     const enabledCount = CONFIG_TEMPLATE.split("\n").filter((line) => OPTIONAL_LINE_PATTERN.test(line)).length;
 
-    expect(enabledCount).toBe(15);
+    expect(enabledCount).toBe(20);
   });
 
   it.each([

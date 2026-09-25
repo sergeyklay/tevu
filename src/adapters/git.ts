@@ -41,6 +41,7 @@ import type {
   OverlayRecord,
   OverlaySnapshot,
   PatchArtifact,
+  PatchBase,
   RestoreRecord,
   SourceValidation,
   TevuResult,
@@ -168,11 +169,19 @@ export function createGitWorkspaceAdapter(
 
     async capturePatch(
       workspace: CaseWorkspace,
+      base?: PatchBase,
     ): Promise<TevuResult<PatchArtifact, "SourceMaterializationError" | "ArtifactError">> {
       // A private throwaway index leaves the case repository's own index
       // untouched while `add --all` snapshots the complete worktree state.
+      // With a patch base, `GIT_OBJECT_DIRECTORY` reads through its private
+      // object directory and the diff target becomes the base's tree, so
+      // `before_agent` output the base already holds never appears as added.
       const patchIndexFile = join(workspace.runtimeDirectory, "patch-index");
-      const indexEnvironment = { GIT_INDEX_FILE: patchIndexFile };
+      const indexEnvironment = {
+        GIT_INDEX_FILE: patchIndexFile,
+        ...(base === undefined ? {} : { GIT_OBJECT_DIRECTORY: base.objectDirectory }),
+      };
+      const diffTarget = base?.tree ?? workspace.syntheticCommit;
       try {
         await rm(patchIndexFile, { force: true });
         const staged = await runGit(workspace.worktreeDirectory, ["add", "--all"], {
@@ -183,14 +192,7 @@ export function createGitWorkspaceAdapter(
         }
         const diff = await runGit(
           workspace.worktreeDirectory,
-          [
-            "diff",
-            "--cached",
-            "--binary",
-            "--no-color",
-            "--no-ext-diff",
-            workspace.syntheticCommit,
-          ],
+          ["diff", "--cached", "--binary", "--no-color", "--no-ext-diff", diffTarget],
           { environment: indexEnvironment, keepFinalNewline: true },
         );
         if (diff.exitCode !== 0) {
@@ -206,6 +208,47 @@ export function createGitWorkspaceAdapter(
         };
       } finally {
         await rm(patchIndexFile, { force: true }).catch(() => undefined);
+      }
+    },
+
+    async snapshotPatchBase(workspace: CaseWorkspace): Promise<TevuResult<PatchBase, "ArtifactError">> {
+      const baseDirectory = join(workspace.runtimeDirectory, "patch-base");
+      try {
+        await mkdir(baseDirectory);
+      } catch (cause) {
+        return artifactError(
+          "snapshot-patch-base",
+          `patch base directory cannot be created exclusively: ${describeCause(cause)}`,
+        );
+      }
+      const objectDirectory = join(baseDirectory, "objects");
+      try {
+        await mkdir(join(objectDirectory, "info"), { recursive: true });
+        await writeFile(
+          join(objectDirectory, "info", "alternates"),
+          `${workspace.repositoryDirectory}/objects\n`,
+          "utf8",
+        );
+      } catch (cause) {
+        return artifactError(
+          "snapshot-patch-base",
+          `patch base object directory cannot be prepared: ${describeCause(cause)}`,
+        );
+      }
+      const indexFile = join(baseDirectory, "index");
+      const environment = { GIT_INDEX_FILE: indexFile, GIT_OBJECT_DIRECTORY: objectDirectory };
+      try {
+        const staged = await runGit(workspace.worktreeDirectory, ["add", "--all"], { environment });
+        if (staged.exitCode !== 0) {
+          return artifactError("snapshot-patch-base", describeGitFailure("add --all", staged));
+        }
+        const written = await runGit(workspace.worktreeDirectory, ["write-tree"], { environment });
+        if (written.exitCode !== 0 || written.stdout.length === 0) {
+          return artifactError("snapshot-patch-base", describeGitFailure("write-tree", written));
+        }
+        return { ok: true, value: { tree: written.stdout, objectDirectory } };
+      } finally {
+        await rm(indexFile, { force: true }).catch(() => undefined);
       }
     },
 

@@ -225,10 +225,74 @@ export const JiraTrackerSettingsSchema = z.strictObject({
 /** Parsed Jira Cloud connection settings. */
 export type JiraTrackerSettings = z.infer<typeof JiraTrackerSettingsSchema>;
 
+/** One repository setup command: executable and literal arguments, no shell; the shape of a check's `run`. */
+export type SetupCommand = [string, ...string[]];
+
+/** Field-level materialized schema mirroring {@link SetupCommand}; the same shape as {@link CommandCheckSchema}'s `run` field. */
+export const SetupCommandSchema = z.tuple([z.string().min(1)], z.string());
+
+const RawRepositorySetupShape = z.strictObject({
+  before_agent: z.array(SetupCommandSchema).optional(),
+  before_checks: z.array(SetupCommandSchema).optional(),
+  timeout: DurationSchema.optional(),
+  env: z.array(VariableNameSchema).default([]),
+});
+
+type RawRepositorySetup = z.infer<typeof RawRepositorySetupShape>;
+
+function hasSetupCommand(commands: SetupCommand[] | undefined): boolean {
+  return commands !== undefined && commands.length > 0;
+}
+
+function refineRepositorySetup(value: RawRepositorySetup, ctx: z.RefinementCtx): void {
+  if (!hasSetupCommand(value.before_agent) && !hasSetupCommand(value.before_checks)) {
+    ctx.addIssue({
+      code: "custom",
+      message: "setup must declare a command in before_agent, before_checks, or both",
+    });
+  }
+  if (value.timeout === undefined) {
+    ctx.addIssue({ code: "custom", path: ["timeout"], message: "timeout is required when setup is declared" });
+  }
+  checkNoFixedNames(value.env, ctx, ["env"]);
+  checkUniqueStrings(value.env, ctx, ["env"], "duplicate environment variable name");
+}
+
+/** A repository's setup block; a phase key is present only when its list holds at least one command. */
+export interface RepositorySetup {
+  before_agent?: SetupCommand[];
+  before_checks?: SetupCommand[];
+  timeout: string;
+  env: string[];
+}
+
+/**
+ * Validates and normalizes one repository's `setup` block: at least one
+ * phase holds a command, `timeout` is present, and `env` carries no fixed or
+ * duplicate name. An empty phase list is materialized as an absent key
+ * (owner decision: `before_agent: []` and an absent `before_agent` are the
+ * same value), so run-time code never branches on an empty phase.
+ */
+export const RepositorySetupSchema = RawRepositorySetupShape.superRefine(refineRepositorySetup).transform(
+  (value): RepositorySetup => {
+    const timeout = value.timeout;
+    if (timeout === undefined) {
+      throw new Error("unreachable: refineRepositorySetup guarantees setup.timeout is present");
+    }
+    return {
+      ...(hasSetupCommand(value.before_agent) ? { before_agent: value.before_agent } : {}),
+      ...(hasSetupCommand(value.before_checks) ? { before_checks: value.before_checks } : {}),
+      timeout,
+      env: value.env,
+    };
+  },
+);
+
 /** One local source repository referenced by tasks. */
 export const RepositoryDefinitionSchema = z.strictObject({
   id: IdSchema,
   path: z.string().min(1),
+  setup: RepositorySetupSchema.optional(),
 });
 
 /** One configured source repository. */
@@ -546,6 +610,21 @@ function refineTevuConfig(raw: RawTevuConfig, ctx: z.RefinementCtx): void {
   const jiraEmailName = jira === undefined ? undefined : tryReferencedVariableName(jira.email);
   const jiraTokenName = jira === undefined ? undefined : tryReferencedVariableName(jira.token);
 
+  raw.repositories.forEach((repository, repositoryIndex) => {
+    repository.setup?.env.forEach((name, nameIndex) => {
+      const path = ["repositories", repositoryIndex, "setup", "env", nameIndex];
+      if (agentNames.has(name)) {
+        ctx.addIssue({
+          code: "custom",
+          path,
+          message: `environment variable "${name}" is passed to the agent and cannot also be passed to a setup command`,
+        });
+      } else if (name === jiraEmailName || name === jiraTokenName) {
+        ctx.addIssue({ code: "custom", path, message: `Jira credential variable "${name}" must not be passed to a setup command` });
+      }
+    });
+  });
+
   raw.tasks.forEach((task: RawTask, taskIndex) => {
     if (task.repo === undefined) {
       if (raw.repositories.length > 1) {
@@ -670,9 +749,10 @@ export type TevuConfigInput = z.input<typeof TevuConfigSchema>;
 /**
  * Returns every command check's `env` name across every task, in
  * first-appearance order (tasks, then acceptance before done, then list
- * order), for the isolated evaluator environment's ordinary allowlist.
+ * order). Module-private: {@link evaluatorEnvironmentNames} is the isolated
+ * evaluator environment's ordinary allowlist.
  */
-export function checkEnvironmentNames(config: TevuConfig): string[] {
+function checkEnvironmentNames(config: TevuConfig): string[] {
   const seen = new Set<string>();
   const names: string[] = [];
   for (const task of config.tasks) {
@@ -685,6 +765,25 @@ export function checkEnvironmentNames(config: TevuConfig): string[] {
           seen.add(name);
           names.push(name);
         }
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * Returns every evaluator-environment variable name: {@link checkEnvironmentNames}'s
+ * result and order, then each repository's `setup.env` names in configuration
+ * order, first appearance wins across the combined list.
+ */
+export function evaluatorEnvironmentNames(config: TevuConfig): string[] {
+  const names = checkEnvironmentNames(config);
+  const seen = new Set(names);
+  for (const repository of config.repositories) {
+    for (const name of repository.setup?.env ?? []) {
+      if (!seen.has(name)) {
+        seen.add(name);
+        names.push(name);
       }
     }
   }
