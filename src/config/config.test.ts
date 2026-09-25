@@ -980,6 +980,53 @@ describe('TevuConfigSchema', () => {
     });
   });
 
+  it.each(['PATH', 'XDG_CACHE_HOME'])(
+    'rejects the fixed environment name %s in a command check env',
+    (name) => {
+      const config = buildConfig({
+        tasks: [
+          buildTaskDefinition({
+            checks: {
+              acceptance: [buildManualCheck()],
+              done: [buildCommandCheck({ env: [name] })],
+            },
+          }),
+        ],
+      });
+
+      expect(expectSchemaRejection(config)).toEqual([
+        {
+          path: 'tasks.0.checks.done.0.env.0',
+          message:
+            'PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract and cannot be configured',
+        },
+      ]);
+    },
+  );
+
+  it('accepts an ordinary environment variable name in a command check env', () => {
+    const config = buildConfig({
+      tasks: [
+        buildTaskDefinition({
+          checks: {
+            acceptance: [buildManualCheck()],
+            done: [buildCommandCheck({ env: ['NODE_OPTIONS'] })],
+          },
+        }),
+      ],
+    });
+
+    expect(expectSchemaAcceptance(config).tasks[0]?.checks.done[0]).toEqual({
+      id: 'tests-pass',
+      description: 'The tests pass',
+      run: ['npm', 'test'],
+      timeout: '1m',
+      exit_codes: [0],
+      env: ['NODE_OPTIONS'],
+      required: true,
+    });
+  });
+
   it('re-parses its own materialized output to a deeply equal value', () => {
     const parsedOnce = expectSchemaAcceptance(buildConfig());
 

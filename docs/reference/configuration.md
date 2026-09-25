@@ -214,7 +214,7 @@ run: [npm, test]
 # required: false       # checks are required unless stated otherwise
 ```
 
-Commands run sequentially in the case workspace. Arguments are passed directly, without a shell. A target task's test command is independent of tevu's own product-test runner. The solution patch is captured before checks run, relative to the state `before_agent` left when the repository declares one; restore and overlay then run, followed by `setup.before_checks` when declared, so command checks see the restored and overlaid worktree rather than the state the agent left.
+Commands run sequentially in the case workspace. Arguments are passed directly, without a shell. A target task's test command is independent of tevu's own product-test runner. The solution patch is captured before checks run, relative to the state `before_agent` left when the repository declares one; restore and overlay then run, followed by `setup.before_checks` when declared, so command checks see the restored and overlaid worktree rather than the state the agent left. Ignore rules never hide a change to a tracked path, meaning a path in the [patch base](#repository-setup) when one was recorded and in `base_commit` otherwise.
 
 ### Restore and overlay
 

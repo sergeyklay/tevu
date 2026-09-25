@@ -808,6 +808,152 @@ describe('patch base (P2, P3)', () => {
   }, 30_000);
 });
 
+/** A sealed source whose committed `.gitignore` matches the committed path `tracked.txt` and a second, never-committed path. */
+async function createIgnoredTrackedPathSource(): Promise<{ path: string; commit: string }> {
+  const path = join(testDirectory, 'ignored-tracked-source');
+  await mkdir(path, { recursive: true });
+  await writeFile(join(path, '.gitignore'), 'tracked.txt\nnew-excluded.txt\n');
+  await writeFile(join(path, 'tracked.txt'), 'base tracked line\n');
+  await runGit(path, ['init', '--quiet', '-b', 'main']);
+  await runGit(path, ['add', '.gitignore']);
+  await runGit(path, ['add', '--force', 'tracked.txt']);
+  await runGit(path, [
+    ...GIT_IDENTITY_FLAGS,
+    'commit',
+    '--quiet',
+    '-m',
+    'synthetic ignored-tracked commit',
+  ]);
+  const commit = (await runGit(path, ['rev-parse', 'HEAD'])).stdout.trim();
+  return { path, commit };
+}
+
+/** V1 precondition: `relativePath` is both tracked at the synthetic root commit and ignore-rule matched. */
+async function assertTrackedAndIgnored(
+  workspace: CaseWorkspace,
+  relativePath: string,
+): Promise<void> {
+  const tracked = await runGit(workspace.worktreeDirectory, [
+    'ls-tree',
+    '--name-only',
+    workspace.syntheticCommit,
+    relativePath,
+  ]);
+  const ignored = await runGit(workspace.worktreeDirectory, [
+    'check-ignore',
+    '--no-index',
+    '--quiet',
+    relativePath,
+  ]);
+  expect(tracked.stdout).toBe(relativePath);
+  expect(ignored.exitCode).toBe(0);
+}
+
+async function appendLine(path: string, line: string): Promise<void> {
+  const current = await readFile(path, 'utf8');
+  await writeFile(path, `${current}${line}\n`);
+}
+
+describe('tracked paths an ignore rule matches (D1)', () => {
+  it('case a: an untouched ignored tracked path yields an empty patch with no patch base', async () => {
+    const repository = await createIgnoredTrackedPathSource();
+    const adapter = createGitAdapter(repository.path, repository.commit);
+    const workspace = unwrapOk(
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+    );
+    await assertTrackedAndIgnored(workspace, 'tracked.txt');
+
+    const patch = unwrapOk(await adapter.capturePatch(workspace));
+
+    expect(patch.content).toBe('');
+    expect(patch.isEmpty).toBe(true);
+  });
+
+  it('case b: an appended line to an ignored tracked path enters the patch alongside a new unignored path and without a new ignored path', async () => {
+    const repository = await createIgnoredTrackedPathSource();
+    const adapter = createGitAdapter(repository.path, repository.commit);
+    const workspace = unwrapOk(
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+    );
+    await assertTrackedAndIgnored(workspace, 'tracked.txt');
+
+    await appendLine(join(workspace.worktreeDirectory, 'tracked.txt'), 'appended by the agent');
+    await writeFile(join(workspace.worktreeDirectory, 'new-included.txt'), 'new unignored file\n');
+    await writeFile(join(workspace.worktreeDirectory, 'new-excluded.txt'), 'new ignored file\n');
+
+    const patch = unwrapOk(await adapter.capturePatch(workspace));
+
+    expect(patch.isEmpty).toBe(false);
+    expect(patch.content).toContain('diff --git a/tracked.txt b/tracked.txt');
+    expect(patch.content).toContain('+appended by the agent');
+    expect(patch.content).not.toContain('deleted file mode');
+    expect(patch.content).toContain('diff --git a/new-included.txt b/new-included.txt');
+    expect(patch.content).toContain('new file mode');
+    expect(patch.content).not.toContain('new-excluded.txt');
+  });
+
+  it('case c: an untouched ignored tracked path yields an empty patch with a patch base', async () => {
+    const repository = await createIgnoredTrackedPathSource();
+    const adapter = createGitAdapter(repository.path, repository.commit);
+    const workspace = unwrapOk(
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+    );
+    await assertTrackedAndIgnored(workspace, 'tracked.txt');
+    const base = unwrapOk(await adapter.snapshotPatchBase(workspace));
+
+    const patch = unwrapOk(await adapter.capturePatch(workspace, base));
+
+    expect(patch.content).toBe('');
+    expect(patch.isEmpty).toBe(true);
+  }, 30_000);
+
+  it('case d: an appended line to an ignored tracked path enters the patch with a patch base', async () => {
+    const repository = await createIgnoredTrackedPathSource();
+    const adapter = createGitAdapter(repository.path, repository.commit);
+    const workspace = unwrapOk(
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+    );
+    await assertTrackedAndIgnored(workspace, 'tracked.txt');
+    const base = unwrapOk(await adapter.snapshotPatchBase(workspace));
+
+    await appendLine(join(workspace.worktreeDirectory, 'tracked.txt'), 'appended by the agent');
+
+    const patch = unwrapOk(await adapter.capturePatch(workspace, base));
+
+    expect(patch.isEmpty).toBe(false);
+    expect(patch.content).toContain('diff --git a/tracked.txt b/tracked.txt');
+    expect(patch.content).toContain('+appended by the agent');
+    expect(patch.content).not.toContain('deleted file mode');
+    expect(patch.content).not.toContain('new file mode');
+  }, 30_000);
+
+  it('case e: a before_agent-enabled sparse checkout does not hide a change to a path outside its definition from the base or the capture', async () => {
+    const repository = await createIgnoredTrackedPathSource();
+    const adapter = createGitAdapter(repository.path, repository.commit);
+    const workspace = unwrapOk(
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+    );
+    await assertTrackedAndIgnored(workspace, 'tracked.txt');
+    await runGit(workspace.worktreeDirectory, ['config', 'core.sparseCheckout', 'true']);
+    await mkdir(join(workspace.repositoryDirectory, 'info'), { recursive: true });
+    await writeFile(
+      join(workspace.repositoryDirectory, 'info', 'sparse-checkout'),
+      '/*\n!/tracked.txt\n',
+    );
+
+    await appendLine(join(workspace.worktreeDirectory, 'tracked.txt'), 'L1');
+    const base = unwrapOk(await adapter.snapshotPatchBase(workspace));
+    await appendLine(join(workspace.worktreeDirectory, 'tracked.txt'), 'L2');
+
+    const patch = unwrapOk(await adapter.capturePatch(workspace, base));
+
+    expect(patch.isEmpty).toBe(false);
+    expect(patch.content).toContain('diff --git a/tracked.txt b/tracked.txt');
+    expect(patch.content).toContain('+L2');
+    expect(patch.content).not.toContain('+L1');
+  }, 30_000);
+});
+
 describe('isolated case environments', () => {
   it('builds separate replacement environments with private homes and no host state', async () => {
     const config = buildConfig('/synthetic/source', 'f'.repeat(40));

@@ -666,6 +666,14 @@ function refineTevuConfig(raw: RawTevuConfig, ctx: z.RefinementCtx): void {
             message: 'set timeout on this check or run.check_timeout',
           });
         }
+        checkNoFixedNames(check.env ?? [], ctx, [
+          'tasks',
+          taskIndex,
+          'checks',
+          collection,
+          checkIndex,
+          'env',
+        ]);
         const seenNames = new Set<string>();
         (check.env ?? []).forEach((name, nameIndex) => {
           const path = ['tasks', taskIndex, 'checks', collection, checkIndex, 'env', nameIndex];
