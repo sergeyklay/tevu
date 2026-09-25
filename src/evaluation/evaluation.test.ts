@@ -244,9 +244,10 @@ function buildSyntheticConfig(outputDirectory = "/tevu-synthetic/artifacts"): Te
 
 function buildCaseIdentity(overrides: Partial<CaseIdentity> = {}): CaseIdentity {
   return {
-    caseId: "task-1--alpha",
+    caseId: "task-1--alpha--1",
     taskId: "task-1",
     modelId: "alpha",
+    attempt: 1,
     sourceCommit: "0123456789abcdef0123456789abcdef01234567",
     model: "vendor/model-alpha-synth",
     effort: "effort-high",
@@ -345,7 +346,7 @@ function buildCaseResult(overrides: Partial<CaseResult> = {}): CaseResult {
     outcome: "passed",
     checks: [],
     metrics: unavailableBenchmarkMetrics("not yet normalized"),
-    artifacts: buildArtifactIndex("task-1--alpha", new Set(["result"])),
+    artifacts: buildArtifactIndex("task-1--alpha--1", new Set(["result"])),
     failure: null,
     ...overrides,
   };
@@ -355,7 +356,7 @@ function buildAssessmentArtifact(overrides: Partial<AssessmentArtifact> = {}): A
   return {
     schemaVersion: 1,
     runId: "20260923t000000z-synthetic",
-    caseId: "task-1--alpha",
+    caseId: "task-1--alpha--1",
     revision: 2,
     current: [
       {
@@ -404,15 +405,20 @@ function buildManifest(
     completedAt: null,
     host: { platform: "linux", nodeVersion: "v24.21.0", bunVersion: "1.4.2" },
     tools: { gitVersion: "git version 2.45.0", agentVersions: { [AGENT_NAME]: capabilities.detectedVersion } },
-    execution: { concurrency: config.run.concurrency, caseTimeoutMs: 60_000 },
+    execution: {
+      concurrency: config.run.concurrency,
+      caseTimeoutMs: 60_000,
+      repeat: { value: config.run.repeat, source: "config" },
+    },
     cases: caseIds.map((caseId) => {
-      const [taskId, modelId] = caseId.split("--") as [string, string];
+      const [taskId, modelId, attempt] = caseId.split("--") as [string, string, string];
       const model = config.models.find((entry) => entry.id === modelId);
       const task = config.tasks.find((entry) => entry.id === taskId);
       return buildCaseIdentity({
         caseId,
         taskId,
         modelId,
+        attempt: Number(attempt),
         sourceCommit: task?.base_commit ?? "0123456789abcdef0123456789abcdef01234567",
         model: model?.model ?? "vendor/model-alpha-synth",
         effort: model?.effort ?? "effort-high",
@@ -439,9 +445,9 @@ function buildSyntheticRecords(): SyntheticRecords {
   const capabilities = buildCapabilityReport();
   const runId = "20260923t000000z-synthetic";
   const manifest = buildManifest(runId, config, capabilities, [
-    "task-1--alpha",
-    "task-1--beta",
-    "task-2--alpha",
+    "task-1--alpha--1",
+    "task-1--beta--1",
+    "task-2--alpha--1",
   ]);
 
   // Neutral record: no opencode event or export shape. The
@@ -458,7 +464,7 @@ function buildSyntheticRecords(): SyntheticRecords {
   const events: AgentEventRecord[] = [...neutralEvents, secretError];
 
   const alphaNormalized = requireFakeAdapter().normalizeMetrics({
-    caseId: "task-1--alpha",
+    caseId: "task-1--alpha--1",
     sessionId: null,
     sessionExport: exportRecord,
     events,
@@ -473,7 +479,7 @@ function buildSyntheticRecords(): SyntheticRecords {
   });
 
   const alpha = buildCaseResult({
-    identity: buildCaseIdentity({ caseId: "task-1--alpha" }),
+    identity: buildCaseIdentity({ caseId: "task-1--alpha--1" }),
     lifecycle: "completed",
     outcome: "pending",
     checks: [
@@ -494,13 +500,13 @@ function buildSyntheticRecords(): SyntheticRecords {
       }),
     ],
     metrics: alphaMetrics.metrics,
-    artifacts: buildArtifactIndex("task-1--alpha", new Set([
+    artifacts: buildArtifactIndex("task-1--alpha--1", new Set([
       "events", "diagnostics", "sessionExport", "solutionPatch", "checks", "result",
     ])),
   });
 
   const beta = buildCaseResult({
-    identity: buildCaseIdentity({ caseId: "task-1--beta", modelId: "beta", effort: "effort-low" }),
+    identity: buildCaseIdentity({ caseId: "task-1--beta--1", modelId: "beta", effort: "effort-low" }),
     lifecycle: "completed",
     outcome: "failed",
     process: buildProcessResult({
@@ -516,16 +522,16 @@ function buildSyntheticRecords(): SyntheticRecords {
       }),
     ],
     metrics: unavailableBenchmarkMetrics("root session export unavailable"),
-    artifacts: buildArtifactIndex("task-1--beta", new Set(["events", "diagnostics", "checks", "result"])),
+    artifacts: buildArtifactIndex("task-1--beta--1", new Set(["events", "diagnostics", "checks", "result"])),
     failure: {
-      error: { kind: "AgentProcessError", agent: AGENT_NAME, caseId: "task-1--beta", exitCode: 1, signal: null },
+      error: { kind: "AgentProcessError", agent: AGENT_NAME, caseId: "task-1--beta--1", exitCode: 1, signal: null },
       occurredAt: "2026-09-23T00:00:00.950Z",
     },
   });
 
   const gamma = buildCaseResult({
     identity: buildCaseIdentity({
-      caseId: "task-2--alpha",
+      caseId: "task-2--alpha--1",
       taskId: "task-2",
       modelId: "gamma",
       model: "vendor/model-gamma-synth",
@@ -542,9 +548,9 @@ function buildSyntheticRecords(): SyntheticRecords {
     outcome: "not-evaluated",
     checks: [],
     metrics: unavailableBenchmarkMetrics("case timed out; checks were not run"),
-    artifacts: buildArtifactIndex("task-2--alpha", new Set([])),
+    artifacts: buildArtifactIndex("task-2--alpha--1", new Set([])),
     failure: {
-      error: { kind: "CaseTimeoutError", caseId: "task-2--alpha", timeoutMs: 60000 },
+      error: { kind: "CaseTimeoutError", caseId: "task-2--alpha--1", timeoutMs: 60000 },
       occurredAt: "2026-09-23T00:00:42.100Z",
     },
   });
@@ -607,20 +613,20 @@ function fakeEvaluatorProcess(
 
 function buildEvaluationInput(overrides: Partial<CheckEvaluationInput> = {}): CheckEvaluationInput {
   return {
-    caseId: "task-1--alpha",
+    caseId: "task-1--alpha--1",
     checks: [],
     workspace: {
-      caseId: "task-1--alpha",
+      caseId: "task-1--alpha--1",
       sourceRepositoryPath: "/tevu-synthetic/repo-1",
       sourceCommit: "0123456789abcdef0123456789abcdef01234567",
       repositoryDirectory: "/tevu-synthetic/case/repo",
       worktreeDirectory: "/tevu-synthetic/case/worktree",
       runtimeDirectory: "/tevu-synthetic/case/runtime",
-      branch: "tevu/task-1--alpha",
+      branch: "tevu/task-1--alpha--1",
       syntheticCommit: "0synthetic0000000000000000000000000000000c",
     },
     environment: {
-      caseId: "task-1--alpha",
+      caseId: "task-1--alpha--1",
       recipient: "evaluator",
       homeDirectory: "/tevu-synthetic/case/runtime/evaluator/home",
       temporaryDirectory: "/tevu-synthetic/case/runtime/evaluator/tmp",
@@ -690,10 +696,10 @@ async function collectSourceDigests(root: string, runId: string): Promise<string
   const beta = ["events.jsonl", "checks.json"];
   const digests: string[] = [];
   for (const file of alpha) {
-    digests.push(await digestFile(caseFile(root, runId, "task-1--alpha", file)));
+    digests.push(await digestFile(caseFile(root, runId, "task-1--alpha--1", file)));
   }
   for (const file of beta) {
-    digests.push(await digestFile(caseFile(root, runId, "task-1--beta", file)));
+    digests.push(await digestFile(caseFile(root, runId, "task-1--beta--1", file)));
   }
   return digests;
 }
@@ -737,35 +743,35 @@ async function createSyntheticRun(root: string): Promise<{
   }
 
   for (const event of records.events) {
-    await appendOrThrow(store, "task-1--alpha", event);
+    await appendOrThrow(store, "task-1--alpha--1", event);
   }
-  const diagnostic = await store.appendDiagnostic("task-1--alpha", `synthetic diagnostic ${PROVIDER_SECRET}`);
+  const diagnostic = await store.appendDiagnostic("task-1--alpha--1", `synthetic diagnostic ${PROVIDER_SECRET}`);
   if (!diagnostic.ok) {
     throw new Error(`appendDiagnostic failed: ${JSON.stringify(diagnostic.error)}`);
   }
-  const exportWrite = await store.writeSessionExport("task-1--alpha", records.exportRecord);
+  const exportWrite = await store.writeSessionExport("task-1--alpha--1", records.exportRecord);
   if (!exportWrite.ok) {
     throw new Error(`writeSessionExport failed: ${JSON.stringify(exportWrite.error)}`);
   }
-  const patchWrite = await store.writePatch("task-1--alpha", {
-    caseId: "task-1--alpha",
+  const patchWrite = await store.writePatch("task-1--alpha--1", {
+    caseId: "task-1--alpha--1",
     content: `${PATCH_BODY}\n`,
     isEmpty: false,
   });
   if (!patchWrite.ok) {
     throw new Error(`writePatch failed: ${JSON.stringify(patchWrite.error)}`);
   }
-  await writeChecksOrThrow(store, "task-1--alpha", records.caseResults[0].checks);
+  await writeChecksOrThrow(store, "task-1--alpha--1", records.caseResults[0].checks);
 
   const betaError: FakeEventRecord = { kind: "error", message: "synthetic provider outage" };
   const betaToolUse: FakeEventRecord = { kind: "tool" };
-  await appendOrThrow(store, "task-1--beta", betaError);
-  await appendOrThrow(store, "task-1--beta", betaToolUse);
-  const betaDiagnostic = await store.appendDiagnostic("task-1--beta", "synthetic beta diagnostic");
+  await appendOrThrow(store, "task-1--beta--1", betaError);
+  await appendOrThrow(store, "task-1--beta--1", betaToolUse);
+  const betaDiagnostic = await store.appendDiagnostic("task-1--beta--1", "synthetic beta diagnostic");
   if (!betaDiagnostic.ok) {
     throw new Error(`appendDiagnostic failed: ${JSON.stringify(betaDiagnostic.error)}`);
   }
-  await writeChecksOrThrow(store, "task-1--beta", records.caseResults[1].checks);
+  await writeChecksOrThrow(store, "task-1--beta--1", records.caseResults[1].checks);
 
   for (const result of records.caseResults) {
     const finalized = await store.finalizeCase(result);
@@ -1090,13 +1096,13 @@ describe("evaluateChecks", () => {
       const worktreeDirectory = join(root, "worktree");
       await mkdir(worktreeDirectory, { recursive: true });
       const workspace = {
-        caseId: "task-1--alpha",
+        caseId: "task-1--alpha--1",
         sourceRepositoryPath: "/tevu-synthetic/repo-1",
         sourceCommit: "0123456789abcdef0123456789abcdef01234567",
         repositoryDirectory: join(root, "repo"),
         worktreeDirectory,
         runtimeDirectory: join(root, "runtime"),
-        branch: "tevu/task-1--alpha",
+        branch: "tevu/task-1--alpha--1",
         syntheticCommit: "0synthetic0000000000000000000000000000000c",
       };
 
@@ -1314,7 +1320,7 @@ describe("combineCaseMetrics", () => {
     const failure = {
       kind: "AgentProtocolError" as const,
       agent: "opencode",
-      context: { phase: "case" as const, caseId: "task-1--alpha" },
+      context: { phase: "case" as const, caseId: "task-1--alpha--1" },
       reason: "part identity (sessionID, messageID, id) is missing or malformed",
     };
 
@@ -1341,7 +1347,7 @@ describe("combineCaseMetrics", () => {
     const failure = {
       kind: "AgentProtocolError" as const,
       agent: "opencode",
-      context: { phase: "case" as const, caseId: "task-1--alpha" },
+      context: { phase: "case" as const, caseId: "task-1--alpha--1" },
       reason: "run output did not identify a root session",
     };
 
@@ -1373,9 +1379,9 @@ describe("unavailableBenchmarkMetrics", () => {
   });
 });
 
-const GOLDEN_NORMALIZED_JSON = "{\n  \"assessments\": [],\n  \"capabilities\": {},\n  \"cases\": [\n    {\n      \"artifacts\": {\n        \"assessment\": null,\n        \"checks\": null,\n        \"diagnostics\": null,\n        \"events\": null,\n        \"result\": \"cases/task-1--alpha/result.json\",\n        \"sessionExport\": null,\n        \"solutionPatch\": null\n      },\n      \"checks\": [],\n      \"failure\": null,\n      \"identity\": {\n        \"agent\": \"opencode\",\n        \"caseId\": \"task-1--alpha\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-1\"\n      },\n      \"lifecycle\": \"completed\",\n      \"metrics\": {\n        \"apiCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"apiErrors\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"cacheReadTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cacheWriteTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cost\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"USD\",\n          \"value\": null\n        },\n        \"elapsed\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"case\",\n          \"unit\": \"millisecond\",\n          \"value\": null\n        },\n        \"inputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"outputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"reasoningTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"skillCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"toolCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"turns\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        }\n      },\n      \"outcome\": \"passed\",\n      \"process\": {\n        \"durationMs\": 1500,\n        \"endedAt\": \"2026-09-23T00:00:01.500Z\",\n        \"exitCode\": 0,\n        \"signal\": null,\n        \"startedAt\": \"2026-09-23T00:00:00.000Z\",\n        \"terminationStage\": \"none\"\n      },\n      \"schemaVersion\": 1\n    },\n    {\n      \"artifacts\": {\n        \"assessment\": null,\n        \"checks\": null,\n        \"diagnostics\": null,\n        \"events\": null,\n        \"result\": \"cases/task-2--alpha/result.json\",\n        \"sessionExport\": null,\n        \"solutionPatch\": null\n      },\n      \"checks\": [],\n      \"failure\": null,\n      \"identity\": {\n        \"agent\": \"opencode\",\n        \"caseId\": \"task-2--alpha\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-2\"\n      },\n      \"lifecycle\": \"completed\",\n      \"metrics\": {\n        \"apiCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"apiErrors\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"cacheReadTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cacheWriteTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cost\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"USD\",\n          \"value\": null\n        },\n        \"elapsed\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"case\",\n          \"unit\": \"millisecond\",\n          \"value\": null\n        },\n        \"inputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"outputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"reasoningTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"skillCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"toolCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"turns\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        }\n      },\n      \"outcome\": \"passed\",\n      \"process\": {\n        \"durationMs\": 1500,\n        \"endedAt\": \"2026-09-23T00:00:01.500Z\",\n        \"exitCode\": 0,\n        \"signal\": null,\n        \"startedAt\": \"2026-09-23T00:00:00.000Z\",\n        \"terminationStage\": \"none\"\n      },\n      \"schemaVersion\": 1\n    }\n  ],\n  \"exitCode\": 0,\n  \"findings\": [],\n  \"manifest\": {\n    \"cases\": [\n      {\n        \"agent\": \"opencode\",\n        \"caseId\": \"task-1--alpha\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-1\"\n      },\n      {\n        \"agent\": \"opencode\",\n        \"caseId\": \"task-2--alpha\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-2\"\n      }\n    ],\n    \"completedAt\": \"2026-01-01T00:05:00.000Z\",\n    \"configDigest\": \"sha256-golden-digest\",\n    \"execution\": {\n      \"caseTimeoutMs\": 1000,\n      \"concurrency\": 1\n    },\n    \"host\": {\n      \"bunVersion\": \"1.4.2\",\n      \"nodeVersion\": \"v24.21.0\",\n      \"platform\": \"linux\"\n    },\n    \"runId\": \"20260101t000000z-golden\",\n    \"schemaVersion\": 1,\n    \"startedAt\": \"2026-01-01T00:00:00.000Z\",\n    \"tools\": {\n      \"agentVersions\": {\n        \"opencode\": null\n      },\n      \"gitVersion\": \"git version 2.45.0\"\n    }\n  },\n  \"models\": [],\n  \"repositories\": [],\n  \"schemaVersion\": 1,\n  \"tasks\": [\n    {\n      \"checks\": [\n        {\n          \"category\": \"acceptance\",\n          \"description\": \"acceptance command exits zero\",\n          \"evaluator\": \"command\",\n          \"id\": \"acc-acceptance-command\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"manual Definition of Done review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"dod-manual-review\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"optional manual polish review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"man-optional-polish\",\n          \"required\": false\n        }\n      ],\n      \"description\": \"synthetic task description for the welcome route\",\n      \"id\": \"task-1\",\n      \"repositoryId\": \"repo-1\",\n      \"source\": {\n        \"kind\": \"manual\",\n        \"reference\": null,\n        \"title\": \"Synthetic welcome-route task\"\n      },\n      \"startCommit\": \"0123456789abcdef0123456789abcdef01234567\"\n    },\n    {\n      \"checks\": [\n        {\n          \"category\": \"acceptance\",\n          \"description\": \"acceptance command exits zero\",\n          \"evaluator\": \"command\",\n          \"id\": \"acc-acceptance-command\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"manual Definition of Done review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"dod-manual-review\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"optional manual polish review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"man-optional-polish\",\n          \"required\": false\n        }\n      ],\n      \"description\": \"synthetic task description for the welcome route\",\n      \"id\": \"task-2\",\n      \"repositoryId\": \"repo-1\",\n      \"source\": {\n        \"issueKey\": \"TEVU-999\",\n        \"issueUrl\": \"https://jira.example.com/browse/TEVU-999\",\n        \"kind\": \"jira-cloud\"\n      },\n      \"startCommit\": \"0123456789abcdef0123456789abcdef01234567\"\n    }\n  ]\n}\n";
+const GOLDEN_NORMALIZED_JSON = "{\n  \"assessments\": [],\n  \"capabilities\": {},\n  \"cases\": [\n    {\n      \"artifacts\": {\n        \"assessment\": null,\n        \"checks\": null,\n        \"diagnostics\": null,\n        \"events\": null,\n        \"result\": \"cases/task-1--alpha--1/result.json\",\n        \"sessionExport\": null,\n        \"solutionPatch\": null\n      },\n      \"checks\": [],\n      \"failure\": null,\n      \"identity\": {\n        \"agent\": \"opencode\",\n        \"attempt\": 1,\n        \"caseId\": \"task-1--alpha--1\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-1\"\n      },\n      \"lifecycle\": \"completed\",\n      \"metrics\": {\n        \"apiCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"apiErrors\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"cacheReadTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cacheWriteTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cost\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"USD\",\n          \"value\": null\n        },\n        \"elapsed\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"case\",\n          \"unit\": \"millisecond\",\n          \"value\": null\n        },\n        \"inputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"outputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"reasoningTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"skillCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"toolCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"turns\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        }\n      },\n      \"outcome\": \"passed\",\n      \"process\": {\n        \"durationMs\": 1500,\n        \"endedAt\": \"2026-09-23T00:00:01.500Z\",\n        \"exitCode\": 0,\n        \"signal\": null,\n        \"startedAt\": \"2026-09-23T00:00:00.000Z\",\n        \"terminationStage\": \"none\"\n      },\n      \"schemaVersion\": 1\n    },\n    {\n      \"artifacts\": {\n        \"assessment\": null,\n        \"checks\": null,\n        \"diagnostics\": null,\n        \"events\": null,\n        \"result\": \"cases/task-2--alpha--1/result.json\",\n        \"sessionExport\": null,\n        \"solutionPatch\": null\n      },\n      \"checks\": [],\n      \"failure\": null,\n      \"identity\": {\n        \"agent\": \"opencode\",\n        \"attempt\": 1,\n        \"caseId\": \"task-2--alpha--1\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-2\"\n      },\n      \"lifecycle\": \"completed\",\n      \"metrics\": {\n        \"apiCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"apiErrors\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"cacheReadTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cacheWriteTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cost\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"USD\",\n          \"value\": null\n        },\n        \"elapsed\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"case\",\n          \"unit\": \"millisecond\",\n          \"value\": null\n        },\n        \"inputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"outputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"reasoningTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"skillCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"toolCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"turns\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        }\n      },\n      \"outcome\": \"passed\",\n      \"process\": {\n        \"durationMs\": 1500,\n        \"endedAt\": \"2026-09-23T00:00:01.500Z\",\n        \"exitCode\": 0,\n        \"signal\": null,\n        \"startedAt\": \"2026-09-23T00:00:00.000Z\",\n        \"terminationStage\": \"none\"\n      },\n      \"schemaVersion\": 1\n    }\n  ],\n  \"exitCode\": 0,\n  \"findings\": [],\n  \"manifest\": {\n    \"cases\": [\n      {\n        \"agent\": \"opencode\",\n        \"attempt\": 1,\n        \"caseId\": \"task-1--alpha--1\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-1\"\n      },\n      {\n        \"agent\": \"opencode\",\n        \"attempt\": 1,\n        \"caseId\": \"task-2--alpha--1\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-2\"\n      }\n    ],\n    \"completedAt\": \"2026-01-01T00:05:00.000Z\",\n    \"configDigest\": \"sha256-golden-digest\",\n    \"execution\": {\n      \"caseTimeoutMs\": 1000,\n      \"concurrency\": 1,\n      \"repeat\": {\n        \"source\": \"config\",\n        \"value\": 1\n      }\n    },\n    \"host\": {\n      \"bunVersion\": \"1.4.2\",\n      \"nodeVersion\": \"v24.21.0\",\n      \"platform\": \"linux\"\n    },\n    \"runId\": \"20260101t000000z-golden\",\n    \"schemaVersion\": 1,\n    \"startedAt\": \"2026-01-01T00:00:00.000Z\",\n    \"tools\": {\n      \"agentVersions\": {\n        \"opencode\": null\n      },\n      \"gitVersion\": \"git version 2.45.0\"\n    }\n  },\n  \"models\": [],\n  \"pairs\": [\n    {\n      \"allPassed\": true,\n      \"modelId\": \"alpha\",\n      \"outcomes\": {\n        \"failed\": 0,\n        \"not-evaluated\": 0,\n        \"passed\": 1,\n        \"pending\": 0\n      },\n      \"passedOfPlanned\": \"1/1\",\n      \"planned\": 1,\n      \"taskId\": \"task-1\"\n    },\n    {\n      \"allPassed\": true,\n      \"modelId\": \"alpha\",\n      \"outcomes\": {\n        \"failed\": 0,\n        \"not-evaluated\": 0,\n        \"passed\": 1,\n        \"pending\": 0\n      },\n      \"passedOfPlanned\": \"1/1\",\n      \"planned\": 1,\n      \"taskId\": \"task-2\"\n    }\n  ],\n  \"repositories\": [],\n  \"schemaVersion\": 1,\n  \"tasks\": [\n    {\n      \"checks\": [\n        {\n          \"category\": \"acceptance\",\n          \"description\": \"acceptance command exits zero\",\n          \"evaluator\": \"command\",\n          \"id\": \"acc-acceptance-command\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"manual Definition of Done review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"dod-manual-review\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"optional manual polish review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"man-optional-polish\",\n          \"required\": false\n        }\n      ],\n      \"description\": \"synthetic task description for the welcome route\",\n      \"id\": \"task-1\",\n      \"repositoryId\": \"repo-1\",\n      \"source\": {\n        \"kind\": \"manual\",\n        \"reference\": null,\n        \"title\": \"Synthetic welcome-route task\"\n      },\n      \"startCommit\": \"0123456789abcdef0123456789abcdef01234567\"\n    },\n    {\n      \"checks\": [\n        {\n          \"category\": \"acceptance\",\n          \"description\": \"acceptance command exits zero\",\n          \"evaluator\": \"command\",\n          \"id\": \"acc-acceptance-command\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"manual Definition of Done review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"dod-manual-review\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"optional manual polish review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"man-optional-polish\",\n          \"required\": false\n        }\n      ],\n      \"description\": \"synthetic task description for the welcome route\",\n      \"id\": \"task-2\",\n      \"repositoryId\": \"repo-1\",\n      \"source\": {\n        \"issueKey\": \"TEVU-999\",\n        \"issueUrl\": \"https://jira.example.com/browse/TEVU-999\",\n        \"kind\": \"jira-cloud\"\n      },\n      \"startCommit\": \"0123456789abcdef0123456789abcdef01234567\"\n    }\n  ]\n}\n";
 
-const GOLDEN_MARKDOWN = "# tevu run 20260101t000000z-golden\n\n> **Sensitive data:** the tevu configuration file and this artifact directory can contain\n> sensitive private repository, task, Jira, model-output, and evaluator data. They rely on\n> host filesystem access controls.\n>\n> **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,\n> later Git history, host agent state, and benchmark artifacts from normal discovery.\n> It does not claim that a model with shell access cannot probe arbitrary host paths.\n\n## Run\n\n- Configuration digest: `sha256-golden-digest`\n- Started: 2026-01-01T00:00:00.000Z\n- Completed: 2026-01-01T00:05:00.000Z\n- Host: linux, Node.js v24.21.0, Bun 1.4.2, Git git version 2.45.0\n- Agent \"opencode\" version (detected provenance only): not detected\n- Agent \"opencode\" isolation control (deny outside worktree): not probed\n- Concurrency: 1\n- Case timeout: 1000ms\n- Run exit code: 0\n\n## Task task-1\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: manual — Synthetic welcome-route task\n\n| Outcome | Model entry | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|\n| passed | alpha | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-1--alpha\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-1--alpha/result.json](cases/task-1--alpha/result.json)\n\n## Task task-2\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: Jira snapshot — [TEVU-999](https://jira.example.com/browse/TEVU-999)\n\n| Outcome | Model entry | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|\n| passed | alpha | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-2--alpha\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-2--alpha/result.json](cases/task-2--alpha/result.json)\n\n---\n\nTask outcome, runtime failure, and run exit status are reported independently.\nCommand check output is configured acceptance evidence, not an additional model-quality metric.\nNo composite score or winner is computed.\n";
+const GOLDEN_MARKDOWN = "# tevu run 20260101t000000z-golden\n\n> **Sensitive data:** the tevu configuration file and this artifact directory can contain\n> sensitive private repository, task, Jira, model-output, and evaluator data. They rely on\n> host filesystem access controls.\n>\n> **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,\n> later Git history, host agent state, and benchmark artifacts from normal discovery.\n> It does not claim that a model with shell access cannot probe arbitrary host paths.\n\n## Run\n\n- Configuration digest: `sha256-golden-digest`\n- Started: 2026-01-01T00:00:00.000Z\n- Completed: 2026-01-01T00:05:00.000Z\n- Host: linux, Node.js v24.21.0, Bun 1.4.2, Git git version 2.45.0\n- Agent \"opencode\" version (detected provenance only): not detected\n- Agent \"opencode\" isolation control (deny outside worktree): not probed\n- Concurrency: 1\n- Case timeout: 1000ms\n- Repeat: 1 (source: config)\n- Run exit code: 0\n\n## Task task-1\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: manual — Synthetic welcome-route task\n\nPair summary:\n\n| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |\n|---|---|---|---|---|---|---|---|\n| alpha | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |\n\n| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|---|\n| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-1--alpha--1\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-1--alpha--1/result.json](cases/task-1--alpha--1/result.json)\n\n## Task task-2\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: Jira snapshot — [TEVU-999](https://jira.example.com/browse/TEVU-999)\n\nPair summary:\n\n| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |\n|---|---|---|---|---|---|---|---|\n| alpha | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |\n\n| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|---|\n| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-2--alpha--1\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-2--alpha--1/result.json](cases/task-2--alpha--1/result.json)\n\n---\n\nTask outcome, runtime failure, and run exit status are reported independently.\nCommand check output is configured acceptance evidence, not an additional model-quality metric.\nNo composite score or winner is computed.\n";
 
 describe("deterministic report regeneration", () => {
   it("sorts every collection by stable identity regardless of input order", () => {
@@ -1410,9 +1416,9 @@ describe("deterministic report regeneration", () => {
     const model = buildNormalizedRun(input);
 
     expect(model.cases.map((entry) => entry.identity.caseId)).toEqual([
-      "task-1--alpha",
-      "task-1--beta",
-      "task-2--alpha",
+      "task-1--alpha--1",
+      "task-1--beta--1",
+      "task-2--alpha--1",
     ]);
     expect(model.tasks.map((task) => task.id)).toEqual(["task-1", "task-2"]);
     expect(model.models.map((entry) => entry.id)).toEqual(["alpha", "beta", "gamma"]);
@@ -1437,12 +1443,12 @@ describe("deterministic report regeneration", () => {
     const manualCase = buildCaseResult({ identity: buildCaseIdentity({ agent: "opencode" }) });
     const jiraCase = buildCaseResult({
       identity: buildCaseIdentity({
-        caseId: "task-2--alpha",
+        caseId: "task-2--alpha--1",
         taskId: "task-2",
         sourceCommit: jiraTask.startCommit,
         agent: "opencode",
       }),
-      artifacts: buildArtifactIndex("task-2--alpha", new Set(["result"])),
+      artifacts: buildArtifactIndex("task-2--alpha--1", new Set(["result"])),
     });
     const manifest: RunManifest = {
       schemaVersion: 1,
@@ -1452,7 +1458,7 @@ describe("deterministic report regeneration", () => {
       completedAt: "2026-01-01T00:05:00.000Z",
       host: { platform: "linux", nodeVersion: "v24.21.0", bunVersion: "1.4.2" },
       tools: { gitVersion: "git version 2.45.0", agentVersions: { opencode: null } },
-      execution: { concurrency: 1, caseTimeoutMs: 1000 },
+      execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 1, source: "config" } },
       cases: [manualCase.identity, jiraCase.identity],
     };
     const input: ReportInput = {
@@ -1480,8 +1486,8 @@ describe("deterministic report regeneration", () => {
       },
     });
     const githubCase = buildCaseResult({
-      identity: buildCaseIdentity({ caseId: "task-3--alpha", taskId: "task-3", sourceCommit: githubTask.startCommit }),
-      artifacts: buildArtifactIndex("task-3--alpha", new Set(["result"])),
+      identity: buildCaseIdentity({ caseId: "task-3--alpha--1", taskId: "task-3", sourceCommit: githubTask.startCommit }),
+      artifacts: buildArtifactIndex("task-3--alpha--1", new Set(["result"])),
     });
     const manifest: RunManifest = {
       schemaVersion: 1,
@@ -1491,7 +1497,7 @@ describe("deterministic report regeneration", () => {
       completedAt: "2026-01-01T00:05:00.000Z",
       host: { platform: "linux", nodeVersion: "v24.21.0", bunVersion: "1.4.2" },
       tools: { gitVersion: "git version 2.45.0", agentVersions: { opencode: null } },
-      execution: { concurrency: 1, caseTimeoutMs: 1000 },
+      execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 1, source: "config" } },
       cases: [githubCase.identity],
     };
     const input: ReportInput = {
@@ -1515,6 +1521,105 @@ describe("deterministic report regeneration", () => {
       issueKey: "octo/repo#42",
       issueUrl: "https://github.com/octo/repo/issues/42",
     });
+  });
+
+  it("computes each PairSummary's outcome counts, passedOfPlanned, and allPassed, topping up not-evaluated by the unmatched planned attempts, and renders the pair row (AC-6)", () => {
+    const passed = buildCaseResult({
+      identity: buildCaseIdentity({ caseId: "task-1--alpha--1", attempt: 1 }),
+      outcome: "passed",
+    });
+    const failed = buildCaseResult({
+      identity: buildCaseIdentity({ caseId: "task-1--alpha--2", attempt: 2 }),
+      outcome: "failed",
+    });
+    const notEvaluatedIdentity = buildCaseIdentity({ caseId: "task-1--alpha--3", attempt: 3 });
+    const manifest: RunManifest = {
+      schemaVersion: 1,
+      runId: "20260101t000000z-pairs",
+      configDigest: "sha256-pairs-digest",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:05:00.000Z",
+      host: { platform: "linux", nodeVersion: "v24.21.0", bunVersion: "1.4.2" },
+      tools: { gitVersion: "git version 2.45.0", agentVersions: {} },
+      execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 3, source: "config" } },
+      cases: [passed.identity, failed.identity, notEvaluatedIdentity],
+    };
+    const input: ReportInput = {
+      run: { schemaVersion: 1, manifest, cases: [passed, failed], findings: [], exitCode: 2 },
+      capabilities: {},
+      tasks: [buildTaskRecord()],
+      models: [],
+      repositories: [],
+      assessments: [],
+    };
+
+    const model = buildNormalizedRun(input);
+    const markdown = buildReport(input).markdown;
+
+    expect(model.pairs).toEqual([
+      {
+        taskId: "task-1",
+        modelId: "alpha",
+        planned: 3,
+        outcomes: { passed: 1, failed: 1, pending: 0, "not-evaluated": 1 },
+        passedOfPlanned: "1/3",
+        allPassed: false,
+      },
+    ]);
+    expect(markdown).toContain("| alpha | 3 | 1 | 1 | 0 | 1 | 1/3 | no |");
+    const normalized = JSON.parse(serializeNormalizedRun(model)) as { pairs: unknown };
+    expect(normalized.pairs).toEqual([
+      {
+        allPassed: false,
+        modelId: "alpha",
+        outcomes: { failed: 1, "not-evaluated": 1, passed: 1, pending: 0 },
+        passedOfPlanned: "1/3",
+        planned: 3,
+        taskId: "task-1",
+      },
+    ]);
+  });
+
+  it("orders findings and their rendered Run findings list by attempt number, not the caseId string, for repeat 10 (AC-11)", () => {
+    const identities = Array.from({ length: 10 }, (_, index) =>
+      buildCaseIdentity({ caseId: `task-1--alpha--${index + 1}`, attempt: index + 1 }),
+    );
+    const manifest: RunManifest = {
+      schemaVersion: 1,
+      runId: "20260101t000000z-order",
+      configDigest: "sha256-order-digest",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:05:00.000Z",
+      host: { platform: "linux", nodeVersion: "v24.21.0", bunVersion: "1.4.2" },
+      tools: { gitVersion: "git version 2.45.0", agentVersions: {} },
+      execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 10, source: "config" } },
+      cases: identities,
+    };
+    const findings: RunFinding[] = [
+      { severity: "warning", caseId: "task-1--alpha--10", message: "synthetic finding ten" },
+      { severity: "warning", caseId: "task-1--alpha--9", message: "synthetic finding nine" },
+    ];
+    const input: ReportInput = {
+      run: { schemaVersion: 1, manifest, cases: [], findings, exitCode: 1 },
+      capabilities: {},
+      tasks: [],
+      models: [],
+      repositories: [],
+      assessments: [],
+    };
+
+    const model = buildNormalizedRun(input);
+    const markdown = buildReport(input).markdown;
+
+    expect(model.findings.map((finding) => finding.caseId)).toEqual([
+      "task-1--alpha--9",
+      "task-1--alpha--10",
+    ]);
+    const nineIndex = markdown.indexOf("case task-1--alpha--9)");
+    const tenIndex = markdown.indexOf("case task-1--alpha--10)");
+    expect(nineIndex).toBeGreaterThan(-1);
+    expect(tenIndex).toBeGreaterThan(-1);
+    expect(nineIndex).toBeLessThan(tenIndex);
   });
 
   it("regenerates byte-identical normalized JSON and Markdown from unchanged source artifacts", async () => {
@@ -1576,7 +1681,7 @@ describe("deterministic report regeneration", () => {
     const root = await mkdtemp(join(tmpdir(), "tevu-eval-unregistered-agent-"));
     try {
       const { runId, store } = await createSyntheticRun(root);
-      const resultPath = caseFile(root, runId, "task-1--alpha", "result.json");
+      const resultPath = caseFile(root, runId, "task-1--alpha--1", "result.json");
       const before = await readFile(resultPath, "utf8");
       const stored = JSON.parse(before) as { identity: Record<string, unknown> };
       stored.identity["agent"] = "ghost-agent";
@@ -1591,11 +1696,84 @@ describe("deterministic report regeneration", () => {
         error: {
           kind: "ArtifactError",
           operation: "rebuild-report",
-          reason: 'case "task-1--alpha" names agent "ghost-agent", which has no registered adapter',
+          reason: 'case "task-1--alpha--1" names agent "ghost-agent", which has no registered adapter',
         },
       });
       expect(await readFile(resultPath, "utf8")).toBe(corrupted);
       expect(existsSync(reportPath)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a run whose manifest lacks execution.repeat, before any write (AC-12, verification property 10)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tevu-eval-no-repeat-"));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      const runJsonPath = join(root, "artifacts", runId, "run.json");
+      const before = await readFile(runJsonPath, "utf8");
+      const stored = JSON.parse(before) as { manifest: { execution: Record<string, unknown> } };
+      delete stored.manifest.execution["repeat"];
+      await writeFile(runJsonPath, JSON.stringify(stored, null, 2), "utf8");
+      const corrupted = await readFile(runJsonPath, "utf8");
+      const reportPath = join(root, "artifacts", runId, "report.md");
+
+      const manifestResult = await store.readRunManifest(runId);
+      const runResult = await store.readRunResult(runId);
+      const rebuilt = await rebuildReport(runId, store, AGENTS_REGISTRY);
+
+      expect(manifestResult.ok).toBe(false);
+      expect(runResult.ok).toBe(false);
+      expect(rebuilt.ok).toBe(false);
+      expect(await readFile(runJsonPath, "utf8")).toBe(corrupted);
+      expect(existsSync(reportPath)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a case result missing identity.attempt, before any write (AC-12, verification property 10)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tevu-eval-no-attempt-"));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      const resultPath = caseFile(root, runId, "task-1--alpha--1", "result.json");
+      const before = await readFile(resultPath, "utf8");
+      const stored = JSON.parse(before) as { identity: Record<string, unknown> };
+      delete stored.identity["attempt"];
+      await writeFile(resultPath, JSON.stringify(stored, null, 2), "utf8");
+      const corrupted = await readFile(resultPath, "utf8");
+
+      const result = await store.readCaseResult(runId, "task-1--alpha--1");
+
+      expect(result.ok).toBe(false);
+      expect(await readFile(resultPath, "utf8")).toBe(corrupted);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns ArtifactError and creates no run directory for a manifest whose execution.repeat fails isRepeatSetting (verification property 11)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tevu-eval-bad-repeat-"));
+    try {
+      const records = buildSyntheticRecords();
+      const store = createArtifactStore({ artifactsDirectory: join(root, "artifacts"), redact: (text) => text });
+      const manifest: RunManifest = {
+        ...records.manifest,
+        runId: "20260101t000000z-bad-repeat",
+        execution: { ...records.manifest.execution, repeat: { value: 0, source: "cli" } },
+      };
+
+      const result = await store.startRun(manifest);
+
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          kind: "ArtifactError",
+          operation: "start-run",
+          reason: 'run manifest execution.repeat must be a whole number of at least 1 with source "config" or "cli"',
+        },
+      });
+      expect(existsSync(join(root, "artifacts", manifest.runId))).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1609,7 +1787,7 @@ describe("deterministic report regeneration", () => {
       expect(rebuilt.ok).toBe(true);
       if (!rebuilt.ok) return;
 
-      const alpha = await store.readCaseResult(runId, "task-1--alpha");
+      const alpha = await store.readCaseResult(runId, "task-1--alpha--1");
       expect(alpha.ok).toBe(true);
       if (!alpha.ok) return;
       expect(alpha.value.outcome).toBe("passed");
@@ -1623,13 +1801,13 @@ describe("deterministic report regeneration", () => {
         "pending",
       );
 
-      const beta = await store.readCaseResult(runId, "task-1--beta");
+      const beta = await store.readCaseResult(runId, "task-1--beta--1");
       expect(beta.ok).toBe(true);
       if (!beta.ok) return;
       expect(beta.value.outcome).toBe("failed");
       expect(beta.value.failure?.error.kind).toBe("AgentProcessError");
 
-      const gamma = await store.readCaseResult(runId, "task-2--alpha");
+      const gamma = await store.readCaseResult(runId, "task-2--alpha--1");
       expect(gamma.ok).toBe(true);
       if (!gamma.ok) return;
       expect(gamma.value.outcome).toBe("not-evaluated");
@@ -1640,7 +1818,7 @@ describe("deterministic report regeneration", () => {
       if (!run.ok) return;
       expect(run.value.exitCode).toBe(2);
 
-      const assessment = await store.readAssessment(runId, "task-1--alpha");
+      const assessment = await store.readAssessment(runId, "task-1--alpha--1");
       expect(assessment.ok).toBe(true);
       if (!assessment.ok) return;
       expect(assessment.value?.current).toHaveLength(1);
@@ -1689,7 +1867,7 @@ describe("deterministic report regeneration", () => {
       expect(markdown).toContain("non-adversarial");
 
       expect(markdown.indexOf("## Task task-1")).toBeLessThan(markdown.indexOf("## Task task-2"));
-      expect(markdown).toContain("| passed | alpha | vendor/model-alpha-synth | effort-high | completed | none |");
+      expect(markdown).toContain("| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none |");
       expect(markdown.indexOf("| passed | alpha |")).toBeLessThan(markdown.indexOf("| failed | beta |"));
       expect(markdown).toContain("Jira snapshot — [TEVU-999](https://jira.example.com/browse/TEVU-999)");
 
@@ -1717,9 +1895,9 @@ describe("deterministic report regeneration", () => {
 
       expect(rebuilt.value.normalizedJson).not.toContain(TRANSCRIPT_BODY);
 
-      const sessionOnDisk = await readFile(caseFile(root, runId, "task-1--alpha", "session.json"), "utf8");
+      const sessionOnDisk = await readFile(caseFile(root, runId, "task-1--alpha--1", "session.json"), "utf8");
       expect(sessionOnDisk).toContain(TRANSCRIPT_BODY);
-      const patchOnDisk = await readFile(caseFile(root, runId, "task-1--alpha", "solution.patch"), "utf8");
+      const patchOnDisk = await readFile(caseFile(root, runId, "task-1--alpha--1", "solution.patch"), "utf8");
       expect(patchOnDisk).toContain(PATCH_BODY);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -1731,25 +1909,25 @@ describe("deterministic report regeneration", () => {
     try {
       const { runId, store } = await createSyntheticRun(root);
 
-      const rawEvents = await readFile(caseFile(root, runId, "task-1--alpha", "events.jsonl"), "utf8");
+      const rawEvents = await readFile(caseFile(root, runId, "task-1--alpha--1", "events.jsonl"), "utf8");
       expect(rawEvents).not.toContain(PROVIDER_SECRET);
       expect(rawEvents).toContain("[REDACTED]");
       for (const line of rawEvents.trim().split("\n")) {
         JSON.parse(line);
       }
 
-      const diagnostics = await readFile(caseFile(root, runId, "task-1--alpha", "stderr.log"), "utf8");
+      const diagnostics = await readFile(caseFile(root, runId, "task-1--alpha--1", "stderr.log"), "utf8");
       expect(diagnostics).toContain("[REDACTED]");
       expect(diagnostics).not.toContain(PROVIDER_SECRET);
 
-      const events = await store.readEvents(runId, "task-1--alpha");
+      const events = await store.readEvents(runId, "task-1--alpha--1");
       expect(events.ok).toBe(true);
       if (!events.ok) return;
       expect(events.value).toHaveLength(9);
       expect(JSON.stringify(events.value)).not.toContain(PROVIDER_SECRET);
       expect(events.value[0]).toMatchObject({ kind: "tool" });
 
-      const sessionExport = await store.readSessionExport(runId, "task-1--alpha");
+      const sessionExport = await store.readSessionExport(runId, "task-1--alpha--1");
       expect(sessionExport.ok).toBe(true);
       if (!sessionExport.ok) return;
       // The store persists an opaque record; this fixture's own shape is
@@ -1757,7 +1935,7 @@ describe("deterministic report regeneration", () => {
       expect((sessionExport.value as { rootSessionId?: unknown } | null)?.rootSessionId).toBe("ses-root-0001");
       expect(JSON.stringify(sessionExport.value)).toContain("additiveTopLevelField");
 
-      const checks = await store.readChecks(runId, "task-1--alpha");
+      const checks = await store.readChecks(runId, "task-1--alpha--1");
       expect(checks.ok).toBe(true);
       if (!checks.ok) return;
       expect(checks.value).toHaveLength(3);
@@ -1781,17 +1959,17 @@ describe("deterministic report regeneration", () => {
         },
       });
       const started = await failingStore.startRun(
-        buildManifest("20260923t010000z-redact", records.config, records.capabilities, ["task-1--alpha"]),
+        buildManifest("20260923t010000z-redact", records.config, records.capabilities, ["task-1--alpha--1"]),
       );
       expect(started.ok).toBe(true);
 
-      const attempt = await failingStore.writeSessionExport("task-1--alpha", records.exportRecord);
+      const attempt = await failingStore.writeSessionExport("task-1--alpha--1", records.exportRecord);
       expect(attempt.ok).toBe(false);
       if (attempt.ok) return;
       expect(attempt.error.kind).toBe("ArtifactError");
       expect(attempt.error.reason).toContain("redaction failed");
       expect(
-        existsSync(caseFile(root, "20260923t010000z-redact", "task-1--alpha", "session.json")),
+        existsSync(caseFile(root, "20260923t010000z-redact", "task-1--alpha--1", "session.json")),
       ).toBe(false);
 
       const nonStringStore = createArtifactStore({
@@ -1801,17 +1979,17 @@ describe("deterministic report regeneration", () => {
         ) => string,
       });
       const nonStringRun = await nonStringStore.startRun(
-        buildManifest("20260923t010000z-redact2", records.config, records.capabilities, ["task-1--alpha"]),
+        buildManifest("20260923t010000z-redact2", records.config, records.capabilities, ["task-1--alpha--1"]),
       );
       expect(nonStringRun.ok).toBe(true);
-      const nonStringWrite = await nonStringStore.writeChecks("task-1--alpha", [
+      const nonStringWrite = await nonStringStore.writeChecks("task-1--alpha--1", [
         buildCheckResult({ checkId: "acc-acceptance-command" }),
       ]);
       expect(nonStringWrite.ok).toBe(false);
       if (nonStringWrite.ok) return;
       expect(nonStringWrite.error.reason).toContain("redaction returned no text");
       expect(
-        existsSync(caseFile(root, "20260923t010000z-redact2", "task-1--alpha", "checks.json")),
+        existsSync(caseFile(root, "20260923t010000z-redact2", "task-1--alpha--1", "checks.json")),
       ).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -1853,7 +2031,7 @@ function storeFailingWriteReport(store: ArtifactStore): ArtifactStore {
 }
 
 async function readSyntheticAssessmentBytes(root: string, runId: string): Promise<string> {
-  return readFile(caseFile(root, runId, "task-1--alpha", "assessment.json"), "utf8");
+  return readFile(caseFile(root, runId, "task-1--alpha--1", "assessment.json"), "utf8");
 }
 
 describe("assessCase locking, revision, and recovery", () => {
@@ -1864,20 +2042,20 @@ describe("assessCase locking, revision, and recovery", () => {
       const seeded = await rebuildReport(runId, store, AGENTS_REGISTRY);
       expect(seeded.ok).toBe(true);
       const artifactPaths = [
-        caseFile(root, runId, "task-1--alpha", "assessment.json"),
-        caseFile(root, runId, "task-1--alpha", "result.json"),
+        caseFile(root, runId, "task-1--alpha--1", "assessment.json"),
+        caseFile(root, runId, "task-1--alpha--1", "result.json"),
         join(root, "artifacts", runId, "report.md"),
       ];
       const before = await Promise.all(artifactPaths.map((filePath) => readFile(filePath, "utf8")));
 
-      const lock = await store.acquireAssessmentLock(runId, "task-1--alpha");
+      const lock = await store.acquireAssessmentLock(runId, "task-1--alpha--1");
       expect(lock.ok).toBe(true);
       if (!lock.ok) return;
 
       const attempted = await assessCase(
         {
           runId,
-          caseId: "task-1--alpha",
+          caseId: "task-1--alpha--1",
           decisions: [
             {
               checkId: "man-optional-polish",
@@ -1898,7 +2076,7 @@ describe("assessCase locking, revision, and recovery", () => {
         throw new Error(`expected AssessmentConflictError, got ${JSON.stringify(attempted)}`);
       }
       expect(attempted.error.runId).toBe(runId);
-      expect(attempted.error.caseId).toBe("task-1--alpha");
+      expect(attempted.error.caseId).toBe("task-1--alpha--1");
       expect(attempted.error.reason).toContain("assessment lock already exists");
 
       const after = await Promise.all(artifactPaths.map((filePath) => readFile(filePath, "utf8")));
@@ -1919,7 +2097,7 @@ describe("assessCase locking, revision, and recovery", () => {
       const assessed = await assessCase(
         {
           runId,
-          caseId: "task-1--alpha",
+          caseId: "task-1--alpha--1",
           decisions: [
             {
               checkId: "dod-manual-review",
@@ -1949,7 +2127,7 @@ describe("assessCase locking, revision, and recovery", () => {
         assessed.value.checks.find((check) => check.checkId === "dod-manual-review")?.evidence,
       ).toContain("manually assessed by curator-2 at 2026-09-23T02:00:00.000Z: regressed after rework");
 
-      const assessment = await store.readAssessment(runId, "task-1--alpha");
+      const assessment = await store.readAssessment(runId, "task-1--alpha--1");
       expect(assessment.ok).toBe(true);
       if (!assessment.ok || assessment.value === null) return;
       expect(assessment.value.revision).toBe(3);
@@ -1987,7 +2165,7 @@ describe("assessCase locking, revision, and recovery", () => {
       const assessed = await assessCase(
         {
           runId,
-          caseId: "task-1--alpha",
+          caseId: "task-1--alpha--1",
           decisions: [
             {
               checkId: "man-optional-polish",
@@ -2007,7 +2185,7 @@ describe("assessCase locking, revision, and recovery", () => {
       if (!assessed.ok) return;
       expect(assessed.value.outcome).toBe("passed");
 
-      const assessment = await store.readAssessment(runId, "task-1--alpha");
+      const assessment = await store.readAssessment(runId, "task-1--alpha--1");
       expect(assessment.ok).toBe(true);
       if (!assessment.ok || assessment.value === null) return;
       expect(assessment.value.revision).toBe(3);
@@ -2090,7 +2268,7 @@ describe("assessCase locking, revision, and recovery", () => {
         const attempted = await assessCase(
           {
             runId,
-            caseId: "task-1--alpha",
+            caseId: "task-1--alpha--1",
             decisions: [decision],
             assessedAt: "2026-09-23T02:00:00.000Z",
           },
@@ -2105,7 +2283,7 @@ describe("assessCase locking, revision, and recovery", () => {
         expect(attempted.error.findings.some((finding) => finding.message === message)).toBe(true);
         expect(await readSyntheticAssessmentBytes(root, runId)).toBe(before);
 
-        const lock = await store.acquireAssessmentLock(runId, "task-1--alpha");
+        const lock = await store.acquireAssessmentLock(runId, "task-1--alpha--1");
         expect(lock.ok).toBe(true);
         if (lock.ok) {
           const released = await lock.value.release();
@@ -2127,7 +2305,7 @@ describe("assessCase locking, revision, and recovery", () => {
       const attempted = await assessCase(
         {
           runId,
-          caseId: "task-1--alpha",
+          caseId: "task-1--alpha--1",
           decisions: [
             {
               checkId: "man-optional-polish",
@@ -2151,7 +2329,7 @@ describe("assessCase locking, revision, and recovery", () => {
       expect(attempted.error.activeCaseIds).toEqual([]);
       expect(await readSyntheticAssessmentBytes(root, runId)).toBe(before);
 
-      const reacquired = await store.acquireAssessmentLock(runId, "task-1--alpha");
+      const reacquired = await store.acquireAssessmentLock(runId, "task-1--alpha--1");
       expect(reacquired.ok).toBe(true);
       if (reacquired.ok) {
         const released = await reacquired.value.release();
@@ -2172,7 +2350,7 @@ describe("assessCase locking, revision, and recovery", () => {
       const attempted = await assessCase(
         {
           runId,
-          caseId: "task-1--alpha",
+          caseId: "task-1--alpha--1",
           decisions: [
             {
               checkId: "man-optional-polish",
@@ -2196,7 +2374,7 @@ describe("assessCase locking, revision, and recovery", () => {
       expect(attempted.error.reason).toContain("is committed");
       expect(attempted.error.reason).toContain(`tevu report ${runId}`);
 
-      const committed = await store.readAssessment(runId, "task-1--alpha");
+      const committed = await store.readAssessment(runId, "task-1--alpha--1");
       expect(committed.ok).toBe(true);
       if (!committed.ok || committed.value === null) return;
       expect(committed.value.revision).toBe(3);
@@ -2215,7 +2393,7 @@ describe("assessCase locking, revision, and recovery", () => {
       expect(repeat.value.markdown).toBe(recovered.value.markdown);
       expect(existsSync(reportPath)).toBe(true);
 
-      const derived = await store.readCaseResult(runId, "task-1--alpha");
+      const derived = await store.readCaseResult(runId, "task-1--alpha--1");
       expect(derived.ok).toBe(true);
       if (!derived.ok) return;
       expect(derived.value.outcome).toBe("passed");
@@ -2223,7 +2401,7 @@ describe("assessCase locking, revision, and recovery", () => {
       expect(polish?.verdict).toBe("passed");
       expect(polish?.evidence).toContain("manually assessed by curator-2");
 
-      const assessmentAfterRecovery = await store.readAssessment(runId, "task-1--alpha");
+      const assessmentAfterRecovery = await store.readAssessment(runId, "task-1--alpha--1");
       expect(assessmentAfterRecovery.ok).toBe(true);
       if (!assessmentAfterRecovery.ok || assessmentAfterRecovery.value === null) return;
       expect(assessmentAfterRecovery.value.revision).toBe(3);
@@ -2322,19 +2500,19 @@ describe("credential-secret redaction at serialization boundaries", () => {
         redact: createRedactor([QUOTED_SECRET]),
       });
       const started = await store.startRun(
-        buildManifest(runId, buildSyntheticConfig(), buildCapabilityReport(), ["task-1--alpha"]),
+        buildManifest(runId, buildSyntheticConfig(), buildCapabilityReport(), ["task-1--alpha--1"]),
       );
       expect(started.ok).toBe(true);
       const exportWithSecret = buildRedactionExport();
       (exportWithSecret.messages[0].parts[0] as unknown as { text: string }).text =
         `note ${QUOTED_SECRET} end`;
 
-      const written = await store.writeSessionExport("task-1--alpha", exportWithSecret);
+      const written = await store.writeSessionExport("task-1--alpha--1", exportWithSecret);
       expect(written.ok).toBe(true);
-      const raw = await readFile(caseFile(root, runId, "task-1--alpha", "session.json"), "utf8");
+      const raw = await readFile(caseFile(root, runId, "task-1--alpha--1", "session.json"), "utf8");
       const storedDocument = JSON.parse(raw) as unknown;
       expect(storedDocument).toMatchObject({ info: { id: "ses-redact-0001" } });
-      const readBack = await store.readSessionExport(runId, "task-1--alpha");
+      const readBack = await store.readSessionExport(runId, "task-1--alpha--1");
       expect(readBack.ok).toBe(true);
       if (!readBack.ok || readBack.value === null) return;
       // The store persists an opaque record; this fixture's own shape is
@@ -2361,20 +2539,20 @@ describe("credential-secret redaction at serialization boundaries", () => {
         redact: createRedactor([TOKEN_DIGIT_SECRET]),
       });
       const started = await store.startRun(
-        buildManifest(runId, buildSyntheticConfig(), buildCapabilityReport(), ["task-1--alpha"]),
+        buildManifest(runId, buildSyntheticConfig(), buildCapabilityReport(), ["task-1--alpha--1"]),
       );
       expect(started.ok).toBe(true);
 
-      const written = await store.writeSessionExport("task-1--alpha", buildRedactionExport());
+      const written = await store.writeSessionExport("task-1--alpha--1", buildRedactionExport());
       expect(written.ok).toBe(true);
-      const raw = await readFile(caseFile(root, runId, "task-1--alpha", "session.json"), "utf8");
+      const raw = await readFile(caseFile(root, runId, "task-1--alpha--1", "session.json"), "utf8");
       const storedDocument = JSON.parse(raw) as {
         messages: Array<{ info: { tokens?: { input?: unknown; output?: unknown }; cost?: unknown } }>;
       };
       expect(typeof storedDocument.messages[1].info.tokens?.input).toBe("number");
       expect(storedDocument.messages[1].info.tokens?.input).toBe(120);
       expect(storedDocument.messages[1].info.cost).toBe(0.0125);
-      const readBack = await store.readSessionExport(runId, "task-1--alpha");
+      const readBack = await store.readSessionExport(runId, "task-1--alpha--1");
       expect(readBack.ok).toBe(true);
       if (!readBack.ok || readBack.value === null) return;
       // The store persists an opaque record; this fixture's own shape is
@@ -2403,7 +2581,7 @@ describe("credential-secret redaction at serialization boundaries", () => {
         redact: createRedactor([QUOTED_SECRET]),
       });
       const started = await store.startRun(
-        buildManifest(runId, buildSyntheticConfig(), buildCapabilityReport(), ["task-1--alpha"]),
+        buildManifest(runId, buildSyntheticConfig(), buildCapabilityReport(), ["task-1--alpha--1"]),
       );
       expect(started.ok).toBe(true);
       const secretEvent: RedactionTestEvent = {
@@ -2412,13 +2590,13 @@ describe("credential-secret redaction at serialization boundaries", () => {
         sessionID: "ses-redact-0001",
         error: { message: `provider said ${QUOTED_SECRET} today` },
       };
-      const appended = await store.appendEvent("task-1--alpha", secretEvent);
+      const appended = await store.appendEvent("task-1--alpha--1", secretEvent);
       expect(appended.ok).toBe(true);
 
-      const raw = await readFile(caseFile(root, runId, "task-1--alpha", "events.jsonl"), "utf8");
+      const raw = await readFile(caseFile(root, runId, "task-1--alpha--1", "events.jsonl"), "utf8");
       const storedLine = raw.trim();
       expect(() => JSON.parse(storedLine)).not.toThrow();
-      const readBack = await store.readEvents(runId, "task-1--alpha");
+      const readBack = await store.readEvents(runId, "task-1--alpha--1");
       expect(readBack.ok).toBe(true);
       if (!readBack.ok) return;
       const errorPayload = readBack.value[0] as unknown as { error: { message?: unknown } };

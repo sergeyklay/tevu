@@ -337,7 +337,7 @@ describe("runBenchmark tamper-proof check-state (AC-1, P11)", () => {
     const result = await runBenchmark(planBenchmark(config), dependencies);
 
     const run = unwrapOk(result);
-    const caseResult = caseResultOf(run, "guard-task--m1");
+    const caseResult = caseResultOf(run, "guard-task--m1--1");
     expect(caseResult.lifecycle).toBe("completed");
     expect(caseResult.outcome).toBe("passed");
     expect(caseResult.checks.map((check) => check.verdict)).toEqual(["passed", "passed"]);
@@ -380,7 +380,7 @@ describe.each([
     const result = await runBenchmark(planBenchmark(config), dependencies);
 
     const run = unwrapOk(result);
-    const caseResult = caseResultOf(run, "guard-task--m1");
+    const caseResult = caseResultOf(run, "guard-task--m1--1");
     expect(caseResult.lifecycle).toBe("completed");
     expect(caseResult.outcome).toBe("passed");
     expect(caseResult.checks.map((check) => check.verdict)).toEqual(["passed", "passed"]);

@@ -5,7 +5,7 @@
 > host filesystem access controls.
 >
 > **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,
-> later Git history, host OpenCode state, and benchmark artifacts from normal discovery.
+> later Git history, host agent state, and benchmark artifacts from normal discovery.
 > It does not claim that a model with shell access cannot probe arbitrary host paths.
 
 ## Run
@@ -14,10 +14,11 @@
 - Started: 2026-09-23T00:00:00.000Z
 - Completed: not completed
 - Host: linux, Node.js v24.21.0, Bun 1.4.2, Git git version 2.45.0
-- OpenCode version (detected provenance only): 9.9.9-synthetic
-- Isolation control (deny outside worktree): unavailable
+- Agent "opencode" version (detected provenance only): 9.9.9-synthetic
+- Agent "opencode" isolation control (deny outside worktree): unavailable
 - Concurrency: 2
 - Case timeout: 60000ms
+- Repeat: 1 (source: config)
 - Run exit code: 2
 
 ## Run findings
@@ -32,12 +33,19 @@ synthetic task description for the welcome route
 - Source commit: `0123456789abcdef0123456789abcdef01234567`
 - Source: manual — Synthetic welcome-route task
 
-| Outcome | Model entry | Model | Effort | Lifecycle | Runtime failure | Elapsed |
-|---|---|---|---|---|---|---|
-| passed | alpha | vendor/model-alpha-synth | effort-high | completed | none | 1500 millisecond (case, source: process) |
-| failed | beta | vendor/model-alpha-synth | effort-low | completed | OpenCodeProcessError | 900 millisecond (case, source: process) |
+Pair summary:
 
-### Case task-1--alpha
+| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |
+|---|---|---|---|---|---|---|---|
+| alpha | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |
+| beta | 1 | 0 | 1 | 0 | 0 | 0/1 | no |
+
+| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |
+|---|---|---|---|---|---|---|---|
+| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | 1500 millisecond (case, source: process) |
+| failed | beta | 1 | vendor/model-alpha-synth | effort-low | completed | AgentProcessError | 900 millisecond (case, source: process) |
+
+### Case task-1--alpha--1
 
 - Model entry: alpha (vendor/model-alpha-synth, effort effort-high)
 - Lifecycle: completed
@@ -46,9 +54,9 @@ synthetic task description for the welcome route
 
 | Verdict | Check | Category | Required | Evaluator | Duration | Evidence |
 |---|---|---|---|---|---|---|
-| passed | acc-acceptance-command | acceptance | true | command | 12ms | [cases/task-1--alpha/checks.json](cases/task-1--alpha/checks.json) |
-| passed | dod-manual-review | definition-of-done | true | manual | - | [cases/task-1--alpha/checks.json](cases/task-1--alpha/checks.json) |
-| pending | man-optional-polish | definition-of-done | false | manual | - | [cases/task-1--alpha/checks.json](cases/task-1--alpha/checks.json) |
+| passed | acc-acceptance-command | acceptance | true | command | 12ms | [cases/task-1--alpha--1/checks.json](cases/task-1--alpha--1/checks.json) |
+| passed | dod-manual-review | definition-of-done | true | manual | - | [cases/task-1--alpha--1/checks.json](cases/task-1--alpha--1/checks.json) |
+| pending | man-optional-polish | definition-of-done | false | manual | - | [cases/task-1--alpha--1/checks.json](cases/task-1--alpha--1/checks.json) |
 
 Pending manual checks: man-optional-polish.
 
@@ -69,28 +77,28 @@ Metrics:
 
 Artifacts:
 
-- Solution patch: [cases/task-1--alpha/solution.patch](cases/task-1--alpha/solution.patch)
-- Events: [cases/task-1--alpha/events.jsonl](cases/task-1--alpha/events.jsonl)
-- Diagnostics: [cases/task-1--alpha/stderr.log](cases/task-1--alpha/stderr.log)
-- Session export: [cases/task-1--alpha/session.json](cases/task-1--alpha/session.json)
-- Check evidence: [cases/task-1--alpha/checks.json](cases/task-1--alpha/checks.json)
-- Result: [cases/task-1--alpha/result.json](cases/task-1--alpha/result.json)
+- Solution patch: [cases/task-1--alpha--1/solution.patch](cases/task-1--alpha--1/solution.patch)
+- Events: [cases/task-1--alpha--1/events.jsonl](cases/task-1--alpha--1/events.jsonl)
+- Diagnostics: [cases/task-1--alpha--1/stderr.log](cases/task-1--alpha--1/stderr.log)
+- Session export: [cases/task-1--alpha--1/session.json](cases/task-1--alpha--1/session.json)
+- Check evidence: [cases/task-1--alpha--1/checks.json](cases/task-1--alpha--1/checks.json)
+- Result: [cases/task-1--alpha--1/result.json](cases/task-1--alpha--1/result.json)
 
 Assessments (revision 2):
 
 - dod-manual-review: passed by curator at 2026-09-23T01:00:00.000Z — confirmed by reviewer
 
-### Case task-1--beta
+### Case task-1--beta--1
 
 - Model entry: beta (vendor/model-alpha-synth, effort effort-low)
 - Lifecycle: completed
 - Task outcome: failed
 - Process: exit code 1, 900ms, termination stage none
-- Runtime failure (preserved independently of the task outcome): OpenCodeProcessError at 2026-09-23T00:00:00.950Z
+- Runtime failure (preserved independently of the task outcome): AgentProcessError at 2026-09-23T00:00:00.950Z
 
 | Verdict | Check | Category | Required | Evaluator | Duration | Evidence |
 |---|---|---|---|---|---|---|
-| failed | acc-acceptance-command | acceptance | true | command | 12ms | [cases/task-1--beta/checks.json](cases/task-1--beta/checks.json) |
+| failed | acc-acceptance-command | acceptance | true | command | 12ms | [cases/task-1--beta--1/checks.json](cases/task-1--beta--1/checks.json) |
 
 Metrics:
 
@@ -110,11 +118,11 @@ Metrics:
 Artifacts:
 
 - Solution patch: missing
-- Events: [cases/task-1--beta/events.jsonl](cases/task-1--beta/events.jsonl)
-- Diagnostics: [cases/task-1--beta/stderr.log](cases/task-1--beta/stderr.log)
+- Events: [cases/task-1--beta--1/events.jsonl](cases/task-1--beta--1/events.jsonl)
+- Diagnostics: [cases/task-1--beta--1/stderr.log](cases/task-1--beta--1/stderr.log)
 - Session export: missing
-- Check evidence: [cases/task-1--beta/checks.json](cases/task-1--beta/checks.json)
-- Result: [cases/task-1--beta/result.json](cases/task-1--beta/result.json)
+- Check evidence: [cases/task-1--beta--1/checks.json](cases/task-1--beta--1/checks.json)
+- Result: [cases/task-1--beta--1/result.json](cases/task-1--beta--1/result.json)
 
 ## Task task-2
 
@@ -124,11 +132,17 @@ synthetic task description for the welcome route
 - Source commit: `fedcba9876543210fedcba9876543210fedcba98`
 - Source: Jira snapshot — [TEVU-999](https://jira.example.com/browse/TEVU-999)
 
-| Outcome | Model entry | Model | Effort | Lifecycle | Runtime failure | Elapsed |
-|---|---|---|---|---|---|---|
-| not-evaluated | gamma | vendor/model-gamma-synth | effort-high | timed-out | CaseTimeoutError | 42000 millisecond (case, source: process) |
+Pair summary:
 
-### Case task-2--alpha
+| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |
+|---|---|---|---|---|---|---|---|
+| alpha | 1 | 0 | 0 | 0 | 1 | 0/1 | no |
+
+| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |
+|---|---|---|---|---|---|---|---|
+| not-evaluated | gamma | 1 | vendor/model-gamma-synth | effort-high | timed-out | CaseTimeoutError | 42000 millisecond (case, source: process) |
+
+### Case task-2--alpha--1
 
 - Model entry: gamma (vendor/model-gamma-synth, effort effort-high)
 - Lifecycle: timed-out
@@ -158,7 +172,7 @@ Artifacts:
 - Diagnostics: missing
 - Session export: missing
 - Check evidence: missing
-- Result: [cases/task-2--alpha/result.json](cases/task-2--alpha/result.json)
+- Result: [cases/task-2--alpha--1/result.json](cases/task-2--alpha--1/result.json)
 
 ---
 

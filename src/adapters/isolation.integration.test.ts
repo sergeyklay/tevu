@@ -9,18 +9,32 @@ import { join, resolve } from "node:path";
 import process from "node:process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { planBenchmark, runBenchmark } from "../application/run-benchmark.ts";
 import { TevuConfigSchema } from "../config/schema.ts";
 import { buildCheckEnvironment } from "../evaluation/checks.ts";
+import { createArtifactStore } from "./artifact-store.ts";
 import { createGitWorkspaceAdapter } from "./git.ts";
-import { createEnvironmentAdapter, createRedactor, createStreamingRedactor, runManagedProcess } from "./process.ts";
+import {
+  createEnvironmentAdapter,
+  createEvaluatorProcessAdapter,
+  createRedactor,
+  createStreamingRedactor,
+  runManagedProcess,
+} from "./process.ts";
 
 import type {
+  AgentAdapter,
+  AgentRunInput,
+  AgentRunResult,
   CaseEnvironments,
   CaseIdentity,
   CaseWorkspace,
+  Clock,
   GitWorkspaceAdapter,
   IsolatedEnvironment,
   ManagedProcessResult,
+  PrerequisiteAdapter,
+  RunDependencies,
   TevuError,
   TevuResult,
 } from "../domain/types.ts";
@@ -198,6 +212,7 @@ function buildIdentity(caseId: string, sourceCommit: string): CaseIdentity {
     caseId,
     taskId: "task-1",
     modelId: "c1",
+    attempt: 1,
     sourceCommit,
     model: "synthetic/model-a",
     effort: "fast",
@@ -1331,4 +1346,144 @@ describe("readOverlay (P6)", () => {
       ],
     });
   });
+});
+
+function buildTrivialAgentAdapter(): AgentAdapter {
+  return {
+    async probe() {
+      return {
+        ok: true,
+        value: { executable: "fake-agent", detectedVersion: null, capabilities: [], isolation: { denyOutsideWorktree: "available" } },
+      };
+    },
+    async run(input: AgentRunInput): Promise<TevuResult<AgentRunResult, never>> {
+      const value: AgentRunResult = {
+        process: {
+          exitCode: 0,
+          signal: null,
+          startedAt: "2026-01-01T00:00:00.000Z",
+          endedAt: "2026-01-01T00:00:01.000Z",
+          durationMs: 1_000,
+          terminationStage: "none",
+        },
+        sessionId: `session-${input.identity.caseId}`,
+        parseFindings: [],
+      };
+      input.onProcess?.(value);
+      return { ok: true, value } as TevuResult<AgentRunResult, never>;
+    },
+    async exportSession() {
+      return { ok: true, value: {} };
+    },
+    normalizeMetrics() {
+      return {
+        ok: true,
+        value: {
+          inputTokens: { value: null, unit: "token", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
+          outputTokens: { value: null, unit: "token", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
+          reasoningTokens: { value: null, unit: "token", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
+          cacheReadTokens: { value: null, unit: "token", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
+          cacheWriteTokens: { value: null, unit: "token", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
+          turns: { value: null, unit: "count", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
+          apiCalls: { value: null, unit: "count", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
+          apiErrors: { value: null, unit: "count", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
+          toolCalls: { value: null, unit: "count", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
+          skillCalls: { value: null, unit: "count", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
+          cost: { value: null, unit: "USD", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
+        },
+      };
+    },
+  };
+}
+
+describe("file-backed artifact store with repeated attempts (AC-13)", () => {
+  it("finalizes a run with repeat: 2 through the real ArtifactStore, with a case directory for every attempt of every pair", async () => {
+    const repository = await createSyntheticRepository();
+    const outputDirectory = join(testDirectory, "artifacts");
+    const config: TevuConfig = TevuConfigSchema.parse({
+      version: 1,
+      run: { output_dir: outputDirectory, concurrency: 2, repeat: 2, timeout: "30s", stop_grace: "500ms" },
+      agents: { opencode: { command: "unused-agent-command", secrets: [], env: [] } },
+      repositories: [{ id: "repo-1", path: repository.path }],
+      models: [
+        { id: "m1", model: "synthetic/model-a", effort: "fast" },
+        { id: "m2", model: "synthetic/model-b", effort: "deep" },
+      ],
+      tasks: [
+        {
+          id: "guard-task",
+          title: "Guard task",
+          repo: "repo-1",
+          base_commit: repository.commit,
+          description: "synthetic task description",
+          prompt: "synthetic task prompt",
+          readiness: ["synthetic ready item"],
+          checks: {
+            acceptance: [
+              {
+                id: "acc-1",
+                description: "always passes",
+                run: [process.execPath, "-e", "process.exit(0);"],
+                timeout: "10s",
+                exit_codes: [0],
+              },
+            ],
+            done: [
+              {
+                id: "dod-1",
+                description: "always passes",
+                run: [process.execPath, "-e", "process.exit(0);"],
+                timeout: "10s",
+                exit_codes: [0],
+              },
+            ],
+          },
+        },
+      ],
+    });
+    const prerequisites: PrerequisiteAdapter = {
+      async probeHost() {
+        return {
+          ok: true,
+          value: {
+            platform: process.platform === "darwin" ? "darwin" : "linux",
+            nodeVersion: process.version,
+            bunVersion: "n/a",
+            gitVersion: "n/a",
+          },
+        };
+      },
+      hasEnvironmentVariable: () => true,
+      async probeWritableDirectory() {
+        return { ok: true, value: undefined };
+      },
+    };
+    const clock: Clock = { now: () => new Date("2026-01-01T00:00:00.000Z") };
+    const dependencies: RunDependencies = {
+      git: createGitWorkspaceAdapter({ config, workspacesDirectory: join(testDirectory, "workspaces") }),
+      agents: new Map([["opencode", buildTrivialAgentAdapter()]]),
+      artifacts: createArtifactStore({ artifactsDirectory: config.run.output_dir, redact: (text) => text }),
+      evaluatorProcesses: createEvaluatorProcessAdapter(() => []),
+      environments: createEnvironmentAdapter(),
+      prerequisites,
+      clock,
+      generateRunId: () => "run-ac13-repeat-synthetic",
+      configDigest: () => "digest-ac13-synthetic",
+      redact: (text) => text,
+      cancellation: new AbortController().signal,
+    };
+
+    const result = await runBenchmark(planBenchmark(config), dependencies);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const run = result.value;
+    expect(run.exitCode).toBe(0);
+    const runDirectory = join(outputDirectory, run.manifest.runId);
+    for (const modelId of ["m1", "m2"]) {
+      for (const attempt of [1, 2]) {
+        expect(existsSync(join(runDirectory, "cases", `guard-task--${modelId}--${attempt}`))).toBe(true);
+      }
+    }
+  }, 30_000);
 });

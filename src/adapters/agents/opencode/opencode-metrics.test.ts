@@ -23,7 +23,7 @@ import type {
   SecretRedactor,
 } from "../../../domain/types.ts";
 
-const CASE_ID = "task-1--alpha";
+const CASE_ID = "task-1--alpha--1";
 const FIXTURE_DIRECTORY = new URL("./fixtures/", import.meta.url);
 
 function readTextFixture(name: string): string {
@@ -727,6 +727,7 @@ const IDENTITY = {
   caseId: CASE_ID,
   taskId: "task-1",
   modelId: "alpha",
+  attempt: 1,
   sourceCommit: "0123456789abcdef0123456789abcdef01234567",
   model: "vendor/model-alpha-synth",
   effort: "effort-high",
