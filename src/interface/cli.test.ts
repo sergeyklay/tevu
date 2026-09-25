@@ -29,6 +29,7 @@ import type {
   TevuConfigInput,
 } from "../config/schema.ts";
 import type {
+  AgentCapabilityReport,
   AssessmentRecord,
   BenchmarkMetrics,
   BenchmarkPlan,
@@ -36,7 +37,6 @@ import type {
   CaseResult,
   ConfigReadCause,
   IssueSnapshot,
-  OpenCodeCapabilityReport,
   ReportResult,
   RunFinding,
   RunResult,
@@ -149,6 +149,23 @@ function buildModel(overrides: Partial<ModelDefinitionInput> = {}): ModelDefinit
   return { id: "c1", model: "provider/model-a", effort: "high", ...overrides };
 }
 
+const AGENT_NAME = "fake-agent";
+
+/**
+ * Renames the schema-required `opencode` key to `fake-agent` after parsing.
+ * The strict schema accepts only the literal `opencode` key (out of scope for
+ * this migration), so every agent-neutral test builds through that key and
+ * relabels the materialized config instead of parsing `fake-agent` directly.
+ */
+function rekeyToFakeAgent(config: TevuConfig): TevuConfig {
+  const { opencode, ...otherAgents } = config.agents;
+  return {
+    ...config,
+    agents: { ...otherAgents, [AGENT_NAME]: opencode },
+    models: config.models.map((model) => ({ ...model, agent: AGENT_NAME })),
+  };
+}
+
 function buildTevuConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
   const config: TevuConfigInput = {
     version: 1,
@@ -159,7 +176,7 @@ function buildTevuConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
     tasks: [buildTaskDefinition()],
     ...overrides,
   };
-  return TevuConfigSchema.parse(config);
+  return rekeyToFakeAgent(TevuConfigSchema.parse(config));
 }
 
 /** Materializes one task through the schema so every default (required, evaluator, etc.) is resolved. */
@@ -180,14 +197,17 @@ function buildFinding(overrides: Partial<ValidationFinding> = {}): ValidationFin
   };
 }
 
-function buildCapabilityReport(
-  overrides: Partial<OpenCodeCapabilityReport> = {},
-): OpenCodeCapabilityReport {
+function buildCapabilityReport(overrides: Partial<AgentCapabilityReport> = {}): AgentCapabilityReport {
   return {
     executable: "opencode",
     detectedVersion: "1.18.32",
-    commands: { run: "available", export: "available" },
-    runOptions: { jsonFormat: "available", model: "available", variant: "available" },
+    capabilities: [
+      { name: "run command", required: true, availability: "available" },
+      { name: "export command", required: true, availability: "available" },
+      { name: "run --format json", required: true, availability: "available" },
+      { name: "run --model", required: true, availability: "available" },
+      { name: "run --variant", required: true, availability: "available" },
+    ],
     isolation: { denyOutsideWorktree: "available" },
     ...overrides,
   };
@@ -197,7 +217,7 @@ function buildValidationReport(overrides: Partial<ValidationReport> = {}): Valid
   return {
     valid: true,
     findings: [],
-    capabilities: buildCapabilityReport(),
+    capabilities: { [AGENT_NAME]: buildCapabilityReport() },
     ...overrides,
   };
 }
@@ -216,6 +236,7 @@ function buildBenchmarkPlan(
         sourceCommit: "abc123def",
         model: model.model,
         effort: model.effort,
+        agent: model.agent,
       })),
     ),
     concurrency: config.run.concurrency,
@@ -234,6 +255,7 @@ function buildCaseIdentity(overrides: Partial<CaseIdentity> = {}): CaseIdentity 
     sourceCommit: "abc123def",
     model: "provider/model-a",
     effort: "high",
+    agent: AGENT_NAME,
     ...overrides,
   };
 }
@@ -311,7 +333,7 @@ function buildRunResult(overrides: Partial<RunResult> = {}): RunResult {
       startedAt: "2026-09-23T10:00:00.000Z",
       completedAt: "2026-09-23T10:05:00.000Z",
       host: { platform: "linux", nodeVersion: "24.10.0", bunVersion: "1.2.0" },
-      tools: { gitVersion: "2.47.0", opencodeVersion: "1.18.32" },
+      tools: { gitVersion: "2.47.0", agentVersions: { [AGENT_NAME]: "1.18.32" } },
       execution: { concurrency: 2, caseTimeoutMs: 600000 },
       cases: [identity],
     },
@@ -550,7 +572,7 @@ const BOOTSTRAP_PROMPTS = [
   "Agent time limit per case (for example 10m)",
   "Grace period before a forced stop (for example 3s)",
   "Default time limit for command checks (for example 5m; empty to set one per check)",
-  "OpenCode command (name on PATH, or a path relative to the configuration file)",
+  'Command for agent "opencode" (name on PATH, or a path relative to the configuration file)',
   "Add a secret variable for the agent (name only, never the value)?",
   "Add a ordinary variable for the agent?",
   "Configure Jira Cloud issue import?",
@@ -559,10 +581,10 @@ const BOOTSTRAP_PROMPTS = [
   "Add another repository?",
   "Model entry ID",
   'Model for "c1" (provider/model)',
-  'Reasoning effort for "c1" (passed to OpenCode as --variant)',
+  'Reasoning effort for "c1" (passed to the agent verbatim)',
   "Model entry ID",
   'Model for "c2" (provider/model)',
-  'Reasoning effort for "c2" (passed to OpenCode as --variant)',
+  'Reasoning effort for "c2" (passed to the agent verbatim)',
   "Add another model?",
 ];
 
@@ -678,9 +700,9 @@ const EXECUTE_FAILURE_CASES: Array<{
   },
   {
     name: "prerequisite",
-    error: { kind: "PrerequisiteError", tool: "opencode", expected: "an opencode executable" },
+    error: { kind: "PrerequisiteError", tool: "fake-agent", expected: "a fake-agent executable" },
     code: 1,
-    stderr: 'error: prerequisite "opencode" is not satisfied; expected an opencode executable',
+    stderr: 'error: prerequisite "fake-agent" is not satisfied; expected a fake-agent executable',
   },
 ];
 
@@ -828,7 +850,7 @@ describe("tevu CLI", () => {
 
       expect(code).toBe(0);
       expect(help.startsWith(`${description}\n\n${usage}\n\n`)).toBe(true);
-      expect(help).not.toMatch(/OpenCode|Sensitive data:|Isolation boundary:/i);
+      expect(help).not.toMatch(/opencode|Sensitive data:|Isolation boundary:/i);
       expect(help).toMatch(/-h, --help\s+Show help\n/);
       expect(help).not.toMatch(/\.\s*$/m);
       expect(err).toEqual([]);
@@ -875,7 +897,7 @@ describe("tevu CLI", () => {
       expect(err[0]).toBe("Compare coding models on your tasks");
       expect(err.slice(1, 4)).toEqual(["Usage:", "  tevu [options]", "  tevu <command> [options]"]);
       expect(err.join("")).toContain("Examples:");
-      expect(err.join("")).not.toMatch(/OpenCode|Sensitive data:|Isolation boundary:/i);
+      expect(err.join("")).not.toMatch(/opencode|Sensitive data:|Isolation boundary:/i);
       expect(out).toEqual([]);
     });
 
@@ -985,9 +1007,9 @@ describe("tevu CLI", () => {
           value: buildValidationReport({
             valid: false,
             findings: [
-              buildFinding({ severity: "error", identifier: "opencode", message: "missing" }),
+              buildFinding({ severity: "error", identifier: "fake-agent", message: "missing" }),
             ],
-            capabilities: null,
+            capabilities: {},
           }),
         })),
       });
@@ -995,7 +1017,7 @@ describe("tevu CLI", () => {
       const { code, out } = await runCli(["validate"], { operations });
 
       expect(code).toBe(1);
-      expect(out).toEqual(["error opencode: missing", "Configuration is invalid."]);
+      expect(out).toEqual(["error fake-agent: missing", "Configuration is invalid."]);
       expect(operations.planBenchmark).not.toHaveBeenCalled();
     });
 
@@ -1160,13 +1182,13 @@ describe("tevu CLI", () => {
 
       expect(code).toBe(0);
       expect(out).toEqual([
-        "Dry run: no artifact, workspace, Jira call, or OpenCode model session is created.",
+        "Dry run: no artifact, workspace, Jira call, or agent model session is created.",
         "Planned cases (2, execution order):",
         "  case-c1-task-1: task task-1, model entry c1 (provider/model-a, effort high), commit abc123def",
         "  case-c2-task-1: task task-1, model entry c2 (provider/model-b, effort low), commit abc123def",
         "Limits: concurrency 2, timeout 600000ms, stop grace 5000ms",
         "Artifact destination: /tmp/artifacts",
-        "OpenCode capabilities (opencode, detected version: 1.18.32):",
+        'Agent "fake-agent" capabilities (opencode, detected version: 1.18.32):',
         "  run command: available",
         "  export command: available",
         "  run --format json: available",
@@ -1201,13 +1223,13 @@ describe("tevu CLI", () => {
       const operations = createOperations({
         validateConfig: vi.fn(async () => ({
           ok: true as const,
-          value: buildValidationReport({ capabilities: null }),
+          value: buildValidationReport({ capabilities: {} }),
         })),
       });
 
       const { out } = await runCli(["run", "--dry-run"], { operations });
 
-      expect(out).toContain("OpenCode capabilities: not probed");
+      expect(out).toContain('Agent "fake-agent" capabilities: not probed');
     });
 
     it("prints findings and stops before planning when validation fails", async () => {
@@ -1217,7 +1239,7 @@ describe("tevu CLI", () => {
           value: buildValidationReport({
             valid: false,
             findings: [
-              buildFinding({ severity: "error", identifier: "opencode", message: "unavailable" }),
+              buildFinding({ severity: "error", identifier: "fake-agent", message: "unavailable" }),
             ],
           }),
         })),
@@ -1226,7 +1248,7 @@ describe("tevu CLI", () => {
       const { code, out } = await runCli(["run"], { operations });
 
       expect(code).toBe(1);
-      expect(out).toEqual(["error opencode: unavailable", "Configuration is invalid."]);
+      expect(out).toEqual(["error fake-agent: unavailable", "Configuration is invalid."]);
       expect(operations.planBenchmark).not.toHaveBeenCalled();
       expectNoWrites(operations);
     });
@@ -1348,7 +1370,8 @@ describe("tevu CLI", () => {
                 outcome: "passed",
                 failure: {
                   error: {
-                    kind: "OpenCodeProcessError",
+                    kind: "AgentProcessError",
+                    agent: "fake-agent",
                     caseId: "case-c1-task-1",
                     exitCode: 1,
                     signal: null,
@@ -1365,7 +1388,7 @@ describe("tevu CLI", () => {
 
       expect(code).toBe(2);
       expect(out).toContain(
-        "case-c1-task-1: lifecycle process-failed, outcome passed, runtime failure OpenCodeProcessError",
+        "case-c1-task-1: lifecycle process-failed, outcome passed, runtime failure AgentProcessError",
       );
       expect(out).toContain("Report: /tmp/artifacts/run-1/report.md");
       expect(operations.rebuildRunReport).toHaveBeenCalledOnce();

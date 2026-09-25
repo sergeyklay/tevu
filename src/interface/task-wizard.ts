@@ -19,7 +19,7 @@ import {
   text,
 } from "@clack/prompts";
 
-import { DurationSchema, VariableNameSchema, referencedVariableName } from "../config/schema.ts";
+import { AGENT_NAMES, DurationSchema, VariableNameSchema, referencedVariableName } from "../config/schema.ts";
 
 import type { Readable, Writable } from "node:stream";
 import type { CANCEL_SYMBOL, Option } from "@clack/prompts";
@@ -319,7 +319,7 @@ async function interviewBootstrap(
     validate: (value) => (value === undefined || value.trim().length === 0 ? undefined : validateDuration(value)),
   });
   const command = await askText(io, {
-    message: "OpenCode command (name on PATH, or a path relative to the configuration file)",
+    message: `Command for agent "${AGENT_NAMES[0]}" (name on PATH, or a path relative to the configuration file)`,
     validate: validateNonWhitespace,
   });
   const takenNames = new Set<string>();
@@ -337,7 +337,7 @@ async function interviewBootstrap(
       stop_grace: stopGrace,
       ...(checkTimeoutRaw.trim().length === 0 ? {} : { check_timeout: checkTimeoutRaw.trim() }),
     },
-    agents: { opencode: { command, secrets, env } },
+    agents: { [AGENT_NAMES[0]]: { command, secrets, env } },
     ...(jira === undefined ? {} : { trackers: { jira } }),
     repositories,
     models,
@@ -452,7 +452,7 @@ async function interviewModels(io: WizardIo): Promise<ModelDefinitionInput[]> {
     });
     const model = await askModel(io, id);
     const effort = await askText(io, {
-      message: `Reasoning effort for "${id}" (passed to OpenCode as --variant)`,
+      message: `Reasoning effort for "${id}" (passed to the agent verbatim)`,
       validate: validateNonWhitespace,
     });
     usedIds.add(id);
@@ -511,10 +511,10 @@ async function interviewTask(
   });
   const readiness = await interviewReadiness(io);
   const usedCheckIds = new Set<string>();
-  const agentNames = new Set([
-    ...(existing?.agents.opencode.secrets ?? bootstrap?.agents.opencode.secrets ?? []),
-    ...(existing?.agents.opencode.env ?? bootstrap?.agents.opencode.env ?? []),
-  ]);
+  const configuredAgents = existing?.agents ?? bootstrap?.agents ?? {};
+  const agentNames = new Set(
+    Object.values(configuredAgents).flatMap((settings) => [...(settings.secrets ?? []), ...(settings.env ?? [])]),
+  );
   const jiraNames = new Set(
     jiraSettings === undefined
       ? []
@@ -810,9 +810,11 @@ function renderTaskReview(input: TaskWizardInput): string {
       `  run.timeout: ${bootstrap.run.timeout}`,
       `  run.stop_grace: ${bootstrap.run.stop_grace}`,
       ...(bootstrap.run.check_timeout === undefined ? [] : [`  run.check_timeout: ${bootstrap.run.check_timeout}`]),
-      `  agents.opencode.command: ${bootstrap.agents.opencode.command}`,
-      `  agents.opencode.secrets: ${renderVariableList(bootstrap.agents.opencode.secrets ?? [])}`,
-      `  agents.opencode.env: ${renderVariableList(bootstrap.agents.opencode.env ?? [])}`,
+      ...Object.entries(bootstrap.agents).flatMap(([name, settings]) => [
+        `  agents.${name}.command: ${settings.command}`,
+        `  agents.${name}.secrets: ${renderVariableList(settings.secrets ?? [])}`,
+        `  agents.${name}.env: ${renderVariableList(settings.env ?? [])}`,
+      ]),
     );
     if (bootstrap.trackers?.jira !== undefined) {
       lines.push(

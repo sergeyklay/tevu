@@ -12,8 +12,16 @@ import { buildCheckEnvironment } from "../evaluation/checks.ts";
 import { createGitWorkspaceAdapter } from "./git.ts";
 import { createEnvironmentAdapter, createRedactor, createStreamingRedactor, runManagedProcess } from "./process.ts";
 
-import type { CaseIdentity, CaseWorkspace, GitWorkspaceAdapter, TevuError, TevuResult } from "../domain/types.ts";
-import type { ManagedProcessResult } from "./process.ts";
+import type {
+  CaseEnvironments,
+  CaseIdentity,
+  CaseWorkspace,
+  GitWorkspaceAdapter,
+  IsolatedEnvironment,
+  ManagedProcessResult,
+  TevuError,
+  TevuResult,
+} from "../domain/types.ts";
 import type { TaskInput, TevuConfig, TevuConfigInput } from "../config/schema.ts";
 
 const PROVIDER_NAME = "TEVU_IT_PROVIDER_KEY";
@@ -50,7 +58,7 @@ const FIXED_EVALUATOR_KEYS = [
   "CI",
 ];
 
-const OPENCODE_ENV_KEYS = [...FIXED_EVALUATOR_KEYS, PROVIDER_NAME, SECRET_NAME].sort();
+const AGENT_ENV_KEYS = [...FIXED_EVALUATOR_KEYS, PROVIDER_NAME, SECRET_NAME].sort();
 const EVALUATOR_ALLOWLISTED_KEYS = [...FIXED_EVALUATOR_KEYS, EVAL_NAME].sort();
 
 const SOURCE_TEXT = "synthetic source line one\n";
@@ -101,6 +109,14 @@ function unwrapOk<T, K extends TevuError["kind"]>(result: TevuResult<T, K>): T {
     throw new Error(`expected an ok result, received ${result.error.kind}`);
   }
   return result.value;
+}
+
+/** `createCaseEnvironments` always populates `agent`; narrows past its still-optional shim type. */
+function requireAgentEnvironment(environments: CaseEnvironments): IsolatedEnvironment {
+  if (environments.agent === undefined) {
+    throw new Error("expected createCaseEnvironments to populate the agent environment");
+  }
+  return environments.agent;
 }
 
 type GitOutcome = { exitCode: number | null; stdout: string; stderr: string };
@@ -163,7 +179,7 @@ function buildConfig(repositoryPath: string, sourceCommit: string): TevuConfig {
   const config: TevuConfigInput = {
     version: 1,
     run: { output_dir: join(testDirectory, "artifacts"), concurrency: 1, timeout: "1m", stop_grace: "250ms" },
-    agents: { opencode: { command: "/synthetic/opencode", secrets: [PROVIDER_NAME, SECRET_NAME], env: [] } },
+    agents: { opencode: { command: "/synthetic/agent", secrets: [PROVIDER_NAME, SECRET_NAME], env: [] } },
     repositories: [{ id: "repo-1", path: repositoryPath }],
     models: [
       { id: "c1", model: "synthetic/model-a", effort: "fast" },
@@ -182,6 +198,7 @@ function buildIdentity(caseId: string, sourceCommit: string): CaseIdentity {
     sourceCommit,
     model: "synthetic/model-a",
     effort: "fast",
+    agent: "opencode",
   };
 }
 
@@ -593,57 +610,58 @@ describe("isolated case environments", () => {
     const workspace = buildFabricatedWorkspace("task-1--c1");
     await mkdir(workspace.runtimeDirectory, { recursive: true });
 
-    const environments = await adapter.createCaseEnvironments(workspace, unwrapOk(snapshot), config);
-    const { opencode, evaluator } = unwrapOk(environments);
+    const environments = await adapter.createCaseEnvironments(workspace, unwrapOk(snapshot), config, "opencode");
+    const { evaluator } = unwrapOk(environments);
+    const agent = requireAgentEnvironment(unwrapOk(environments));
 
-    expect(Object.keys(opencode.variables).sort()).toEqual(OPENCODE_ENV_KEYS);
+    expect(Object.keys(agent.variables).sort()).toEqual(AGENT_ENV_KEYS);
     expect(Object.keys(evaluator.variables).sort()).toEqual([...FIXED_EVALUATOR_KEYS].sort());
-    expect(opencode.variables.LANG).toBe("C.UTF-8");
-    expect(opencode.variables.LC_ALL).toBe("C.UTF-8");
-    expect(opencode.variables.CI).toBe("1");
-    expect(opencode.variables.PATH).toBe(unwrapOk(snapshot).path);
-    expect(opencode.variables[PROVIDER_NAME]).toBe(PROVIDER_VALUE);
-    expect(opencode.variables[SECRET_NAME]).toBe(SECRET_VALUE);
-    expect(opencode.variables.HOME).toBe(opencode.homeDirectory);
-    expect(opencode.variables.TMPDIR).toBe(opencode.temporaryDirectory);
-    expect(opencode.homeDirectory.startsWith(workspace.runtimeDirectory)).toBe(true);
-    expect(opencode.variables.HOME).not.toBe(process.env.HOME);
-    expect(opencode.variables.XDG_DATA_HOME).not.toBe(HOST_XDG_DATA);
+    expect(agent.variables.LANG).toBe("C.UTF-8");
+    expect(agent.variables.LC_ALL).toBe("C.UTF-8");
+    expect(agent.variables.CI).toBe("1");
+    expect(agent.variables.PATH).toBe(unwrapOk(snapshot).path);
+    expect(agent.variables[PROVIDER_NAME]).toBe(PROVIDER_VALUE);
+    expect(agent.variables[SECRET_NAME]).toBe(SECRET_VALUE);
+    expect(agent.variables.HOME).toBe(agent.homeDirectory);
+    expect(agent.variables.TMPDIR).toBe(agent.temporaryDirectory);
+    expect(agent.homeDirectory.startsWith(workspace.runtimeDirectory)).toBe(true);
+    expect(agent.variables.HOME).not.toBe(process.env.HOME);
+    expect(agent.variables.XDG_DATA_HOME).not.toBe(HOST_XDG_DATA);
     expect(evaluator.homeDirectory.startsWith(workspace.runtimeDirectory)).toBe(true);
-    expect(opencode.homeDirectory).not.toBe(evaluator.homeDirectory);
+    expect(agent.homeDirectory).not.toBe(evaluator.homeDirectory);
 
     const evaluatorValues = JSON.stringify(evaluator.variables);
     expect(evaluatorValues).not.toContain(PROVIDER_VALUE);
     expect(evaluatorValues).not.toContain(SECRET_VALUE);
     expect(evaluatorValues).not.toContain(HOST_SENTINEL_VALUE);
     expect(evaluatorValues).not.toContain(UNLISTED_VALUE);
-    expect(JSON.stringify(opencode.variables)).not.toContain(HOST_SENTINEL_VALUE);
-    expect(JSON.stringify(opencode.variables)).not.toContain(UNLISTED_VALUE);
+    expect(JSON.stringify(agent.variables)).not.toContain(HOST_SENTINEL_VALUE);
+    expect(JSON.stringify(agent.variables)).not.toContain(UNLISTED_VALUE);
 
     for (const directory of [
-      opencode.homeDirectory,
-      opencode.temporaryDirectory,
+      agent.homeDirectory,
+      agent.temporaryDirectory,
       evaluator.homeDirectory,
       evaluator.temporaryDirectory,
-      opencode.variables.XDG_CONFIG_HOME,
+      agent.variables.XDG_CONFIG_HOME,
       evaluator.variables.XDG_STATE_HOME,
     ]) {
       await stat(directory);
     }
-    const opencodeConfigHome = await stat(opencode.variables.XDG_CONFIG_HOME);
-    expect(opencodeConfigHome.isDirectory()).toBe(true);
+    const agentConfigHome = await stat(agent.variables.XDG_CONFIG_HOME);
+    expect(agentConfigHome.isDirectory()).toBe(true);
 
-    expect(opencode.variableManifest).toEqual(
+    expect(agent.variableManifest).toEqual(
       expect.arrayContaining([
-        { name: PROVIDER_NAME, classification: "secret", recipient: "opencode" },
-        { name: SECRET_NAME, classification: "secret", recipient: "opencode" },
+        { name: PROVIDER_NAME, classification: "secret", recipient: "agent" },
+        { name: SECRET_NAME, classification: "secret", recipient: "agent" },
       ]),
     );
     expect(evaluator.variableManifest).toEqual(
       expect.arrayContaining([{ name: EVAL_NAME, classification: "ordinary", recipient: "evaluator" }]),
     );
-    expect(JSON.stringify([...opencode.variableManifest, ...evaluator.variableManifest])).not.toContain(PROVIDER_VALUE);
-    expect(JSON.stringify([...opencode.variableManifest, ...evaluator.variableManifest])).not.toContain(SECRET_VALUE);
+    expect(JSON.stringify([...agent.variableManifest, ...evaluator.variableManifest])).not.toContain(PROVIDER_VALUE);
+    expect(JSON.stringify([...agent.variableManifest, ...evaluator.variableManifest])).not.toContain(SECRET_VALUE);
   });
 
   it("keeps the parent snapshot immutable and passes only allowlisted ordinary values to evaluator checks", async () => {
@@ -659,16 +677,18 @@ describe("isolated case environments", () => {
       await mkdir(workspace.runtimeDirectory, { recursive: true });
     }
     const firstEnvironments = unwrapOk(
-      await adapter.createCaseEnvironments(firstWorkspace, snapshotValue, config),
+      await adapter.createCaseEnvironments(firstWorkspace, snapshotValue, config, "opencode"),
     );
     const secondEnvironments = unwrapOk(
-      await adapter.createCaseEnvironments(secondWorkspace, snapshotValue, config),
+      await adapter.createCaseEnvironments(secondWorkspace, snapshotValue, config, "opencode"),
     );
+    const firstAgent = requireAgentEnvironment(firstEnvironments);
+    const secondAgent = requireAgentEnvironment(secondEnvironments);
 
-    expect(firstEnvironments.opencode.variables.PATH).toBe(snapshotValue.path);
-    expect(secondEnvironments.opencode.variables.PATH).toBe(snapshotValue.path);
-    expect(firstEnvironments.opencode.variables[PROVIDER_NAME]).toBe(snapshotValue.opencodeValues[PROVIDER_NAME]);
-    expect(firstEnvironments.opencode.variables).not.toBe(secondEnvironments.opencode.variables);
+    expect(firstAgent.variables.PATH).toBe(snapshotValue.path);
+    expect(secondAgent.variables.PATH).toBe(snapshotValue.path);
+    expect(firstAgent.variables[PROVIDER_NAME]).toBe(snapshotValue.agentValues?.[PROVIDER_NAME]);
+    expect(firstAgent.variables).not.toBe(secondAgent.variables);
     secondEnvironments.evaluator.variables.TEVU_IT_SCRATCH = "scratch";
     expect(firstEnvironments.evaluator.variables.TEVU_IT_SCRATCH).toBeUndefined();
     expect(snapshotValue).toEqual(snapshotClone);
@@ -698,13 +718,14 @@ describe("isolated case environments", () => {
     const snapshotValue = unwrapOk(adapter.snapshotParent(config));
     const workspace = buildFabricatedWorkspace("task-1--c1");
     await mkdir(workspace.runtimeDirectory, { recursive: true });
-    const environments = unwrapOk(await adapter.createCaseEnvironments(workspace, snapshotValue, config));
+    const environments = unwrapOk(await adapter.createCaseEnvironments(workspace, snapshotValue, config, "opencode"));
+    const agent = requireAgentEnvironment(environments);
 
     const outcome = expectLaunched(
       await runManagedProcess({
         argv: [process.execPath, "-e", ENVIRONMENT_PROBE_SCRIPT],
         cwd: testDirectory,
-        environment: environments.opencode.variables,
+        environment: agent.variables,
         timeoutMs: 10_000,
         terminationGraceMs: 250,
         secretValues: [PROVIDER_VALUE, SECRET_VALUE],
@@ -721,12 +742,12 @@ describe("isolated case environments", () => {
     };
     expect(outcome.exitCode).toBe(0);
     expect(outcome.terminationStage).toBe("none");
-    expect(reported.home).toBe(environments.opencode.homeDirectory);
+    expect(reported.home).toBe(agent.homeDirectory);
     expect(reported.provider).toBe("[REDACTED]");
     expect(reported.secret).toBe("[REDACTED]");
     expect(reported.ordinary).toBeUndefined();
     expect(reported.hostSentinel).toBeUndefined();
-    expect(reported.keys).toEqual(OPENCODE_ENV_KEYS);
+    expect(reported.keys).toEqual(AGENT_ENV_KEYS);
     expect(outcome.stdout.text).not.toContain(PROVIDER_VALUE);
     expect(outcome.stdout.text).not.toContain(SECRET_VALUE);
 

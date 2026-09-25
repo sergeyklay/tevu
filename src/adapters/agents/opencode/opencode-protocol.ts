@@ -1,12 +1,65 @@
-import type {
-  OpenCodeExport,
-  OpenCodePart,
-  OpenCodeRunEvent,
-  TevuResult,
-} from "../domain/types.ts";
-
 /** Error context for protocol failures: capability probing or one planned case. */
 export type ProtocolContext = { phase: "probe" } | { phase: "case"; caseId: string };
+
+/**
+ * Result of one decode step, kept local rather than expressed through the
+ * domain `TevuResult`: the decoder has no `agent` name to embed, so its
+ * failures carry the adapter-internal `ProtocolErrorShape` until the wrapping
+ * `AgentAdapter` methods translate them into a genuine `AgentProtocolError`.
+ */
+type DecodeResult<T> = { ok: true; value: T } | { ok: false; error: ProtocolErrorShape };
+
+/** Structural identity shared by every OpenCode message part. */
+export type OpenCodePart = {
+  id: string;
+  sessionID: string;
+  messageID: string;
+  type: string;
+};
+
+/** Tool-call part carried by `tool_use` events. */
+export type OpenCodeToolPart = OpenCodePart & {
+  type: "tool";
+  callID: string;
+  tool: string;
+  state: { status: "pending" | "running" | "completed" | "error" };
+};
+
+/** Consumed OpenCode JSON event records streamed during `run --format json`. */
+export type OpenCodeRunEvent =
+  | { type: "tool_use"; timestamp: number; sessionID: string; part: OpenCodeToolPart }
+  | {
+      type: "step_start" | "step_finish" | "text" | "reasoning";
+      timestamp: number;
+      sessionID: string;
+      part: OpenCodePart;
+    }
+  | { type: "error"; timestamp: number; sessionID: string; error: unknown };
+
+/** Consumed root-session export record; additive unknown fields are tolerated by the decoder. */
+export type OpenCodeExport = {
+  info: { id: string; parentID?: string };
+  messages: Array<{
+    info:
+      | { id: string; sessionID: string; role: "user" }
+      | {
+          id: string;
+          sessionID: string;
+          role: "assistant";
+          parentID: string;
+          finish?: string;
+          error?: unknown;
+          cost: number;
+          tokens: {
+            input: number;
+            output: number;
+            reasoning: number;
+            cache: { read: number; write: number };
+          };
+        };
+    parts: OpenCodePart[];
+  }>;
+};
 
 /** Event types whose records the version 1 decoder consumes. */
 const CONSUMED_EVENT_TYPES = new Set([
@@ -33,7 +86,7 @@ export function decodeEvent(
   input: unknown,
   context: ProtocolContext,
   line?: number,
-): TevuResult<OpenCodeRunEvent | null, "OpenCodeProtocolError"> {
+): DecodeResult<OpenCodeRunEvent | null> {
   if (!isRecord(input)) {
     return protocolError(context, "event record is not a JSON object", line);
   }
@@ -73,7 +126,7 @@ export function decodeEvent(
 export function decodeExport(
   input: unknown,
   context: ProtocolContext,
-): TevuResult<OpenCodeExport, "OpenCodeProtocolError"> {
+): DecodeResult<OpenCodeExport> {
   if (!isRecord(input) || !isRecord(input["info"])) {
     return protocolError(context, "export record is not a JSON object with an info record");
   }
@@ -124,16 +177,6 @@ export function eventIdentity(event: OpenCodeRunEvent, ordinal: number): string 
     return `${event.sessionID}\u0000error\u0000${ordinal}`;
   }
   return `${event.sessionID}\u0000${event.part.id}`;
-}
-
-/** Deduplication identity of one export message: `(info.sessionID, info.id)`. */
-export function exportMessageIdentity(info: { id: string; sessionID: string }): string {
-  return `${info.sessionID}\u0000${info.id}`;
-}
-
-/** Deduplication identity of one export part: `(sessionID, messageID, id)`. */
-export function exportPartIdentity(part: OpenCodePart): string {
-  return `${part.sessionID}\u0000${part.messageID}\u0000${part.id}`;
 }
 
 /**
@@ -192,7 +235,8 @@ function validatePartIdentity(
   return null;
 }
 
-type ProtocolErrorShape = {
+/** A decode-layer protocol failure, translated into `AgentProtocolError` by the wrapping `AgentAdapter`. */
+export type ProtocolErrorShape = {
   kind: "OpenCodeProtocolError";
   context: ProtocolContext;
   line?: number;

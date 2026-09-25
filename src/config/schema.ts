@@ -155,35 +155,58 @@ function checkUniqueStrings(
   });
 }
 
-/** OpenCode agent settings: the launch command and its two pass-through variable lists. */
-export const OpenCodeAgentSettingsSchema = z
-  .strictObject({
-    command: z.string().min(1),
-    secrets: z.array(VariableNameSchema).default([]),
-    env: z.array(VariableNameSchema).default([]),
-  })
-  .superRefine((value, ctx) => {
-    checkNoFixedNames(value.secrets, ctx, ["secrets"]);
-    checkNoFixedNames(value.env, ctx, ["env"]);
-    checkUniqueStrings(value.secrets, ctx, ["secrets"], "duplicate environment variable name");
-    checkUniqueStrings(value.env, ctx, ["env"], "duplicate environment variable name");
-    const secretNames = new Set(value.secrets);
-    value.env.forEach((name, index) => {
-      if (secretNames.has(name)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["env", index],
-          message: `environment variable "${name}" appears in both agents.opencode.secrets and agents.opencode.env`,
-        });
-      }
+/** Schema of one `agents.<agentName>` block; `agentName` appears only in validation messages. */
+export function agentSettingsSchema(agentName: string) {
+  return z
+    .strictObject({
+      command: z.string().min(1),
+      secrets: z.array(VariableNameSchema).default([]),
+      env: z.array(VariableNameSchema).default([]),
+    })
+    .superRefine((value, ctx) => {
+      checkNoFixedNames(value.secrets, ctx, ["secrets"]);
+      checkNoFixedNames(value.env, ctx, ["env"]);
+      checkUniqueStrings(value.secrets, ctx, ["secrets"], "duplicate environment variable name");
+      checkUniqueStrings(value.env, ctx, ["env"], "duplicate environment variable name");
+      const secretNames = new Set(value.secrets);
+      value.env.forEach((name, index) => {
+        if (secretNames.has(name)) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["env", index],
+            message: `environment variable "${name}" appears in both agents.${agentName}.secrets and agents.${agentName}.env`,
+          });
+        }
+      });
     });
-  });
+}
 
-/** Parsed OpenCode agent settings; `secrets` and `env` default to `[]`. */
-export type OpenCodeAgentSettings = z.infer<typeof OpenCodeAgentSettingsSchema>;
+/** Parsed agent block settings; `secrets` and `env` default to `[]`. */
+export type AgentSettings = z.infer<ReturnType<typeof agentSettingsSchema>>;
 
-/** File-shape OpenCode agent settings; `secrets` and `env` are optional. */
-export type OpenCodeAgentSettingsInput = z.input<typeof OpenCodeAgentSettingsSchema>;
+/** File-shape agent block settings; `secrets` and `env` are optional. */
+export type AgentSettingsInput = z.input<ReturnType<typeof agentSettingsSchema>>;
+
+const AGENTS_SHAPE = { opencode: agentSettingsSchema("opencode") };
+
+/** Agent name: a key of the `agents` block. */
+export type AgentName = keyof TevuConfigInput["agents"];
+
+/** Agent names the `agents` block accepts, derived from its strict object shape, not a second literal. */
+export const AGENT_NAMES: readonly AgentName[] = Object.keys(AGENTS_SHAPE) as AgentName[];
+
+/** Distinct `models[].agent` values in configuration order. */
+export function agentNamesInUse(config: TevuConfig): string[] {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const model of config.models) {
+    if (!seen.has(model.agent)) {
+      seen.add(model.agent);
+      names.push(model.agent);
+    }
+  }
+  return names;
+}
 
 /** Jira Cloud connection settings; credentials are `$VARIABLE` references, never values. */
 export const JiraTrackerSettingsSchema = z.strictObject({
@@ -465,7 +488,7 @@ function checkUniqueIds(
 const RawTevuConfigShape = z.strictObject({
   version: z.literal(1),
   run: RunSettingsSchema,
-  agents: z.strictObject({ opencode: OpenCodeAgentSettingsSchema }),
+  agents: z.strictObject(AGENTS_SHAPE),
   trackers: z.strictObject({ jira: JiraTrackerSettingsSchema.optional() }).optional(),
   repositories: z.array(RepositoryDefinitionSchema).min(1),
   models: z.array(ModelDefinitionSchema).min(2),
@@ -491,7 +514,9 @@ function refineTevuConfig(raw: RawTevuConfig, ctx: z.RefinementCtx): void {
   });
 
   const repositoryIds = new Set(raw.repositories.map((repository) => repository.id));
-  const agentNames = new Set([...raw.agents.opencode.secrets, ...raw.agents.opencode.env]);
+  const agentNames = new Set(
+    Object.values(raw.agents).flatMap((agent) => [...agent.secrets, ...agent.env]),
+  );
   const jira = raw.trackers?.jira;
   const jiraEmailName = jira === undefined ? undefined : tryReferencedVariableName(jira.email);
   const jiraTokenName = jira === undefined ? undefined : tryReferencedVariableName(jira.token);
@@ -548,14 +573,17 @@ function refineTevuConfig(raw: RawTevuConfig, ctx: z.RefinementCtx): void {
 }
 
 function materializeTevuConfig(raw: RawTevuConfig): TevuConfig {
-  const onlyAgentKey = Object.keys(raw.agents)[0] ?? "opencode";
+  const firstAgentKey = Object.keys(raw.agents)[0];
+  if (firstAgentKey === undefined) {
+    throw new Error("unreachable: RawTevuConfigShape.agents guarantees at least one configured agent");
+  }
   const soleRepositoryId = raw.repositories.length === 1 ? raw.repositories[0]?.id : undefined;
 
   const models: ModelDefinition[] = raw.models.map((model) => ({
     id: model.id,
     model: model.model,
     effort: model.effort,
-    agent: model.agent ?? onlyAgentKey,
+    agent: model.agent ?? firstAgentKey,
   }));
 
   const tasks: TaskDefinition[] = raw.tasks.map((task: RawTask) => {
@@ -594,7 +622,7 @@ function materializeTevuConfig(raw: RawTevuConfig): TevuConfig {
 export interface TevuConfig {
   version: 1;
   run: RunSettings;
-  agents: { opencode: OpenCodeAgentSettings };
+  agents: Record<string, AgentSettings>;
   trackers?: { jira?: JiraTrackerSettings };
   repositories: RepositoryDefinition[];
   models: ModelDefinition[];

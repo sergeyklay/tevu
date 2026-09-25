@@ -1,9 +1,11 @@
-import { checkEnvironmentNames, TevuConfigSchema } from "../config/schema.ts";
+import { agentNamesInUse, checkEnvironmentNames, TevuConfigSchema } from "../config/schema.ts";
+import { buildTaskPrompt } from "./task-prompt.ts";
 import { describeSourceCommitInPrompt } from "./source-commit-in-prompt.ts";
 
 import type { TevuConfig } from "../config/schema.ts";
 import type {
-  OpenCodeCapabilityReport,
+  AgentCapabilityReport,
+  AgentRegistry,
   SourceValidation,
   TevuError,
   TevuResult,
@@ -18,7 +20,7 @@ type ValidateConfigErrorKind =
   | "PrerequisiteError"
   | "SourceMaterializationError"
   | "IsolationError"
-  | "OpenCodeProtocolError";
+  | "AgentProtocolError";
 
 /**
  * Aggregates static and local prerequisite validation for one configuration.
@@ -34,6 +36,7 @@ export async function validateConfig(
   config: TevuConfig,
   dependencies: ValidationDependencies,
 ): Promise<TevuResult<ValidationReport, ValidateConfigErrorKind>> {
+  const agents = dependencies.agents;
   const findings: ValidationFinding[] = [
     ...collectSchemaFindings(config),
     ...(await collectHostFindings(dependencies)),
@@ -42,16 +45,25 @@ export async function validateConfig(
     ...(await collectArtifactFindings(config, dependencies)),
   ];
 
-  let capabilities: OpenCodeCapabilityReport | null = null;
-  const probe = await dependencies.opencode.probe(config.agents.opencode.command);
-  if (probe.ok) {
-    capabilities = probe.value;
-  } else {
-    findings.push(
-      probe.error.kind === "PrerequisiteError"
-        ? prerequisiteFinding(probe.error)
-        : { severity: "error", identifier: "agents.opencode.command", message: probe.error.reason },
-    );
+  const capabilities: Record<string, AgentCapabilityReport> = {};
+  for (const name of agentNamesInUse(config)) {
+    const adapter = agents.get(name);
+    if (adapter === undefined) {
+      findings.push({
+        severity: "error",
+        identifier: `agents.${name}`,
+        message: "no agent adapter is registered under this name",
+      });
+      continue;
+    }
+    const probe = await adapter.probe();
+    if (probe.ok) {
+      capabilities[name] = probe.value;
+    } else if (probe.error.kind === "PrerequisiteError") {
+      findings.push(prerequisiteFinding(probe.error));
+    } else {
+      findings.push({ severity: "error", identifier: `agents.${name}.command`, message: probe.error.reason });
+    }
   }
 
   return {
@@ -100,11 +112,15 @@ function collectEnvironmentFindings(
   dependencies: ValidationDependencies,
 ): ValidationFinding[] {
   const findings: ValidationFinding[] = [];
-  const names = new Set([
-    ...config.agents.opencode.secrets,
-    ...config.agents.opencode.env,
-    ...checkEnvironmentNames(config),
-  ]);
+  const names = new Set<string>();
+  for (const settings of Object.values(config.agents)) {
+    for (const name of [...settings.secrets, ...settings.env]) {
+      names.add(name);
+    }
+  }
+  for (const name of checkEnvironmentNames(config)) {
+    names.add(name);
+  }
   for (const name of names) {
     if (!dependencies.prerequisites.hasEnvironmentVariable(name)) {
       findings.push({
@@ -162,7 +178,7 @@ async function collectSourceFindings(
       continue;
     }
     const reason = describeSourceCommitInPrompt(
-      dependencies.buildTaskPrompt(task),
+      buildTaskPrompt(task),
       result.value.resolvedCommit,
     );
     if (reason !== undefined) {

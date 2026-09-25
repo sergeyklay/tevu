@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,7 @@ import { renderConfigDocument } from "../config/document.ts";
 import { loadConfig } from "../config/load.ts";
 import { decodeRunConfig } from "../config/run-snapshot.ts";
 import { TevuConfigSchema } from "../config/schema.ts";
-import { decodeEvent, decodeExport } from "../adapters/opencode-protocol.ts";
+import { unavailableBenchmarkMetrics } from "../domain/types.ts";
 import {
   createEnvironmentAdapter,
   createEvaluatorProcessAdapter,
@@ -24,7 +24,7 @@ import {
   orderTaskChecks,
   reduceRequiredOutcome,
 } from "./checks.ts";
-import { normalizeMetrics, unavailableBenchmarkMetrics } from "./metrics.ts";
+import { combineCaseMetrics } from "./metrics.ts";
 import { buildNormalizedRun, buildReport, serializeNormalizedRun } from "./report.ts";
 
 import type {
@@ -38,6 +38,12 @@ import type {
   TevuConfigInput,
 } from "../config/schema.ts";
 import type {
+  AgentAdapter,
+  AgentCapabilityReport,
+  AgentEventRecord,
+  AgentMetrics,
+  AgentRegistry,
+  AgentSessionExport,
   ArtifactStore,
   AssessmentArtifact,
   AssessmentDecision,
@@ -48,10 +54,6 @@ import type {
   EvaluatorProcessAdapter,
   EvaluatorProcessRequest,
   EvaluatorProcessResult,
-  OpenCodeCapabilityReport,
-  OpenCodeExport,
-  OpenCodePart,
-  OpenCodeRunEvent,
   ProcessResult,
   RunFinding,
   RunManifest,
@@ -74,25 +76,91 @@ const JIRA_DESCRIPTION = "TEVU-JIRA-DESCRIPTION full imported body";
 const TRANSCRIPT_BODY = "TEVU-TRANSCRIPT-BODY model output text";
 const PATCH_BODY = "TEVU-PATCH-BODY diff --git a/src/welcome.ts b/src/welcome.ts";
 
-const FIXTURE_DIRECTORY = new URL("../adapters/opencode-protocol.fixtures/", import.meta.url);
+const AGENT_NAME = "fake-agent";
 
-function readTextFixture(name: string): string {
-  return readFileSync(new URL(name, FIXTURE_DIRECTORY), "utf8");
+/** Neutral event record the fake agent emits; carries no opencode protocol shape. */
+type FakeEventRecord = { kind: "tool" } | { kind: "error"; message: string };
+
+/**
+ * Renames the schema-required `opencode` key to `fake-agent` after parsing.
+ * The strict schema accepts only the literal `opencode` key (out of scope for
+ * this migration), so every agent-neutral test builds through that key and
+ * relabels the materialized config instead of parsing `fake-agent` directly.
+ */
+function rekeyToFakeAgent(config: TevuConfig): TevuConfig {
+  const { opencode, ...otherAgents } = config.agents;
+  return {
+    ...config,
+    agents: { ...otherAgents, [AGENT_NAME]: opencode },
+    models: config.models.map((model) => ({ ...model, agent: AGENT_NAME })),
+  };
 }
 
-function readJsonFixture(name: string): unknown {
-  return JSON.parse(readTextFixture(name)) as unknown;
+/** Sums fixed values matching a fully available root-session export; verified verbatim by the tests below. */
+function buildFullMetrics(): AgentMetrics {
+  return buildAgentMetrics();
 }
 
-function decodeFixtureEvents(text: string): OpenCodeRunEvent[] {
-  const events: OpenCodeRunEvent[] = [];
-  for (const [index, line] of text.trim().split("\n").entries()) {
-    const decoded = decodeEvent(JSON.parse(line) as unknown, { phase: "case", caseId: "fixture" }, index + 1);
-    if (decoded.ok && decoded.value !== null) {
-      events.push(decoded.value);
-    }
+/** Counts the neutral event records the fake agent's own run emitted; mirrors a real adapter's event fallback. */
+function buildEventFallbackMetrics(reason: string, events: readonly unknown[]): AgentMetrics {
+  const unavailable = (unit: "count" | "token" | "USD"): AgentMetrics["cost"] => ({
+    value: null,
+    unit,
+    availability: { status: "unavailable", reason },
+    scope: "root-session",
+  });
+  const measured = (value: number, unit: "count" | "token" | "USD"): AgentMetrics["cost"] => ({
+    value,
+    unit,
+    availability: { status: "available", source: "run events" },
+    scope: "root-session",
+  });
+  const records = events as FakeEventRecord[];
+  return {
+    inputTokens: unavailable("token"),
+    outputTokens: unavailable("token"),
+    reasoningTokens: unavailable("token"),
+    cacheReadTokens: unavailable("token"),
+    cacheWriteTokens: unavailable("token"),
+    turns: unavailable("count"),
+    apiCalls: unavailable("count"),
+    apiErrors: measured(records.filter((event) => event.kind === "error").length, "count"),
+    toolCalls: measured(records.filter((event) => event.kind === "tool").length, "count"),
+    skillCalls: measured(0, "count"),
+    cost: unavailable("USD"),
+  };
+}
+
+/**
+ * A registry holding a fake agent under "fake-agent", so `rebuildReport`/
+ * `assessCase` can resolve the synthetic run's saved agent name. Only
+ * `normalizeMetrics` and `probe` are ever invoked by report regeneration; the
+ * other methods are never called.
+ */
+const AGENTS_REGISTRY: AgentRegistry = new Map<string, AgentAdapter>([
+  [
+    AGENT_NAME,
+    {
+      probe: () => Promise.resolve({ ok: true, value: buildCapabilityReport() }),
+      run: () => Promise.reject(new Error("unused in report regeneration")),
+      exportSession: () => Promise.reject(new Error("unused in report regeneration")),
+      normalizeMetrics(input) {
+        if (input.sessionExport !== null) {
+          return { ok: true, value: buildFullMetrics() };
+        }
+        const reason = input.exportUnavailableReason ?? "root session export unavailable";
+        return { ok: true, value: buildEventFallbackMetrics(reason, input.events) };
+      },
+    },
+  ],
+]);
+
+function requireFakeAdapter(): AgentAdapter {
+  const adapter = AGENTS_REGISTRY.get(AGENT_NAME);
+  if (adapter === undefined) {
+    throw new Error(`expected AGENTS_REGISTRY to register "${AGENT_NAME}"`);
   }
-  return events;
+  return adapter;
 }
 
 function buildCheckDefinition(overrides: Partial<CheckInput> = {}): CheckInput {
@@ -182,6 +250,7 @@ function buildCaseIdentity(overrides: Partial<CaseIdentity> = {}): CaseIdentity 
     sourceCommit: "0123456789abcdef0123456789abcdef01234567",
     model: "vendor/model-alpha-synth",
     effort: "effort-high",
+    agent: AGENT_NAME,
     ...overrides,
   };
 }
@@ -311,12 +380,11 @@ function buildAssessmentArtifact(overrides: Partial<AssessmentArtifact> = {}): A
   };
 }
 
-function buildCapabilityReport(overrides: Partial<OpenCodeCapabilityReport> = {}): OpenCodeCapabilityReport {
+function buildCapabilityReport(overrides: Partial<AgentCapabilityReport> = {}): AgentCapabilityReport {
   return {
-    executable: "/synthetic/opencode",
+    executable: `/synthetic/${AGENT_NAME}`,
     detectedVersion: "9.9.9-synthetic",
-    commands: { run: "available", export: "available" },
-    runOptions: { jsonFormat: "available", model: "available", variant: "available" },
+    capabilities: [{ name: "run command", required: true, availability: "available" }],
     isolation: { denyOutsideWorktree: "unavailable" },
     ...overrides,
   };
@@ -325,7 +393,7 @@ function buildCapabilityReport(overrides: Partial<OpenCodeCapabilityReport> = {}
 function buildManifest(
   runId: string,
   config: TevuConfig,
-  capabilities: OpenCodeCapabilityReport,
+  capabilities: AgentCapabilityReport,
   caseIds: readonly string[],
 ): RunManifest {
   return {
@@ -335,7 +403,7 @@ function buildManifest(
     startedAt: "2026-09-23T00:00:00.000Z",
     completedAt: null,
     host: { platform: "linux", nodeVersion: "v24.21.0", bunVersion: "1.4.2" },
-    tools: { gitVersion: "git version 2.45.0", opencodeVersion: "9.9.9-synthetic" },
+    tools: { gitVersion: "git version 2.45.0", agentVersions: { [AGENT_NAME]: capabilities.detectedVersion } },
     execution: { concurrency: config.run.concurrency, caseTimeoutMs: 60_000 },
     cases: caseIds.map((caseId) => {
       const [taskId, modelId] = caseId.split("--") as [string, string];
@@ -350,24 +418,24 @@ function buildManifest(
         effort: model?.effort ?? "effort-high",
       });
     }),
-    context: { config, capabilities },
+    context: { config, capabilities: { [AGENT_NAME]: capabilities } },
   };
 }
 
 type SyntheticRecords = {
   runId: string;
   config: TevuConfig;
-  capabilities: OpenCodeCapabilityReport;
+  capabilities: AgentCapabilityReport;
   manifest: RunManifest;
   caseResults: CaseResult[];
   assessment: AssessmentArtifact;
   findings: RunFinding[];
-  exportRecord: OpenCodeExport;
-  events: OpenCodeRunEvent[];
+  exportRecord: AgentSessionExport;
+  events: AgentEventRecord[];
 };
 
 function buildSyntheticRecords(): SyntheticRecords {
-  const config = buildSyntheticConfig();
+  const config = rekeyToFakeAgent(buildSyntheticConfig());
   const capabilities = buildCapabilityReport();
   const runId = "20260923t000000z-synthetic";
   const manifest = buildManifest(runId, config, capabilities, [
@@ -376,39 +444,33 @@ function buildSyntheticRecords(): SyntheticRecords {
     "task-2--alpha",
   ]);
 
-  const parsedExport = structuredClone(readJsonFixture("session-valid.json")) as {
-    messages: Array<{ parts: Array<Record<string, unknown>> }>;
-  };
-  parsedExport.messages[1].parts.push({
-    id: "prt-x9",
-    sessionID: "ses-root-0001",
-    messageID: "msg-a1",
-    type: "text",
-    text: TRANSCRIPT_BODY,
-  });
-  const decodedExport = decodeExport(parsedExport, { phase: "case", caseId: "task-1--alpha" });
-  if (!decodedExport.ok) {
-    throw new Error(`valid export fixture must decode: ${decodedExport.error.reason}`);
-  }
-
-  const secretError: OpenCodeRunEvent = {
-    type: "error",
-    timestamp: 2000,
-    sessionID: "ses-root-0001",
-    error: { message: `leak ${PROVIDER_SECRET} marker` },
-  };
-  const events = [...decodeFixtureEvents(readTextFixture("events-valid.jsonl")), secretError];
-
-  const alphaMetrics = normalizeMetrics({
-    caseId: "task-1--alpha",
+  // Neutral record: no opencode event or export shape. The
+  // `additiveTopLevelField` key lets the fail-closed redaction test below
+  // trigger its synthetic failure on this record's serialized text.
+  const exportRecord: AgentSessionExport = {
     rootSessionId: "ses-root-0001",
-    sessionExport: decodedExport.value,
+    transcript: TRANSCRIPT_BODY,
+    additiveTopLevelField: "synthetic-forward-compat",
+  };
+
+  const neutralEvents: FakeEventRecord[] = Array.from({ length: 8 }, () => ({ kind: "tool" }) as FakeEventRecord);
+  const secretError: FakeEventRecord = { kind: "error", message: `leak ${PROVIDER_SECRET} marker` };
+  const events: AgentEventRecord[] = [...neutralEvents, secretError];
+
+  const alphaNormalized = requireFakeAdapter().normalizeMetrics({
+    caseId: "task-1--alpha",
+    sessionId: null,
+    sessionExport: exportRecord,
     events,
-    elapsedMs: 1500,
   });
-  if (!alphaMetrics.ok) {
-    throw new Error(`fixture metrics must normalize: ${alphaMetrics.error.reason}`);
+  if (!alphaNormalized.ok) {
+    throw new Error(`fixture metrics must normalize: ${alphaNormalized.error.reason}`);
   }
+  const alphaMetrics = combineCaseMetrics({
+    durationMs: 1500,
+    elapsedUnavailableReason: "unused",
+    normalized: alphaNormalized,
+  });
 
   const alpha = buildCaseResult({
     identity: buildCaseIdentity({ caseId: "task-1--alpha" }),
@@ -431,7 +493,7 @@ function buildSyntheticRecords(): SyntheticRecords {
         durationMs: null,
       }),
     ],
-    metrics: alphaMetrics.value,
+    metrics: alphaMetrics.metrics,
     artifacts: buildArtifactIndex("task-1--alpha", new Set([
       "events", "diagnostics", "sessionExport", "solutionPatch", "checks", "result",
     ])),
@@ -456,7 +518,7 @@ function buildSyntheticRecords(): SyntheticRecords {
     metrics: unavailableBenchmarkMetrics("root session export unavailable"),
     artifacts: buildArtifactIndex("task-1--beta", new Set(["events", "diagnostics", "checks", "result"])),
     failure: {
-      error: { kind: "OpenCodeProcessError", caseId: "task-1--beta", exitCode: 1, signal: null },
+      error: { kind: "AgentProcessError", agent: AGENT_NAME, caseId: "task-1--beta", exitCode: 1, signal: null },
       occurredAt: "2026-09-23T00:00:00.950Z",
     },
   });
@@ -495,7 +557,7 @@ function buildSyntheticRecords(): SyntheticRecords {
     caseResults: [alpha, beta, gamma],
     assessment: buildAssessmentArtifact({ runId }),
     findings: [{ severity: "warning", caseId: null, message: "cleanup warning: retained synthetic path" }],
-    exportRecord: decodedExport.value,
+    exportRecord,
     events,
   };
 }
@@ -578,7 +640,7 @@ function buildEvaluationInput(overrides: Partial<CheckEvaluationInput> = {}): Ch
     },
     snapshot: {
       path: "/synthetic/parent-path",
-      opencodeValues: { [PROVIDER_ENV_NAME]: PROVIDER_SECRET },
+      agentValues: { [PROVIDER_ENV_NAME]: PROVIDER_SECRET },
       ordinaryEvaluatorValues: {
         [ORDINARY_ENV_NAME]: ORDINARY_VALUE,
         [OTHER_ORDINARY_NAME]: "other-ordinary-value",
@@ -639,7 +701,7 @@ async function collectSourceDigests(root: string, runId: string): Promise<string
 async function appendOrThrow(
   store: ReturnType<typeof createArtifactStore>,
   caseId: string,
-  event: OpenCodeRunEvent,
+  event: AgentEventRecord,
 ): Promise<void> {
   const appended = await store.appendEvent(caseId, event);
   if (!appended.ok) {
@@ -695,26 +757,8 @@ async function createSyntheticRun(root: string): Promise<{
   }
   await writeChecksOrThrow(store, "task-1--alpha", records.caseResults[0].checks);
 
-  const betaError: OpenCodeRunEvent = {
-    type: "error",
-    timestamp: 3000,
-    sessionID: "ses-beta-0001",
-    error: { message: "synthetic provider outage" },
-  };
-  const betaToolUse: OpenCodeRunEvent = {
-    type: "tool_use",
-    timestamp: 3100,
-    sessionID: "ses-beta-0001",
-    part: {
-      id: "prt-beta-1",
-      sessionID: "ses-beta-0001",
-      messageID: "msg-beta-1",
-      type: "tool",
-      callID: "call-beta-1",
-      tool: "bash",
-      state: { status: "completed" },
-    },
-  };
+  const betaError: FakeEventRecord = { kind: "error", message: "synthetic provider outage" };
+  const betaToolUse: FakeEventRecord = { kind: "tool" };
   await appendOrThrow(store, "task-1--beta", betaError);
   await appendOrThrow(store, "task-1--beta", betaToolUse);
   const betaDiagnostic = await store.appendDiagnostic("task-1--beta", "synthetic beta diagnostic");
@@ -1039,7 +1083,7 @@ describe("evaluateChecks", () => {
     const root = await mkdtemp(join(tmpdir(), "tevu-eval-real-env-"));
     try {
       const environments = createEnvironmentAdapter();
-      const config = buildSyntheticConfig();
+      const config = rekeyToFakeAgent(buildSyntheticConfig());
       const snapshot = environments.snapshotParent(config);
       expect(snapshot.ok).toBe(true);
       if (!snapshot.ok) return;
@@ -1056,15 +1100,15 @@ describe("evaluateChecks", () => {
         syntheticCommit: "0synthetic0000000000000000000000000000000c",
       };
 
-      const created = await environments.createCaseEnvironments(workspace, snapshot.value, config);
+      const created = await environments.createCaseEnvironments(workspace, snapshot.value, config, AGENT_NAME);
       expect(created.ok).toBe(true);
       if (!created.ok) return;
-      const { evaluator, opencode } = created.value;
+      const { evaluator, agent } = created.value;
 
       expect(evaluator.homeDirectory.startsWith(join(workspace.runtimeDirectory, "evaluator"))).toBe(true);
-      expect(opencode.homeDirectory.startsWith(join(workspace.runtimeDirectory, "opencode"))).toBe(true);
-      expect(evaluator.homeDirectory).not.toBe(opencode.homeDirectory);
-      expect(evaluator.temporaryDirectory).not.toBe(opencode.temporaryDirectory);
+      expect(agent.homeDirectory.startsWith(join(workspace.runtimeDirectory, "agent"))).toBe(true);
+      expect(evaluator.homeDirectory).not.toBe(agent.homeDirectory);
+      expect(evaluator.temporaryDirectory).not.toBe(agent.temporaryDirectory);
       expect(Object.keys(evaluator.variables).sort()).toEqual([
         "CI", "HOME", "LANG", "LC_ALL", "PATH", "TMPDIR",
         "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
@@ -1196,562 +1240,121 @@ describe("reduceRequiredOutcome", () => {
   });
 });
 
-describe("normalizeMetrics from the root session export", () => {
-  it("sums tokens, cost, and activity exactly once by message and part identity from the valid fixture", () => {
-    const sessionExport = decodeExport(readJsonFixture("session-valid.json"), {
-      phase: "case",
-      caseId: "task-1--alpha",
-    });
-    expect(sessionExport.ok).toBe(true);
-    if (!sessionExport.ok) return;
+function buildAgentMetrics(overrides: Partial<AgentMetrics> = {}): AgentMetrics {
+  const measured = (value: number, unit: "count" | "token" | "USD"): AgentMetrics["cost"] => ({
+    value,
+    unit,
+    availability: { status: "available", source: "root-session export" },
+    scope: "root-session",
+  });
+  return {
+    inputTokens: measured(130, "token"),
+    outputTokens: measured(45, "token"),
+    reasoningTokens: measured(16, "token"),
+    cacheReadTokens: measured(30, "token"),
+    cacheWriteTokens: measured(10, "token"),
+    turns: measured(1, "count"),
+    apiCalls: measured(2, "count"),
+    apiErrors: measured(1, "count"),
+    toolCalls: measured(2, "count"),
+    skillCalls: measured(1, "count"),
+    cost: measured(0.0125, "USD"),
+    ...overrides,
+  };
+}
 
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport: sessionExport.value,
-      events: [],
-      elapsedMs: 1234,
+describe("combineCaseMetrics", () => {
+  it("reads elapsed from a measured process duration and every other field from the agent's normalized value", () => {
+    const combined = combineCaseMetrics({
+      durationMs: 1500,
+      elapsedUnavailableReason: "unused",
+      normalized: { ok: true, value: buildAgentMetrics() },
     });
 
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    expect(normalized.value.inputTokens).toEqual({
-      value: 130,
-      unit: "token",
-      availability: { status: "available", source: "root-session export" },
-      scope: "root-session",
+    expect(combined.protocolFailure).toBeNull();
+    expect(combined.metrics.elapsed).toEqual({
+      value: 1500,
+      unit: "millisecond",
+      availability: { status: "available", source: "process" },
+      scope: "case",
     });
-    expect(normalized.value.outputTokens).toMatchObject({ value: 45 });
-    expect(normalized.value.reasoningTokens).toMatchObject({ value: 16 });
-    expect(normalized.value.cacheReadTokens).toMatchObject({ value: 30 });
-    expect(normalized.value.cacheWriteTokens).toMatchObject({ value: 10 });
-    expect(normalized.value.turns).toMatchObject({ value: 1 });
-    expect(normalized.value.apiCalls).toMatchObject({ value: 2 });
-    expect(normalized.value.apiErrors).toMatchObject({ value: 1 });
-    expect(normalized.value.toolCalls).toMatchObject({ value: 2 });
-    expect(normalized.value.skillCalls).toMatchObject({ value: 1 });
-    expect(normalized.value.cost).toEqual({
-      value: 0.0125,
-      unit: "USD",
-      availability: { status: "available", source: "root-session export" },
-      scope: "root-session",
+    expect(combined.metrics.inputTokens).toEqual(buildAgentMetrics().inputTokens);
+    expect(Object.keys(combined.metrics)).toEqual([
+      "elapsed",
+      "inputTokens",
+      "outputTokens",
+      "reasoningTokens",
+      "cacheReadTokens",
+      "cacheWriteTokens",
+      "turns",
+      "apiCalls",
+      "apiErrors",
+      "toolCalls",
+      "skillCalls",
+      "cost",
+    ]);
+  });
+
+  it("marks elapsed unavailable with the supplied reason when no process timing exists", () => {
+    const combined = combineCaseMetrics({
+      durationMs: null,
+      elapsedUnavailableReason: "the agent process produced no timing evidence",
+      normalized: { ok: true, value: buildAgentMetrics() },
     });
-    expect(normalized.value.elapsed).toEqual({
-      value: 1234,
+
+    expect(combined.metrics.elapsed).toEqual({
+      value: null,
+      unit: "millisecond",
+      availability: { status: "unavailable", reason: "the agent process produced no timing evidence" },
+      scope: "case",
+    });
+  });
+
+  it("marks every field unavailable with the protocol failure's reason and preserves the failure", () => {
+    const failure = {
+      kind: "AgentProtocolError" as const,
+      agent: "opencode",
+      context: { phase: "case" as const, caseId: "task-1--alpha" },
+      reason: "part identity (sessionID, messageID, id) is missing or malformed",
+    };
+
+    const combined = combineCaseMetrics({
+      durationMs: 1500,
+      elapsedUnavailableReason: "unused",
+      normalized: { ok: false, error: failure },
+    });
+
+    expect(combined.protocolFailure).toEqual(failure);
+    for (const [name, metric] of Object.entries(combined.metrics)) {
+      if (name === "elapsed") continue;
+      expect(metric).toMatchObject({ value: null, availability: { status: "unavailable", reason: failure.reason } });
+    }
+    expect(combined.metrics.elapsed).toEqual({
+      value: 1500,
       unit: "millisecond",
       availability: { status: "available", source: "process" },
       scope: "case",
     });
   });
 
-  it("retains root-session scope on every normalized metric and never claims session-tree scope", () => {
-    const sessionExport = decodeExport(readJsonFixture("session-valid.json"), {
-      phase: "case",
-      caseId: "task-1--alpha",
-    });
-    if (!sessionExport.ok) throw new Error("valid export fixture must decode");
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport: sessionExport.value,
-      events: [],
-      elapsedMs: 1234,
-    });
-
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    for (const [name, metric] of Object.entries(normalized.value)) {
-      expect(metric.scope).toBe(name === "elapsed" ? "case" : "root-session");
-      expect(metric.scope).not.toBe("session-tree");
-    }
-  });
-
-  it("measures a genuine zero when the export has no assistant records", () => {
-    const sessionExport = {
-      info: { id: "ses-root-0001" },
-      messages: [{ info: { id: "msg-u1", sessionID: "ses-root-0001", role: "user" }, parts: [] }],
-    } as unknown as OpenCodeExport;
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport,
-      events: [],
-      elapsedMs: 1234,
-    });
-
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    for (const [name, metric] of Object.entries(normalized.value)) {
-      if (name === "elapsed") continue;
-      expect(metric).toMatchObject({ value: 0, availability: { status: "available" } });
-    }
-  });
-
-  it("never adds event error counts to export error counts", () => {
-    const sessionExport = decodeExport(readJsonFixture("session-valid.json"), {
-      phase: "case",
-      caseId: "task-1--alpha",
-    });
-    if (!sessionExport.ok) throw new Error("valid export fixture must decode");
-    const rootError: OpenCodeRunEvent = {
-      type: "error",
-      timestamp: 9000,
-      sessionID: "ses-root-0001",
-      error: { message: "synthetic error" },
+  it("leaves elapsed unavailable too when a protocol failure coincides with no measured duration", () => {
+    const failure = {
+      kind: "AgentProtocolError" as const,
+      agent: "opencode",
+      context: { phase: "case" as const, caseId: "task-1--alpha" },
+      reason: "run output did not identify a root session",
     };
 
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport: sessionExport.value,
-      events: [rootError, rootError],
-      elapsedMs: 1234,
+    const combined = combineCaseMetrics({
+      durationMs: null,
+      elapsedUnavailableReason: "the agent process produced no timing evidence",
+      normalized: { ok: false, error: failure },
     });
 
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    expect(normalized.value.apiErrors).toMatchObject({
-      value: 1,
-      availability: { status: "available", source: "root-session export" },
-    });
-  });
-
-  it("marks absent optional token fields unavailable while other metrics stay measured", () => {
-    const sessionExport = {
-      info: { id: "ses-root-0001" },
-      messages: [
-        {
-          info: { id: "msg-a1", sessionID: "ses-root-0001", role: "assistant", finish: "stop", cost: 0.5 },
-          parts: [],
-        },
-      ],
-    } as unknown as OpenCodeExport;
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport,
-      events: [],
-      elapsedMs: 1234,
-    });
-
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    for (const name of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens"]) {
-      expect(normalized.value[name as keyof typeof normalized.value]).toMatchObject({
-        value: null,
-        availability: { status: "unavailable" },
-      });
-    }
-    const inputAvailability = normalized.value.inputTokens.availability;
-    expect(inputAvailability.status).toBe("unavailable");
-    if (inputAvailability.status !== "unavailable") return;
-    expect(inputAvailability.reason).toBe('field "tokens.input" is absent in export message "msg-a1"');
-    const cacheAvailability = normalized.value.cacheReadTokens.availability;
-    expect(cacheAvailability.status).toBe("unavailable");
-    if (cacheAvailability.status !== "unavailable") return;
-    expect(cacheAvailability.reason).toBe(
-      'field "tokens.cache.read" is absent in export message "msg-a1"',
-    );
-    expect(normalized.value.cost).toMatchObject({ value: 0.5, availability: { status: "available" } });
-    expect(normalized.value.turns).toMatchObject({ value: 1 });
-  });
-
-  it("marks a malformed cost field unavailable without inventing zero or an estimate", () => {
-    const sessionExport = {
-      info: { id: "ses-root-0001" },
-      messages: [
-        {
-          info: {
-            id: "msg-a1",
-            sessionID: "ses-root-0001",
-            role: "assistant",
-            finish: "stop",
-            cost: "not-a-number",
-            tokens: { input: 3, output: 4, reasoning: 0, cache: { read: 0, write: 0 } },
-          },
-          parts: [],
-        },
-      ],
-    } as unknown as OpenCodeExport;
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport,
-      events: [],
-      elapsedMs: 1234,
-    });
-
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    expect(normalized.value.cost).toEqual({
+    expect(combined.metrics.elapsed).toMatchObject({
       value: null,
-      unit: "USD",
-      availability: { status: "unavailable", reason: 'field "cost" is malformed in export message "msg-a1"' },
-      scope: "root-session",
+      availability: { status: "unavailable", reason: failure.reason },
     });
-    expect(normalized.value.inputTokens).toMatchObject({ value: 3, availability: { status: "available" } });
-  });
-
-  it("marks skill calls unavailable when a tool part has no tool name", () => {
-    const sessionExport = {
-      info: { id: "ses-root-0001" },
-      messages: [
-        {
-          info: {
-            id: "msg-a1",
-            sessionID: "ses-root-0001",
-            role: "assistant",
-            finish: "stop",
-            cost: 0,
-            tokens: { input: 3, output: 4, reasoning: 0, cache: { read: 0, write: 0 } },
-          },
-          parts: [
-            {
-              id: "prt-x",
-              sessionID: "ses-root-0001",
-              messageID: "msg-a1",
-              type: "tool",
-              state: { status: "completed" },
-            },
-          ],
-        },
-      ],
-    } as unknown as OpenCodeExport;
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport,
-      events: [],
-      elapsedMs: 1234,
-    });
-
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    expect(normalized.value.toolCalls).toMatchObject({ value: 1, availability: { status: "available" } });
-    expect(normalized.value.skillCalls).toEqual({
-      value: null,
-      unit: "count",
-      availability: {
-        status: "unavailable",
-        reason: 'tool name is absent or malformed on tool part "prt-x"',
-      },
-      scope: "root-session",
-    });
-  });
-
-  it("counts each message and part once when duplicates share identity", () => {
-    const message = {
-      info: {
-        id: "msg-a1",
-        sessionID: "ses-root-0001",
-        role: "assistant",
-        finish: "stop",
-        cost: 0.25,
-        tokens: { input: 100, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
-      },
-      parts: [
-        {
-          id: "prt-1",
-          sessionID: "ses-root-0001",
-          messageID: "msg-a1",
-          type: "tool",
-          tool: "bash",
-          state: { status: "completed" },
-        },
-      ],
-    };
-    const sessionExport = {
-      info: { id: "ses-root-0001" },
-      messages: [
-        message,
-        {
-          info: { ...message.info, cost: 999, tokens: { input: 999, output: 999, reasoning: 0, cache: { read: 0, write: 0 } } },
-          parts: message.parts,
-        },
-      ],
-    } as unknown as OpenCodeExport;
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport,
-      events: [],
-      elapsedMs: 1234,
-    });
-
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    expect(normalized.value.inputTokens).toMatchObject({ value: 100 });
-    expect(normalized.value.cost).toMatchObject({ value: 0.25 });
-    expect(normalized.value.turns).toMatchObject({ value: 1 });
-    expect(normalized.value.toolCalls).toMatchObject({ value: 1 });
-  });
-
-  it("marks elapsed unavailable with the supplied reason when no timing evidence exists", () => {
-    const sessionExport = { info: { id: "ses-root-0001" }, messages: [] } as unknown as OpenCodeExport;
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport,
-      events: [],
-      elapsedMs: null,
-      elapsedUnavailableReason: "the OpenCode process produced no timing evidence",
-    });
-
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    expect(normalized.value.elapsed).toEqual({
-      value: null,
-      unit: "millisecond",
-      availability: { status: "unavailable", reason: "the OpenCode process produced no timing evidence" },
-      scope: "case",
-    });
-  });
-
-  it.each([
-    {
-      scenario: "the export session identity is missing",
-      info: { id: "" },
-      reason: "export session identity (info.id) is missing or malformed",
-    },
-    {
-      scenario: "a message identity is missing",
-      info: { id: "ses-root-0001" },
-      reason: "export message identity (sessionID, id) is missing or malformed",
-    },
-  ])("returns OpenCodeProtocolError when $scenario", ({ info, reason }) => {
-    const sessionExport = {
-      info,
-      messages: [{ info: { id: "", sessionID: "ses-root-0001", role: "assistant" }, parts: [] }],
-    } as unknown as OpenCodeExport;
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport,
-      events: [],
-      elapsedMs: 1234,
-    });
-
-    expect(normalized.ok).toBe(false);
-    if (normalized.ok) return;
-    expect(normalized.error.kind).toBe("OpenCodeProtocolError");
-    expect(normalized.error.context).toEqual({ phase: "case", caseId: "task-1--alpha" });
-    expect(normalized.error.reason).toBe(reason);
-  });
-
-  it("returns OpenCodeProtocolError when an export part identity is malformed", () => {
-    const sessionExport = {
-      info: { id: "ses-root-0001" },
-      messages: [
-        {
-          info: { id: "msg-u1", sessionID: "ses-root-0001", role: "user" },
-          parts: [{ id: "prt-1", sessionID: "ses-root-0001", messageID: "", type: "text" }],
-        },
-      ],
-    } as unknown as OpenCodeExport;
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport,
-      events: [],
-      elapsedMs: 1234,
-    });
-
-    expect(normalized.ok).toBe(false);
-    if (normalized.ok) return;
-    expect(normalized.error.reason).toBe("export part identity (sessionID, messageID, id) is missing or malformed");
-  });
-});
-
-describe("normalizeMetrics event fallback", () => {
-  it("supplies only event-derived metrics when the export is unavailable and never fabricates the rest", () => {
-    const events = decodeFixtureEvents(readTextFixture("events-valid.jsonl"));
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport: null,
-      events,
-      elapsedMs: 1234,
-      exportUnavailableReason: "root session export unavailable: process failure",
-    });
-
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    expect(normalized.value.apiErrors).toEqual({
-      value: 1,
-      unit: "count",
-      availability: { status: "available", source: "run events" },
-      scope: "root-session",
-    });
-    expect(normalized.value.toolCalls).toEqual({
-      value: 2,
-      unit: "count",
-      availability: { status: "available", source: "run events" },
-      scope: "root-session",
-    });
-    expect(normalized.value.skillCalls).toEqual({
-      value: 1,
-      unit: "count",
-      availability: { status: "available", source: "run events" },
-      scope: "root-session",
-    });
-    for (const name of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "turns", "apiCalls", "cost"]) {
-      expect(normalized.value[name as keyof typeof normalized.value]).toMatchObject({
-        value: null,
-        availability: { status: "unavailable", reason: "root session export unavailable: process failure" },
-        scope: "root-session",
-      });
-    }
-  });
-
-  it("deduplicates repeated event part representations by (sessionID, part.id)", () => {
-    const toolUse: OpenCodeRunEvent = {
-      type: "tool_use",
-      timestamp: 1,
-      sessionID: "ses-root-0001",
-      part: {
-        id: "prt-1",
-        sessionID: "ses-root-0001",
-        messageID: "msg-1",
-        type: "tool",
-        callID: "call-1",
-        tool: "bash",
-        state: { status: "completed" },
-      },
-    };
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport: null,
-      events: [toolUse, toolUse, { ...toolUse, timestamp: 2 }],
-      elapsedMs: 1234,
-      exportUnavailableReason: "root session export unavailable",
-    });
-
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    expect(normalized.value.toolCalls).toMatchObject({ value: 1 });
-  });
-
-  it("ignores events from sessions other than the identified root session", () => {
-    const childToolUse: OpenCodeRunEvent = {
-      type: "tool_use",
-      timestamp: 1,
-      sessionID: "ses-child-0001",
-      part: {
-        id: "prt-c1",
-        sessionID: "ses-child-0001",
-        messageID: "msg-c1",
-        type: "tool",
-        callID: "call-c1",
-        tool: "bash",
-        state: { status: "completed" },
-      },
-    };
-    const rootError: OpenCodeRunEvent = {
-      type: "error",
-      timestamp: 2,
-      sessionID: "ses-root-0001",
-      error: { message: "root error only" },
-    };
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport: null,
-      events: [childToolUse, rootError],
-      elapsedMs: 1234,
-      exportUnavailableReason: "root session export unavailable",
-    });
-
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    expect(normalized.value.toolCalls).toMatchObject({ value: 0, availability: { status: "available" } });
-    expect(normalized.value.apiErrors).toMatchObject({ value: 1 });
-  });
-
-  it("marks every export-derived metric unavailable when no root session could be identified", () => {
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: null,
-      sessionExport: null,
-      events: [],
-      elapsedMs: null,
-      exportUnavailableReason: "root session export unavailable: process failure",
-    });
-
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    for (const [name, metric] of Object.entries(normalized.value)) {
-      if (name === "elapsed") continue;
-      expect(metric).toMatchObject({
-        value: null,
-        availability: {
-          status: "unavailable",
-          reason: "root session export unavailable: process failure; root session could not be identified",
-        },
-        scope: "root-session",
-      });
-    }
-  });
-
-  it("marks skill calls unavailable from events when a tool part lacks its tool name", () => {
-    const toolUse = {
-      type: "tool_use",
-      timestamp: 1,
-      sessionID: "ses-root-0001",
-      part: {
-        id: "prt-1",
-        sessionID: "ses-root-0001",
-        messageID: "msg-1",
-        type: "tool",
-        state: { status: "completed" },
-      },
-    } as unknown as OpenCodeRunEvent;
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport: null,
-      events: [toolUse],
-      elapsedMs: 1234,
-      exportUnavailableReason: "root session export unavailable",
-    });
-
-    expect(normalized.ok).toBe(true);
-    if (!normalized.ok) return;
-    expect(normalized.value.toolCalls).toMatchObject({ value: 1, availability: { status: "available" } });
-    expect(normalized.value.skillCalls).toMatchObject({
-      value: null,
-      availability: { status: "unavailable", reason: 'tool name is absent or malformed on tool part "prt-1"' },
-    });
-  });
-
-  it("returns OpenCodeProtocolError when an event lacks session identity", () => {
-    const malformed = { type: "error", timestamp: 1, error: {} } as unknown as OpenCodeRunEvent;
-
-    const normalized = normalizeMetrics({
-      caseId: "task-1--alpha",
-      rootSessionId: "ses-root-0001",
-      sessionExport: null,
-      events: [malformed],
-      elapsedMs: 1234,
-    });
-
-    expect(normalized.ok).toBe(false);
-    if (normalized.ok) return;
-    expect(normalized.error.context).toEqual({ phase: "case", caseId: "task-1--alpha" });
-    expect(normalized.error.reason).toBe("event session identity (sessionID) is missing or malformed");
   });
 });
 
@@ -1770,14 +1373,14 @@ describe("unavailableBenchmarkMetrics", () => {
   });
 });
 
-const GOLDEN_NORMALIZED_JSON = "{\n  \"assessments\": [],\n  \"capabilities\": null,\n  \"cases\": [\n    {\n      \"artifacts\": {\n        \"assessment\": null,\n        \"checks\": null,\n        \"diagnostics\": null,\n        \"events\": null,\n        \"result\": \"cases/task-1--alpha/result.json\",\n        \"sessionExport\": null,\n        \"solutionPatch\": null\n      },\n      \"checks\": [],\n      \"failure\": null,\n      \"identity\": {\n        \"caseId\": \"task-1--alpha\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-1\"\n      },\n      \"lifecycle\": \"completed\",\n      \"metrics\": {\n        \"apiCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"apiErrors\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"cacheReadTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cacheWriteTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cost\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"USD\",\n          \"value\": null\n        },\n        \"elapsed\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"case\",\n          \"unit\": \"millisecond\",\n          \"value\": null\n        },\n        \"inputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"outputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"reasoningTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"skillCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"toolCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"turns\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        }\n      },\n      \"outcome\": \"passed\",\n      \"process\": {\n        \"durationMs\": 1500,\n        \"endedAt\": \"2026-09-23T00:00:01.500Z\",\n        \"exitCode\": 0,\n        \"signal\": null,\n        \"startedAt\": \"2026-09-23T00:00:00.000Z\",\n        \"terminationStage\": \"none\"\n      },\n      \"schemaVersion\": 1\n    },\n    {\n      \"artifacts\": {\n        \"assessment\": null,\n        \"checks\": null,\n        \"diagnostics\": null,\n        \"events\": null,\n        \"result\": \"cases/task-2--alpha/result.json\",\n        \"sessionExport\": null,\n        \"solutionPatch\": null\n      },\n      \"checks\": [],\n      \"failure\": null,\n      \"identity\": {\n        \"caseId\": \"task-2--alpha\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-2\"\n      },\n      \"lifecycle\": \"completed\",\n      \"metrics\": {\n        \"apiCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"apiErrors\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"cacheReadTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cacheWriteTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cost\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"USD\",\n          \"value\": null\n        },\n        \"elapsed\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"case\",\n          \"unit\": \"millisecond\",\n          \"value\": null\n        },\n        \"inputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"outputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"reasoningTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"skillCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"toolCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"turns\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        }\n      },\n      \"outcome\": \"passed\",\n      \"process\": {\n        \"durationMs\": 1500,\n        \"endedAt\": \"2026-09-23T00:00:01.500Z\",\n        \"exitCode\": 0,\n        \"signal\": null,\n        \"startedAt\": \"2026-09-23T00:00:00.000Z\",\n        \"terminationStage\": \"none\"\n      },\n      \"schemaVersion\": 1\n    }\n  ],\n  \"exitCode\": 0,\n  \"findings\": [],\n  \"manifest\": {\n    \"cases\": [\n      {\n        \"caseId\": \"task-1--alpha\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-1\"\n      },\n      {\n        \"caseId\": \"task-2--alpha\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-2\"\n      }\n    ],\n    \"completedAt\": \"2026-01-01T00:05:00.000Z\",\n    \"configDigest\": \"sha256-golden-digest\",\n    \"execution\": {\n      \"caseTimeoutMs\": 1000,\n      \"concurrency\": 1\n    },\n    \"host\": {\n      \"bunVersion\": \"1.4.2\",\n      \"nodeVersion\": \"v24.21.0\",\n      \"platform\": \"linux\"\n    },\n    \"runId\": \"20260101t000000z-golden\",\n    \"schemaVersion\": 1,\n    \"startedAt\": \"2026-01-01T00:00:00.000Z\",\n    \"tools\": {\n      \"gitVersion\": \"git version 2.45.0\",\n      \"opencodeVersion\": null\n    }\n  },\n  \"models\": [],\n  \"repositories\": [],\n  \"schemaVersion\": 1,\n  \"tasks\": [\n    {\n      \"checks\": [\n        {\n          \"category\": \"acceptance\",\n          \"description\": \"acceptance command exits zero\",\n          \"evaluator\": \"command\",\n          \"id\": \"acc-acceptance-command\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"manual Definition of Done review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"dod-manual-review\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"optional manual polish review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"man-optional-polish\",\n          \"required\": false\n        }\n      ],\n      \"description\": \"synthetic task description for the welcome route\",\n      \"id\": \"task-1\",\n      \"repositoryId\": \"repo-1\",\n      \"source\": {\n        \"kind\": \"manual\",\n        \"reference\": null,\n        \"title\": \"Synthetic welcome-route task\"\n      },\n      \"startCommit\": \"0123456789abcdef0123456789abcdef01234567\"\n    },\n    {\n      \"checks\": [\n        {\n          \"category\": \"acceptance\",\n          \"description\": \"acceptance command exits zero\",\n          \"evaluator\": \"command\",\n          \"id\": \"acc-acceptance-command\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"manual Definition of Done review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"dod-manual-review\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"optional manual polish review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"man-optional-polish\",\n          \"required\": false\n        }\n      ],\n      \"description\": \"synthetic task description for the welcome route\",\n      \"id\": \"task-2\",\n      \"repositoryId\": \"repo-1\",\n      \"source\": {\n        \"issueKey\": \"TEVU-999\",\n        \"issueUrl\": \"https://jira.example.com/browse/TEVU-999\",\n        \"kind\": \"jira-cloud\"\n      },\n      \"startCommit\": \"0123456789abcdef0123456789abcdef01234567\"\n    }\n  ]\n}\n";
+const GOLDEN_NORMALIZED_JSON = "{\n  \"assessments\": [],\n  \"capabilities\": {},\n  \"cases\": [\n    {\n      \"artifacts\": {\n        \"assessment\": null,\n        \"checks\": null,\n        \"diagnostics\": null,\n        \"events\": null,\n        \"result\": \"cases/task-1--alpha/result.json\",\n        \"sessionExport\": null,\n        \"solutionPatch\": null\n      },\n      \"checks\": [],\n      \"failure\": null,\n      \"identity\": {\n        \"agent\": \"opencode\",\n        \"caseId\": \"task-1--alpha\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-1\"\n      },\n      \"lifecycle\": \"completed\",\n      \"metrics\": {\n        \"apiCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"apiErrors\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"cacheReadTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cacheWriteTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cost\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"USD\",\n          \"value\": null\n        },\n        \"elapsed\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"case\",\n          \"unit\": \"millisecond\",\n          \"value\": null\n        },\n        \"inputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"outputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"reasoningTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"skillCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"toolCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"turns\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        }\n      },\n      \"outcome\": \"passed\",\n      \"process\": {\n        \"durationMs\": 1500,\n        \"endedAt\": \"2026-09-23T00:00:01.500Z\",\n        \"exitCode\": 0,\n        \"signal\": null,\n        \"startedAt\": \"2026-09-23T00:00:00.000Z\",\n        \"terminationStage\": \"none\"\n      },\n      \"schemaVersion\": 1\n    },\n    {\n      \"artifacts\": {\n        \"assessment\": null,\n        \"checks\": null,\n        \"diagnostics\": null,\n        \"events\": null,\n        \"result\": \"cases/task-2--alpha/result.json\",\n        \"sessionExport\": null,\n        \"solutionPatch\": null\n      },\n      \"checks\": [],\n      \"failure\": null,\n      \"identity\": {\n        \"agent\": \"opencode\",\n        \"caseId\": \"task-2--alpha\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-2\"\n      },\n      \"lifecycle\": \"completed\",\n      \"metrics\": {\n        \"apiCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"apiErrors\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"cacheReadTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cacheWriteTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"cost\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"USD\",\n          \"value\": null\n        },\n        \"elapsed\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"case\",\n          \"unit\": \"millisecond\",\n          \"value\": null\n        },\n        \"inputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"outputTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"reasoningTokens\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"token\",\n          \"value\": null\n        },\n        \"skillCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"toolCalls\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        },\n        \"turns\": {\n          \"availability\": {\n            \"reason\": \"not yet normalized\",\n            \"status\": \"unavailable\"\n          },\n          \"scope\": \"root-session\",\n          \"unit\": \"count\",\n          \"value\": null\n        }\n      },\n      \"outcome\": \"passed\",\n      \"process\": {\n        \"durationMs\": 1500,\n        \"endedAt\": \"2026-09-23T00:00:01.500Z\",\n        \"exitCode\": 0,\n        \"signal\": null,\n        \"startedAt\": \"2026-09-23T00:00:00.000Z\",\n        \"terminationStage\": \"none\"\n      },\n      \"schemaVersion\": 1\n    }\n  ],\n  \"exitCode\": 0,\n  \"findings\": [],\n  \"manifest\": {\n    \"cases\": [\n      {\n        \"agent\": \"opencode\",\n        \"caseId\": \"task-1--alpha\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-1\"\n      },\n      {\n        \"agent\": \"opencode\",\n        \"caseId\": \"task-2--alpha\",\n        \"effort\": \"effort-high\",\n        \"model\": \"vendor/model-alpha-synth\",\n        \"modelId\": \"alpha\",\n        \"sourceCommit\": \"0123456789abcdef0123456789abcdef01234567\",\n        \"taskId\": \"task-2\"\n      }\n    ],\n    \"completedAt\": \"2026-01-01T00:05:00.000Z\",\n    \"configDigest\": \"sha256-golden-digest\",\n    \"execution\": {\n      \"caseTimeoutMs\": 1000,\n      \"concurrency\": 1\n    },\n    \"host\": {\n      \"bunVersion\": \"1.4.2\",\n      \"nodeVersion\": \"v24.21.0\",\n      \"platform\": \"linux\"\n    },\n    \"runId\": \"20260101t000000z-golden\",\n    \"schemaVersion\": 1,\n    \"startedAt\": \"2026-01-01T00:00:00.000Z\",\n    \"tools\": {\n      \"agentVersions\": {\n        \"opencode\": null\n      },\n      \"gitVersion\": \"git version 2.45.0\"\n    }\n  },\n  \"models\": [],\n  \"repositories\": [],\n  \"schemaVersion\": 1,\n  \"tasks\": [\n    {\n      \"checks\": [\n        {\n          \"category\": \"acceptance\",\n          \"description\": \"acceptance command exits zero\",\n          \"evaluator\": \"command\",\n          \"id\": \"acc-acceptance-command\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"manual Definition of Done review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"dod-manual-review\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"optional manual polish review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"man-optional-polish\",\n          \"required\": false\n        }\n      ],\n      \"description\": \"synthetic task description for the welcome route\",\n      \"id\": \"task-1\",\n      \"repositoryId\": \"repo-1\",\n      \"source\": {\n        \"kind\": \"manual\",\n        \"reference\": null,\n        \"title\": \"Synthetic welcome-route task\"\n      },\n      \"startCommit\": \"0123456789abcdef0123456789abcdef01234567\"\n    },\n    {\n      \"checks\": [\n        {\n          \"category\": \"acceptance\",\n          \"description\": \"acceptance command exits zero\",\n          \"evaluator\": \"command\",\n          \"id\": \"acc-acceptance-command\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"manual Definition of Done review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"dod-manual-review\",\n          \"required\": true\n        },\n        {\n          \"category\": \"definition-of-done\",\n          \"description\": \"optional manual polish review\",\n          \"evaluator\": \"manual\",\n          \"id\": \"man-optional-polish\",\n          \"required\": false\n        }\n      ],\n      \"description\": \"synthetic task description for the welcome route\",\n      \"id\": \"task-2\",\n      \"repositoryId\": \"repo-1\",\n      \"source\": {\n        \"issueKey\": \"TEVU-999\",\n        \"issueUrl\": \"https://jira.example.com/browse/TEVU-999\",\n        \"kind\": \"jira-cloud\"\n      },\n      \"startCommit\": \"0123456789abcdef0123456789abcdef01234567\"\n    }\n  ]\n}\n";
 
-const GOLDEN_MARKDOWN = "# tevu run 20260101t000000z-golden\n\n> **Sensitive data:** the tevu configuration file and this artifact directory can contain\n> sensitive private repository, task, Jira, model-output, and evaluator data. They rely on\n> host filesystem access controls.\n>\n> **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,\n> later Git history, host OpenCode state, and benchmark artifacts from normal discovery.\n> It does not claim that a model with shell access cannot probe arbitrary host paths.\n\n## Run\n\n- Configuration digest: `sha256-golden-digest`\n- Started: 2026-01-01T00:00:00.000Z\n- Completed: 2026-01-01T00:05:00.000Z\n- Host: linux, Node.js v24.21.0, Bun 1.4.2, Git git version 2.45.0\n- OpenCode version (detected provenance only): not detected\n- Isolation control (deny outside worktree): not probed\n- Concurrency: 1\n- Case timeout: 1000ms\n- Run exit code: 0\n\n## Task task-1\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: manual \u2014 Synthetic welcome-route task\n\n| Outcome | Model entry | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|\n| passed | alpha | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-1--alpha\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-1--alpha/result.json](cases/task-1--alpha/result.json)\n\n## Task task-2\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: Jira snapshot \u2014 [TEVU-999](https://jira.example.com/browse/TEVU-999)\n\n| Outcome | Model entry | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|\n| passed | alpha | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-2--alpha\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-2--alpha/result.json](cases/task-2--alpha/result.json)\n\n---\n\nTask outcome, runtime failure, and run exit status are reported independently.\nCommand check output is configured acceptance evidence, not an additional model-quality metric.\nNo composite score or winner is computed.\n";
+const GOLDEN_MARKDOWN = "# tevu run 20260101t000000z-golden\n\n> **Sensitive data:** the tevu configuration file and this artifact directory can contain\n> sensitive private repository, task, Jira, model-output, and evaluator data. They rely on\n> host filesystem access controls.\n>\n> **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,\n> later Git history, host agent state, and benchmark artifacts from normal discovery.\n> It does not claim that a model with shell access cannot probe arbitrary host paths.\n\n## Run\n\n- Configuration digest: `sha256-golden-digest`\n- Started: 2026-01-01T00:00:00.000Z\n- Completed: 2026-01-01T00:05:00.000Z\n- Host: linux, Node.js v24.21.0, Bun 1.4.2, Git git version 2.45.0\n- Agent \"opencode\" version (detected provenance only): not detected\n- Agent \"opencode\" isolation control (deny outside worktree): not probed\n- Concurrency: 1\n- Case timeout: 1000ms\n- Run exit code: 0\n\n## Task task-1\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: manual — Synthetic welcome-route task\n\n| Outcome | Model entry | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|\n| passed | alpha | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-1--alpha\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-1--alpha/result.json](cases/task-1--alpha/result.json)\n\n## Task task-2\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: Jira snapshot — [TEVU-999](https://jira.example.com/browse/TEVU-999)\n\n| Outcome | Model entry | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|\n| passed | alpha | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-2--alpha\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-2--alpha/result.json](cases/task-2--alpha/result.json)\n\n---\n\nTask outcome, runtime failure, and run exit status are reported independently.\nCommand check output is configured acceptance evidence, not an additional model-quality metric.\nNo composite score or winner is computed.\n";
 
 describe("deterministic report regeneration", () => {
   it("sorts every collection by stable identity regardless of input order", () => {
     const records = buildSyntheticRecords();
-    const config = buildSyntheticConfig();
+    const config = rekeyToFakeAgent(buildSyntheticConfig());
     const decoded = decodeRunConfig(config);
     if (!decoded.ok) throw new Error("synthetic config must decode");
     const run: RunResult = {
@@ -1789,7 +1392,7 @@ describe("deterministic report regeneration", () => {
     };
     const input = {
       run: { ...run, cases: records.caseResults },
-      capabilities: records.capabilities,
+      capabilities: { [AGENT_NAME]: records.capabilities },
       tasks: decoded.value.tasks,
       models: decoded.value.models,
       repositories: decoded.value.repositories,
@@ -1797,7 +1400,7 @@ describe("deterministic report regeneration", () => {
     };
     const reordered = {
       run,
-      capabilities: records.capabilities,
+      capabilities: { [AGENT_NAME]: records.capabilities },
       tasks: [...decoded.value.tasks].reverse(),
       models: [...decoded.value.models].reverse(),
       repositories: [...decoded.value.repositories].reverse(),
@@ -1828,9 +1431,17 @@ describe("deterministic report regeneration", () => {
       id: "task-2",
       source: { kind: "jira-cloud", issueKey: "TEVU-999", issueUrl: "https://jira.example.com/browse/TEVU-999" },
     });
-    const manualCase = buildCaseResult();
+    // This golden fixture pins report output that predates the agent-adapter
+    // migration; its identities stay literally "opencode" so the pinned
+    // bytes below never change. No `AgentRegistry` is involved here.
+    const manualCase = buildCaseResult({ identity: buildCaseIdentity({ agent: "opencode" }) });
     const jiraCase = buildCaseResult({
-      identity: buildCaseIdentity({ caseId: "task-2--alpha", taskId: "task-2", sourceCommit: jiraTask.startCommit }),
+      identity: buildCaseIdentity({
+        caseId: "task-2--alpha",
+        taskId: "task-2",
+        sourceCommit: jiraTask.startCommit,
+        agent: "opencode",
+      }),
       artifacts: buildArtifactIndex("task-2--alpha", new Set(["result"])),
     });
     const manifest: RunManifest = {
@@ -1840,13 +1451,13 @@ describe("deterministic report regeneration", () => {
       startedAt: "2026-01-01T00:00:00.000Z",
       completedAt: "2026-01-01T00:05:00.000Z",
       host: { platform: "linux", nodeVersion: "v24.21.0", bunVersion: "1.4.2" },
-      tools: { gitVersion: "git version 2.45.0", opencodeVersion: null },
+      tools: { gitVersion: "git version 2.45.0", agentVersions: { opencode: null } },
       execution: { concurrency: 1, caseTimeoutMs: 1000 },
       cases: [manualCase.identity, jiraCase.identity],
     };
     const input: ReportInput = {
       run: { schemaVersion: 1, manifest, cases: [manualCase, jiraCase], findings: [], exitCode: 0 },
-      capabilities: null,
+      capabilities: {},
       tasks: [manualTask, jiraTask],
       models: [],
       repositories: [],
@@ -1879,13 +1490,13 @@ describe("deterministic report regeneration", () => {
       startedAt: "2026-01-01T00:00:00.000Z",
       completedAt: "2026-01-01T00:05:00.000Z",
       host: { platform: "linux", nodeVersion: "v24.21.0", bunVersion: "1.4.2" },
-      tools: { gitVersion: "git version 2.45.0", opencodeVersion: null },
+      tools: { gitVersion: "git version 2.45.0", agentVersions: { opencode: null } },
       execution: { concurrency: 1, caseTimeoutMs: 1000 },
       cases: [githubCase.identity],
     };
     const input: ReportInput = {
       run: { schemaVersion: 1, manifest, cases: [githubCase], findings: [], exitCode: 0 },
-      capabilities: null,
+      capabilities: {},
       tasks: [githubTask],
       models: [],
       repositories: [],
@@ -1912,10 +1523,10 @@ describe("deterministic report regeneration", () => {
       const { runId, store } = await createSyntheticRun(root);
       const digestsBefore = await collectSourceDigests(root, runId);
 
-      const first = await rebuildReport(runId, store);
+      const first = await rebuildReport(runId, store, AGENTS_REGISTRY);
       expect(first.ok).toBe(true);
       const digestsAfterFirst = await collectSourceDigests(root, runId);
-      const second = await rebuildReport(runId, store);
+      const second = await rebuildReport(runId, store, AGENTS_REGISTRY);
       expect(second.ok).toBe(true);
       const digestsAfterSecond = await collectSourceDigests(root, runId);
 
@@ -1944,7 +1555,7 @@ describe("deterministic report regeneration", () => {
       const corrupted = await readFile(runJsonPath, "utf8");
       const reportPath = join(root, "artifacts", runId, "report.md");
 
-      const result = await rebuildReport(runId, store);
+      const result = await rebuildReport(runId, store, AGENTS_REGISTRY);
 
       expect(result).toEqual({
         ok: false,
@@ -1961,11 +1572,40 @@ describe("deterministic report regeneration", () => {
     }
   });
 
+  it("refuses a run whose case names an agent with no registered adapter, before any write", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tevu-eval-unregistered-agent-"));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      const resultPath = caseFile(root, runId, "task-1--alpha", "result.json");
+      const before = await readFile(resultPath, "utf8");
+      const stored = JSON.parse(before) as { identity: Record<string, unknown> };
+      stored.identity["agent"] = "ghost-agent";
+      await writeFile(resultPath, JSON.stringify(stored, null, 2), "utf8");
+      const corrupted = await readFile(resultPath, "utf8");
+      const reportPath = join(root, "artifacts", runId, "report.md");
+
+      const result = await rebuildReport(runId, store, AGENTS_REGISTRY);
+
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          kind: "ArtifactError",
+          operation: "rebuild-report",
+          reason: 'case "task-1--alpha" names agent "ghost-agent", which has no registered adapter',
+        },
+      });
+      expect(await readFile(resultPath, "utf8")).toBe(corrupted);
+      expect(existsSync(reportPath)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("recomputes outcomes from current assessments while history stays evidence-only", async () => {
     const root = await mkdtemp(join(tmpdir(), "tevu-eval-assess-"));
     try {
       const { runId, store } = await createSyntheticRun(root);
-      const rebuilt = await rebuildReport(runId, store);
+      const rebuilt = await rebuildReport(runId, store, AGENTS_REGISTRY);
       expect(rebuilt.ok).toBe(true);
       if (!rebuilt.ok) return;
 
@@ -1987,7 +1627,7 @@ describe("deterministic report regeneration", () => {
       expect(beta.ok).toBe(true);
       if (!beta.ok) return;
       expect(beta.value.outcome).toBe("failed");
-      expect(beta.value.failure?.error.kind).toBe("OpenCodeProcessError");
+      expect(beta.value.failure?.error.kind).toBe("AgentProcessError");
 
       const gamma = await store.readCaseResult(runId, "task-2--alpha");
       expect(gamma.ok).toBe(true);
@@ -2016,7 +1656,7 @@ describe("deterministic report regeneration", () => {
     const root = await mkdtemp(join(tmpdir(), "tevu-eval-write-"));
     try {
       const { runId, store } = await createSyntheticRun(root);
-      const rebuilt = await rebuildReport(runId, store);
+      const rebuilt = await rebuildReport(runId, store, AGENTS_REGISTRY);
       expect(rebuilt.ok).toBe(true);
       if (!rebuilt.ok) return;
       expect(rebuilt.value.runId).toBe(runId);
@@ -2035,13 +1675,13 @@ describe("deterministic report regeneration", () => {
     const root = await mkdtemp(join(tmpdir(), "tevu-eval-render-"));
     try {
       const { runId, store } = await createSyntheticRun(root);
-      const rebuilt = await rebuildReport(runId, store);
+      const rebuilt = await rebuildReport(runId, store, AGENTS_REGISTRY);
       expect(rebuilt.ok).toBe(true);
       if (!rebuilt.ok) return;
       const markdown = rebuilt.value.markdown;
 
-      expect(markdown).toContain("OpenCode version (detected provenance only): 9.9.9-synthetic");
-      expect(markdown).toContain("Isolation control (deny outside worktree): unavailable");
+      expect(markdown).toContain(`Agent "${AGENT_NAME}" version (detected provenance only): 9.9.9-synthetic`);
+      expect(markdown).toContain(`Agent "${AGENT_NAME}" isolation control (deny outside worktree): unavailable`);
       expect(markdown).toContain("Configuration digest: `sha256-synthetic-digest`");
       expect(markdown).toContain("Run exit code: 2");
       expect(markdown).toContain("No composite score or winner is computed.");
@@ -2054,7 +1694,7 @@ describe("deterministic report regeneration", () => {
       expect(markdown).toContain("Jira snapshot — [TEVU-999](https://jira.example.com/browse/TEVU-999)");
 
       expect(markdown).toContain(
-        "Runtime failure (preserved independently of the task outcome): OpenCodeProcessError",
+        "Runtime failure (preserved independently of the task outcome): AgentProcessError",
       );
       expect(markdown).toContain(
         "Runtime failure (preserved independently of the task outcome): CaseTimeoutError",
@@ -2064,9 +1704,6 @@ describe("deterministic report regeneration", () => {
       expect(markdown).toContain("- inputTokens: unavailable: the preserved case artifacts contain no session export\n");
       expect(markdown).toContain("- skillCalls: 0 count (root-session, source: run events)");
       expect(markdown).toContain("- elapsed: 42000 millisecond (case, source: process)");
-      expect(markdown).toContain(
-        "- inputTokens: unavailable: the preserved case artifacts contain no session export; root session could not be identified",
-      );
 
       expect(markdown).toContain("Assessments (revision 2):");
       expect(markdown).toContain("- dod-manual-review: passed by curator at 2026-09-23T01:00:00.000Z");
@@ -2110,12 +1747,14 @@ describe("deterministic report regeneration", () => {
       if (!events.ok) return;
       expect(events.value).toHaveLength(9);
       expect(JSON.stringify(events.value)).not.toContain(PROVIDER_SECRET);
-      expect(events.value[0]).toMatchObject({ type: "step_start", sessionID: "ses-root-0001" });
+      expect(events.value[0]).toMatchObject({ kind: "tool" });
 
       const sessionExport = await store.readSessionExport(runId, "task-1--alpha");
       expect(sessionExport.ok).toBe(true);
       if (!sessionExport.ok) return;
-      expect(sessionExport.value?.info.id).toBe("ses-root-0001");
+      // The store persists an opaque record; this fixture's own shape is
+      // known here only because the test constructed it.
+      expect((sessionExport.value as { rootSessionId?: unknown } | null)?.rootSessionId).toBe("ses-root-0001");
       expect(JSON.stringify(sessionExport.value)).toContain("additiveTopLevelField");
 
       const checks = await store.readChecks(runId, "task-1--alpha");
@@ -2222,7 +1861,7 @@ describe("assessCase locking, revision, and recovery", () => {
     const root = await mkdtemp(join(tmpdir(), "tevu-eval-conflict-"));
     try {
       const { runId, store } = await createSyntheticRun(root);
-      const seeded = await rebuildReport(runId, store);
+      const seeded = await rebuildReport(runId, store, AGENTS_REGISTRY);
       expect(seeded.ok).toBe(true);
       const artifactPaths = [
         caseFile(root, runId, "task-1--alpha", "assessment.json"),
@@ -2251,6 +1890,7 @@ describe("assessCase locking, revision, and recovery", () => {
           assessedAt: "2026-09-23T02:00:00.000Z",
         },
         store,
+        AGENTS_REGISTRY,
       );
 
       expect(attempted.ok).toBe(false);
@@ -2299,6 +1939,7 @@ describe("assessCase locking, revision, and recovery", () => {
           assessedAt: "2026-09-23T02:00:00.000Z",
         },
         store,
+        AGENTS_REGISTRY,
       );
 
       expect(assessed.ok).toBe(true);
@@ -2359,6 +2000,7 @@ describe("assessCase locking, revision, and recovery", () => {
           assessedAt: "2026-09-23T02:00:00.000Z",
         },
         store,
+        AGENTS_REGISTRY,
       );
 
       expect(assessed.ok).toBe(true);
@@ -2453,6 +2095,7 @@ describe("assessCase locking, revision, and recovery", () => {
             assessedAt: "2026-09-23T02:00:00.000Z",
           },
           store,
+          AGENTS_REGISTRY,
         );
 
         expect(attempted.ok).toBe(false);
@@ -2498,6 +2141,7 @@ describe("assessCase locking, revision, and recovery", () => {
           cancellation: controller.signal,
         },
         storeAbortingOnReadAssessment(store, controller),
+        AGENTS_REGISTRY,
       );
 
       expect(attempted.ok).toBe(false);
@@ -2541,6 +2185,7 @@ describe("assessCase locking, revision, and recovery", () => {
           assessedAt: "2026-09-23T02:00:00.000Z",
         },
         storeFailingWriteReport(store),
+        AGENTS_REGISTRY,
       );
 
       expect(attempted.ok).toBe(false);
@@ -2560,10 +2205,10 @@ describe("assessCase locking, revision, and recovery", () => {
         "man-optional-polish",
       ]);
 
-      const recovered = await rebuildReport(runId, store);
+      const recovered = await rebuildReport(runId, store, AGENTS_REGISTRY);
       expect(recovered.ok).toBe(true);
       if (!recovered.ok) return;
-      const repeat = await rebuildReport(runId, store);
+      const repeat = await rebuildReport(runId, store, AGENTS_REGISTRY);
       expect(repeat.ok).toBe(true);
       if (!repeat.ok) return;
       expect(repeat.value.normalizedJson).toBe(recovered.value.normalizedJson);
@@ -2600,12 +2245,43 @@ describe("assessCase locking, revision, and recovery", () => {
 // and backslash (serializers escape it, so a literal byte match on serialized
 // output can never find it), and a digit-only secret equal to a legitimate
 // numeric metric value (byte-level replacement corrupts numbers and framing).
+//
+// This corpus keeps an opencode-shaped literal on purpose: the store persists
+// an opaque record regardless of shape, and this block proves redaction
+// survives a realistic nested JSON grammar rather than exercising any
+// agent-specific decoding.
+
+/** Structural identity shared by every opencode-shaped test message part. */
+type RedactionTestPart = { id: string; sessionID: string; messageID: string; type: string };
+
+/** opencode-shaped root-session export literal used only as a redaction test fixture. */
+type RedactionTestExport = {
+  info: { id: string; parentID?: string };
+  messages: Array<{
+    info:
+      | { id: string; sessionID: string; role: "user" }
+      | {
+          id: string;
+          sessionID: string;
+          role: "assistant";
+          parentID: string;
+          finish?: string;
+          cost: number;
+          tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } };
+        };
+    parts: RedactionTestPart[];
+  }>;
+};
+
+/** opencode-shaped run event literal used only as a redaction test fixture. */
+type RedactionTestEvent =
+  | { type: "error"; timestamp: number; sessionID: string; error: { message: string } };
 
 const QUOTED_SECRET = 'tevu"sec\\ret\nx';
 const TOKEN_DIGIT_SECRET = "120";
 const YAML_DIGIT_SECRET = "1000";
 
-function buildRedactionExport(): OpenCodeExport {
+function buildRedactionExport(): RedactionTestExport {
   const userPart: Record<string, unknown> = {
     id: "prt-u1",
     sessionID: "ses-redact-0001",
@@ -2618,7 +2294,7 @@ function buildRedactionExport(): OpenCodeExport {
     messages: [
       {
         info: { id: "msg-u1", sessionID: "ses-redact-0001", role: "user" },
-        parts: [userPart as unknown as OpenCodePart],
+        parts: [userPart as unknown as RedactionTestPart],
       },
       {
         info: {
@@ -2661,7 +2337,10 @@ describe("credential-secret redaction at serialization boundaries", () => {
       const readBack = await store.readSessionExport(runId, "task-1--alpha");
       expect(readBack.ok).toBe(true);
       if (!readBack.ok || readBack.value === null) return;
-      const text = (readBack.value.messages[0].parts[0] as Record<string, unknown>)["text"];
+      // The store persists an opaque record; this fixture's own shape is
+      // known here only because the test constructed it.
+      const readBackExport = readBack.value as unknown as RedactionTestExport;
+      const text = (readBackExport.messages[0].parts[0] as Record<string, unknown>)["text"];
       expect(typeof text).toBe("string");
       expect(String(text).replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\")).not.toContain(
         QUOTED_SECRET,
@@ -2698,13 +2377,16 @@ describe("credential-secret redaction at serialization boundaries", () => {
       const readBack = await store.readSessionExport(runId, "task-1--alpha");
       expect(readBack.ok).toBe(true);
       if (!readBack.ok || readBack.value === null) return;
-      const assistantInfo = readBack.value.messages[1].info as unknown as {
+      // The store persists an opaque record; this fixture's own shape is
+      // known here only because the test constructed it.
+      const readBackExport = readBack.value as unknown as RedactionTestExport;
+      const assistantInfo = readBackExport.messages[1].info as unknown as {
         tokens?: { input?: unknown; output?: unknown };
         cost?: unknown;
       };
       expect(assistantInfo.tokens?.input).toBe(120);
       expect(assistantInfo.cost).toBe(0.0125);
-      const userText = (readBack.value.messages[0].parts[0] as Record<string, unknown>)["text"];
+      const userText = (readBackExport.messages[0].parts[0] as Record<string, unknown>)["text"];
       expect(String(userText)).not.toContain(TOKEN_DIGIT_SECRET);
       expect(String(userText)).toContain("[REDACTED]");
     } finally {
@@ -2724,7 +2406,7 @@ describe("credential-secret redaction at serialization boundaries", () => {
         buildManifest(runId, buildSyntheticConfig(), buildCapabilityReport(), ["task-1--alpha"]),
       );
       expect(started.ok).toBe(true);
-      const secretEvent: OpenCodeRunEvent = {
+      const secretEvent: RedactionTestEvent = {
         type: "error",
         timestamp: 4000,
         sessionID: "ses-redact-0001",
@@ -2752,11 +2434,17 @@ describe("credential-secret redaction at serialization boundaries", () => {
     const root = await mkdtemp(join(tmpdir(), "tevu-eval-redact-yaml-"));
     try {
       const configPath = join(root, "tevu.yaml");
+      // This round trip writes the config and re-validates it against the
+      // strict schema, which accepts only the literal "opencode" key, so it
+      // stays un-rekeyed rather than using "fake-agent".
       const config = buildSyntheticConfig(join(root, "artifacts"));
       config.repositories[0].path = join(root, "repo-1");
       config.tasks[0].prompt = `note ${QUOTED_SECRET} end`;
       const redact = createRedactor([QUOTED_SECRET]);
-      const rendered = renderConfigDocument(config, { redact });
+      // A materialized TevuConfig is always a valid TevuConfigInput value (every
+      // default already filled in); the compiler cannot see that a Record-typed
+      // agents block still holds the schema-derived literal key at runtime.
+      const rendered = renderConfigDocument(config as unknown as TevuConfigInput, { redact });
       expect(rendered.ok).toBe(true);
       if (!rendered.ok) return;
       const configStore = createConfigStore({ redact });
@@ -2781,7 +2469,10 @@ describe("credential-secret redaction at serialization boundaries", () => {
       const config = buildSyntheticConfig(join(root, "artifacts"));
       config.repositories[0].path = join(root, "repo-1");
       const redact = createRedactor([YAML_DIGIT_SECRET]);
-      const rendered = renderConfigDocument(config, { redact });
+      // A materialized TevuConfig is always a valid TevuConfigInput value (every
+      // default already filled in); the compiler cannot see that a Record-typed
+      // agents block still holds the schema-derived literal key at runtime.
+      const rendered = renderConfigDocument(config as unknown as TevuConfigInput, { redact });
       expect(rendered.ok).toBe(true);
       if (!rendered.ok) return;
       const configStore = createConfigStore({ redact });

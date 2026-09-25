@@ -16,13 +16,14 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 import { createArtifactStore, createConfigStore } from "./adapters/artifact-store.ts";
+import { createOpenCodeAdapter } from "./adapters/agents/opencode/opencode.ts";
 import { createGitWorkspaceAdapter, createSourceValidator } from "./adapters/git.ts";
-import { buildTaskPrompt, createOpenCodeAdapter } from "./adapters/opencode.ts";
 import {
   createEnvironmentAdapter,
   createEvaluatorProcessAdapter,
   createPrerequisiteAdapter,
   createRedactor,
+  createSecretRedactor,
   runManagedProcess,
 } from "./adapters/process.ts";
 import {
@@ -41,12 +42,12 @@ import { runProgram } from "./interface/program.ts";
 import type { JiraCloudSettings } from "./adapters/trackers/jira-cloud.ts";
 import type { TevuConfig } from "./config/schema.ts";
 import type {
+  AgentRegistry,
   ArtifactStore,
   Clock,
   EnvironmentAdapter,
   GitWorkspaceAdapter,
   LoadConfigErrorKind,
-  OpenCodeAdapter,
   TevuResult,
 } from "./domain/types.ts";
 import type {
@@ -99,8 +100,24 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
   const gitFor = (config: TevuConfig): GitWorkspaceAdapter =>
     createGitWorkspaceAdapter({ config, workspacesDirectory: createWorkspacesRoot() });
 
-  const opencodeFor = (config: TevuConfig): OpenCodeAdapter =>
-    createOpenCodeAdapter({ executable: config.agents.opencode.command, readSecretValues: registry.read });
+  const secrets = createSecretRedactor(registry.read, registry.redact);
+
+  /** Registers every configured agent under its own name; currently the schema declares only "opencode". */
+  const agentsFor = (config: TevuConfig): AgentRegistry =>
+    new Map([
+      [
+        "opencode",
+        createOpenCodeAdapter(
+          { agent: "opencode", executable: config.agents.opencode.command },
+          {
+            runProcess: runManagedProcess,
+            secrets,
+            probeEnvironment: { PATH: process.env["PATH"] ?? "" },
+            probeDirectory: process.cwd(),
+          },
+        ),
+      ],
+    ]);
 
   const storeFor = (config: TevuConfig): ArtifactStore =>
     createArtifactStore({ artifactsDirectory: config.run.output_dir, redact: registry.redact });
@@ -149,10 +166,9 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
     validateConfig: (config) =>
       validateConfig(config, {
         git: gitFor(config),
-        opencode: opencodeFor(config),
+        agents: agentsFor(config),
         environments,
         prerequisites,
-        buildTaskPrompt,
       }),
     planBenchmark,
     executeBenchmark: async (plan, hooks) => {
@@ -160,7 +176,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       try {
         return await runBenchmark(plan, {
         git: gitFor(plan.config),
-        opencode: opencodeFor(plan.config),
+        agents: agentsFor(plan.config),
         artifacts: createArtifactStore({
           artifactsDirectory: plan.artifactsDirectory,
           redact: registry.redact,
@@ -175,7 +191,6 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
           return runId;
         },
         configDigest: (config) => sha256Hex(canonicalConfigSerialization(config)),
-        buildTaskPrompt,
         redact: registry.redact,
         cancellation: hooks.cancellation,
         onLifecycle: hooks.onLifecycle,
@@ -184,10 +199,10 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
         clearCancellationExit();
       }
     },
-    rebuildRunReport: (config, runId) => rebuildReport(runId, storeFor(config)),
+    rebuildRunReport: (config, runId) => rebuildReport(runId, storeFor(config), agentsFor(config)),
     readAssessmentContext: (config, runId, caseId) =>
       readAssessmentContext(runId, caseId, storeFor(config)),
-    applyAssessment: (config, input) => assessCase(input, storeFor(config)),
+    applyAssessment: (config, input) => assessCase(input, storeFor(config), agentsFor(config)),
   };
 
   return {
@@ -241,7 +256,7 @@ function createSecretRegistry(): SecretRegistry {
 
 /** Registers every agent secret's value and the Jira token, mirroring the run-level snapshot. */
 function registerConfigSecrets(registry: SecretRegistry, config: TevuConfig): void {
-  const names = [...config.agents.opencode.secrets];
+  const names = Object.values(config.agents).flatMap((settings) => settings.secrets);
   const jira = config.trackers?.jira;
   if (jira !== undefined) {
     names.push(referencedVariableName(jira.token));
@@ -262,8 +277,8 @@ function wrapEnvironmentAdapter(
       }
       return snapshot;
     },
-    createCaseEnvironments: (workspace, snapshot, config) =>
-      adapter.createCaseEnvironments(workspace, snapshot, config),
+    createCaseEnvironments: (workspace, snapshot, config, agent) =>
+      adapter.createCaseEnvironments(workspace, snapshot, config, agent),
   };
 }
 

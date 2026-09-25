@@ -105,14 +105,17 @@ export async function resolveConfig(
       ...config.run,
       output_dir: resolveConfigPath(configDirectory, config.run.output_dir),
     },
-    agents: {
-      opencode: {
-        ...config.agents.opencode,
-        command: config.agents.opencode.command.includes(path.sep)
-          ? resolveConfigPath(configDirectory, config.agents.opencode.command)
-          : config.agents.opencode.command,
-      },
-    },
+    agents: Object.fromEntries(
+      Object.entries(config.agents).map(([name, settings]) => [
+        name,
+        {
+          ...settings,
+          command: settings.command.includes(path.sep)
+            ? resolveConfigPath(configDirectory, settings.command)
+            : settings.command,
+        },
+      ]),
+    ),
     repositories: config.repositories.map((repository) => ({
       ...repository,
       path: resolveConfigPath(configDirectory, repository.path),
@@ -136,7 +139,7 @@ export async function resolveConfig(
  * Reads the text, parses and validates it against the strict authoritative
  * schema, then resolves relative paths against the configuration file
  * directory and enforces real-path separation between the run output
- * directory and every configured repository. Performs no Git, OpenCode,
+ * directory and every configured repository. Performs no Git, agent,
  * Jira, wizard, or artifact mutation work.
  */
 export async function loadConfig(

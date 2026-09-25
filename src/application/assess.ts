@@ -4,29 +4,30 @@
  * preserved in the run manifest, commits exactly one assessment revision under
  * the exclusive case lock, and regenerates the derived results before the lock
  * is released. `rebuildReport` rebuilds the derived case results, the run
- * aggregate, and the report solely from versioned source artifacts. No Git,
- * Jira, OpenCode, model, clock, or filesystem implementation enters this
+ * aggregate, and the report solely from versioned source artifacts, resolving
+ * each case's adapter from the injected `AgentRegistry` by its saved agent
+ * name. No Git, Jira, model, clock, or filesystem implementation enters this
  * module; every effect flows through the injected `ArtifactStore`.
  */
 
 import { decodeRunConfig } from "../config/run-snapshot.ts";
 import { reduceRequiredOutcome } from "../evaluation/checks.ts";
-import { normalizeMetrics, unavailableBenchmarkMetrics } from "../evaluation/metrics.ts";
+import { combineCaseMetrics } from "../evaluation/metrics.ts";
 import { buildReport } from "../evaluation/report.ts";
 import { reduceRunExitCode } from "./run-benchmark.ts";
 
 import type {
+  AgentEventRecord,
+  AgentRegistry,
+  AgentSessionExport,
   ArtifactStore,
   AssessmentArtifact,
   AssessmentInput,
   AssessmentLock,
   AssessmentRecord,
-  BenchmarkMetrics,
   CaseResult,
   CheckRecord,
   CheckResult,
-  OpenCodeExport,
-  OpenCodeRunEvent,
   ReportResult,
   RunResult,
   TaskRecord,
@@ -59,7 +60,7 @@ type AssessCaseErrorKind =
   | "CancellationError";
 
 /** Error kinds the report regeneration contract declares. */
-type RebuildReportErrorKind = "OpenCodeProtocolError" | "ArtifactError";
+type RebuildReportErrorKind = "AgentProtocolError" | "ArtifactError";
 
 /** Derived records produced by one regeneration pass over a finalized run. */
 type RebuiltRun = {
@@ -84,6 +85,7 @@ const ELAPSED_ABSENT_REASON = "the preserved case result contains no process tim
 export async function assessCase(
   input: AssessmentInput,
   store: ArtifactStore,
+  agents: AgentRegistry,
 ): Promise<TevuResult<CaseResult, AssessCaseErrorKind>> {
   if (isAborted(input.cancellation)) {
     return cancellationFailure();
@@ -171,7 +173,7 @@ export async function assessCase(
   }
 
   // Commit point passed: the revision must survive every later failure.
-  const rebuilt = await rebuildRunDerived(input.runId, store);
+  const rebuilt = await rebuildRunDerived(input.runId, store, agents);
   if (!rebuilt.ok) {
     await lock.value.release();
     return artifactFailure(
@@ -259,8 +261,9 @@ export async function readAssessmentContext(
 export async function rebuildReport(
   runId: string,
   store: ArtifactStore,
+  agents: AgentRegistry,
 ): Promise<TevuResult<ReportResult, RebuildReportErrorKind>> {
-  const rebuilt = await rebuildRunDerived(runId, store);
+  const rebuilt = await rebuildRunDerived(runId, store, agents);
   if (!rebuilt.ok) {
     return rebuilt;
   }
@@ -271,6 +274,7 @@ export async function rebuildReport(
 async function rebuildRunDerived(
   runId: string,
   store: ArtifactStore,
+  agents: AgentRegistry,
 ): Promise<TevuResult<RebuiltRun, RebuildReportErrorKind>> {
   const stored = await store.readRunResult(runId);
   if (!stored.ok) {
@@ -293,7 +297,7 @@ async function rebuildRunDerived(
   const cases: CaseResult[] = [];
   const assessments: AssessmentArtifact[] = [];
   for (const cached of stored.value.cases) {
-    const rebuilt = await rebuildCaseResult(runId, cached.identity.caseId, tasksById, store);
+    const rebuilt = await rebuildCaseResult(runId, cached.identity.caseId, tasksById, store, agents);
     if (!rebuilt.ok) {
       return rebuilt;
     }
@@ -340,6 +344,7 @@ async function rebuildCaseResult(
   caseId: string,
   tasksById: ReadonlyMap<string, TaskRecord>,
   store: ArtifactStore,
+  agents: AgentRegistry,
 ): Promise<
   TevuResult<{ result: CaseResult; assessment: AssessmentArtifact | null }, RebuildReportErrorKind>
 > {
@@ -348,8 +353,16 @@ async function rebuildCaseResult(
     return cached;
   }
   const source = cached.value;
+  const agentName = source.identity.agent;
+  const adapter = agentName === undefined ? undefined : agents.get(agentName);
+  if (adapter === undefined) {
+    return artifactFailure(
+      "rebuild-report",
+      `case "${caseId}" names agent "${String(agentName)}", which has no registered adapter`,
+    );
+  }
 
-  let events: OpenCodeRunEvent[] = [];
+  let events: AgentEventRecord[] = [];
   if (source.artifacts.events !== null) {
     const read = await store.readEvents(runId, caseId);
     if (!read.ok) {
@@ -357,7 +370,7 @@ async function rebuildCaseResult(
     }
     events = read.value;
   }
-  let sessionExport: OpenCodeExport | null = null;
+  let sessionExport: AgentSessionExport | null = null;
   if (source.artifacts.sessionExport !== null) {
     const read = await store.readSessionExport(runId, caseId);
     if (!read.ok) {
@@ -385,6 +398,16 @@ async function rebuildCaseResult(
       `preserved configuration does not define task "${source.identity.taskId}" for case "${caseId}"`,
     );
   }
+  const normalized = adapter.normalizeMetrics({
+    caseId,
+    sessionId: null,
+    events,
+    sessionExport,
+    exportUnavailableReason: EXPORT_ABSENT_REASON,
+  });
+  if (!normalized.ok) {
+    return normalized;
+  }
   const derivedChecks = applyCurrentAssessments(checks, assessment.value);
   const paths = store.caseArtifactPaths(caseId);
   const result: CaseResult = {
@@ -394,50 +417,17 @@ async function rebuildCaseResult(
         ? reduceRequiredOutcome(task.checks, derivedChecks)
         : "not-evaluated",
     checks: derivedChecks,
-    metrics: recomputeMetrics(source, events, sessionExport),
+    metrics: combineCaseMetrics({
+      durationMs: source.process?.durationMs ?? null,
+      elapsedUnavailableReason: ELAPSED_ABSENT_REASON,
+      normalized,
+    }).metrics,
     artifacts: {
       ...source.artifacts,
       assessment: assessment.value !== null ? paths.assessment : null,
     },
   };
   return { ok: true, value: { result, assessment: assessment.value } };
-}
-
-/**
- * Recomputes one case's metrics from the preserved source records. The root
- * session is identified from the export or, failing that, from the first
- * preserved event, matching how the run identified it. A normalization
- * protocol failure keeps the truthful preserved elapsed time and marks every
- * other metric unavailable with the failure reason, mirroring run behavior.
- */
-function recomputeMetrics(
-  source: CaseResult,
-  events: readonly OpenCodeRunEvent[],
-  sessionExport: OpenCodeExport | null,
-): BenchmarkMetrics {
-  const durationMs = source.process?.durationMs ?? null;
-  const normalized = normalizeMetrics({
-    caseId: source.identity.caseId,
-    rootSessionId: sessionExport?.info.id ?? events[0]?.sessionID ?? null,
-    sessionExport,
-    events,
-    elapsedMs: durationMs,
-    elapsedUnavailableReason: ELAPSED_ABSENT_REASON,
-    exportUnavailableReason: EXPORT_ABSENT_REASON,
-  });
-  if (normalized.ok) {
-    return normalized.value;
-  }
-  const metrics = unavailableBenchmarkMetrics(normalized.error.reason);
-  if (durationMs !== null) {
-    metrics.elapsed = {
-      value: durationMs,
-      unit: "millisecond",
-      availability: { status: "available", source: "process" },
-      scope: "case",
-    };
-  }
-  return metrics;
 }
 
 /**
@@ -615,7 +605,7 @@ async function releaseAndReturn<T extends { ok: false }>(
 function describeRebuildError(error: Extract<TevuError, { kind: RebuildReportErrorKind }>): string {
   return error.kind === "ArtifactError"
     ? `artifact operation "${error.operation}" failed: ${error.reason}`
-    : `OpenCode protocol failure: ${error.reason}`;
+    : `agent "${error.agent}" protocol failure: ${error.reason}`;
 }
 
 function artifactFailure(

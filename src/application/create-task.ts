@@ -46,8 +46,14 @@ export type TaskDependencies = {
   cancellation?: AbortSignal;
 };
 
-/** Configuration read from disk, or built fresh from bootstrap answers, before the candidate write. */
-type BaseDocument = { text: string | null; base: TevuConfig | Omit<TevuConfigInput, "version" | "tasks"> };
+/**
+ * Configuration read from disk, or built fresh from bootstrap answers, before
+ * the candidate write; only the bootstrap branch (`text: null`) renders a
+ * brand-new document.
+ */
+type BaseDocument =
+  | { text: null; base: Omit<TevuConfigInput, "version" | "tasks"> }
+  | { text: string; base: TevuConfig };
 
 /**
  * Creates one benchmark task and atomically appends it to the configuration.
@@ -72,12 +78,12 @@ export async function createTask(
   if (!loaded.ok) {
     return loaded;
   }
-  const { text, base } = loaded.value;
+  const doc = loaded.value;
 
-  dependencies.registerSecrets(collectBaseSecretNames(base));
+  dependencies.registerSecrets(collectBaseSecretNames(doc.base));
 
   const repositories: RepositoryDefinition[] =
-    input.newRepository === undefined ? base.repositories : [...base.repositories, input.newRepository];
+    input.newRepository === undefined ? doc.base.repositories : [...doc.base.repositories, input.newRepository];
   const matched = matchRepository(repositories, input.task.repo, input.task.id);
   if (!matched.ok) {
     return matched;
@@ -102,17 +108,17 @@ export async function createTask(
 
   const rendering = { redact: dependencies.redact };
   const candidate =
-    text === null
+    doc.text === null
       ? renderConfigDocument(
           {
             version: 1,
-            ...base,
+            ...doc.base,
             repositories,
             tasks: [renderedTask],
           },
           rendering,
         )
-      : appendToConfigText(text, { task: renderedTask, repository: input.newRepository }, rendering);
+      : appendToConfigText(doc.text, { task: renderedTask, repository: input.newRepository }, rendering);
   if (!candidate.ok) {
     return candidate;
   }
@@ -184,7 +190,7 @@ async function loadBaseDocument(
 }
 
 function collectBaseSecretNames(base: BaseDocument["base"]): string[] {
-  const names = [...(base.agents.opencode.secrets ?? [])];
+  const names = Object.values(base.agents).flatMap((settings) => settings.secrets ?? []);
   const token = base.trackers?.jira?.token;
   if (token !== undefined) {
     names.push(referencedVariableName(token));

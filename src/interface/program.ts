@@ -9,6 +9,7 @@
 
 import { Command, CommanderError, Option } from "commander";
 
+import { agentNamesInUse } from "../config/schema.ts";
 import { CONFIG_TEMPLATE } from "../config/template.ts";
 import { runAssessmentWizard, runTaskWizard } from "./task-wizard.ts";
 
@@ -18,13 +19,13 @@ import type { AssessmentCaseContext } from "../application/assess.ts";
 import type { TaskWizardInput } from "../application/create-task.ts";
 import type { JiraTrackerSettings, TaskDefinition, TevuConfig } from "../config/schema.ts";
 import type {
+  AgentCapabilityReport,
   AssessmentInput,
   BenchmarkPlan,
   CaseLifecycle,
   CaseResult,
   IssueSnapshot,
   LoadConfigErrorKind,
-  OpenCodeCapabilityReport,
   ReportResult,
   RunResult,
   TevuError,
@@ -86,7 +87,7 @@ export type ProgramOperations = {
       | "PrerequisiteError"
       | "SourceMaterializationError"
       | "IsolationError"
-      | "OpenCodeProtocolError"
+      | "AgentProtocolError"
     >
   >;
   planBenchmark(config: TevuConfig): BenchmarkPlan;
@@ -99,8 +100,8 @@ export type ProgramOperations = {
       | "PrerequisiteError"
       | "SourceMaterializationError"
       | "IsolationError"
-      | "OpenCodeProcessError"
-      | "OpenCodeProtocolError"
+      | "AgentProcessError"
+      | "AgentProtocolError"
       | "CaseTimeoutError"
       | "EvaluationError"
       | "ArtifactError"
@@ -110,7 +111,7 @@ export type ProgramOperations = {
   rebuildRunReport(
     config: TevuConfig,
     runId: string,
-  ): Promise<TevuResult<ReportResult, "OpenCodeProtocolError" | "ArtifactError">>;
+  ): Promise<TevuResult<ReportResult, "AgentProtocolError" | "ArtifactError">>;
   readAssessmentContext(
     config: TevuConfig,
     runId: string,
@@ -574,9 +575,9 @@ async function runReport(
 function printDryRun(
   out: LineWriter,
   plan: BenchmarkPlan,
-  capabilities: OpenCodeCapabilityReport | null,
+  capabilities: Readonly<Record<string, AgentCapabilityReport>>,
 ): void {
-  out("Dry run: no artifact, workspace, Jira call, or OpenCode model session is created.");
+  out("Dry run: no artifact, workspace, Jira call, or agent model session is created.");
   out(`Planned cases (${plan.cases.length}, execution order):`);
   for (const identity of plan.cases) {
     out(
@@ -587,23 +588,23 @@ function printDryRun(
     `Limits: concurrency ${plan.concurrency}, timeout ${plan.caseTimeoutMs}ms, stop grace ${plan.terminationGraceMs}ms`,
   );
   out(`Artifact destination: ${plan.artifactsDirectory}`);
-  printCapabilities(out, capabilities);
+  for (const name of agentNamesInUse(plan.config)) {
+    printCapabilities(out, name, capabilities[name] ?? null);
+  }
 }
 
-function printCapabilities(out: LineWriter, capabilities: OpenCodeCapabilityReport | null): void {
-  if (capabilities === null) {
-    out("OpenCode capabilities: not probed");
+function printCapabilities(out: LineWriter, name: string, report: AgentCapabilityReport | null): void {
+  if (report === null) {
+    out(`Agent "${name}" capabilities: not probed`);
     return;
   }
   out(
-    `OpenCode capabilities (${capabilities.executable}, detected version: ${capabilities.detectedVersion ?? "not detected"}):`,
+    `Agent "${name}" capabilities (${report.executable}, detected version: ${report.detectedVersion ?? "not detected"}):`,
   );
-  out(`  run command: ${capabilities.commands.run}`);
-  out(`  export command: ${capabilities.commands.export}`);
-  out(`  run --format json: ${capabilities.runOptions.jsonFormat}`);
-  out(`  run --model: ${capabilities.runOptions.model}`);
-  out(`  run --variant: ${capabilities.runOptions.variant}`);
-  out(`  isolation deny-outside-worktree (optional): ${capabilities.isolation.denyOutsideWorktree}`);
+  for (const capability of report.capabilities) {
+    out(`  ${capability.name}${capability.required ? "" : " (optional)"}: ${capability.availability}`);
+  }
+  out(`  isolation deny-outside-worktree (optional): ${report.isolation.denyOutsideWorktree}`);
 }
 
 function printFindings(out: LineWriter, findings: readonly ValidationFinding[]): void {
@@ -640,13 +641,13 @@ function renderTevuError(error: TevuError, redact: (text: string) => string): st
       return [
         `error: ${error.tracker === "jira-cloud" ? "Jira" : "GitHub"} issue "${error.reference}" import failed${error.status === undefined ? "" : ` (status ${error.status})`}: ${error.reason}`,
       ];
-    case "OpenCodeProcessError":
+    case "AgentProcessError":
       return [
-        `error: OpenCode process for case "${error.caseId}" failed (exit code ${error.exitCode ?? "none"}, signal ${error.signal ?? "none"})`,
+        `error: agent "${error.agent}" process for case "${error.caseId}" failed (exit code ${error.exitCode ?? "none"}, signal ${error.signal ?? "none"})`,
       ];
-    case "OpenCodeProtocolError":
+    case "AgentProtocolError":
       return [
-        `error: OpenCode protocol failure (${error.context.phase === "probe" ? "probe" : `case ${error.context.caseId}`}): ${error.reason}`,
+        `error: agent "${error.agent}" protocol failure (${error.context.phase === "probe" ? "probe" : `case ${error.context.caseId}`}): ${error.reason}`,
       ];
     case "CaseTimeoutError":
       return [`error: case "${error.caseId}" exceeded its ${error.timeoutMs}ms timeout`];

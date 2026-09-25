@@ -171,14 +171,23 @@ function buildRunNode(run: TevuConfigInput["run"], guard: GuardedRedactor): Reco
 }
 
 function buildAgentsNode(agents: TevuConfigInput["agents"], guard: GuardedRedactor): Record<string, unknown> {
-  const opencode: Record<string, unknown> = { command: guard.redact(agents.opencode.command) };
-  if (agents.opencode.secrets !== undefined && agents.opencode.secrets.length > 0) {
-    opencode.secrets = agents.opencode.secrets.map((name) => guard.redact(name));
+  return Object.fromEntries(
+    Object.entries(agents).map(([name, settings]) => [name, buildAgentSettingsNode(settings, guard)]),
+  );
+}
+
+function buildAgentSettingsNode(
+  settings: TevuConfigInput["agents"][keyof TevuConfigInput["agents"]],
+  guard: GuardedRedactor,
+): Record<string, unknown> {
+  const node: Record<string, unknown> = { command: guard.redact(settings.command) };
+  if (settings.secrets !== undefined && settings.secrets.length > 0) {
+    node.secrets = settings.secrets.map((name) => guard.redact(name));
   }
-  if (agents.opencode.env !== undefined && agents.opencode.env.length > 0) {
-    opencode.env = agents.opencode.env.map((name) => guard.redact(name));
+  if (settings.env !== undefined && settings.env.length > 0) {
+    node.env = settings.env.map((name) => guard.redact(name));
   }
-  return { opencode };
+  return node;
 }
 
 function buildTrackersNode(

@@ -1,12 +1,12 @@
 /**
  * Shared domain contracts for tevu: results, typed errors, run and case
- * records, OpenCode protocol records, and adapter interfaces.
+ * records, the agent-independent adapter port, and adapter interfaces.
  *
  * This module must stay free of boundary dependencies: no Commander.js, Clack,
  * Execa, Git commands, Jira transport code, or Node.js process globals.
  */
 
-import type { RepositoryDefinition, TaskDefinition, TevuConfig } from "../config/schema.ts";
+import type { RepositoryDefinition, TevuConfig } from "../config/schema.ts";
 
 /** Result of a fallible module contract; errors never cross boundaries as thrown exceptions. */
 export type TevuResult<T, K extends TevuError["kind"]> =
@@ -53,13 +53,15 @@ export type TevuError =
       reason: string;
     }
   | {
-      kind: "OpenCodeProcessError";
+      kind: "AgentProcessError";
+      agent: string;
       caseId: string;
       exitCode: number | null;
       signal: string | null;
     }
   | {
-      kind: "OpenCodeProtocolError";
+      kind: "AgentProtocolError";
+      agent: string;
       context: { phase: "probe" } | { phase: "case"; caseId: string };
       line?: number;
       reason: string;
@@ -83,6 +85,7 @@ export type CaseIdentity = {
   sourceCommit: string;
   model: string;
   effort: string;
+  agent: string;
 };
 
 /**
@@ -123,7 +126,7 @@ export type RunConfigRecord = {
   repositories: RepositoryRecord[];
 };
 
-/** Versioned manifest of one benchmark run; `tools.opencodeVersion` is provenance only, never a gate. */
+/** Versioned manifest of one benchmark run; `tools.agentVersions` is provenance only, never a gate. */
 export type RunManifest = {
   schemaVersion: 1;
   runId: string;
@@ -135,13 +138,13 @@ export type RunManifest = {
     nodeVersion: string;
     bunVersion: string;
   };
-  tools: { gitVersion: string; opencodeVersion: string | null };
+  tools: { gitVersion: string; agentVersions: Record<string, string | null> };
   execution: { concurrency: number; caseTimeoutMs: number };
   cases: CaseIdentity[];
   context?: {
     /** Decode through `decodeRunConfig`; never read directly as a `TevuConfig`. */
     config: unknown;
-    capabilities: OpenCodeCapabilityReport;
+    capabilities: Record<string, AgentCapabilityReport>;
   };
 };
 
@@ -160,7 +163,7 @@ export type CaseLifecycle =
 /** Which termination stage ended a supervised process group. */
 export type TerminationStage = "none" | "graceful" | "forced";
 
-/** OpenCode process evidence, independent of task acceptance. */
+/** Agent process evidence, independent of task acceptance. */
 export type ProcessResult = {
   exitCode: number | null;
   signal: string | null;
@@ -216,24 +219,6 @@ export type CaseResult = {
   };
 };
 
-/** Runtime-probed capability report for the configured OpenCode executable. */
-export type OpenCodeCapabilityReport = {
-  executable: string;
-  detectedVersion: string | null;
-  commands: {
-    run: "available" | "unavailable";
-    export: "available" | "unavailable";
-  };
-  runOptions: {
-    jsonFormat: "available" | "unavailable";
-    model: "available" | "unavailable";
-    variant: "available" | "unavailable";
-  };
-  isolation: {
-    denyOutsideWorktree: "available" | "unavailable";
-  };
-};
-
 /** Whether a metric was measured, with its source or the reason it is unavailable. */
 export type MetricAvailability =
   | { status: "available"; source: string }
@@ -263,6 +248,33 @@ export type BenchmarkMetrics = {
   cost: MetricValue;
 };
 
+/** Constructs an explicitly unavailable metric; never a zero and never an estimate. */
+export function unavailableMetric(
+  unit: MetricValue["unit"],
+  reason: string,
+  scope: MetricValue["scope"] = "root-session",
+): MetricValue {
+  return { value: null, unit, availability: { status: "unavailable", reason }, scope };
+}
+
+/** Constructs a complete metric set where every value is unavailable for one reason. */
+export function unavailableBenchmarkMetrics(reason: string): BenchmarkMetrics {
+  return {
+    elapsed: unavailableMetric("millisecond", reason, "case"),
+    inputTokens: unavailableMetric("token", reason),
+    outputTokens: unavailableMetric("token", reason),
+    reasoningTokens: unavailableMetric("token", reason),
+    cacheReadTokens: unavailableMetric("token", reason),
+    cacheWriteTokens: unavailableMetric("token", reason),
+    turns: unavailableMetric("count", reason),
+    apiCalls: unavailableMetric("count", reason),
+    apiErrors: unavailableMetric("count", reason),
+    toolCalls: unavailableMetric("count", reason),
+    skillCalls: unavailableMetric("count", reason),
+    cost: unavailableMetric("USD", reason),
+  };
+}
+
 /** Verdict and redacted, size-reported evidence for one configured check. */
 export type CheckResult = {
   checkId: string;
@@ -289,58 +301,6 @@ export type AssessmentArtifact = {
   revision: number;
   current: AssessmentRecord[];
   history: Array<AssessmentRecord & { replacedAt: string }>;
-};
-
-/** Structural identity shared by every OpenCode message part. */
-export type OpenCodePart = {
-  id: string;
-  sessionID: string;
-  messageID: string;
-  type: string;
-};
-
-/** Tool-call part carried by `tool_use` events. */
-export type OpenCodeToolPart = OpenCodePart & {
-  type: "tool";
-  callID: string;
-  tool: string;
-  state: { status: "pending" | "running" | "completed" | "error" };
-};
-
-/** Consumed OpenCode JSON event records streamed during `run --format json`. */
-export type OpenCodeRunEvent =
-  | { type: "tool_use"; timestamp: number; sessionID: string; part: OpenCodeToolPart }
-  | {
-      type: "step_start" | "step_finish" | "text" | "reasoning";
-      timestamp: number;
-      sessionID: string;
-      part: OpenCodePart;
-    }
-  | { type: "error"; timestamp: number; sessionID: string; error: unknown };
-
-/** Consumed root-session export record; additive unknown fields are tolerated by the decoder. */
-export type OpenCodeExport = {
-  info: { id: string; parentID?: string };
-  messages: Array<{
-    info:
-      | { id: string; sessionID: string; role: "user" }
-      | {
-          id: string;
-          sessionID: string;
-          role: "assistant";
-          parentID: string;
-          finish?: string;
-          error?: unknown;
-          cost: number;
-          tokens: {
-            input: number;
-            output: number;
-            reasoning: number;
-            cache: { read: number; write: number };
-          };
-        };
-    parts: OpenCodePart[];
-  }>;
 };
 
 /** Injectable time source; wall-clock reads must not come from process globals in pure modules. */
@@ -405,13 +365,13 @@ export interface GitWorkspaceAdapter {
 export type EnvironmentVariableRecord = {
   name: string;
   classification: "fixed" | "secret" | "ordinary";
-  recipient: "opencode" | "evaluator";
+  recipient: "agent" | "evaluator";
 };
 
 /** Complete replacement environment for one case recipient, plus its value-free manifest. */
 export type IsolatedEnvironment = {
   caseId: string;
-  recipient: "opencode" | "evaluator";
+  recipient: "agent" | "evaluator";
   homeDirectory: string;
   temporaryDirectory: string;
   variables: Record<string, string>;
@@ -421,14 +381,14 @@ export type IsolatedEnvironment = {
 /** Immutable run-level snapshot of the parent PATH and configured variable values. */
 export type ParentEnvironmentSnapshot = {
   path: string;
-  opencodeValues: Record<string, string>;
+  agentValues: Record<string, string>;
   ordinaryEvaluatorValues: Record<string, string>;
   secretValues: string[];
 };
 
-/** Separate OpenCode and evaluator replacement environments for one case. */
+/** Agent and evaluator replacement environments for one case. */
 export type CaseEnvironments = {
-  opencode: IsolatedEnvironment;
+  agent: IsolatedEnvironment;
   evaluator: IsolatedEnvironment;
 };
 
@@ -441,6 +401,7 @@ export interface EnvironmentAdapter {
     workspace: CaseWorkspace,
     snapshot: ParentEnvironmentSnapshot,
     config: TevuConfig,
+    agent: string,
   ): Promise<TevuResult<CaseEnvironments, "IsolationError">>;
 }
 
@@ -480,47 +441,123 @@ export interface EvaluatorProcessAdapter {
   run(request: EvaluatorProcessRequest): Promise<EvaluatorProcessResult>;
 }
 
-/** Input for exactly one managed `opencode run --format json` case process. */
-export type OpenCodeRunInput = {
-  identity: CaseIdentity;
+/** One raw agent event record: opaque outside its adapter, already redacted, serializable as one JSON value. */
+export type AgentEventRecord = unknown;
+
+/** One raw root-session export: opaque outside its adapter, already redacted, one JSON object. */
+export type AgentSessionExport = { readonly [field: string]: unknown };
+
+export type CapabilityAvailability = "available" | "unavailable";
+
+/** One probed capability; `name` is a display label, unique within its report. */
+export type AgentCapability = { name: string; required: boolean; availability: CapabilityAvailability };
+
+/** Probe result; `detectedVersion` is provenance only and never gates behavior. */
+export type AgentCapabilityReport = {
   executable: string;
+  detectedVersion: string | null;
+  capabilities: AgentCapability[];
+  isolation: { denyOutsideWorktree: CapabilityAvailability };
+};
+
+/** Model metrics an agent derives from its records; evaluation adds `elapsed`. */
+export type AgentMetrics = Omit<BenchmarkMetrics, "elapsed">;
+
+export type AgentRunInput = {
+  identity: CaseIdentity;
   prompt: string;
   worktreeDirectory: string;
   environment: IsolatedEnvironment;
   timeoutMs: number;
   terminationGraceMs: number;
   cancellation: AbortSignal;
-  onEvent: (
-    event: OpenCodeRunEvent,
-  ) => Promise<TevuResult<void, "ArtifactError" | "OpenCodeProtocolError">>;
+  onEvent: (event: AgentEventRecord) => Promise<TevuResult<void, "ArtifactError">>;
   onDiagnostic: (line: string) => Promise<TevuResult<void, "ArtifactError">>;
-  onProcess?: (result: OpenCodeRunResult) => void;
+  onProcess?: (result: AgentRunResult) => void;
 };
 
-/** Process evidence, root-session identity, and preserved parse findings for one case run. */
-export type OpenCodeRunResult = {
-  process: ProcessResult;
+export type AgentRunResult = { process: ProcessResult; sessionId: string | null; parseFindings: string[] };
+
+export type AgentMetricsInput = {
+  caseId: string;
+  /** The run's `AgentRunResult.sessionId`; `null` makes the adapter identify the root session from the records. */
   sessionId: string | null;
-  parseFindings: string[];
+  events: readonly AgentEventRecord[];
+  sessionExport: AgentSessionExport | null;
+  exportUnavailableReason?: string;
 };
 
-/** OpenCode capability probing, one-case execution, and root-session export. */
-export interface OpenCodeAdapter {
-  probe(
-    executable: string,
-  ): Promise<TevuResult<OpenCodeCapabilityReport, "PrerequisiteError" | "OpenCodeProtocolError">>;
-  run(
-    input: OpenCodeRunInput,
-  ): Promise<
-    TevuResult<
-      OpenCodeRunResult,
-      "OpenCodeProcessError" | "OpenCodeProtocolError" | "CaseTimeoutError" | "CancellationError"
-    >
+export interface AgentAdapter {
+  probe(): Promise<TevuResult<AgentCapabilityReport, "PrerequisiteError" | "AgentProtocolError">>;
+  run(input: AgentRunInput): Promise<
+    TevuResult<AgentRunResult, "AgentProcessError" | "AgentProtocolError" | "CaseTimeoutError" | "CancellationError">
   >;
   exportSession(
     sessionId: string,
     environment: IsolatedEnvironment,
-  ): Promise<TevuResult<OpenCodeExport, "OpenCodeProcessError" | "OpenCodeProtocolError">>;
+  ): Promise<TevuResult<AgentSessionExport, "AgentProcessError" | "AgentProtocolError">>;
+  normalizeMetrics(input: AgentMetricsInput): TevuResult<AgentMetrics, "AgentProtocolError">;
+}
+
+/** Adapters keyed by agent name; built only in `src/index.ts`. */
+export type AgentRegistry = ReadonlyMap<string, AgentAdapter>;
+
+/** Input for one supervised literal-argv process with a replacement environment. */
+export type ManagedProcessRequest = {
+  argv: [string, ...string[]];
+  cwd: string;
+  environment: Record<string, string>;
+  timeoutMs: number;
+  terminationGraceMs: number;
+  cancellation?: AbortSignal;
+  secretValues?: readonly string[];
+  onStdout?: (text: string) => void;
+  onStderr?: (text: string) => void;
+  maxCaptureBytes?: number;
+  /**
+   * With "structured", stdout bypasses the generic chunk-level text redaction
+   * so structured records can be parsed from unmangled bytes; the caller then
+   * owns redacting every decoded record before any persistent, terminal, or
+   * callback sink. The bounded capture and byte totals stay truthful to the
+   * raw stream. Defaults to "text".
+   */
+  stdoutRedaction?: "text" | "structured";
+};
+
+/**
+ * Evidence that a process could not be started; the reason is already
+ * redacted. `code` carries the Node.js-specific error code (e.g. `ENOENT`)
+ * when one is available; the `cancelled before launch` result never sets it.
+ */
+export type ManagedProcessLaunchFailure = { launched: false; reason: string; code?: string };
+
+/** Complete evidence for one launched and settled process. */
+export type ManagedProcessCompletion = {
+  launched: true;
+  exitCode: number | null;
+  signal: string | null;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  timedOut: boolean;
+  cancelled: boolean;
+  terminationStage: TerminationStage;
+  stdout: RedactedCapture;
+  stderr: RedactedCapture;
+};
+
+/** Outcome of one managed process; launch failure is evidence, not an exception. */
+export type ManagedProcessResult = ManagedProcessCompletion | ManagedProcessLaunchFailure;
+
+/** Supervises one literal-argv process; launch failure is evidence, never an exception. */
+export type ManagedProcessRunner = (request: ManagedProcessRequest) => Promise<ManagedProcessResult>;
+
+/** Credential-secret redaction over the current secret values; injected into agent adapters; no method throws. */
+export interface SecretRedactor {
+  secretValues(): readonly string[];
+  redactText(text: string): string;
+  /** Redacts every string, keys included, of a decoded JSON value; a cycle or a failed redactor yields `ArtifactError` whose reason carries no value. */
+  redactValue(value: unknown): TevuResult<unknown, "ArtifactError">;
 }
 
 /** One tracker issue read once during task creation. */
@@ -578,12 +615,12 @@ export interface ArtifactStore {
   startRun(manifest: RunManifest): Promise<TevuResult<void, "ArtifactError">>;
   appendEvent(
     caseId: string,
-    event: OpenCodeRunEvent,
-  ): Promise<TevuResult<void, "ArtifactError" | "OpenCodeProtocolError">>;
+    event: AgentEventRecord,
+  ): Promise<TevuResult<void, "ArtifactError">>;
   appendDiagnostic(caseId: string, line: string): Promise<TevuResult<void, "ArtifactError">>;
   writeSessionExport(
     caseId: string,
-    sessionExport: OpenCodeExport,
+    sessionExport: AgentSessionExport,
   ): Promise<TevuResult<void, "ArtifactError">>;
   writePatch(caseId: string, patch: PatchArtifact): Promise<TevuResult<void, "ArtifactError">>;
   writeChecks(caseId: string, checks: CheckResult[]): Promise<TevuResult<void, "ArtifactError">>;
@@ -606,11 +643,11 @@ export interface ArtifactStore {
   readEvents(
     runId: string,
     caseId: string,
-  ): Promise<TevuResult<OpenCodeRunEvent[], "ArtifactError" | "OpenCodeProtocolError">>;
+  ): Promise<TevuResult<AgentEventRecord[], "ArtifactError">>;
   readSessionExport(
     runId: string,
     caseId: string,
-  ): Promise<TevuResult<OpenCodeExport | null, "ArtifactError" | "OpenCodeProtocolError">>;
+  ): Promise<TevuResult<AgentSessionExport | null, "ArtifactError">>;
   readChecks(
     runId: string,
     caseId: string,
@@ -653,17 +690,16 @@ export interface PrerequisiteAdapter {
 /** Effects injected into the aggregate validation use case. */
 export type ValidationDependencies = {
   git: GitWorkspaceAdapter;
-  opencode: OpenCodeAdapter;
+  agents: AgentRegistry;
   environments: EnvironmentAdapter;
   prerequisites: PrerequisiteAdapter;
-  buildTaskPrompt: (task: TaskDefinition) => string;
 };
 
 /** Aggregate validation outcome; any error-severity finding makes the configuration invalid. */
 export type ValidationReport = {
   valid: boolean;
   findings: ValidationFinding[];
-  capabilities: OpenCodeCapabilityReport | null;
+  capabilities: Record<string, AgentCapabilityReport>;
 };
 
 /** Deterministic task-by-contender execution plan derived purely from configuration. */
@@ -679,7 +715,7 @@ export type BenchmarkPlan = {
 /** Effects injected into the benchmark orchestration use case. */
 export type RunDependencies = {
   git: GitWorkspaceAdapter;
-  opencode: OpenCodeAdapter;
+  agents: AgentRegistry;
   artifacts: ArtifactStore;
   evaluatorProcesses: EvaluatorProcessAdapter;
   environments: EnvironmentAdapter;
@@ -687,7 +723,6 @@ export type RunDependencies = {
   clock: Clock;
   generateRunId: RunIdGenerator;
   configDigest: (config: TevuConfig) => string;
-  buildTaskPrompt: (task: TaskDefinition) => string;
   redact: (text: string) => string;
   cancellation: AbortSignal;
   onLifecycle?: (caseId: string, lifecycle: CaseLifecycle) => void;

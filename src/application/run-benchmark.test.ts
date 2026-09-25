@@ -1,12 +1,19 @@
 // @vitest-environment node
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { planBenchmark, reduceRunExitCode, runBenchmark } from "./run-benchmark.ts";
+import { buildTaskPrompt } from "./task-prompt.ts";
 import { TevuConfigSchema } from "../config/schema.ts";
-import { unavailableBenchmarkMetrics } from "../evaluation/metrics.ts";
+import { unavailableBenchmarkMetrics } from "../domain/types.ts";
 
-import type { CheckInput, TaskDefinition, TaskInput, TevuConfig, TevuConfigInput } from "../config/schema.ts";
+import type { CheckInput, TaskInput, TevuConfig, TevuConfigInput } from "../config/schema.ts";
 import type {
+  AgentAdapter,
+  AgentCapabilityReport,
+  AgentMetrics,
+  AgentRegistry,
+  AgentRunInput,
+  AgentRunResult,
   ArtifactStore,
   CaseEnvironments,
   CaseIdentity,
@@ -23,12 +30,6 @@ import type {
   HostProbe,
   IsolatedEnvironment,
   MetricValue,
-  OpenCodeAdapter,
-  OpenCodeCapabilityReport,
-  OpenCodeExport,
-  OpenCodeRunEvent,
-  OpenCodeRunInput,
-  OpenCodeRunResult,
   ParentEnvironmentSnapshot,
   PrerequisiteAdapter,
   ProcessResult,
@@ -45,22 +46,26 @@ const COMMIT_A = "a".repeat(40);
 const COMMIT_B = "b".repeat(40);
 const RUN_ID = "run-0001-synthetic";
 const CLOCK_BASE = "2026-01-01T00:00:00.000Z";
+const AGENT_NAME = "fake-agent";
 
 const EMPTY_CAPTURE: RedactedCapture = { text: "", totalBytes: 0, truncated: false };
 
+/** Neutral event record the fake agent emits and counts; carries no protocol shape. */
+type FakeEventRecord = { kind: "tool" } | { kind: "error" };
+
 type FakeRunOutcome = TevuResult<
-  OpenCodeRunResult,
-  "OpenCodeProcessError" | "OpenCodeProtocolError" | "CaseTimeoutError" | "CancellationError"
+  AgentRunResult,
+  "AgentProcessError" | "AgentProtocolError" | "CaseTimeoutError" | "CancellationError"
 >;
 
 type CaseRunFailure = Extract<
   TevuError,
-  { kind: "OpenCodeProcessError" | "OpenCodeProtocolError" | "CaseTimeoutError" | "CancellationError" }
+  { kind: "AgentProcessError" | "AgentProtocolError" | "CaseTimeoutError" | "CancellationError" }
 >;
 
-type ExportFailure = Extract<TevuError, { kind: "OpenCodeProcessError" | "OpenCodeProtocolError" }>;
+type ExportFailure = Extract<TevuError, { kind: "AgentProcessError" | "AgentProtocolError" }>;
 
-type RunScript = (input: OpenCodeRunInput) => Promise<FakeRunOutcome>;
+type RunScript = (input: AgentRunInput) => Promise<FakeRunOutcome>;
 
 function unwrapOk<T, K extends TevuError["kind"]>(result: TevuResult<T, K>): T {
   if (!result.ok) {
@@ -125,11 +130,26 @@ function buildRunSettings(overrides: Partial<TevuConfigInput["run"]> = {}): Tevu
   return { output_dir: "/synthetic/artifacts", concurrency: 2, timeout: "60s", stop_grace: "500ms", ...overrides };
 }
 
+/**
+ * Renames the schema-required `opencode` key to `fake-agent` after parsing.
+ * The strict schema accepts only the literal `opencode` key (out of scope for
+ * this migration), so every agent-neutral test builds through that key and
+ * relabels the materialized config instead of parsing `fake-agent` directly.
+ */
+function rekeyToFakeAgent(config: TevuConfig): TevuConfig {
+  const { opencode, ...otherAgents } = config.agents;
+  return {
+    ...config,
+    agents: { ...otherAgents, [AGENT_NAME]: opencode },
+    models: config.models.map((model) => ({ ...model, agent: AGENT_NAME })),
+  };
+}
+
 function buildTevuConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
   const config: TevuConfigInput = {
     version: 1,
     run: buildRunSettings(),
-    agents: { opencode: { command: "/synthetic/opencode", secrets: ["TEVU_PROVIDER_KEY"], env: [] } },
+    agents: { opencode: { command: "/synthetic/fake-agent", secrets: ["TEVU_PROVIDER_KEY"], env: [] } },
     repositories: [{ id: "repo-1", path: "/synthetic/source" }],
     models: [
       { id: "c1", model: "synthetic/model-a", effort: "fast" },
@@ -138,7 +158,7 @@ function buildTevuConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
     tasks: [buildTask({ id: "task-1" }), buildTask({ id: "task-2" })],
     ...overrides,
   };
-  return TevuConfigSchema.parse(config);
+  return rekeyToFakeAgent(TevuConfigSchema.parse(config));
 }
 
 function buildCaseIdentity(caseId = "task-1--c1"): CaseIdentity {
@@ -149,6 +169,7 @@ function buildCaseIdentity(caseId = "task-1--c1"): CaseIdentity {
     sourceCommit: COMMIT_A,
     model: "synthetic/model-a",
     effort: "fast",
+    agent: AGENT_NAME,
   };
 }
 
@@ -164,54 +185,7 @@ function buildProcessResult(overrides: Partial<ProcessResult> = {}): ProcessResu
   };
 }
 
-function buildToolUseEvent(sessionId: string): OpenCodeRunEvent {
-  return {
-    type: "tool_use",
-    timestamp: 1,
-    sessionID: sessionId,
-    part: {
-      id: "part-tool-1",
-      sessionID: sessionId,
-      messageID: "message-1",
-      type: "tool",
-      callID: "call-1",
-      tool: "edit",
-      state: { status: "completed" },
-    },
-  };
-}
-
-function buildErrorEvent(sessionId: string): OpenCodeRunEvent {
-  return {
-    type: "error",
-    timestamp: 2,
-    sessionID: sessionId,
-    error: { message: "synthetic provider outage" },
-  };
-}
-
-function buildExport(sessionId: string): OpenCodeExport {
-  return {
-    info: { id: sessionId },
-    messages: [
-      { info: { id: `${sessionId}-user`, sessionID: sessionId, role: "user" }, parts: [] },
-      {
-        info: {
-          id: `${sessionId}-assistant`,
-          sessionID: sessionId,
-          role: "assistant",
-          parentID: `${sessionId}-user`,
-          finish: "stop",
-          cost: 0.25,
-          tokens: { input: 10, output: 20, reasoning: 3, cache: { read: 4, write: 5 } },
-        },
-        parts: [],
-      },
-    ],
-  };
-}
-
-function buildOpenCodeRunResult(overrides: Partial<OpenCodeRunResult> = {}): OpenCodeRunResult {
+function buildAgentRunResult(overrides: Partial<AgentRunResult> = {}): AgentRunResult {
   return {
     process: buildProcessResult(),
     sessionId: "session-synthetic",
@@ -220,12 +194,11 @@ function buildOpenCodeRunResult(overrides: Partial<OpenCodeRunResult> = {}): Ope
   };
 }
 
-function buildCapabilityReport(): OpenCodeCapabilityReport {
+function buildCapabilityReport(): AgentCapabilityReport {
   return {
-    executable: "/synthetic/opencode",
+    executable: "/synthetic/fake-agent",
     detectedVersion: "99.0.0-synthetic",
-    commands: { run: "available", export: "available" },
-    runOptions: { jsonFormat: "available", model: "available", variant: "available" },
+    capabilities: [{ name: "run command", required: true, availability: "available" }],
     isolation: { denyOutsideWorktree: "available" },
   };
 }
@@ -254,11 +227,12 @@ function buildWorkspace(identity: CaseIdentity): CaseWorkspace {
 
 function buildFakeEnvironment(
   caseId: string,
-  recipient: "opencode" | "evaluator",
+  recipient: "agent" | "evaluator",
   snapshot: ParentEnvironmentSnapshot,
 ): IsolatedEnvironment {
   const homeDirectory = `/synthetic/workspaces/${caseId}/runtime/${recipient}/home`;
   const temporaryDirectory = `/synthetic/workspaces/${caseId}/runtime/${recipient}/tmp`;
+  const agentValues = snapshot.agentValues;
   const variables: Record<string, string> = {
     PATH: snapshot.path,
     HOME: homeDirectory,
@@ -266,10 +240,10 @@ function buildFakeEnvironment(
     LANG: "C.UTF-8",
     LC_ALL: "C.UTF-8",
     CI: "1",
-    ...(recipient === "opencode" ? snapshot.opencodeValues : {}),
+    ...(recipient === "agent" ? agentValues : {}),
   };
   const configuredNames =
-    recipient === "opencode" ? Object.keys(snapshot.opencodeValues) : Object.keys(snapshot.ordinaryEvaluatorValues);
+    recipient === "agent" ? Object.keys(agentValues) : Object.keys(snapshot.ordinaryEvaluatorValues);
   const variableManifest: EnvironmentVariableRecord[] = [
     ...["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CI"].map((name) => ({
       name,
@@ -278,7 +252,7 @@ function buildFakeEnvironment(
     })),
     ...configuredNames.map((name) => ({
       name,
-      classification: recipient === "opencode" ? ("secret" as const) : ("ordinary" as const),
+      classification: recipient === "agent" ? ("secret" as const) : ("ordinary" as const),
       recipient,
     })),
   ];
@@ -310,7 +284,7 @@ function buildCaseResult(overrides: Partial<CaseResult> = {}): CaseResult {
 
 function buildFailureRecord(overrides: Partial<FailureRecord> = {}): FailureRecord {
   return {
-    error: { kind: "OpenCodeProcessError", caseId: "task-1--c1", exitCode: 3, signal: null },
+    error: { kind: "AgentProcessError", agent: AGENT_NAME, caseId: "task-1--c1", exitCode: 3, signal: null },
     occurredAt: CLOCK_BASE,
     ...overrides,
   };
@@ -320,14 +294,14 @@ function buildRunFinding(overrides: Partial<RunFinding> = {}): RunFinding {
   return { severity: "warning", caseId: null, message: "synthetic finding", ...overrides };
 }
 
-function defaultRunScript(input: OpenCodeRunInput): Promise<FakeRunOutcome> {
+function defaultRunScript(input: AgentRunInput): Promise<FakeRunOutcome> {
   return successfulRunScript(input);
 }
 
-async function successfulRunScript(input: OpenCodeRunInput): Promise<FakeRunOutcome> {
+async function successfulRunScript(input: AgentRunInput): Promise<FakeRunOutcome> {
   const sessionId = `session-${input.identity.caseId}`;
-  await input.onEvent(buildToolUseEvent(sessionId));
-  const value = buildOpenCodeRunResult({ sessionId });
+  await input.onEvent({ kind: "tool" } satisfies FakeEventRecord);
+  const value = buildAgentRunResult({ sessionId });
   input.onProcess?.(value);
   return { ok: true, value };
 }
@@ -338,11 +312,11 @@ function failedRunScript(
 ): RunScript {
   return async (input) => {
     const sessionId = `session-${input.identity.caseId}`;
-    await input.onEvent(buildToolUseEvent(sessionId));
+    await input.onEvent({ kind: "tool" } satisfies FakeEventRecord);
     if (options.withErrorEvent === true) {
-      await input.onEvent(buildErrorEvent(sessionId));
+      await input.onEvent({ kind: "error" } satisfies FakeEventRecord);
     }
-    const value = buildOpenCodeRunResult({
+    const value = buildAgentRunResult({
       sessionId,
       process: buildProcessResult({ exitCode: 3, durationMs: 4_321 }),
     });
@@ -354,9 +328,9 @@ function failedRunScript(
 function timedOutRunScript(): RunScript {
   return async (input) => {
     const sessionId = `session-${input.identity.caseId}`;
-    await input.onEvent(buildToolUseEvent(sessionId));
-    await input.onEvent(buildErrorEvent(sessionId));
-    const value = buildOpenCodeRunResult({
+    await input.onEvent({ kind: "tool" } satisfies FakeEventRecord);
+    await input.onEvent({ kind: "error" } satisfies FakeEventRecord);
+    const value = buildAgentRunResult({
       sessionId,
       process: buildProcessResult({
         exitCode: null,
@@ -370,6 +344,59 @@ function timedOutRunScript(): RunScript {
       ok: false,
       error: { kind: "CaseTimeoutError", caseId: input.identity.caseId, timeoutMs: 60_000 },
     };
+  };
+}
+
+/** Sums fixed values matching a fully available root-session export; verified verbatim by the tests below. */
+function buildFullMetrics(): AgentMetrics {
+  const measured = (value: number, unit: MetricValue["unit"]): MetricValue => ({
+    value,
+    unit,
+    availability: { status: "available", source: "root-session export" },
+    scope: "root-session",
+  });
+  return {
+    inputTokens: measured(10, "token"),
+    outputTokens: measured(20, "token"),
+    reasoningTokens: measured(3, "token"),
+    cacheReadTokens: measured(4, "token"),
+    cacheWriteTokens: measured(5, "token"),
+    turns: measured(1, "count"),
+    apiCalls: measured(1, "count"),
+    apiErrors: measured(0, "count"),
+    toolCalls: measured(0, "count"),
+    skillCalls: measured(0, "count"),
+    cost: measured(0.25, "USD"),
+  };
+}
+
+/** Counts the neutral event records the fake agent's own `run` emitted; mirrors a real adapter's event fallback. */
+function buildEventFallbackMetrics(reason: string, events: readonly unknown[]): AgentMetrics {
+  const unavailable = (unit: MetricValue["unit"]): MetricValue => ({
+    value: null,
+    unit,
+    availability: { status: "unavailable", reason },
+    scope: "root-session",
+  });
+  const measured = (value: number, unit: MetricValue["unit"]): MetricValue => ({
+    value,
+    unit,
+    availability: { status: "available", source: "run events" },
+    scope: "root-session",
+  });
+  const records = events as FakeEventRecord[];
+  return {
+    inputTokens: unavailable("token"),
+    outputTokens: unavailable("token"),
+    reasoningTokens: unavailable("token"),
+    cacheReadTokens: unavailable("token"),
+    cacheWriteTokens: unavailable("token"),
+    turns: unavailable("count"),
+    apiCalls: unavailable("count"),
+    apiErrors: measured(records.filter((event) => event.kind === "error").length, "count"),
+    toolCalls: measured(records.filter((event) => event.kind === "tool").length, "count"),
+    skillCalls: measured(0, "count"),
+    cost: unavailable("USD"),
   };
 }
 
@@ -428,51 +455,62 @@ function createHarness(config: TevuConfig) {
   let heldRuns: PromiseWithResolvers<void> | null = null;
   const startedSignals = new Map<string, PromiseWithResolvers<void>>();
 
-  const opencodeState = {
+  const agentState = {
     runCalls: new Map<string, number>(),
-    runInputs: [] as OpenCodeRunInput[],
+    runInputs: [] as AgentRunInput[],
     startedOrder: [] as string[],
     scripts: new Map<string, RunScript>(),
     exportCalls: [] as string[],
     exportFailures: new Map<string, ExportFailure>(),
     activeCount: 0,
     maxActiveCount: 0,
-    probeError: null as Extract<TevuError, { kind: "PrerequisiteError" | "OpenCodeProtocolError" }> | null,
+    probeError: null as Extract<TevuError, { kind: "PrerequisiteError" | "AgentProtocolError" }> | null,
   };
 
-  const opencode: OpenCodeAdapter = {
-    async probe(executable) {
+  const fakeAdapter: AgentAdapter = {
+    async probe() {
       timeline.push("probe");
-      if (opencodeState.probeError !== null) {
-        return { ok: false, error: opencodeState.probeError };
+      if (agentState.probeError !== null) {
+        return { ok: false, error: agentState.probeError };
       }
       return { ok: true, value: buildCapabilityReport() };
     },
     async run(input) {
       const caseId = input.identity.caseId;
-      opencodeState.runCalls.set(caseId, (opencodeState.runCalls.get(caseId) ?? 0) + 1);
-      opencodeState.startedOrder.push(caseId);
-      opencodeState.runInputs.push(input);
-      opencodeState.activeCount += 1;
-      opencodeState.maxActiveCount = Math.max(opencodeState.maxActiveCount, opencodeState.activeCount);
+      agentState.runCalls.set(caseId, (agentState.runCalls.get(caseId) ?? 0) + 1);
+      agentState.startedOrder.push(caseId);
+      agentState.runInputs.push(input);
+      agentState.activeCount += 1;
+      agentState.maxActiveCount = Math.max(agentState.maxActiveCount, agentState.activeCount);
       startedSignals.get(caseId)?.resolve();
       timeline.push(`run:start:${caseId}`);
-      const script = opencodeState.scripts.get(caseId) ?? defaultRunScript;
+      if (heldRuns !== null) {
+        await heldRuns.promise;
+      }
+      const script = agentState.scripts.get(caseId) ?? defaultRunScript;
       const outcome = await script(input);
-      opencodeState.activeCount -= 1;
+      agentState.activeCount -= 1;
       timeline.push(`run:end:${caseId}`);
       return outcome;
     },
     async exportSession(sessionId) {
-      opencodeState.exportCalls.push(sessionId);
+      agentState.exportCalls.push(sessionId);
       timeline.push(`exportSession:${sessionId}`);
-      const failure = opencodeState.exportFailures.get(sessionId);
+      const failure = agentState.exportFailures.get(sessionId);
       if (failure !== undefined) {
         return { ok: false, error: failure };
       }
-      return { ok: true, value: buildExport(sessionId) };
+      return { ok: true, value: { rootSessionId: sessionId } };
+    },
+    normalizeMetrics(input) {
+      if (input.sessionExport !== null) {
+        return { ok: true, value: buildFullMetrics() };
+      }
+      const reason = input.exportUnavailableReason ?? "root session export unavailable";
+      return { ok: true, value: buildEventFallbackMetrics(reason, input.events) };
     },
   };
+  const agents: AgentRegistry = new Map([[AGENT_NAME, fakeAdapter]]);
 
   const artifactState = {
     failOnce: new Map<string, Extract<TevuError, { kind: "ArtifactError" }>>(),
@@ -507,7 +545,7 @@ function createHarness(config: TevuConfig) {
       artifactState.startedManifests.push(manifest);
       return recordArtifactCall("startRun", manifest.runId);
     },
-    async appendEvent(caseId, event) {
+    async appendEvent(caseId) {
       return recordArtifactCall("appendEvent", caseId);
     },
     async appendDiagnostic(caseId) {
@@ -605,7 +643,7 @@ function createHarness(config: TevuConfig) {
   const environmentState = {
     snapshotValue: {
       path: "/synthetic/bin:/usr/bin",
-      opencodeValues: { TEVU_PROVIDER_KEY: "synthetic-provider-secret" },
+      agentValues: { TEVU_PROVIDER_KEY: "synthetic-provider-secret" },
       ordinaryEvaluatorValues: { TEVU_EVAL_VAR: "synthetic-evaluator-value" },
       secretValues: ["synthetic-provider-secret"],
     } satisfies ParentEnvironmentSnapshot,
@@ -628,7 +666,7 @@ function createHarness(config: TevuConfig) {
       timeline.push(`environments:${workspace.caseId}`);
       environmentState.snapshotsReceived.push(snapshot);
       const value: CaseEnvironments = {
-        opencode: buildFakeEnvironment(workspace.caseId, "opencode", snapshot),
+        agent: buildFakeEnvironment(workspace.caseId, "agent", snapshot),
         evaluator: buildFakeEnvironment(workspace.caseId, "evaluator", snapshot),
       };
       environmentState.created.push({ caseId: workspace.caseId, value });
@@ -665,7 +703,7 @@ function createHarness(config: TevuConfig) {
 
   const dependencies: RunDependencies = {
     git,
-    opencode,
+    agents,
     artifacts,
     evaluatorProcesses,
     environments,
@@ -673,13 +711,12 @@ function createHarness(config: TevuConfig) {
     clock,
     generateRunId: () => RUN_ID,
     configDigest: () => "digest-synthetic",
-    buildTaskPrompt: vi.fn((task: TaskDefinition) => `prompt:${task.id}`),
     redact: (text) => text,
     cancellation: cancellationController.signal,
     onLifecycle: (caseId, lifecycle) => lifecycleEvents.push({ caseId, lifecycle }),
   };
 
-  const opencodeHarness = Object.assign(opencodeState, {
+  const agentHarness = Object.assign(agentState, {
     holdNewRuns(): void {
       heldRuns = Promise.withResolvers<void>();
     },
@@ -724,7 +761,7 @@ function createHarness(config: TevuConfig) {
     lifecycleEvents,
     cancellation: cancellationController,
     git: gitState,
-    opencode: opencodeHarness,
+    agent: agentHarness,
     artifacts: artifactState,
     evaluatorProcesses: evaluatorHarness,
     environments: environmentState,
@@ -767,7 +804,7 @@ async function runWithFailingExport(
 ): Promise<{ run: RunResult; harness: Harness }> {
   const config = buildTevuConfig({ tasks: [buildTask()] });
   const harness = createHarness(config);
-  harness.opencode.exportFailures.set("session-task-1--c1", buildError("task-1--c1"));
+  harness.agent.exportFailures.set("session-task-1--c1", buildError("task-1--c1"));
   const result = await runBenchmark(planBenchmark(config), harness.dependencies);
   return { run: unwrapOk(result), harness };
 }
@@ -810,6 +847,7 @@ describe("planBenchmark", () => {
         sourceCommit: COMMIT_A,
         model: "synthetic/model-a",
         effort: "fast",
+        agent: AGENT_NAME,
       },
       {
         caseId: "task-1--c2",
@@ -818,6 +856,7 @@ describe("planBenchmark", () => {
         sourceCommit: COMMIT_A,
         model: "synthetic/model-b",
         effort: "deep",
+        agent: AGENT_NAME,
       },
       {
         caseId: "task-2--c1",
@@ -826,6 +865,7 @@ describe("planBenchmark", () => {
         sourceCommit: COMMIT_B,
         model: "synthetic/model-a",
         effort: "fast",
+        agent: AGENT_NAME,
       },
       {
         caseId: "task-2--c2",
@@ -834,11 +874,12 @@ describe("planBenchmark", () => {
         sourceCommit: COMMIT_B,
         model: "synthetic/model-b",
         effort: "deep",
+        agent: AGENT_NAME,
       },
     ]);
   });
 
-  it("builds each CaseIdentity with keys in the order caseId, taskId, modelId, sourceCommit, model, effort", () => {
+  it("builds each CaseIdentity with keys in the order caseId, taskId, modelId, sourceCommit, model, effort, agent", () => {
     const config = buildTevuConfig({ tasks: [buildTask({ id: "task-1", base_commit: COMMIT_A })] });
 
     const plan = planBenchmark(config);
@@ -850,6 +891,7 @@ describe("planBenchmark", () => {
       "sourceCommit",
       "model",
       "effort",
+      "agent",
     ]);
   });
 
@@ -992,7 +1034,10 @@ describe("runBenchmark", () => {
       nodeVersion: "v24.0.0-synthetic",
       bunVersion: "1.2.3-synthetic",
     });
-    expect(manifest.tools).toEqual({ gitVersion: "2.45.0-synthetic", opencodeVersion: "99.0.0-synthetic" });
+    expect(manifest.tools).toEqual({
+      gitVersion: "2.45.0-synthetic",
+      agentVersions: { [AGENT_NAME]: "99.0.0-synthetic" },
+    });
     expect(manifest.execution).toEqual({ concurrency: 2, caseTimeoutMs: 60_000 });
     expect(manifest.cases).toEqual([
       {
@@ -1002,6 +1047,7 @@ describe("runBenchmark", () => {
         sourceCommit: `pinned-${COMMIT_A}`,
         model: "synthetic/model-a",
         effort: "fast",
+        agent: AGENT_NAME,
       },
       {
         caseId: "task-1--c2",
@@ -1010,6 +1056,7 @@ describe("runBenchmark", () => {
         sourceCommit: `pinned-${COMMIT_A}`,
         model: "synthetic/model-b",
         effort: "deep",
+        agent: AGENT_NAME,
       },
       {
         caseId: "task-2--c1",
@@ -1018,6 +1065,7 @@ describe("runBenchmark", () => {
         sourceCommit: `pinned-${COMMIT_A}`,
         model: "synthetic/model-a",
         effort: "fast",
+        agent: AGENT_NAME,
       },
       {
         caseId: "task-2--c2",
@@ -1026,11 +1074,14 @@ describe("runBenchmark", () => {
         sourceCommit: `pinned-${COMMIT_A}`,
         model: "synthetic/model-b",
         effort: "deep",
+        agent: AGENT_NAME,
       },
     ]);
     expect(manifest.context?.config).toBe(config);
-    expect(manifest.context?.capabilities.detectedVersion).toBe("99.0.0-synthetic");
-    expect(harness.artifacts.startedManifests[0].completedAt).toBeNull();
+    expect((manifest.context?.capabilities as Record<string, AgentCapabilityReport>)[AGENT_NAME]?.detectedVersion).toBe(
+      "99.0.0-synthetic",
+    );
+    expect(harness.artifacts.startedManifests[0]?.completedAt).toBeNull();
     expect(run.cases.every((entry) => entry.identity.sourceCommit === `pinned-${COMMIT_A}`)).toBe(true);
   });
 
@@ -1044,7 +1095,7 @@ describe("runBenchmark", () => {
     const error = unwrapError(result);
     expect(error.kind).toBe("PrerequisiteError");
     expect(harness.environments.snapshotParentCalls).toBe(0);
-    expect(harness.opencode.runCalls.size).toBe(0);
+    expect(harness.agent.runCalls.size).toBe(0);
     expect(harness.artifacts.startedManifests).toHaveLength(0);
   });
 
@@ -1063,15 +1114,16 @@ describe("runBenchmark", () => {
     const error = unwrapError(result);
     expect(error.kind).toBe("PrerequisiteError");
     expect(harness.prerequisites.probeHostCalls).toBe(1);
-    expect(harness.opencode.runCalls.size).toBe(0);
+    expect(harness.agent.runCalls.size).toBe(0);
     expect(harness.artifacts.startedManifests).toHaveLength(0);
   });
 
   it("returns the capability probe failure before commit pinning and any write", async () => {
     const config = buildTevuConfig();
     const harness = createHarness(config);
-    harness.opencode.probeError = {
-      kind: "OpenCodeProtocolError",
+    harness.agent.probeError = {
+      kind: "AgentProtocolError",
+      agent: AGENT_NAME,
       context: { phase: "probe" },
       reason: "synthetic missing run command",
     };
@@ -1079,10 +1131,28 @@ describe("runBenchmark", () => {
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
     const error = unwrapError(result);
-    expect(error).toMatchObject({ kind: "OpenCodeProtocolError", context: { phase: "probe" } });
+    expect(error).toMatchObject({ kind: "AgentProtocolError", context: { phase: "probe" } });
     expect(harness.git.validatedCommits).toHaveLength(0);
     expect(harness.artifacts.startedManifests).toHaveLength(0);
     expect(harness.lifecycleEvents).toEqual([]);
+  });
+
+  it("returns a PrerequisiteError naming the agent when no adapter is registered for it", async () => {
+    const config = buildTevuConfig();
+    const harness = createHarness(config);
+    harness.dependencies.agents = new Map();
+
+    const result = await runBenchmark(planBenchmark(config), harness.dependencies);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: "PrerequisiteError",
+        tool: AGENT_NAME,
+        expected: "a registered agent adapter",
+        actual: "none",
+      },
+    });
   });
 
   it("remaps source resolution failures to the owning task before any write", async () => {
@@ -1099,14 +1169,17 @@ describe("runBenchmark", () => {
     const error = unwrapError(result);
     expect(error).toMatchObject({ kind: "SourceMaterializationError", taskId: "task-1" });
     expect(harness.artifacts.startedManifests).toHaveLength(0);
-    expect(harness.opencode.runCalls.size).toBe(0);
+    expect(harness.agent.runCalls.size).toBe(0);
   });
 
   it("fails before any case starts when a planned case's prompt names its resolved commit", async () => {
-    const config = buildTevuConfig();
+    const config = buildTevuConfig({
+      tasks: [
+        buildTask({ id: "task-1" }),
+        buildTask({ id: "task-2", prompt: "the agent prompt names pinned-something" }),
+      ],
+    });
     const harness = createHarness(config);
-    harness.dependencies.buildTaskPrompt = (task) =>
-      task.id === "task-2" ? "the agent prompt names pinned-something" : "an unrelated prompt";
 
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
@@ -1122,10 +1195,13 @@ describe("runBenchmark", () => {
   });
 
   it("fails before any case starts when the first, uncached task's prompt names its resolved commit", async () => {
-    const config = buildTevuConfig();
+    const config = buildTevuConfig({
+      tasks: [
+        buildTask({ id: "task-1", prompt: "the agent prompt names pinned-something" }),
+        buildTask({ id: "task-2" }),
+      ],
+    });
     const harness = createHarness(config);
-    harness.dependencies.buildTaskPrompt = (task) =>
-      task.id === "task-1" ? "the agent prompt names pinned-something" : "an unrelated prompt";
 
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
@@ -1145,7 +1221,6 @@ describe("runBenchmark", () => {
       run: buildRunSettings({ concurrency: 1 }),
       tasks: [buildTask()],
     });
-    const task = config.tasks[0]!;
     const harness = createHarness(config);
 
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
@@ -1190,17 +1265,18 @@ describe("runBenchmark", () => {
       { caseId: "task-1--c2", lifecycle: "completed" },
     ]);
 
-    const runInput = harness.opencode.runInputs[0];
-    expect(runInput.identity).toEqual({ ...buildCaseIdentity("task-1--c1"), sourceCommit: `pinned-${COMMIT_A}` });
-    expect(runInput.executable).toBe("/synthetic/opencode");
-    expect(runInput.prompt).toBe("prompt:task-1");
-    expect(runInput.prompt).not.toContain(`pinned-${COMMIT_A}`);
-    expect(vi.mocked(harness.dependencies.buildTaskPrompt).mock.calls).toEqual([[task], [task], [task], [task]]);
-    expect(runInput.worktreeDirectory).toBe("/synthetic/workspaces/task-1--c1/worktree");
-    expect(runInput.environment).toBe(harness.environments.created[0].value.opencode);
-    expect(runInput.timeoutMs).toBe(60_000);
-    expect(runInput.terminationGraceMs).toBe(500);
-    expect(runInput.cancellation.aborted).toBe(false);
+    const runInput = harness.agent.runInputs[0];
+    expect(runInput).toBeDefined();
+    expect(runInput?.identity).toEqual({ ...buildCaseIdentity("task-1--c1"), sourceCommit: `pinned-${COMMIT_A}` });
+    const task = config.tasks[0];
+    expect(task).toBeDefined();
+    expect(runInput?.prompt).toBe(task === undefined ? undefined : buildTaskPrompt(task));
+    expect(runInput?.prompt).not.toContain(`pinned-${COMMIT_A}`);
+    expect(runInput?.worktreeDirectory).toBe("/synthetic/workspaces/task-1--c1/worktree");
+    expect(runInput?.environment).toBe(harness.environments.created[0]?.value.agent);
+    expect(runInput?.timeoutMs).toBe(60_000);
+    expect(runInput?.terminationGraceMs).toBe(500);
+    expect(runInput?.cancellation.aborted).toBe(false);
 
     const caseRequests = harness.evaluatorProcesses.requests.filter(
       (request) => request.cwd === "/synthetic/workspaces/task-1--c1/worktree",
@@ -1210,11 +1286,11 @@ describe("runBenchmark", () => {
       "/synthetic/dod-required",
     ]);
     const evaluatorRequest = caseRequests[0];
-    expect(evaluatorRequest.argv).toEqual(["/synthetic/acc-required", "--verify"]);
-    expect(evaluatorRequest.cwd).toBe("/synthetic/workspaces/task-1--c1/worktree");
-    expect(evaluatorRequest.environment).toEqual(harness.environments.created[0].value.evaluator.variables);
-    expect(evaluatorRequest.timeoutMs).toBe(5_000);
-    expect(evaluatorRequest.terminationGraceMs).toBe(500);
+    expect(evaluatorRequest?.argv).toEqual(["/synthetic/acc-required", "--verify"]);
+    expect(evaluatorRequest?.cwd).toBe("/synthetic/workspaces/task-1--c1/worktree");
+    expect(evaluatorRequest?.environment).toEqual(harness.environments.created[0]?.value.evaluator.variables);
+    expect(evaluatorRequest?.timeoutMs).toBe(5_000);
+    expect(evaluatorRequest?.terminationGraceMs).toBe(500);
 
     const caseResult = caseResultOf(run, "task-1--c1");
     expect(caseResult.lifecycle).toBe("completed");
@@ -1222,7 +1298,7 @@ describe("runBenchmark", () => {
     expect(caseResult.failure).toBeNull();
     expect(caseResult.process?.exitCode).toBe(0);
     expect(caseResult.checks.map((check) => check.verdict)).toEqual(["passed", "passed"]);
-    expect(caseResult.checks[0].evidence).toContain("exit code 0");
+    expect(caseResult.checks[0]?.evidence).toContain("exit code 0");
     expect(caseResult.artifacts).toEqual({
       events: "task-1--c1/events.jsonl",
       diagnostics: null,
@@ -1242,23 +1318,23 @@ describe("runBenchmark", () => {
   it("caps active cases at the configured concurrency", async () => {
     const config = buildTevuConfig();
     const harness = createHarness(config);
-    harness.opencode.holdNewRuns();
-    const firstStart = harness.opencode.waitForCaseStart("task-1--c1");
-    const secondStart = harness.opencode.waitForCaseStart("task-1--c2");
+    harness.agent.holdNewRuns();
+    const firstStart = harness.agent.waitForCaseStart("task-1--c1");
+    const secondStart = harness.agent.waitForCaseStart("task-1--c2");
 
     const runPromise = runBenchmark(planBenchmark(config), harness.dependencies);
     await Promise.all([firstStart, secondStart]);
 
-    expect(harness.opencode.activeCount).toBe(2);
-    expect(harness.opencode.maxActiveCount).toBe(2);
-    expect(harness.opencode.startedOrder).toEqual(["task-1--c1", "task-1--c2"]);
+    expect(harness.agent.activeCount).toBe(2);
+    expect(harness.agent.maxActiveCount).toBe(2);
+    expect(harness.agent.startedOrder).toEqual(["task-1--c1", "task-1--c2"]);
 
-    harness.opencode.releaseHeldRuns();
+    harness.agent.releaseHeldRuns();
     const result = await runPromise;
 
     const run = unwrapOk(result);
-    expect(harness.opencode.maxActiveCount).toBe(2);
-    expect(harness.opencode.runCalls.size).toBe(4);
+    expect(harness.agent.maxActiveCount).toBe(2);
+    expect(harness.agent.runCalls.size).toBe(4);
     expect(run.cases).toHaveLength(4);
     expect(run.cases.every((entry) => entry.lifecycle === "completed")).toBe(true);
   });
@@ -1276,13 +1352,13 @@ describe("runBenchmark", () => {
     await firstCheck;
 
     expect(harness.timeline.filter((entry) => entry.startsWith("prepare:"))).toEqual(["prepare:task-1--c1"]);
-    expect([...harness.opencode.runCalls.keys()]).toEqual(["task-1--c1"]);
+    expect([...harness.agent.runCalls.keys()]).toEqual(["task-1--c1"]);
 
     harness.evaluatorProcesses.releaseChecks();
     const result = await runPromise;
 
     unwrapOk(result);
-    expect(harness.opencode.runCalls.size).toBe(2);
+    expect(harness.agent.runCalls.size).toBe(2);
     expect(harness.timeline.filter((entry) => entry.startsWith("prepare:"))).toEqual([
       "prepare:task-1--c1",
       "prepare:task-1--c2",
@@ -1291,18 +1367,20 @@ describe("runBenchmark", () => {
 
   describe.each([
     {
-      label: "readable OpenCode process failure",
+      label: "readable agent process failure",
       buildError: (caseId: string): CaseRunFailure => ({
-        kind: "OpenCodeProcessError",
+        kind: "AgentProcessError",
+        agent: AGENT_NAME,
         caseId,
         exitCode: 3,
         signal: null,
       }),
     },
     {
-      label: "readable case-context OpenCode protocol failure",
+      label: "readable case-context agent protocol failure",
       buildError: (caseId: string): CaseRunFailure => ({
-        kind: "OpenCodeProtocolError",
+        kind: "AgentProtocolError",
+        agent: AGENT_NAME,
         context: { phase: "case", caseId },
         reason: "synthetic malformed event identity",
       }),
@@ -1311,7 +1389,7 @@ describe("runBenchmark", () => {
     it("completes evaluation, preserves the runtime failure, and forces exit 2 without retrying", async () => {
       const config = buildTevuConfig({ tasks: [buildTask()] });
       const harness = createHarness(config);
-      harness.opencode.scripts.set("task-1--c1", failedRunScript(buildError("task-1--c1")));
+      harness.agent.scripts.set("task-1--c1", failedRunScript(buildError("task-1--c1")));
 
       const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
@@ -1328,9 +1406,9 @@ describe("runBenchmark", () => {
       expect(failedCase.artifacts.assessment).toBeNull();
       expectAvailableMetric(failedCase.metrics.elapsed, 4_321, "millisecond", "process", "case");
       expectAvailableMetric(failedCase.metrics.inputTokens, 10, "token", "root-session export");
-      expect(harness.opencode.exportCalls).toHaveLength(2);
-      expect(harness.opencode.exportCalls).toContain("session-task-1--c1");
-      expect(harness.opencode.runCalls.get("task-1--c1")).toBe(1);
+      expect(harness.agent.exportCalls).toHaveLength(2);
+      expect(harness.agent.exportCalls).toContain("session-task-1--c1");
+      expect(harness.agent.runCalls.get("task-1--c1")).toBe(1);
       expect(run.exitCode).toBe(2);
 
       const independentCase = caseResultOf(run, "task-1--c2");
@@ -1342,18 +1420,20 @@ describe("runBenchmark", () => {
 
   describe.each([
     {
-      label: "OpenCode process error",
+      label: "agent process error",
       buildError: (caseId: string): ExportFailure => ({
-        kind: "OpenCodeProcessError",
+        kind: "AgentProcessError",
+        agent: AGENT_NAME,
         caseId,
         exitCode: 2,
         signal: null,
       }),
     },
     {
-      label: "case-context OpenCode protocol error",
+      label: "case-context agent protocol error",
       buildError: (caseId: string): ExportFailure => ({
-        kind: "OpenCodeProtocolError",
+        kind: "AgentProtocolError",
+        agent: AGENT_NAME,
         context: { phase: "case", caseId },
         reason: "synthetic export identity failure",
       }),
@@ -1374,7 +1454,7 @@ describe("runBenchmark", () => {
       expectAvailableMetric(failedExportCase.metrics.toolCalls, 1, "count", "run events");
       expectUnavailableMetric(failedExportCase.metrics.inputTokens, "export failed");
       expectUnavailableMetric(failedExportCase.metrics.turns, "export failed");
-      expect(harness.opencode.exportCalls).toContain("session-task-1--c1");
+      expect(harness.agent.exportCalls).toContain("session-task-1--c1");
 
       const independentCase = caseResultOf(run, "task-1--c2");
       expect(independentCase.lifecycle).toBe("completed");
@@ -1400,11 +1480,12 @@ describe("runBenchmark", () => {
     const config = buildTevuConfig({ tasks: [buildTask()] });
     const harness = createHarness(config);
     harness.git.unreadableCaseIds.add("task-1--c1");
-    harness.opencode.scripts.set(
+    harness.agent.scripts.set(
       "task-1--c1",
-      failedRunScript({ kind: "OpenCodeProcessError", caseId: "task-1--c1", exitCode: 3, signal: null }, {
-        withErrorEvent: true,
-      }),
+      failedRunScript(
+        { kind: "AgentProcessError", agent: AGENT_NAME, caseId: "task-1--c1", exitCode: 3, signal: null },
+        { withErrorEvent: true },
+      ),
     );
 
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
@@ -1414,7 +1495,7 @@ describe("runBenchmark", () => {
     expect(failedCase.lifecycle).toBe("process-failed");
     expect(failedCase.outcome).toBe("not-evaluated");
     expect(failedCase.checks).toEqual([]);
-    expect(failedCase.failure?.error.kind).toBe("OpenCodeProcessError");
+    expect(failedCase.failure?.error.kind).toBe("AgentProcessError");
     expect(failedCase.process?.exitCode).toBe(3);
     expect(failedCase.artifacts.events).toBe("task-1--c1/events.jsonl");
     expect(failedCase.artifacts.sessionExport).toBeNull();
@@ -1424,8 +1505,8 @@ describe("runBenchmark", () => {
     expectAvailableMetric(failedCase.metrics.apiErrors, 1, "count", "run events");
     expectAvailableMetric(failedCase.metrics.toolCalls, 1, "count", "run events");
     expectUnavailableMetric(failedCase.metrics.inputTokens, "unreadable");
-    expect(harness.opencode.exportCalls).not.toContain("session-task-1--c1");
-    expect(harness.opencode.runCalls.get("task-1--c1")).toBe(1);
+    expect(harness.agent.exportCalls).not.toContain("session-task-1--c1");
+    expect(harness.agent.runCalls.get("task-1--c1")).toBe(1);
     expect(harness.timeline).not.toContain(`patch:task-1--c1`);
     expect(
       harness.evaluatorProcesses.requests.every((request) => request.cwd !== "/synthetic/workspaces/task-1--c1/worktree"),
@@ -1440,7 +1521,7 @@ describe("runBenchmark", () => {
   it("times out, skips all checks, attempts the patch, and falls back to event metrics", async () => {
     const config = buildTevuConfig({ tasks: [buildTask()] });
     const harness = createHarness(config);
-    harness.opencode.scripts.set("task-1--c1", timedOutRunScript());
+    harness.agent.scripts.set("task-1--c1", timedOutRunScript());
 
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
@@ -1458,8 +1539,8 @@ describe("runBenchmark", () => {
     expectAvailableMetric(timedOutCase.metrics.apiErrors, 1, "count", "run events");
     expectAvailableMetric(timedOutCase.metrics.toolCalls, 1, "count", "run events");
     expectUnavailableMetric(timedOutCase.metrics.inputTokens, "timed out");
-    expect(harness.opencode.exportCalls).not.toContain("session-task-1--c1");
-    expect(harness.opencode.runCalls.get("task-1--c1")).toBe(1);
+    expect(harness.agent.exportCalls).not.toContain("session-task-1--c1");
+    expect(harness.agent.runCalls.get("task-1--c1")).toBe(1);
     expect(harness.timeline).not.toContain(`exportSession:session-task-1--c1`);
     expect(
       harness.evaluatorProcesses.requests.every(
@@ -1486,9 +1567,9 @@ describe("runBenchmark", () => {
     expect(failedCase.outcome).toBe("not-evaluated");
     expect(failedCase.failure?.error.kind).toBe("ArtifactError");
     expect(failedCase.artifacts.sessionExport).toBeNull();
-    expect(harness.opencode.exportCalls).not.toContain("session-task-1--c1");
-    expect(harness.opencode.runCalls.get("task-1--c1")).toBe(1);
-    expect(harness.opencode.runCalls.has("task-1--c2")).toBe(false);
+    expect(harness.agent.exportCalls).not.toContain("session-task-1--c1");
+    expect(harness.agent.runCalls.get("task-1--c1")).toBe(1);
+    expect(harness.agent.runCalls.has("task-1--c2")).toBe(false);
 
     expect(run.cases.map((entry) => entry.identity.caseId)).toEqual(["task-1--c1"]);
     expect(run.findings).toEqual([
@@ -1513,11 +1594,11 @@ describe("runBenchmark", () => {
       tasks: [buildTask()],
     });
     const harness = createHarness(config);
-    harness.opencode.scripts.set("task-1--c1", async (input) => {
+    harness.agent.scripts.set("task-1--c1", async (input) => {
       await waitForSignal(input.cancellation);
       return { ok: false, error: { kind: "CancellationError", activeCaseIds: ["task-1--c1"] } };
     });
-    const caseStart = harness.opencode.waitForCaseStart("task-1--c1");
+    const caseStart = harness.agent.waitForCaseStart("task-1--c1");
 
     const runPromise = runBenchmark(planBenchmark(config), harness.dependencies);
     await caseStart;
@@ -1530,8 +1611,8 @@ describe("runBenchmark", () => {
     expect(cancelledCase.outcome).toBe("not-evaluated");
     expect(cancelledCase.failure?.error.kind).toBe("CancellationError");
     expect(cancelledCase.artifacts.sessionExport).toBeNull();
-    expect(harness.opencode.exportCalls).not.toContain("session-task-1--c1");
-    expect(harness.opencode.runCalls.has("task-1--c2")).toBe(false);
+    expect(harness.agent.exportCalls).not.toContain("session-task-1--c1");
+    expect(harness.agent.runCalls.has("task-1--c2")).toBe(false);
     expect(run.findings).toEqual([
       {
         severity: "warning",
@@ -1553,8 +1634,8 @@ describe("runBenchmark", () => {
     expect(cancelledCase.artifacts.sessionExport).toBe("task-1--c1/session.json");
     expect(cancelledCase.artifacts.solutionPatch).toBe("task-1--c1/solution.patch");
     expect(cancelledCase.artifacts.checks).toBe("task-1--c1/checks.json");
-    expect(harness.evaluatorProcesses.requests[0].cancellation).toBeDefined();
-    expect(harness.opencode.runCalls.has("task-1--c2")).toBe(false);
+    expect(harness.evaluatorProcesses.requests[0]?.cancellation).toBeDefined();
+    expect(harness.agent.runCalls.has("task-1--c2")).toBe(false);
     expect(run.findings).toEqual([
       {
         severity: "warning",
@@ -1569,7 +1650,7 @@ describe("runBenchmark", () => {
   it("aborts the case cancellation signal when the run is cancelled during evaluation", async () => {
     const { harness } = await runCancelledDuringEvaluation();
 
-    expect(harness.evaluatorProcesses.requests[0].cancellation?.aborted).toBe(true);
+    expect(harness.evaluatorProcesses.requests[0]?.cancellation?.aborted).toBe(true);
   });
 
   it("skips remaining checks when the run is cancelled during evaluation", async () => {
@@ -1591,7 +1672,7 @@ describe("runBenchmark", () => {
     expect(error).toMatchObject({ kind: "CancellationError", activeCaseIds: [] });
     expect(harness.prerequisites.probeHostCalls).toBe(0);
     expect(harness.git.validatedCommits).toHaveLength(0);
-    expect(harness.opencode.runCalls.size).toBe(0);
+    expect(harness.agent.runCalls.size).toBe(0);
     expect(harness.artifacts.startedManifests).toHaveLength(0);
     expect(harness.artifacts.finalizedRuns).toHaveLength(0);
   });
@@ -1617,7 +1698,7 @@ describe("runBenchmark", () => {
       expect(entry.artifacts.events).toBeNull();
       expectUnavailableMetric(entry.metrics.elapsed, "case preparation failed");
     }
-    expect(harness.opencode.runCalls.size).toBe(0);
+    expect(harness.agent.runCalls.size).toBe(0);
     expect(harness.timeline.filter((entry) => entry.startsWith("dispose:"))).toEqual([]);
     expect(run.exitCode).toBe(1);
   });
@@ -1644,7 +1725,7 @@ describe("runBenchmark", () => {
         message: expect.stringContaining("/synthetic/workspaces/task-1--c1/worktree"),
       },
     ]);
-    expect(run.findings[0].message).toContain("cleanup failed");
+    expect(run.findings[0]?.message).toContain("cleanup failed");
     expect(run.exitCode).toBe(0);
   });
 
@@ -1663,7 +1744,7 @@ describe("runBenchmark", () => {
     const persistedCase = caseResultOf(run, "task-1--c1");
     expect(persistedCase.lifecycle).toBe("completed");
     expect(harness.timeline).not.toContain("dispose:task-1--c1");
-    expect(harness.opencode.runCalls.has("task-1--c2")).toBe(false);
+    expect(harness.agent.runCalls.has("task-1--c2")).toBe(false);
     expect(run.findings).toEqual([
       {
         severity: "error",
@@ -1734,7 +1815,7 @@ function buildRunManifest(overrides: Partial<RunManifest> = {}): RunManifest {
     startedAt: CLOCK_BASE,
     completedAt: null,
     host: { platform: "linux", nodeVersion: "v24.0.0-synthetic", bunVersion: "1.2.3-synthetic" },
-    tools: { gitVersion: "2.45.0-synthetic", opencodeVersion: null },
+    tools: { gitVersion: "2.45.0-synthetic", agentVersions: {} },
     execution: { concurrency: 1, caseTimeoutMs: 1_000 },
     cases: [],
     ...overrides,
