@@ -13,3 +13,15 @@
 
 # App configuration.
 tevu.yaml
+
+
+# Agents stuff
+/.claude
+/kb
+/.findings
+/.issues
+/.plans
+/.research
+/.reviews
+/.specs
+/.tasks
