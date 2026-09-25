@@ -5,24 +5,24 @@
  * validation and TypeScript type source; unknown keys fail at every level.
  */
 
-import { z } from "zod";
+import { z } from 'zod';
 
 /** ID grammar shared by every configuration collection. */
 const ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 
 /** Configuration identifier: lowercase letters, digits, and hyphens, starting with a letter. */
-export const IdSchema = z.string().regex(ID_PATTERN, "id must match ^[a-z][a-z0-9-]{0,63}$");
+const IdSchema = z.string().regex(ID_PATTERN, 'id must match ^[a-z][a-z0-9-]{0,63}$');
 
 const nonWhitespaceTextSchema = z
   .string()
-  .refine((text) => text.trim().length > 0, "must contain non-whitespace text");
+  .refine((text) => text.trim().length > 0, 'must contain non-whitespace text');
 
 const DURATION_PATTERN = /^([1-9][0-9]*)(ms|s|m|h)$/;
 const DURATION_UNIT_MS: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000 };
 const MAX_DURATION_MS = 2_147_483_647;
 const DURATION_GRAMMAR_MESSAGE =
-  "must be a positive whole number followed by ms, s, m, or h, for example 30s or 10m";
-const DURATION_BOUND_MESSAGE = "must be at most 2147483647ms";
+  'must be a positive whole number followed by ms, s, m, or h, for example 30s or 10m';
+const DURATION_BOUND_MESSAGE = 'must be at most 2147483647ms';
 
 function parseDurationMs(value: string): number | null {
   const match = DURATION_PATTERN.exec(value);
@@ -44,11 +44,11 @@ function parseDurationMs(value: string): number | null {
 export const DurationSchema = z.string().superRefine((value, ctx) => {
   const ms = parseDurationMs(value);
   if (ms === null) {
-    ctx.addIssue({ code: "custom", message: DURATION_GRAMMAR_MESSAGE });
+    ctx.addIssue({ code: 'custom', message: DURATION_GRAMMAR_MESSAGE });
     return;
   }
   if (ms > MAX_DURATION_MS) {
-    ctx.addIssue({ code: "custom", message: DURATION_BOUND_MESSAGE });
+    ctx.addIssue({ code: 'custom', message: DURATION_BOUND_MESSAGE });
   }
 });
 
@@ -68,26 +68,30 @@ export function durationMs(value: string): number {
 
 const VARIABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const VARIABLE_NAME_GRAMMAR_MESSAGE =
-  "must be a letter or underscore followed by letters, digits, or underscores";
+  'must be a letter or underscore followed by letters, digits, or underscores';
 const FIXED_NAME_MESSAGE =
-  "PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract and cannot be configured";
+  'PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract and cannot be configured';
 
 /** Environment names fixed by the isolation contract; configuration must not redefine them. */
-const FIXED_ENVIRONMENT_NAMES = new Set(["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CI"]);
+const FIXED_ENVIRONMENT_NAMES = new Set(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'CI']);
 
 function isFixedEnvironmentName(name: string): boolean {
-  return FIXED_ENVIRONMENT_NAMES.has(name) || name.startsWith("XDG_");
+  return FIXED_ENVIRONMENT_NAMES.has(name) || name.startsWith('XDG_');
 }
 
 /** An environment variable name: a shell-exportable identifier (E2). */
-export const VariableNameSchema = z.string().regex(VARIABLE_NAME_PATTERN, VARIABLE_NAME_GRAMMAR_MESSAGE);
+export const VariableNameSchema = z
+  .string()
+  .regex(VARIABLE_NAME_PATTERN, VARIABLE_NAME_GRAMMAR_MESSAGE);
 
 const VARIABLE_REFERENCE_PATTERN = /^\$([A-Za-z_][A-Za-z0-9_]*)$/;
 const VARIABLE_REFERENCE_MESSAGE =
-  "must be a $VARIABLE reference, for example $JIRA_API_TOKEN; secret values are never written here";
+  'must be a $VARIABLE reference, for example $JIRA_API_TOKEN; secret values are never written here';
 
 /** A `$VARIABLE` reference: a dollar sign followed by a variable name (E2). */
-export const VariableReferenceSchema = z.string().regex(VARIABLE_REFERENCE_PATTERN, VARIABLE_REFERENCE_MESSAGE);
+const VariableReferenceSchema = z
+  .string()
+  .regex(VARIABLE_REFERENCE_PATTERN, VARIABLE_REFERENCE_MESSAGE);
 
 /**
  * Extracts the variable name a `$VARIABLE` reference names.
@@ -120,7 +124,7 @@ export const MAX_REPEAT = 100;
 export const RepeatSchema = z.int().min(1).max(MAX_REPEAT);
 
 /** Settings shared by every benchmark case. */
-export const RunSettingsSchema = z.strictObject({
+const RunSettingsSchema = z.strictObject({
   output_dir: z.string().min(1),
   concurrency: z.int().min(1).max(32),
   repeat: RepeatSchema.default(1),
@@ -130,10 +134,7 @@ export const RunSettingsSchema = z.strictObject({
 });
 
 /** Parsed run settings, all defaults materialized except the genuinely optional `check_timeout`. */
-export type RunSettings = z.infer<typeof RunSettingsSchema>;
-
-/** File-shape run settings; `repeat` and `check_timeout` are the only optional keys. */
-export type RunSettingsInput = z.input<typeof RunSettingsSchema>;
+type RunSettings = z.infer<typeof RunSettingsSchema>;
 
 function checkNoFixedNames(
   names: readonly string[],
@@ -142,7 +143,7 @@ function checkNoFixedNames(
 ): void {
   names.forEach((name, index) => {
     if (isFixedEnvironmentName(name)) {
-      ctx.addIssue({ code: "custom", path: [...basePath, index], message: FIXED_NAME_MESSAGE });
+      ctx.addIssue({ code: 'custom', path: [...basePath, index], message: FIXED_NAME_MESSAGE });
     }
   });
 }
@@ -156,7 +157,7 @@ function checkUniqueStrings(
   const seen = new Set<string>();
   names.forEach((name, index) => {
     if (seen.has(name)) {
-      ctx.addIssue({ code: "custom", path: [...basePath, index], message: `${label} "${name}"` });
+      ctx.addIssue({ code: 'custom', path: [...basePath, index], message: `${label} "${name}"` });
     }
     seen.add(name);
   });
@@ -171,16 +172,16 @@ export function agentSettingsSchema(agentName: string) {
       env: z.array(VariableNameSchema).default([]),
     })
     .superRefine((value, ctx) => {
-      checkNoFixedNames(value.secrets, ctx, ["secrets"]);
-      checkNoFixedNames(value.env, ctx, ["env"]);
-      checkUniqueStrings(value.secrets, ctx, ["secrets"], "duplicate environment variable name");
-      checkUniqueStrings(value.env, ctx, ["env"], "duplicate environment variable name");
+      checkNoFixedNames(value.secrets, ctx, ['secrets']);
+      checkNoFixedNames(value.env, ctx, ['env']);
+      checkUniqueStrings(value.secrets, ctx, ['secrets'], 'duplicate environment variable name');
+      checkUniqueStrings(value.env, ctx, ['env'], 'duplicate environment variable name');
       const secretNames = new Set(value.secrets);
       value.env.forEach((name, index) => {
         if (secretNames.has(name)) {
           ctx.addIssue({
-            code: "custom",
-            path: ["env", index],
+            code: 'custom',
+            path: ['env', index],
             message: `environment variable "${name}" appears in both agents.${agentName}.secrets and agents.${agentName}.env`,
           });
         }
@@ -189,15 +190,12 @@ export function agentSettingsSchema(agentName: string) {
 }
 
 /** Parsed agent block settings; `secrets` and `env` default to `[]`. */
-export type AgentSettings = z.infer<ReturnType<typeof agentSettingsSchema>>;
+type AgentSettings = z.infer<ReturnType<typeof agentSettingsSchema>>;
 
-/** File-shape agent block settings; `secrets` and `env` are optional. */
-export type AgentSettingsInput = z.input<ReturnType<typeof agentSettingsSchema>>;
-
-const AGENTS_SHAPE = { opencode: agentSettingsSchema("opencode") };
+const AGENTS_SHAPE = { opencode: agentSettingsSchema('opencode') };
 
 /** Agent name: a key of the `agents` block. */
-export type AgentName = keyof TevuConfigInput["agents"];
+export type AgentName = keyof TevuConfigInput['agents'];
 
 /** Agent names the `agents` block accepts, derived from its strict object shape, not a second literal. */
 export const AGENT_NAMES: readonly AgentName[] = Object.keys(AGENTS_SHAPE) as AgentName[];
@@ -216,7 +214,7 @@ export function agentNamesInUse(config: TevuConfig): string[] {
 }
 
 /** Jira Cloud connection settings; credentials are `$VARIABLE` references, never values. */
-export const JiraTrackerSettingsSchema = z.strictObject({
+const JiraTrackerSettingsSchema = z.strictObject({
   url: z.url({ protocol: /^https$/ }),
   email: VariableReferenceSchema,
   token: VariableReferenceSchema,
@@ -228,8 +226,8 @@ export type JiraTrackerSettings = z.infer<typeof JiraTrackerSettingsSchema>;
 /** One repository setup command: executable and literal arguments, no shell; the shape of a check's `run`. */
 export type SetupCommand = [string, ...string[]];
 
-/** Field-level materialized schema mirroring {@link SetupCommand}; the same shape as {@link CommandCheckSchema}'s `run` field. */
-export const SetupCommandSchema = z.tuple([z.string().min(1)], z.string());
+/** Field-level materialized schema mirroring {@link SetupCommand}; the same shape as {@link CommandCheck}'s `run` field. */
+const SetupCommandSchema = z.tuple([z.string().min(1)], z.string());
 
 const RawRepositorySetupShape = z.strictObject({
   before_agent: z.array(SetupCommandSchema).optional(),
@@ -247,15 +245,19 @@ function hasSetupCommand(commands: SetupCommand[] | undefined): boolean {
 function refineRepositorySetup(value: RawRepositorySetup, ctx: z.RefinementCtx): void {
   if (!hasSetupCommand(value.before_agent) && !hasSetupCommand(value.before_checks)) {
     ctx.addIssue({
-      code: "custom",
-      message: "setup must declare a command in before_agent, before_checks, or both",
+      code: 'custom',
+      message: 'setup must declare a command in before_agent, before_checks, or both',
     });
   }
   if (value.timeout === undefined) {
-    ctx.addIssue({ code: "custom", path: ["timeout"], message: "timeout is required when setup is declared" });
+    ctx.addIssue({
+      code: 'custom',
+      path: ['timeout'],
+      message: 'timeout is required when setup is declared',
+    });
   }
-  checkNoFixedNames(value.env, ctx, ["env"]);
-  checkUniqueStrings(value.env, ctx, ["env"], "duplicate environment variable name");
+  checkNoFixedNames(value.env, ctx, ['env']);
+  checkUniqueStrings(value.env, ctx, ['env'], 'duplicate environment variable name');
 }
 
 /** A repository's setup block; a phase key is present only when its list holds at least one command. */
@@ -273,11 +275,11 @@ export interface RepositorySetup {
  * (owner decision: `before_agent: []` and an absent `before_agent` are the
  * same value), so run-time code never branches on an empty phase.
  */
-export const RepositorySetupSchema = RawRepositorySetupShape.superRefine(refineRepositorySetup).transform(
+const RepositorySetupSchema = RawRepositorySetupShape.superRefine(refineRepositorySetup).transform(
   (value): RepositorySetup => {
     const timeout = value.timeout;
     if (timeout === undefined) {
-      throw new Error("unreachable: refineRepositorySetup guarantees setup.timeout is present");
+      throw new Error('unreachable: refineRepositorySetup guarantees setup.timeout is present');
     }
     return {
       ...(hasSetupCommand(value.before_agent) ? { before_agent: value.before_agent } : {}),
@@ -289,7 +291,7 @@ export const RepositorySetupSchema = RawRepositorySetupShape.superRefine(refineR
 );
 
 /** One local source repository referenced by tasks. */
-export const RepositoryDefinitionSchema = z.strictObject({
+const RepositoryDefinitionSchema = z.strictObject({
   id: IdSchema,
   path: z.string().min(1),
   setup: RepositorySetupSchema.optional(),
@@ -302,9 +304,9 @@ export type RepositoryDefinition = z.infer<typeof RepositoryDefinitionSchema>;
 export type RepositoryInput = z.input<typeof RepositoryDefinitionSchema>;
 
 /** One benchmark model entry, before its `agent` default is resolved against the configured agents. */
-export const ModelDefinitionSchema = z.strictObject({
+const ModelDefinitionSchema = z.strictObject({
   id: IdSchema,
-  model: z.templateLiteral([z.string().min(1), "/", z.string().min(1)]),
+  model: z.templateLiteral([z.string().min(1), '/', z.string().min(1)]),
   effort: z.string().min(1),
   agent: z.string().min(1).optional(),
 });
@@ -313,7 +315,7 @@ export const ModelDefinitionSchema = z.strictObject({
 export type ModelDefinitionInput = z.input<typeof ModelDefinitionSchema>;
 
 /** One resolved benchmark model entry: what the benchmark compares. */
-export interface ModelDefinition {
+interface ModelDefinition {
   id: string;
   model: `${string}/${string}`;
   effort: string;
@@ -321,8 +323,8 @@ export interface ModelDefinition {
 }
 
 /** One-time tracker import snapshot; later tracker changes never alter the task. */
-export const ImportedTaskSourceSchema = z.strictObject({
-  kind: z.enum(["jira", "github"]),
+const ImportedTaskSourceSchema = z.strictObject({
+  kind: z.enum(['jira', 'github']),
   key: z.string().min(1),
   url: z.url(),
   imported_at: z.iso.datetime(),
@@ -331,15 +333,15 @@ export const ImportedTaskSourceSchema = z.strictObject({
 });
 
 /** One-time tracker import snapshot stored on a task. */
-export type ImportedTaskSource = z.infer<typeof ImportedTaskSourceSchema>;
+type ImportedTaskSource = z.infer<typeof ImportedTaskSourceSchema>;
 
 /** One restore pattern: non-empty and relative to the repository root, with no leading `/` or `..` segment. */
-export const RestorePatternSchema = z
+const RestorePatternSchema = z
   .string()
-  .refine((pattern) => pattern.length > 0, "restore pattern must not be empty")
+  .refine((pattern) => pattern.length > 0, 'restore pattern must not be empty')
   .refine(
-    (pattern) => !pattern.startsWith("/") && !pattern.split("/").includes(".."),
-    "restore pattern must be relative to the repository root, without a leading / or a .. segment",
+    (pattern) => !pattern.startsWith('/') && !pattern.split('/').includes('..'),
+    'restore pattern must be relative to the repository root, without a leading / or a .. segment',
   );
 
 const RawCheckShape = z.strictObject({
@@ -359,25 +361,29 @@ function refineCheckDiscrimination(check: RawCheck, ctx: z.RefinementCtx): void 
   const hasRun = check.run !== undefined;
   const hasManual = check.manual !== undefined;
   if (!hasRun && !hasManual) {
-    ctx.addIssue({ code: "custom", message: "a check needs run (a command) or manual: true" });
+    ctx.addIssue({ code: 'custom', message: 'a check needs run (a command) or manual: true' });
     return;
   }
   if (hasRun && hasManual) {
-    ctx.addIssue({ code: "custom", message: "a check has either run or manual: true, not both" });
+    ctx.addIssue({ code: 'custom', message: 'a check has either run or manual: true, not both' });
     return;
   }
   if (hasManual && check.manual !== true) {
     ctx.addIssue({
-      code: "custom",
-      path: ["manual"],
-      message: "manual must be true; omit it for a command check",
+      code: 'custom',
+      path: ['manual'],
+      message: 'manual must be true; omit it for a command check',
     });
     return;
   }
   if (hasManual) {
-    for (const key of ["timeout", "exit_codes", "env"] as const) {
+    for (const key of ['timeout', 'exit_codes', 'env'] as const) {
       if (check[key] !== undefined) {
-        ctx.addIssue({ code: "custom", path: [key], message: `only a command check (with run) accepts ${key}` });
+        ctx.addIssue({
+          code: 'custom',
+          path: [key],
+          message: `only a command check (with run) accepts ${key}`,
+        });
       }
     }
   }
@@ -395,7 +401,7 @@ export interface CommandCheck {
 }
 
 /** A manual check's resolved shape: assessed by a human through `tevu assess`. */
-export interface ManualCheck {
+interface ManualCheck {
   id: string;
   description: string;
   manual: true;
@@ -404,25 +410,6 @@ export interface ManualCheck {
 
 /** One acceptance or done check: a command check or a manual check. */
 export type CheckDefinition = CommandCheck | ManualCheck;
-
-/** Field-level materialized schema mirroring {@link CommandCheck}; used to type the leaf shape only. */
-export const CommandCheckSchema = z.strictObject({
-  id: IdSchema,
-  description: z.string(),
-  run: z.tuple([z.string().min(1)], z.string()),
-  timeout: DurationSchema,
-  exit_codes: z.array(z.int()).min(1),
-  env: z.array(VariableNameSchema),
-  required: z.boolean(),
-});
-
-/** Field-level materialized schema mirroring {@link ManualCheck}; used to type the leaf shape only. */
-export const ManualCheckSchema = z.strictObject({
-  id: IdSchema,
-  description: z.string(),
-  manual: z.literal(true),
-  required: z.boolean(),
-});
 
 /** A resolved manual check; identical to {@link ManualCheck}. */
 type PreManualCheck = { id: string; description: string; manual: true; required: boolean };
@@ -447,14 +434,21 @@ type PreCheck = PreManualCheck | PreCommandCheck;
  * command check's `timeout` unresolved; `TevuConfigSchema` applies the
  * `run.check_timeout` fallback once the sibling `run` block is available.
  */
-export const CheckDefinitionSchema = RawCheckShape.superRefine(refineCheckDiscrimination).transform(
+const CheckDefinitionSchema = RawCheckShape.superRefine(refineCheckDiscrimination).transform(
   (check): PreCheck => {
     if (check.manual === true) {
-      return { id: check.id, description: check.description, manual: true, required: check.required ?? true };
+      return {
+        id: check.id,
+        description: check.description,
+        manual: true,
+        required: check.required ?? true,
+      };
     }
     const run = check.run;
     if (run === undefined) {
-      throw new Error("unreachable: refineCheckDiscrimination guarantees a command check declares run");
+      throw new Error(
+        'unreachable: refineCheckDiscrimination guarantees a command check declares run',
+      );
     }
     return {
       id: check.id,
@@ -476,18 +470,26 @@ function refineTaskChecks(
   ctx: z.RefinementCtx,
 ): void {
   if (!task.checks.acceptance.some((check) => check.required)) {
-    ctx.addIssue({ code: "custom", path: ["checks", "acceptance"], message: "at least one acceptance check must be required" });
+    ctx.addIssue({
+      code: 'custom',
+      path: ['checks', 'acceptance'],
+      message: 'at least one acceptance check must be required',
+    });
   }
   if (!task.checks.done.some((check) => check.required)) {
-    ctx.addIssue({ code: "custom", path: ["checks", "done"], message: "at least one done check must be required" });
+    ctx.addIssue({
+      code: 'custom',
+      path: ['checks', 'done'],
+      message: 'at least one done check must be required',
+    });
   }
   const checkIds = new Set<string>();
-  (["acceptance", "done"] as const).forEach((collection) => {
+  (['acceptance', 'done'] as const).forEach((collection) => {
     task.checks[collection].forEach((check, index) => {
       if (checkIds.has(check.id)) {
         ctx.addIssue({
-          code: "custom",
-          path: ["checks", collection, index, "id"],
+          code: 'custom',
+          path: ['checks', collection, index, 'id'],
           message: `duplicate check id "${check.id}" across checks.acceptance and checks.done`,
         });
       }
@@ -497,7 +499,7 @@ function refineTaskChecks(
 }
 
 /** One acceptance-driven benchmark task, before its `repo` default and check timeouts are resolved. */
-export const TaskDefinitionSchema = z
+const TaskDefinitionSchema = z
   .strictObject({
     id: IdSchema,
     title: nonWhitespaceTextSchema,
@@ -542,12 +544,14 @@ export interface TaskDefinition {
 }
 
 function resolveCheck(check: PreCheck, checkTimeout: string | undefined): CheckDefinition {
-  if (!("run" in check)) {
+  if (!('run' in check)) {
     return check;
   }
   const timeout = check.timeout ?? checkTimeout;
   if (timeout === undefined) {
-    throw new Error("unreachable: refineTevuConfig guarantees every command check resolves a timeout");
+    throw new Error(
+      'unreachable: refineTevuConfig guarantees every command check resolves a timeout',
+    );
   }
   return {
     id: check.id,
@@ -563,12 +567,16 @@ function resolveCheck(check: PreCheck, checkTimeout: string | undefined): CheckD
 function checkUniqueIds(
   entries: readonly { id: string }[],
   ctx: z.RefinementCtx,
-  collection: "repositories" | "models" | "tasks",
+  collection: 'repositories' | 'models' | 'tasks',
 ): void {
   const seen = new Set<string>();
   entries.forEach((entry, index) => {
     if (seen.has(entry.id)) {
-      ctx.addIssue({ code: "custom", path: [collection, index, "id"], message: `duplicate ${collection} id "${entry.id}"` });
+      ctx.addIssue({
+        code: 'custom',
+        path: [collection, index, 'id'],
+        message: `duplicate ${collection} id "${entry.id}"`,
+      });
     }
     seen.add(entry.id);
   });
@@ -587,17 +595,17 @@ const RawTevuConfigShape = z.strictObject({
 type RawTevuConfig = z.infer<typeof RawTevuConfigShape>;
 
 function refineTevuConfig(raw: RawTevuConfig, ctx: z.RefinementCtx): void {
-  checkUniqueIds(raw.repositories, ctx, "repositories");
-  checkUniqueIds(raw.models, ctx, "models");
-  checkUniqueIds(raw.tasks, ctx, "tasks");
+  checkUniqueIds(raw.repositories, ctx, 'repositories');
+  checkUniqueIds(raw.models, ctx, 'models');
+  checkUniqueIds(raw.tasks, ctx, 'tasks');
 
   const agentKeys = Object.keys(raw.agents);
   raw.models.forEach((model, index) => {
     if (model.agent !== undefined && !agentKeys.includes(model.agent)) {
       ctx.addIssue({
-        code: "custom",
-        path: ["models", index, "agent"],
-        message: `agent must name a configured agent: ${agentKeys.join(", ")}`,
+        code: 'custom',
+        path: ['models', index, 'agent'],
+        message: `agent must name a configured agent: ${agentKeys.join(', ')}`,
       });
     }
   });
@@ -612,15 +620,19 @@ function refineTevuConfig(raw: RawTevuConfig, ctx: z.RefinementCtx): void {
 
   raw.repositories.forEach((repository, repositoryIndex) => {
     repository.setup?.env.forEach((name, nameIndex) => {
-      const path = ["repositories", repositoryIndex, "setup", "env", nameIndex];
+      const path = ['repositories', repositoryIndex, 'setup', 'env', nameIndex];
       if (agentNames.has(name)) {
         ctx.addIssue({
-          code: "custom",
+          code: 'custom',
           path,
           message: `environment variable "${name}" is passed to the agent and cannot also be passed to a setup command`,
         });
       } else if (name === jiraEmailName || name === jiraTokenName) {
-        ctx.addIssue({ code: "custom", path, message: `Jira credential variable "${name}" must not be passed to a setup command` });
+        ctx.addIssue({
+          code: 'custom',
+          path,
+          message: `Jira credential variable "${name}" must not be passed to a setup command`,
+        });
       }
     });
   });
@@ -629,46 +641,54 @@ function refineTevuConfig(raw: RawTevuConfig, ctx: z.RefinementCtx): void {
     if (task.repo === undefined) {
       if (raw.repositories.length > 1) {
         ctx.addIssue({
-          code: "custom",
-          path: ["tasks", taskIndex, "repo"],
-          message: "repo is required when more than one repository is configured",
+          code: 'custom',
+          path: ['tasks', taskIndex, 'repo'],
+          message: 'repo is required when more than one repository is configured',
         });
       }
     } else if (!repositoryIds.has(task.repo)) {
       ctx.addIssue({
-        code: "custom",
-        path: ["tasks", taskIndex, "repo"],
-        message: "repo must reference a configured repository",
+        code: 'custom',
+        path: ['tasks', taskIndex, 'repo'],
+        message: 'repo must reference a configured repository',
       });
     }
 
-    (["acceptance", "done"] as const).forEach((collection) => {
+    (['acceptance', 'done'] as const).forEach((collection) => {
       task.checks[collection].forEach((check: PreCheck, checkIndex) => {
-        if (!("run" in check)) {
+        if (!('run' in check)) {
           return;
         }
         if (check.timeout === undefined && raw.run.check_timeout === undefined) {
           ctx.addIssue({
-            code: "custom",
-            path: ["tasks", taskIndex, "checks", collection, checkIndex, "timeout"],
-            message: "set timeout on this check or run.check_timeout",
+            code: 'custom',
+            path: ['tasks', taskIndex, 'checks', collection, checkIndex, 'timeout'],
+            message: 'set timeout on this check or run.check_timeout',
           });
         }
         const seenNames = new Set<string>();
         (check.env ?? []).forEach((name, nameIndex) => {
-          const path = ["tasks", taskIndex, "checks", collection, checkIndex, "env", nameIndex];
+          const path = ['tasks', taskIndex, 'checks', collection, checkIndex, 'env', nameIndex];
           if (seenNames.has(name)) {
-            ctx.addIssue({ code: "custom", path, message: `duplicate environment variable name "${name}" in check env` });
+            ctx.addIssue({
+              code: 'custom',
+              path,
+              message: `duplicate environment variable name "${name}" in check env`,
+            });
           }
           seenNames.add(name);
           if (agentNames.has(name)) {
             ctx.addIssue({
-              code: "custom",
+              code: 'custom',
               path,
               message: `environment variable "${name}" is passed to the agent and cannot also be passed to a check`,
             });
           } else if (name === jiraEmailName || name === jiraTokenName) {
-            ctx.addIssue({ code: "custom", path, message: `Jira credential variable "${name}" must not be passed to a check` });
+            ctx.addIssue({
+              code: 'custom',
+              path,
+              message: `Jira credential variable "${name}" must not be passed to a check`,
+            });
           }
         });
       });
@@ -679,7 +699,9 @@ function refineTevuConfig(raw: RawTevuConfig, ctx: z.RefinementCtx): void {
 function materializeTevuConfig(raw: RawTevuConfig): TevuConfig {
   const firstAgentKey = Object.keys(raw.agents)[0];
   if (firstAgentKey === undefined) {
-    throw new Error("unreachable: RawTevuConfigShape.agents guarantees at least one configured agent");
+    throw new Error(
+      'unreachable: RawTevuConfigShape.agents guarantees at least one configured agent',
+    );
   }
   const soleRepositoryId = raw.repositories.length === 1 ? raw.repositories[0]?.id : undefined;
 
@@ -693,7 +715,7 @@ function materializeTevuConfig(raw: RawTevuConfig): TevuConfig {
   const tasks: TaskDefinition[] = raw.tasks.map((task: RawTask) => {
     const repo = task.repo ?? soleRepositoryId;
     if (repo === undefined) {
-      throw new Error("unreachable: refineTevuConfig guarantees a resolvable repository id");
+      throw new Error('unreachable: refineTevuConfig guarantees a resolvable repository id');
     }
     return {
       id: task.id,
@@ -707,7 +729,9 @@ function materializeTevuConfig(raw: RawTevuConfig): TevuConfig {
       checks: {
         ...(task.checks.restore === undefined ? {} : { restore: task.checks.restore }),
         ...(task.checks.overlay === undefined ? {} : { overlay: task.checks.overlay }),
-        acceptance: task.checks.acceptance.map((check) => resolveCheck(check, raw.run.check_timeout)),
+        acceptance: task.checks.acceptance.map((check) =>
+          resolveCheck(check, raw.run.check_timeout),
+        ),
         done: task.checks.done.map((check) => resolveCheck(check, raw.run.check_timeout)),
       },
     };
@@ -741,7 +765,8 @@ export interface TevuConfig {
  * identifiers, agent and repository references, environment-variable
  * separation, and check-timeout resolution.
  */
-export const TevuConfigSchema = RawTevuConfigShape.superRefine(refineTevuConfig).transform(materializeTevuConfig);
+export const TevuConfigSchema =
+  RawTevuConfigShape.superRefine(refineTevuConfig).transform(materializeTevuConfig);
 
 /** File-shape tevu configuration; fields with a default are optional. */
 export type TevuConfigInput = z.input<typeof TevuConfigSchema>;
@@ -757,7 +782,7 @@ function checkEnvironmentNames(config: TevuConfig): string[] {
   const names: string[] = [];
   for (const task of config.tasks) {
     for (const check of [...task.checks.acceptance, ...task.checks.done]) {
-      if (!("run" in check)) {
+      if (!('run' in check)) {
         continue;
       }
       for (const name of check.env) {

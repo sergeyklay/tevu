@@ -13,7 +13,10 @@
  * found, `undefined` otherwise. Total and pure: never throws, performs no
  * I/O, and reads no clock or randomness.
  */
-export function describeSourceCommitInPrompt(prompt: string, sourceCommit: string): string | undefined {
+export function describeSourceCommitInPrompt(
+  prompt: string,
+  sourceCommit: string,
+): string | undefined {
   const prefix = sourceCommit.slice(0, 7);
   if (prompt.toLowerCase().includes(prefix.toLowerCase())) {
     return `agent prompt contains resolved base commit ${prefix}`;

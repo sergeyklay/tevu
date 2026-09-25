@@ -7,14 +7,20 @@
  * timing.
  */
 
-import { decodeEvent, decodeExport } from "./opencode-protocol.ts";
-import { unavailableMetric } from "../../../domain/types.ts";
+import { unavailableMetric } from '@/domain/types';
 
-import type { OpenCodeExport, OpenCodePart, OpenCodeRunEvent, ProtocolErrorShape } from "./opencode-protocol.ts";
-import type { AgentMetrics, AgentMetricsInput, MetricValue } from "../../../domain/types.ts";
+import { decodeEvent, decodeExport } from './opencode-protocol';
 
-const EXPORT_SOURCE = "root-session export";
-const EVENT_SOURCE = "run events";
+import type {
+  OpenCodeExport,
+  OpenCodePart,
+  OpenCodeRunEvent,
+  ProtocolErrorShape,
+} from './opencode-protocol';
+import type { AgentMetrics, AgentMetricsInput, MetricValue } from '@/domain/types';
+
+const EXPORT_SOURCE = 'root-session export';
+const EVENT_SOURCE = 'run events';
 
 /**
  * Result of metric normalization, kept local rather than expressed through
@@ -23,11 +29,10 @@ const EVENT_SOURCE = "run events";
  * `AgentAdapter.normalizeMetrics` translates it into `AgentProtocolError`.
  */
 export type NormalizeMetricsResult =
-  | { ok: true; value: AgentMetrics }
-  | { ok: false; error: ProtocolErrorShape };
+  { ok: true; value: AgentMetrics } | { ok: false; error: ProtocolErrorShape };
 
 /** Deduplication identity of one decoded event: `(sessionID, part.id)`, or the ordinal for errors. */
-export function partEventIdentity(sessionID: string, part: OpenCodePart): string {
+function partEventIdentity(sessionID: string, part: OpenCodePart): string {
   return `${sessionID}\u0000${part.id}`;
 }
 
@@ -52,7 +57,7 @@ export function exportPartIdentity(part: OpenCodePart): string {
  * `AgentAdapter.normalizeMetrics` contract requires.
  */
 export function normalizeMetrics(input: AgentMetricsInput): NormalizeMetricsResult {
-  const context = { phase: "case" as const, caseId: input.caseId };
+  const context = { phase: 'case' as const, caseId: input.caseId };
 
   const exportRecord =
     input.sessionExport === null ? null : decodeExport(input.sessionExport, context);
@@ -72,7 +77,8 @@ export function normalizeMetrics(input: AgentMetricsInput): NormalizeMetricsResu
   }
 
   const sessionExport = exportRecord !== null && exportRecord.ok ? exportRecord.value : null;
-  const rootSessionId = input.sessionId ?? sessionExport?.info.id ?? decodedEvents[0]?.sessionID ?? null;
+  const rootSessionId =
+    input.sessionId ?? sessionExport?.info.id ?? decodedEvents[0]?.sessionID ?? null;
 
   if (sessionExport !== null) {
     return { ok: true, value: normalizeFromExport(sessionExport) };
@@ -82,7 +88,7 @@ export function normalizeMetrics(input: AgentMetricsInput): NormalizeMetricsResu
     value: normalizeFromEvents(
       decodedEvents,
       rootSessionId,
-      input.exportUnavailableReason ?? "root session export unavailable",
+      input.exportUnavailableReason ?? 'root session export unavailable',
     ),
   };
 }
@@ -91,7 +97,7 @@ export function normalizeMetrics(input: AgentMetricsInput): NormalizeMetricsResu
 type ComponentSum = { total: number; malformed: string | null };
 
 function addComponent(sum: ComponentSum, value: unknown, messageId: string, field: string): void {
-  if (typeof value === "number" && Number.isFinite(value)) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
     sum.total += value;
     return;
   }
@@ -103,11 +109,11 @@ function addComponent(sum: ComponentSum, value: unknown, messageId: string, fiel
   }
 }
 
-function measured(value: number, unit: MetricValue["unit"], source: string): MetricValue {
-  return { value, unit, availability: { status: "available", source }, scope: "root-session" };
+function measured(value: number, unit: MetricValue['unit'], source: string): MetricValue {
+  return { value, unit, availability: { status: 'available', source }, scope: 'root-session' };
 }
 
-function sumMetric(sum: ComponentSum, unit: MetricValue["unit"]): MetricValue {
+function sumMetric(sum: ComponentSum, unit: MetricValue['unit']): MetricValue {
   return sum.malformed === null
     ? measured(sum.total, unit, EXPORT_SOURCE)
     : unavailableMetric(unit, sum.malformed);
@@ -138,7 +144,7 @@ function normalizeFromExport(sessionExport: OpenCodeExport): AgentMetrics {
     const firstOccurrence = !seenMessages.has(identity);
     seenMessages.add(identity);
 
-    if (firstOccurrence && info.role === "assistant") {
+    if (firstOccurrence && info.role === 'assistant') {
       const hasFinish = isNonEmptyString(info.finish);
       const hasError = info.error !== undefined;
       if (hasFinish) {
@@ -150,12 +156,12 @@ function normalizeFromExport(sessionExport: OpenCodeExport): AgentMetrics {
       if (hasError) {
         apiErrors += 1;
       }
-      addComponent(sums.inputTokens, info.tokens?.input, info.id, "tokens.input");
-      addComponent(sums.outputTokens, info.tokens?.output, info.id, "tokens.output");
-      addComponent(sums.reasoningTokens, info.tokens?.reasoning, info.id, "tokens.reasoning");
-      addComponent(sums.cacheReadTokens, info.tokens?.cache?.read, info.id, "tokens.cache.read");
-      addComponent(sums.cacheWriteTokens, info.tokens?.cache?.write, info.id, "tokens.cache.write");
-      addComponent(sums.cost, info.cost, info.id, "cost");
+      addComponent(sums.inputTokens, info.tokens?.input, info.id, 'tokens.input');
+      addComponent(sums.outputTokens, info.tokens?.output, info.id, 'tokens.output');
+      addComponent(sums.reasoningTokens, info.tokens?.reasoning, info.id, 'tokens.reasoning');
+      addComponent(sums.cacheReadTokens, info.tokens?.cache?.read, info.id, 'tokens.cache.read');
+      addComponent(sums.cacheWriteTokens, info.tokens?.cache?.write, info.id, 'tokens.cache.write');
+      addComponent(sums.cost, info.cost, info.id, 'cost');
     }
 
     for (const part of message.parts) {
@@ -164,34 +170,34 @@ function normalizeFromExport(sessionExport: OpenCodeExport): AgentMetrics {
         continue;
       }
       seenParts.add(partIdentity);
-      if (part.type !== "tool") {
+      if (part.type !== 'tool') {
         continue;
       }
       toolCalls += 1;
       const tool = (part as Partial<{ tool: string }>).tool;
-      if (typeof tool !== "string") {
+      if (typeof tool !== 'string') {
         skillMalformed = `tool name is absent or malformed on tool part "${part.id}"`;
-      } else if (tool === "skill") {
+      } else if (tool === 'skill') {
         skillCalls += 1;
       }
     }
   }
 
   return {
-    inputTokens: sumMetric(sums.inputTokens, "token"),
-    outputTokens: sumMetric(sums.outputTokens, "token"),
-    reasoningTokens: sumMetric(sums.reasoningTokens, "token"),
-    cacheReadTokens: sumMetric(sums.cacheReadTokens, "token"),
-    cacheWriteTokens: sumMetric(sums.cacheWriteTokens, "token"),
-    turns: measured(turns, "count", EXPORT_SOURCE),
-    apiCalls: measured(apiCalls, "count", EXPORT_SOURCE),
-    apiErrors: measured(apiErrors, "count", EXPORT_SOURCE),
-    toolCalls: measured(toolCalls, "count", EXPORT_SOURCE),
+    inputTokens: sumMetric(sums.inputTokens, 'token'),
+    outputTokens: sumMetric(sums.outputTokens, 'token'),
+    reasoningTokens: sumMetric(sums.reasoningTokens, 'token'),
+    cacheReadTokens: sumMetric(sums.cacheReadTokens, 'token'),
+    cacheWriteTokens: sumMetric(sums.cacheWriteTokens, 'token'),
+    turns: measured(turns, 'count', EXPORT_SOURCE),
+    apiCalls: measured(apiCalls, 'count', EXPORT_SOURCE),
+    apiErrors: measured(apiErrors, 'count', EXPORT_SOURCE),
+    toolCalls: measured(toolCalls, 'count', EXPORT_SOURCE),
     skillCalls:
       skillMalformed === null
-        ? measured(skillCalls, "count", EXPORT_SOURCE)
-        : unavailableMetric("count", skillMalformed),
-    cost: sumMetric(sums.cost, "USD"),
+        ? measured(skillCalls, 'count', EXPORT_SOURCE)
+        : unavailableMetric('count', skillMalformed),
+    cost: sumMetric(sums.cost, 'USD'),
   };
 }
 
@@ -214,7 +220,7 @@ function normalizeFromEvents(
     if (event.sessionID !== rootSessionId) {
       continue;
     }
-    if (event.type === "error") {
+    if (event.type === 'error') {
       apiErrors += 1;
       continue;
     }
@@ -223,32 +229,32 @@ function normalizeFromEvents(
       continue;
     }
     seenParts.add(identity);
-    if (event.type !== "tool_use") {
+    if (event.type !== 'tool_use') {
       continue;
     }
     toolCalls += 1;
-    if (typeof event.part.tool !== "string") {
+    if (typeof event.part.tool !== 'string') {
       skillMalformed = `tool name is absent or malformed on tool part "${event.part.id}"`;
-    } else if (event.part.tool === "skill") {
+    } else if (event.part.tool === 'skill') {
       skillCalls += 1;
     }
   }
 
   return {
-    inputTokens: unavailableMetric("token", exportReason),
-    outputTokens: unavailableMetric("token", exportReason),
-    reasoningTokens: unavailableMetric("token", exportReason),
-    cacheReadTokens: unavailableMetric("token", exportReason),
-    cacheWriteTokens: unavailableMetric("token", exportReason),
-    turns: unavailableMetric("count", exportReason),
-    apiCalls: unavailableMetric("count", exportReason),
-    apiErrors: measured(apiErrors, "count", EVENT_SOURCE),
-    toolCalls: measured(toolCalls, "count", EVENT_SOURCE),
+    inputTokens: unavailableMetric('token', exportReason),
+    outputTokens: unavailableMetric('token', exportReason),
+    reasoningTokens: unavailableMetric('token', exportReason),
+    cacheReadTokens: unavailableMetric('token', exportReason),
+    cacheWriteTokens: unavailableMetric('token', exportReason),
+    turns: unavailableMetric('count', exportReason),
+    apiCalls: unavailableMetric('count', exportReason),
+    apiErrors: measured(apiErrors, 'count', EVENT_SOURCE),
+    toolCalls: measured(toolCalls, 'count', EVENT_SOURCE),
     skillCalls:
       skillMalformed === null
-        ? measured(skillCalls, "count", EVENT_SOURCE)
-        : unavailableMetric("count", skillMalformed),
-    cost: unavailableMetric("USD", exportReason),
+        ? measured(skillCalls, 'count', EVENT_SOURCE)
+        : unavailableMetric('count', skillMalformed),
+    cost: unavailableMetric('USD', exportReason),
   };
 }
 
@@ -259,20 +265,20 @@ function emptySum(): ComponentSum {
 /** Marks every `AgentMetrics` field unavailable for one reason; never a zero or an estimate. */
 function unavailableAgentMetrics(reason: string): AgentMetrics {
   return {
-    inputTokens: unavailableMetric("token", reason),
-    outputTokens: unavailableMetric("token", reason),
-    reasoningTokens: unavailableMetric("token", reason),
-    cacheReadTokens: unavailableMetric("token", reason),
-    cacheWriteTokens: unavailableMetric("token", reason),
-    turns: unavailableMetric("count", reason),
-    apiCalls: unavailableMetric("count", reason),
-    apiErrors: unavailableMetric("count", reason),
-    toolCalls: unavailableMetric("count", reason),
-    skillCalls: unavailableMetric("count", reason),
-    cost: unavailableMetric("USD", reason),
+    inputTokens: unavailableMetric('token', reason),
+    outputTokens: unavailableMetric('token', reason),
+    reasoningTokens: unavailableMetric('token', reason),
+    cacheReadTokens: unavailableMetric('token', reason),
+    cacheWriteTokens: unavailableMetric('token', reason),
+    turns: unavailableMetric('count', reason),
+    apiCalls: unavailableMetric('count', reason),
+    apiErrors: unavailableMetric('count', reason),
+    toolCalls: unavailableMetric('count', reason),
+    skillCalls: unavailableMetric('count', reason),
+    cost: unavailableMetric('USD', reason),
   };
 }
 
 function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
+  return typeof value === 'string' && value.length > 0;
 }

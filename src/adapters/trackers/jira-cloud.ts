@@ -1,6 +1,6 @@
-import { Buffer } from "node:buffer";
+import { Buffer } from 'node:buffer';
 
-import type { IssueSnapshot, IssueTrackerAdapter, TevuResult } from "../../domain/types.ts";
+import type { IssueSnapshot, IssueTrackerAdapter, TevuResult } from '@/domain/types';
 
 /** Jira Cloud connection settings; credentials are read by environment variable name only. */
 export type JiraCloudSettings = {
@@ -10,16 +10,16 @@ export type JiraCloudSettings = {
 };
 
 /** Minimal structural response contract so tests can inject plain fakes. */
-export type JiraHttpResponse = {
+type JiraHttpResponse = {
   status: number;
   headers: { get(name: string): string | null };
   json(): Promise<unknown>;
 };
 
 /** Injected HTTP transport; redirects are never followed automatically. */
-export type JiraFetch = (
+type JiraFetch = (
   url: string,
-  init: { method: "GET"; headers: Record<string, string>; redirect: "manual" },
+  init: { method: 'GET'; headers: Record<string, string>; redirect: 'manual' },
 ) => Promise<JiraHttpResponse>;
 
 /** Effects injected into the Jira Cloud adapter; credentials are read by name only. */
@@ -52,30 +52,38 @@ export function createJiraCloudAdapter(
   return {
     async readIssue(
       issueKey: string,
-    ): Promise<TevuResult<IssueSnapshot, "IssueImportError" | "CancellationError">> {
+    ): Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>> {
       const email = dependencies.getEnvironmentVariable(settings.emailEnvironmentVariable);
       if (email === undefined || email.length === 0) {
-        return importError(issueKey, undefined, `environment variable "${settings.emailEnvironmentVariable}" is not set`);
+        return importError(
+          issueKey,
+          undefined,
+          `environment variable "${settings.emailEnvironmentVariable}" is not set`,
+        );
       }
       const token = dependencies.getEnvironmentVariable(settings.tokenEnvironmentVariable);
       if (token === undefined || token.length === 0) {
-        return importError(issueKey, undefined, `environment variable "${settings.tokenEnvironmentVariable}" is not set`);
+        return importError(
+          issueKey,
+          undefined,
+          `environment variable "${settings.tokenEnvironmentVariable}" is not set`,
+        );
       }
 
       let base: URL;
       try {
         base = new URL(settings.baseUrl);
       } catch {
-        return importError(issueKey, undefined, "configured Jira base URL is malformed");
+        return importError(issueKey, undefined, 'configured Jira base URL is malformed');
       }
-      if (base.protocol !== "https:") {
-        return importError(issueKey, undefined, "configured Jira base URL must use HTTPS");
+      if (base.protocol !== 'https:') {
+        return importError(issueKey, undefined, 'configured Jira base URL must use HTTPS');
       }
 
-      const baseUrl = settings.baseUrl.replace(/\/+$/, "");
+      const baseUrl = settings.baseUrl.replace(/\/+$/, '');
       const headers: Record<string, string> = {
-        Authorization: `Basic ${Buffer.from(`${email}:${token}`, "utf8").toString("base64")}`,
-        Accept: "application/json",
+        Authorization: `Basic ${Buffer.from(`${email}:${token}`, 'utf8').toString('base64')}`,
+        Accept: 'application/json',
       };
 
       let target = `${baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,description`;
@@ -86,7 +94,11 @@ export function createJiraCloudAdapter(
 
         let response: JiraHttpResponse;
         try {
-          response = await dependencies.fetch(target, { method: "GET", headers, redirect: "manual" });
+          response = await dependencies.fetch(target, {
+            method: 'GET',
+            headers,
+            redirect: 'manual',
+          });
         } catch {
           if (requests >= MAX_REQUESTS) {
             return importError(issueKey, undefined, `network failure on final attempt ${requests}`);
@@ -98,28 +110,40 @@ export function createJiraCloudAdapter(
         const status = response.status;
 
         if (status >= 300 && status < 400) {
-          const location = response.headers.get("location");
+          const location = response.headers.get('location');
           if (location === null) {
-            return importError(issueKey, status, "redirect response without a Location header");
+            return importError(issueKey, status, 'redirect response without a Location header');
           }
           let redirected: URL;
           try {
             redirected = new URL(location, target);
           } catch {
-            return importError(issueKey, status, "redirect response with a malformed Location header");
+            return importError(
+              issueKey,
+              status,
+              'redirect response with a malformed Location header',
+            );
           }
           if (redirected.origin !== base.origin) {
-            return importError(issueKey, status, `cross-origin redirect to ${redirected.origin} rejected`);
+            return importError(
+              issueKey,
+              status,
+              `cross-origin redirect to ${redirected.origin} rejected`,
+            );
           }
           if (requests >= MAX_REQUESTS) {
-            return importError(issueKey, status, "same-origin redirect would exceed the three-request budget");
+            return importError(
+              issueKey,
+              status,
+              'same-origin redirect would exceed the three-request budget',
+            );
           }
           target = redirected.toString();
           continue;
         }
 
         if (status === 429) {
-          const retryAfterSeconds = parseRetryAfter(response.headers.get("retry-after"));
+          const retryAfterSeconds = parseRetryAfter(response.headers.get('retry-after'));
           if (retryAfterSeconds === null) {
             return importError(
               issueKey,
@@ -128,7 +152,11 @@ export function createJiraCloudAdapter(
             );
           }
           if (requests >= MAX_REQUESTS) {
-            return importError(issueKey, status, "rate limited on the final attempt of the three-request budget");
+            return importError(
+              issueKey,
+              status,
+              'rate limited on the final attempt of the three-request budget',
+            );
           }
           await dependencies.sleep(retryAfterSeconds * 1000);
           continue;
@@ -150,12 +178,12 @@ export function createJiraCloudAdapter(
         try {
           body = await response.json();
         } catch {
-          return importError(issueKey, status, "response body is not valid JSON");
+          return importError(issueKey, status, 'response body is not valid JSON');
         }
         return decodeIssueResponse(issueKey, baseUrl, status, body);
       }
 
-      return importError(issueKey, undefined, "three-request budget exhausted");
+      return importError(issueKey, undefined, 'three-request budget exhausted');
     },
   };
 }
@@ -165,56 +193,56 @@ export function createJiraCloudAdapter(
  * textual descendants of unsupported nodes and turning hard breaks and block
  * boundaries into newlines.
  */
-export function projectRichTextToPlainText(node: unknown): string {
+function projectRichTextToPlainText(node: unknown): string {
   return nodeToText(node).trim();
 }
 
 const BLOCK_NODE_TYPES = new Set([
-  "doc",
-  "paragraph",
-  "heading",
-  "blockquote",
-  "bulletList",
-  "orderedList",
-  "listItem",
-  "codeBlock",
-  "rule",
-  "table",
-  "tableRow",
-  "tableCell",
-  "tableHeader",
-  "panel",
-  "mediaGroup",
-  "mediaSingle",
-  "taskList",
-  "taskItem",
-  "decisionList",
-  "decisionItem",
-  "expand",
-  "nestedExpand",
+  'doc',
+  'paragraph',
+  'heading',
+  'blockquote',
+  'bulletList',
+  'orderedList',
+  'listItem',
+  'codeBlock',
+  'rule',
+  'table',
+  'tableRow',
+  'tableCell',
+  'tableHeader',
+  'panel',
+  'mediaGroup',
+  'mediaSingle',
+  'taskList',
+  'taskItem',
+  'decisionList',
+  'decisionItem',
+  'expand',
+  'nestedExpand',
 ]);
 
 function nodeToText(node: unknown): string {
-  if (typeof node === "string") {
+  if (typeof node === 'string') {
     return node;
   }
   if (!isRecord(node)) {
-    return "";
+    return '';
   }
-  if (node["type"] === "hardBreak") {
-    return "\n";
+  if (node['type'] === 'hardBreak') {
+    return '\n';
   }
-  if (typeof node["text"] === "string") {
-    return node["text"];
+  if (typeof node['text'] === 'string') {
+    return node['text'];
   }
-  const content = Array.isArray(node["content"]) ? node["content"] : [];
+  const content = Array.isArray(node['content']) ? node['content'] : [];
   if (content.length === 0) {
-    const attrs = isRecord(node["attrs"]) ? node["attrs"] : {};
-    const attrText = attrs["text"] ?? attrs["shortName"];
-    return typeof attrText === "string" ? attrText : "";
+    const attrs = isRecord(node['attrs']) ? node['attrs'] : {};
+    const attrText = attrs['text'] ?? attrs['shortName'];
+    return typeof attrText === 'string' ? attrText : '';
   }
-  const text = content.map(nodeToText).join("");
-  return BLOCK_NODE_TYPES.has(String(node["type"])) && text.length > 0 && !text.endsWith("\n")
+  const text = content.map(nodeToText).join('');
+  return BLOCK_NODE_TYPES.has(String(node['type'])) && text.length > 0 && !text.endsWith('\n')
     ? `${text}\n`
     : text;
 }
@@ -224,21 +252,22 @@ function decodeIssueResponse(
   baseUrl: string,
   status: number,
   body: unknown,
-): TevuResult<IssueSnapshot, "IssueImportError"> {
-  if (!isRecord(body) || !isRecord(body["fields"])) {
-    return importError(requestedKey, status, "issue response shape is malformed");
+): TevuResult<IssueSnapshot, 'IssueImportError'> {
+  if (!isRecord(body) || !isRecord(body['fields'])) {
+    return importError(requestedKey, status, 'issue response shape is malformed');
   }
-  const fields = body["fields"];
-  const summary = fields["summary"];
-  if (typeof summary !== "string") {
-    return importError(requestedKey, status, "issue response is missing a summary field");
+  const fields = body['fields'];
+  const summary = fields['summary'];
+  if (typeof summary !== 'string') {
+    return importError(requestedKey, status, 'issue response is missing a summary field');
   }
-  const rawDescription = fields["description"];
+  const rawDescription = fields['description'];
   const description =
     rawDescription === null || rawDescription === undefined
-      ? ""
+      ? ''
       : projectRichTextToPlainText(rawDescription);
-  const issueKey = typeof body["key"] === "string" && body["key"].length > 0 ? body["key"] : requestedKey;
+  const issueKey =
+    typeof body['key'] === 'string' && body['key'].length > 0 ? body['key'] : requestedKey;
 
   return {
     ok: true,
@@ -270,17 +299,23 @@ function importError(
   reason: string,
 ): {
   ok: false;
-  error: { kind: "IssueImportError"; tracker: "jira-cloud"; reference: string; status?: number; reason: string };
+  error: {
+    kind: 'IssueImportError';
+    tracker: 'jira-cloud';
+    reference: string;
+    status?: number;
+    reason: string;
+  };
 } {
   return {
     ok: false,
     error:
       status === undefined
-        ? { kind: "IssueImportError", tracker: "jira-cloud", reference: issueKey, reason }
-        : { kind: "IssueImportError", tracker: "jira-cloud", reference: issueKey, status, reason },
+        ? { kind: 'IssueImportError', tracker: 'jira-cloud', reference: issueKey, reason }
+        : { kind: 'IssueImportError', tracker: 'jira-cloud', reference: issueKey, status, reason },
   };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

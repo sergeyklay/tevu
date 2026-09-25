@@ -1,33 +1,30 @@
-import { existsSync, readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import process from "node:process";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { existsSync, readFileSync } from 'node:fs';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import process from 'node:process';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { createOpenCodeAdapter } from "./opencode.ts";
-import {
-  exportMessageIdentity,
-  exportPartIdentity,
-  normalizeMetrics,
-} from "./opencode-metrics.ts";
-import { createRedactor, createSecretRedactor, runManagedProcess } from "../../process.ts";
+import { createRedactor, createSecretRedactor, runManagedProcess } from '@/adapters/process';
 
-import type { OpenCodeAdapterDependencies } from "./opencode.ts";
-import type { OpenCodeExport, OpenCodePart } from "./opencode-protocol.ts";
+import { createOpenCodeAdapter } from './opencode';
+import { exportMessageIdentity, exportPartIdentity, normalizeMetrics } from './opencode-metrics';
+
+import type { OpenCodeAdapterDependencies } from './opencode';
+import type { OpenCodeExport, OpenCodePart } from './opencode-protocol';
 import type {
   AgentRunResult,
   IsolatedEnvironment,
   ManagedProcessResult,
   ManagedProcessRunner,
   SecretRedactor,
-} from "../../../domain/types.ts";
+} from '@/domain/types';
 
-const CASE_ID = "task-1--alpha--1";
-const FIXTURE_DIRECTORY = new URL("./fixtures/", import.meta.url);
+const CASE_ID = 'task-1--alpha--1';
+const FIXTURE_DIRECTORY = new URL('./fixtures/', import.meta.url);
 
 function readTextFixture(name: string): string {
-  return readFileSync(new URL(name, FIXTURE_DIRECTORY), "utf8");
+  return readFileSync(new URL(name, FIXTURE_DIRECTORY), 'utf8');
 }
 
 function readJsonFixture(name: string): unknown {
@@ -38,7 +35,7 @@ function readJsonFixture(name: string): unknown {
 function readRawFixtureEvents(name: string): unknown[] {
   return readTextFixture(name)
     .trim()
-    .split("\n")
+    .split('\n')
     .map((line) => JSON.parse(line) as unknown);
 }
 
@@ -50,26 +47,35 @@ function buildAlwaysFailingSecretRedactor(): SecretRedactor {
   return {
     secretValues: () => [],
     redactText: (text) => text,
-    redactValue: () => ({ ok: false, error: { kind: "ArtifactError", operation: "redact-record", reason: "record redaction failed" } }),
+    redactValue: () => ({
+      ok: false,
+      error: {
+        kind: 'ArtifactError',
+        operation: 'redact-record',
+        reason: 'record redaction failed',
+      },
+    }),
   };
 }
 
-function buildDependencies(overrides: Partial<OpenCodeAdapterDependencies> = {}): OpenCodeAdapterDependencies {
+function buildDependencies(
+  overrides: Partial<OpenCodeAdapterDependencies> = {},
+): OpenCodeAdapterDependencies {
   return {
     runProcess: runManagedProcess,
     secrets: buildSecretRedactor([]),
-    probeEnvironment: { PATH: process.env["PATH"] ?? "" },
+    probeEnvironment: { PATH: process.env['PATH'] ?? '' },
     probeDirectory: process.cwd(),
     ...overrides,
   };
 }
 
-describe("normalizeMetrics from the root session export", () => {
-  it("sums tokens, cost, and activity exactly once by message and part identity from the valid fixture", () => {
+describe('normalizeMetrics from the root session export', () => {
+  it('sums tokens, cost, and activity exactly once by message and part identity from the valid fixture', () => {
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
-      sessionExport: readJsonFixture("session-valid.json") as never,
+      sessionId: 'ses-root-0001',
+      sessionExport: readJsonFixture('session-valid.json') as never,
       events: [],
     });
 
@@ -77,9 +83,9 @@ describe("normalizeMetrics from the root session export", () => {
     if (!normalized.ok) return;
     expect(normalized.value.inputTokens).toEqual({
       value: 130,
-      unit: "token",
-      availability: { status: "available", source: "root-session export" },
-      scope: "root-session",
+      unit: 'token',
+      availability: { status: 'available', source: 'root-session export' },
+      scope: 'root-session',
     });
     expect(normalized.value.outputTokens).toMatchObject({ value: 45 });
     expect(normalized.value.reasoningTokens).toMatchObject({ value: 16 });
@@ -92,36 +98,36 @@ describe("normalizeMetrics from the root session export", () => {
     expect(normalized.value.skillCalls).toMatchObject({ value: 1 });
     expect(normalized.value.cost).toEqual({
       value: 0.0125,
-      unit: "USD",
-      availability: { status: "available", source: "root-session export" },
-      scope: "root-session",
+      unit: 'USD',
+      availability: { status: 'available', source: 'root-session export' },
+      scope: 'root-session',
     });
   });
 
-  it("retains root-session scope on every normalized metric and never claims session-tree scope", () => {
+  it('retains root-session scope on every normalized metric and never claims session-tree scope', () => {
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
-      sessionExport: readJsonFixture("session-valid.json") as never,
+      sessionId: 'ses-root-0001',
+      sessionExport: readJsonFixture('session-valid.json') as never,
       events: [],
     });
 
     expect(normalized.ok).toBe(true);
     if (!normalized.ok) return;
     for (const metric of Object.values(normalized.value)) {
-      expect(metric.scope).toBe("root-session");
+      expect(metric.scope).toBe('root-session');
     }
   });
 
-  it("measures a genuine zero when the export has no assistant records", () => {
+  it('measures a genuine zero when the export has no assistant records', () => {
     const sessionExport = {
-      info: { id: "ses-root-0001" },
-      messages: [{ info: { id: "msg-u1", sessionID: "ses-root-0001", role: "user" }, parts: [] }],
+      info: { id: 'ses-root-0001' },
+      messages: [{ info: { id: 'msg-u1', sessionID: 'ses-root-0001', role: 'user' }, parts: [] }],
     };
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
+      sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
     });
@@ -129,22 +135,22 @@ describe("normalizeMetrics from the root session export", () => {
     expect(normalized.ok).toBe(true);
     if (!normalized.ok) return;
     for (const metric of Object.values(normalized.value)) {
-      expect(metric).toMatchObject({ value: 0, availability: { status: "available" } });
+      expect(metric).toMatchObject({ value: 0, availability: { status: 'available' } });
     }
   });
 
-  it("never adds event error counts to export error counts", () => {
+  it('never adds event error counts to export error counts', () => {
     const rootError = {
-      type: "error",
+      type: 'error',
       timestamp: 9000,
-      sessionID: "ses-root-0001",
-      error: { message: "synthetic error" },
+      sessionID: 'ses-root-0001',
+      error: { message: 'synthetic error' },
     };
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
-      sessionExport: readJsonFixture("session-valid.json") as never,
+      sessionId: 'ses-root-0001',
+      sessionExport: readJsonFixture('session-valid.json') as never,
       events: [rootError, rootError],
     });
 
@@ -152,16 +158,22 @@ describe("normalizeMetrics from the root session export", () => {
     if (!normalized.ok) return;
     expect(normalized.value.apiErrors).toMatchObject({
       value: 1,
-      availability: { status: "available", source: "root-session export" },
+      availability: { status: 'available', source: 'root-session export' },
     });
   });
 
-  it("marks absent optional token fields unavailable while other metrics stay measured", () => {
+  it('marks absent optional token fields unavailable while other metrics stay measured', () => {
     const sessionExport = {
-      info: { id: "ses-root-0001" },
+      info: { id: 'ses-root-0001' },
       messages: [
         {
-          info: { id: "msg-a1", sessionID: "ses-root-0001", role: "assistant", finish: "stop", cost: 0.5 },
+          info: {
+            id: 'msg-a1',
+            sessionID: 'ses-root-0001',
+            role: 'assistant',
+            finish: 'stop',
+            cost: 0.5,
+          },
           parts: [],
         },
       ],
@@ -169,42 +181,55 @@ describe("normalizeMetrics from the root session export", () => {
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
+      sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
     });
 
     expect(normalized.ok).toBe(true);
     if (!normalized.ok) return;
-    for (const name of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens"]) {
+    for (const name of [
+      'inputTokens',
+      'outputTokens',
+      'reasoningTokens',
+      'cacheReadTokens',
+      'cacheWriteTokens',
+    ]) {
       expect(normalized.value[name as keyof typeof normalized.value]).toMatchObject({
         value: null,
-        availability: { status: "unavailable" },
+        availability: { status: 'unavailable' },
       });
     }
     const inputAvailability = normalized.value.inputTokens.availability;
-    expect(inputAvailability.status).toBe("unavailable");
-    if (inputAvailability.status !== "unavailable") return;
-    expect(inputAvailability.reason).toBe('field "tokens.input" is absent in export message "msg-a1"');
+    expect(inputAvailability.status).toBe('unavailable');
+    if (inputAvailability.status !== 'unavailable') return;
+    expect(inputAvailability.reason).toBe(
+      'field "tokens.input" is absent in export message "msg-a1"',
+    );
     const cacheAvailability = normalized.value.cacheReadTokens.availability;
-    expect(cacheAvailability.status).toBe("unavailable");
-    if (cacheAvailability.status !== "unavailable") return;
-    expect(cacheAvailability.reason).toBe('field "tokens.cache.read" is absent in export message "msg-a1"');
-    expect(normalized.value.cost).toMatchObject({ value: 0.5, availability: { status: "available" } });
+    expect(cacheAvailability.status).toBe('unavailable');
+    if (cacheAvailability.status !== 'unavailable') return;
+    expect(cacheAvailability.reason).toBe(
+      'field "tokens.cache.read" is absent in export message "msg-a1"',
+    );
+    expect(normalized.value.cost).toMatchObject({
+      value: 0.5,
+      availability: { status: 'available' },
+    });
     expect(normalized.value.turns).toMatchObject({ value: 1 });
   });
 
-  it("marks a malformed cost field unavailable without inventing zero or an estimate", () => {
+  it('marks a malformed cost field unavailable without inventing zero or an estimate', () => {
     const sessionExport = {
-      info: { id: "ses-root-0001" },
+      info: { id: 'ses-root-0001' },
       messages: [
         {
           info: {
-            id: "msg-a1",
-            sessionID: "ses-root-0001",
-            role: "assistant",
-            finish: "stop",
-            cost: "not-a-number",
+            id: 'msg-a1',
+            sessionID: 'ses-root-0001',
+            role: 'assistant',
+            finish: 'stop',
+            cost: 'not-a-number',
             tokens: { input: 3, output: 4, reasoning: 0, cache: { read: 0, write: 0 } },
           },
           parts: [],
@@ -214,7 +239,7 @@ describe("normalizeMetrics from the root session export", () => {
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
+      sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
     });
@@ -223,33 +248,39 @@ describe("normalizeMetrics from the root session export", () => {
     if (!normalized.ok) return;
     expect(normalized.value.cost).toEqual({
       value: null,
-      unit: "USD",
-      availability: { status: "unavailable", reason: 'field "cost" is malformed in export message "msg-a1"' },
-      scope: "root-session",
+      unit: 'USD',
+      availability: {
+        status: 'unavailable',
+        reason: 'field "cost" is malformed in export message "msg-a1"',
+      },
+      scope: 'root-session',
     });
-    expect(normalized.value.inputTokens).toMatchObject({ value: 3, availability: { status: "available" } });
+    expect(normalized.value.inputTokens).toMatchObject({
+      value: 3,
+      availability: { status: 'available' },
+    });
   });
 
-  it("marks skill calls unavailable when a tool part has no tool name", () => {
+  it('marks skill calls unavailable when a tool part has no tool name', () => {
     const sessionExport = {
-      info: { id: "ses-root-0001" },
+      info: { id: 'ses-root-0001' },
       messages: [
         {
           info: {
-            id: "msg-a1",
-            sessionID: "ses-root-0001",
-            role: "assistant",
-            finish: "stop",
+            id: 'msg-a1',
+            sessionID: 'ses-root-0001',
+            role: 'assistant',
+            finish: 'stop',
             cost: 0,
             tokens: { input: 3, output: 4, reasoning: 0, cache: { read: 0, write: 0 } },
           },
           parts: [
             {
-              id: "prt-x",
-              sessionID: "ses-root-0001",
-              messageID: "msg-a1",
-              type: "tool",
-              state: { status: "completed" },
+              id: 'prt-x',
+              sessionID: 'ses-root-0001',
+              messageID: 'msg-a1',
+              type: 'tool',
+              state: { status: 'completed' },
             },
           ],
         },
@@ -258,49 +289,59 @@ describe("normalizeMetrics from the root session export", () => {
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
+      sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
     });
 
     expect(normalized.ok).toBe(true);
     if (!normalized.ok) return;
-    expect(normalized.value.toolCalls).toMatchObject({ value: 1, availability: { status: "available" } });
+    expect(normalized.value.toolCalls).toMatchObject({
+      value: 1,
+      availability: { status: 'available' },
+    });
     expect(normalized.value.skillCalls).toEqual({
       value: null,
-      unit: "count",
-      availability: { status: "unavailable", reason: 'tool name is absent or malformed on tool part "prt-x"' },
-      scope: "root-session",
+      unit: 'count',
+      availability: {
+        status: 'unavailable',
+        reason: 'tool name is absent or malformed on tool part "prt-x"',
+      },
+      scope: 'root-session',
     });
   });
 
-  it("counts each message and part once when duplicates share identity", () => {
+  it('counts each message and part once when duplicates share identity', () => {
     const message = {
       info: {
-        id: "msg-a1",
-        sessionID: "ses-root-0001",
-        role: "assistant",
-        finish: "stop",
+        id: 'msg-a1',
+        sessionID: 'ses-root-0001',
+        role: 'assistant',
+        finish: 'stop',
         cost: 0.25,
         tokens: { input: 100, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
       },
       parts: [
         {
-          id: "prt-1",
-          sessionID: "ses-root-0001",
-          messageID: "msg-a1",
-          type: "tool",
-          tool: "bash",
-          state: { status: "completed" },
+          id: 'prt-1',
+          sessionID: 'ses-root-0001',
+          messageID: 'msg-a1',
+          type: 'tool',
+          tool: 'bash',
+          state: { status: 'completed' },
         },
       ],
     };
     const sessionExport = {
-      info: { id: "ses-root-0001" },
+      info: { id: 'ses-root-0001' },
       messages: [
         message,
         {
-          info: { ...message.info, cost: 999, tokens: { input: 999, output: 999, reasoning: 0, cache: { read: 0, write: 0 } } },
+          info: {
+            ...message.info,
+            cost: 999,
+            tokens: { input: 999, output: 999, reasoning: 0, cache: { read: 0, write: 0 } },
+          },
           parts: message.parts,
         },
       ],
@@ -308,7 +349,7 @@ describe("normalizeMetrics from the root session export", () => {
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
+      sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
     });
@@ -323,120 +364,134 @@ describe("normalizeMetrics from the root session export", () => {
 
   it.each([
     {
-      scenario: "the export session identity is missing",
-      info: { id: "" },
-      reason: "export session identity (info.id) is missing or malformed",
+      scenario: 'the export session identity is missing',
+      info: { id: '' },
+      reason: 'export session identity (info.id) is missing or malformed',
     },
     {
-      scenario: "a message identity is missing",
-      info: { id: "ses-root-0001" },
-      reason: "export message identity (sessionID, id) is missing or malformed",
+      scenario: 'a message identity is missing',
+      info: { id: 'ses-root-0001' },
+      reason: 'export message identity (sessionID, id) is missing or malformed',
     },
-  ])("returns a protocol failure when $scenario", ({ info, reason }) => {
+  ])('returns a protocol failure when $scenario', ({ info, reason }) => {
     const sessionExport = {
       info,
-      messages: [{ info: { id: "", sessionID: "ses-root-0001", role: "assistant" }, parts: [] }],
+      messages: [{ info: { id: '', sessionID: 'ses-root-0001', role: 'assistant' }, parts: [] }],
     };
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
+      sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
     });
 
     expect(normalized.ok).toBe(false);
     if (normalized.ok) return;
-    expect(normalized.error.kind).toBe("OpenCodeProtocolError");
-    expect(normalized.error.context).toEqual({ phase: "case", caseId: CASE_ID });
+    expect(normalized.error.kind).toBe('OpenCodeProtocolError');
+    expect(normalized.error.context).toEqual({ phase: 'case', caseId: CASE_ID });
     expect(normalized.error.reason).toBe(reason);
   });
 
   it("returns a protocol failure when an undecoded export's part identity is malformed", () => {
     const sessionExport = {
-      info: { id: "ses-root-0001" },
+      info: { id: 'ses-root-0001' },
       messages: [
         {
-          info: { id: "msg-u1", sessionID: "ses-root-0001", role: "user" },
-          parts: [{ id: "prt-1", sessionID: "ses-root-0001", messageID: "", type: "text" }],
+          info: { id: 'msg-u1', sessionID: 'ses-root-0001', role: 'user' },
+          parts: [{ id: 'prt-1', sessionID: 'ses-root-0001', messageID: '', type: 'text' }],
         },
       ],
     };
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
+      sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
     });
 
     expect(normalized.ok).toBe(false);
     if (normalized.ok) return;
-    expect(normalized.error.reason).toBe("part identity (sessionID, messageID, id) is missing or malformed");
+    expect(normalized.error.reason).toBe(
+      'part identity (sessionID, messageID, id) is missing or malformed',
+    );
   });
 });
 
-describe("normalizeMetrics event fallback", () => {
-  it("supplies only event-derived metrics when the export is unavailable and never fabricates the rest", () => {
+describe('normalizeMetrics event fallback', () => {
+  it('supplies only event-derived metrics when the export is unavailable and never fabricates the rest', () => {
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
+      sessionId: 'ses-root-0001',
       sessionExport: null,
-      events: readRawFixtureEvents("events-valid.jsonl"),
-      exportUnavailableReason: "root session export unavailable: process failure",
+      events: readRawFixtureEvents('events-valid.jsonl'),
+      exportUnavailableReason: 'root session export unavailable: process failure',
     });
 
     expect(normalized.ok).toBe(true);
     if (!normalized.ok) return;
     expect(normalized.value.apiErrors).toEqual({
       value: 1,
-      unit: "count",
-      availability: { status: "available", source: "run events" },
-      scope: "root-session",
+      unit: 'count',
+      availability: { status: 'available', source: 'run events' },
+      scope: 'root-session',
     });
     expect(normalized.value.toolCalls).toEqual({
       value: 2,
-      unit: "count",
-      availability: { status: "available", source: "run events" },
-      scope: "root-session",
+      unit: 'count',
+      availability: { status: 'available', source: 'run events' },
+      scope: 'root-session',
     });
     expect(normalized.value.skillCalls).toEqual({
       value: 1,
-      unit: "count",
-      availability: { status: "available", source: "run events" },
-      scope: "root-session",
+      unit: 'count',
+      availability: { status: 'available', source: 'run events' },
+      scope: 'root-session',
     });
-    for (const name of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "turns", "apiCalls", "cost"]) {
+    for (const name of [
+      'inputTokens',
+      'outputTokens',
+      'reasoningTokens',
+      'cacheReadTokens',
+      'cacheWriteTokens',
+      'turns',
+      'apiCalls',
+      'cost',
+    ]) {
       expect(normalized.value[name as keyof typeof normalized.value]).toMatchObject({
         value: null,
-        availability: { status: "unavailable", reason: "root session export unavailable: process failure" },
-        scope: "root-session",
+        availability: {
+          status: 'unavailable',
+          reason: 'root session export unavailable: process failure',
+        },
+        scope: 'root-session',
       });
     }
   });
 
-  it("deduplicates repeated event part representations by (sessionID, part.id)", () => {
+  it('deduplicates repeated event part representations by (sessionID, part.id)', () => {
     const toolUse = {
-      type: "tool_use",
+      type: 'tool_use',
       timestamp: 1,
-      sessionID: "ses-root-0001",
+      sessionID: 'ses-root-0001',
       part: {
-        id: "prt-1",
-        sessionID: "ses-root-0001",
-        messageID: "msg-1",
-        type: "tool",
-        callID: "call-1",
-        tool: "bash",
-        state: { status: "completed" },
+        id: 'prt-1',
+        sessionID: 'ses-root-0001',
+        messageID: 'msg-1',
+        type: 'tool',
+        callID: 'call-1',
+        tool: 'bash',
+        state: { status: 'completed' },
       },
     };
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
+      sessionId: 'ses-root-0001',
       sessionExport: null,
       events: [toolUse, toolUse, { ...toolUse, timestamp: 2 }],
-      exportUnavailableReason: "root session export unavailable",
+      exportUnavailableReason: 'root session export unavailable',
     });
 
     expect(normalized.ok).toBe(true);
@@ -444,49 +499,52 @@ describe("normalizeMetrics event fallback", () => {
     expect(normalized.value.toolCalls).toMatchObject({ value: 1 });
   });
 
-  it("ignores events from sessions other than the identified root session", () => {
+  it('ignores events from sessions other than the identified root session', () => {
     const childToolUse = {
-      type: "tool_use",
+      type: 'tool_use',
       timestamp: 1,
-      sessionID: "ses-child-0001",
+      sessionID: 'ses-child-0001',
       part: {
-        id: "prt-c1",
-        sessionID: "ses-child-0001",
-        messageID: "msg-c1",
-        type: "tool",
-        callID: "call-c1",
-        tool: "bash",
-        state: { status: "completed" },
+        id: 'prt-c1',
+        sessionID: 'ses-child-0001',
+        messageID: 'msg-c1',
+        type: 'tool',
+        callID: 'call-c1',
+        tool: 'bash',
+        state: { status: 'completed' },
       },
     };
     const rootError = {
-      type: "error",
+      type: 'error',
       timestamp: 2,
-      sessionID: "ses-root-0001",
-      error: { message: "root error only" },
+      sessionID: 'ses-root-0001',
+      error: { message: 'root error only' },
     };
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
+      sessionId: 'ses-root-0001',
       sessionExport: null,
       events: [childToolUse, rootError],
-      exportUnavailableReason: "root session export unavailable",
+      exportUnavailableReason: 'root session export unavailable',
     });
 
     expect(normalized.ok).toBe(true);
     if (!normalized.ok) return;
-    expect(normalized.value.toolCalls).toMatchObject({ value: 0, availability: { status: "available" } });
+    expect(normalized.value.toolCalls).toMatchObject({
+      value: 0,
+      availability: { status: 'available' },
+    });
     expect(normalized.value.apiErrors).toMatchObject({ value: 1 });
   });
 
-  it("marks every export-derived metric unavailable when no root session could be identified", () => {
+  it('marks every export-derived metric unavailable when no root session could be identified', () => {
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
       sessionId: null,
       sessionExport: null,
       events: [],
-      exportUnavailableReason: "root session export unavailable: process failure",
+      exportUnavailableReason: 'root session export unavailable: process failure',
     });
 
     expect(normalized.ok).toBe(true);
@@ -495,78 +553,104 @@ describe("normalizeMetrics event fallback", () => {
       expect(metric).toMatchObject({
         value: null,
         availability: {
-          status: "unavailable",
-          reason: "root session export unavailable: process failure; root session could not be identified",
+          status: 'unavailable',
+          reason:
+            'root session export unavailable: process failure; root session could not be identified',
         },
-        scope: "root-session",
+        scope: 'root-session',
       });
     }
   });
 
-  it("marks skill calls unavailable from events when a tool part lacks its tool name", () => {
+  it('marks skill calls unavailable from events when a tool part lacks its tool name', () => {
     const toolUse = {
-      type: "tool_use",
+      type: 'tool_use',
       timestamp: 1,
-      sessionID: "ses-root-0001",
-      part: { id: "prt-1", sessionID: "ses-root-0001", messageID: "msg-1", type: "tool", state: { status: "completed" } },
+      sessionID: 'ses-root-0001',
+      part: {
+        id: 'prt-1',
+        sessionID: 'ses-root-0001',
+        messageID: 'msg-1',
+        type: 'tool',
+        state: { status: 'completed' },
+      },
     };
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
+      sessionId: 'ses-root-0001',
       sessionExport: null,
       events: [toolUse],
-      exportUnavailableReason: "root session export unavailable",
+      exportUnavailableReason: 'root session export unavailable',
     });
 
     expect(normalized.ok).toBe(true);
     if (!normalized.ok) return;
-    expect(normalized.value.toolCalls).toMatchObject({ value: 1, availability: { status: "available" } });
+    expect(normalized.value.toolCalls).toMatchObject({
+      value: 1,
+      availability: { status: 'available' },
+    });
     expect(normalized.value.skillCalls).toMatchObject({
       value: null,
-      availability: { status: "unavailable", reason: 'tool name is absent or malformed on tool part "prt-1"' },
+      availability: {
+        status: 'unavailable',
+        reason: 'tool name is absent or malformed on tool part "prt-1"',
+      },
     });
   });
 
-  it("returns a protocol failure when an event lacks session identity", () => {
-    const malformed = { type: "error", timestamp: 1, error: {} };
+  it('returns a protocol failure when an event lacks session identity', () => {
+    const malformed = { type: 'error', timestamp: 1, error: {} };
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: "ses-root-0001",
+      sessionId: 'ses-root-0001',
       sessionExport: null,
       events: [malformed],
     });
 
     expect(normalized.ok).toBe(false);
     if (normalized.ok) return;
-    expect(normalized.error.context).toEqual({ phase: "case", caseId: CASE_ID });
-    expect(normalized.error.reason).toBe("event session identity (sessionID) is missing or malformed");
+    expect(normalized.error.context).toEqual({ phase: 'case', caseId: CASE_ID });
+    expect(normalized.error.reason).toBe(
+      'event session identity (sessionID) is missing or malformed',
+    );
   });
 });
 
-describe("export identity extractors", () => {
-  it("identifies export messages by (sessionID, id)", () => {
-    const first = exportMessageIdentity({ sessionID: "ses-root-0001", id: "msg-a1" });
-    const sameSessionOtherMessage = exportMessageIdentity({ sessionID: "ses-root-0001", id: "msg-a2" });
-    const otherSessionSameMessage = exportMessageIdentity({ sessionID: "ses-root-0002", id: "msg-a1" });
+describe('export identity extractors', () => {
+  it('identifies export messages by (sessionID, id)', () => {
+    const first = exportMessageIdentity({ sessionID: 'ses-root-0001', id: 'msg-a1' });
+    const sameSessionOtherMessage = exportMessageIdentity({
+      sessionID: 'ses-root-0001',
+      id: 'msg-a2',
+    });
+    const otherSessionSameMessage = exportMessageIdentity({
+      sessionID: 'ses-root-0002',
+      id: 'msg-a1',
+    });
 
-    expect(first).toBe("ses-root-0001\u0000msg-a1");
+    expect(first).toBe('ses-root-0001\u0000msg-a1');
     expect(first).not.toBe(sameSessionOtherMessage);
     expect(first).not.toBe(otherSessionSameMessage);
   });
 
-  it("identifies export parts by (sessionID, messageID, id)", () => {
-    const part: OpenCodePart = { sessionID: "ses-root-0001", messageID: "msg-a1", id: "prt-a1", type: "text" };
+  it('identifies export parts by (sessionID, messageID, id)', () => {
+    const part: OpenCodePart = {
+      sessionID: 'ses-root-0001',
+      messageID: 'msg-a1',
+      id: 'prt-a1',
+      type: 'text',
+    };
     const same = { ...part };
-    const otherMessage = { ...part, messageID: "msg-a2" };
+    const otherMessage = { ...part, messageID: 'msg-a2' };
 
     expect(exportPartIdentity(part)).toBe(exportPartIdentity(same));
     expect(exportPartIdentity(part)).not.toBe(exportPartIdentity(otherMessage));
   });
 });
 
-const SYNTHETIC_SESSION = "ses-synth-0001";
+const SYNTHETIC_SESSION = 'ses-synth-0001';
 
 const SYNTHETIC_OPENCODE_SCRIPT = `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
@@ -682,41 +766,44 @@ async function writeExecutable(name: string, body: string): Promise<string> {
 }
 
 beforeAll(async () => {
-  tempRoot = await mkdtemp(join(tmpdir(), "tevu-opencode-metrics-"));
-  syntheticExecutable = await writeExecutable("synthetic-opencode.mjs", SYNTHETIC_OPENCODE_SCRIPT);
+  tempRoot = await mkdtemp(join(tmpdir(), 'tevu-opencode-metrics-'));
+  syntheticExecutable = await writeExecutable('synthetic-opencode.mjs', SYNTHETIC_OPENCODE_SCRIPT);
   missingVariantExecutable = await writeExecutable(
-    "synthetic-opencode-missing-variant.mjs",
+    'synthetic-opencode-missing-variant.mjs',
     SYNTHETIC_MISSING_VARIANT_SCRIPT,
   );
-  exitFourExecutable = await writeExecutable("synthetic-opencode-exit-four.mjs", SYNTHETIC_EXIT_FOUR_SCRIPT);
-  await mkdir(join(tempRoot, "synthetic-home"), { recursive: true });
-  await mkdir(join(tempRoot, "synthetic-tmp"), { recursive: true });
-  process.env["TEVU_PARENT_SENTINEL"] = "parent-only-value";
+  exitFourExecutable = await writeExecutable(
+    'synthetic-opencode-exit-four.mjs',
+    SYNTHETIC_EXIT_FOUR_SCRIPT,
+  );
+  await mkdir(join(tempRoot, 'synthetic-home'), { recursive: true });
+  await mkdir(join(tempRoot, 'synthetic-tmp'), { recursive: true });
+  process.env['TEVU_PARENT_SENTINEL'] = 'parent-only-value';
 });
 
 afterAll(async () => {
-  delete process.env["TEVU_PARENT_SENTINEL"];
+  delete process.env['TEVU_PARENT_SENTINEL'];
   await rm(tempRoot, { recursive: true, force: true });
 });
 
 function syntheticEnvironment(extra: Record<string, string>) {
-  const home = join(tempRoot, "synthetic-home");
+  const home = join(tempRoot, 'synthetic-home');
   return {
     caseId: CASE_ID,
-    recipient: "agent" as const,
+    recipient: 'agent' as const,
     homeDirectory: home,
-    temporaryDirectory: join(tempRoot, "synthetic-tmp"),
+    temporaryDirectory: join(tempRoot, 'synthetic-tmp'),
     variables: {
-      PATH: process.env["PATH"] ?? "",
+      PATH: process.env['PATH'] ?? '',
       HOME: home,
-      XDG_CONFIG_HOME: join(home, ".config"),
-      XDG_DATA_HOME: join(home, ".local", "share"),
-      XDG_CACHE_HOME: join(home, ".cache"),
-      XDG_STATE_HOME: join(home, ".local", "state"),
-      TMPDIR: join(tempRoot, "synthetic-tmp"),
-      LANG: "C.UTF-8",
-      LC_ALL: "C.UTF-8",
-      CI: "1",
+      XDG_CONFIG_HOME: join(home, '.config'),
+      XDG_DATA_HOME: join(home, '.local', 'share'),
+      XDG_CACHE_HOME: join(home, '.cache'),
+      XDG_STATE_HOME: join(home, '.local', 'state'),
+      TMPDIR: join(tempRoot, 'synthetic-tmp'),
+      LANG: 'C.UTF-8',
+      LC_ALL: 'C.UTF-8',
+      CI: '1',
       ...extra,
     },
     variableManifest: [],
@@ -725,19 +812,19 @@ function syntheticEnvironment(extra: Record<string, string>) {
 
 const IDENTITY = {
   caseId: CASE_ID,
-  taskId: "task-1",
-  modelId: "alpha",
+  taskId: 'task-1',
+  modelId: 'alpha',
   attempt: 1,
-  sourceCommit: "0123456789abcdef0123456789abcdef01234567",
-  model: "vendor/model-alpha-synth",
-  effort: "effort-high",
-  agent: "opencode",
+  sourceCommit: '0123456789abcdef0123456789abcdef01234567',
+  model: 'vendor/model-alpha-synth',
+  effort: 'effort-high',
+  agent: 'opencode',
 };
 
-describe("OpenCode adapter over a synthetic executable", () => {
-  it("reports runtime-probed capabilities with version provenance and an unenforceable isolation control", async () => {
+describe('OpenCode adapter over a synthetic executable', () => {
+  it('reports runtime-probed capabilities with version provenance and an unenforceable isolation control', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies(),
     );
 
@@ -746,81 +833,84 @@ describe("OpenCode adapter over a synthetic executable", () => {
     expect(probe.ok).toBe(true);
     if (!probe.ok) return;
     expect(probe.value.executable).toBe(syntheticExecutable);
-    expect(probe.value.detectedVersion).toBe("9.9.9-synthetic");
+    expect(probe.value.detectedVersion).toBe('9.9.9-synthetic');
     expect(probe.value.capabilities).toEqual([
-      { name: "run command", required: true, availability: "available" },
-      { name: "export command", required: true, availability: "available" },
-      { name: "run --format json", required: true, availability: "available" },
-      { name: "run --model", required: true, availability: "available" },
-      { name: "run --variant", required: true, availability: "available" },
+      { name: 'run command', required: true, availability: 'available' },
+      { name: 'export command', required: true, availability: 'available' },
+      { name: 'run --format json', required: true, availability: 'available' },
+      { name: 'run --model', required: true, availability: 'available' },
+      { name: 'run --variant', required: true, availability: 'available' },
     ]);
-    expect(probe.value.isolation.denyOutsideWorktree).toBe("unavailable");
+    expect(probe.value.isolation.denyOutsideWorktree).toBe('unavailable');
   });
 
-  it("fails capability probing with a probe-phase protocol error when a required option is missing", async () => {
+  it('fails capability probing with a probe-phase protocol error when a required option is missing', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: missingVariantExecutable },
+      { agent: 'opencode', executable: missingVariantExecutable },
       buildDependencies(),
     );
 
     const probe = await adapter.probe();
 
     expect(probe.ok).toBe(false);
-    if (probe.ok || probe.error.kind !== "AgentProtocolError") {
+    if (probe.ok || probe.error.kind !== 'AgentProtocolError') {
       throw new Error(`expected a probe-phase protocol error, got ${JSON.stringify(probe)}`);
     }
-    expect(probe.error.context).toEqual({ phase: "probe" });
-    expect(probe.error.reason).toContain("missing required capabilities");
-    expect(probe.error.reason).toContain("run --variant");
+    expect(probe.error.context).toEqual({ phase: 'probe' });
+    expect(probe.error.reason).toContain('missing required capabilities');
+    expect(probe.error.reason).toContain('run --variant');
   });
 
-  it("fails capability probing with a prerequisite error for a nonexistent executable", async () => {
+  it('fails capability probing with a prerequisite error for a nonexistent executable', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: "definitely-not-installed" },
+      { agent: 'opencode', executable: 'definitely-not-installed' },
       buildDependencies(),
     );
 
     const probe = await adapter.probe();
 
     expect(probe.ok).toBe(false);
-    if (probe.ok || probe.error.kind !== "PrerequisiteError") {
+    if (probe.ok || probe.error.kind !== 'PrerequisiteError') {
       throw new Error(`expected a prerequisite error, got ${JSON.stringify(probe)}`);
     }
-    expect(probe.error.tool).toBe("opencode");
-    expect(probe.error.expected).toContain("starts");
+    expect(probe.error.tool).toBe('opencode');
+    expect(probe.error.expected).toContain('starts');
   });
 
-  it("fails capability probing when the executable help invocation exits nonzero", async () => {
+  it('fails capability probing when the executable help invocation exits nonzero', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: exitFourExecutable },
+      { agent: 'opencode', executable: exitFourExecutable },
       buildDependencies(),
     );
 
     const probe = await adapter.probe();
 
     expect(probe.ok).toBe(false);
-    if (probe.ok || probe.error.kind !== "PrerequisiteError") {
+    if (probe.ok || probe.error.kind !== 'PrerequisiteError') {
       throw new Error(`expected a prerequisite error, got ${JSON.stringify(probe)}`);
     }
     expect(probe.error.expected).toContain('--help" exits 0');
   });
 
-  it("runs exactly one managed process with literal argv, the worktree cwd, and a replacement environment", async () => {
-    const worktree = join(tempRoot, "worktree-run");
+  it('runs exactly one managed process with literal argv, the worktree cwd, and a replacement environment', async () => {
+    const worktree = join(tempRoot, 'worktree-run');
     await mkdir(worktree, { recursive: true });
     const recordPath = join(tempRoot, `record-run-${scriptCounter()}.json`);
     const delivered: unknown[] = [];
     const diagnostics: string[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies(),
     );
 
     const outcome = await adapter.run({
       identity: IDENTITY,
-      prompt: "synthetic benchmark prompt",
+      prompt: 'synthetic benchmark prompt',
       worktreeDirectory: worktree,
-      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: "events", TEVU_SYNTH_RECORD: recordPath }),
+      environment: syntheticEnvironment({
+        TEVU_SYNTH_MODE: 'events',
+        TEVU_SYNTH_RECORD: recordPath,
+      }),
       timeoutMs: 10000,
       terminationGraceMs: 250,
       cancellation: new AbortController().signal,
@@ -839,47 +929,56 @@ describe("OpenCode adapter over a synthetic executable", () => {
     expect(outcome.value.sessionId).toBe(SYNTHETIC_SESSION);
     expect(outcome.value.parseFindings).toEqual([]);
     expect(outcome.value.process.exitCode).toBe(0);
-    expect(outcome.value.process.terminationStage).toBe("none");
-    expect(delivered.map((event) => (event as { type: string }).type)).toEqual(["step_start", "tool_use", "error"]);
+    expect(outcome.value.process.terminationStage).toBe('none');
+    expect(delivered.map((event) => (event as { type: string }).type)).toEqual([
+      'step_start',
+      'tool_use',
+      'error',
+    ]);
     expect(diagnostics).toEqual([]);
 
-    const normalized = normalizeMetrics({ caseId: CASE_ID, sessionId: outcome.value.sessionId, sessionExport: null, events: delivered });
+    const normalized = normalizeMetrics({
+      caseId: CASE_ID,
+      sessionId: outcome.value.sessionId,
+      sessionExport: null,
+      events: delivered,
+    });
     expect(normalized.ok).toBe(true);
 
-    const recorded = JSON.parse(await readFile(recordPath, "utf8")) as {
+    const recorded = JSON.parse(await readFile(recordPath, 'utf8')) as {
       argv: string[];
       cwd: string;
       env: Record<string, string>;
     };
     expect(recorded.argv).toEqual([
-      "run",
-      "--format",
-      "json",
-      "--model",
-      "vendor/model-alpha-synth",
-      "--variant",
-      "effort-high",
-      "synthetic benchmark prompt",
+      'run',
+      '--format',
+      'json',
+      '--model',
+      'vendor/model-alpha-synth',
+      '--variant',
+      'effort-high',
+      'synthetic benchmark prompt',
     ]);
     expect(recorded.cwd).toBe(worktree);
-    expect(recorded.env["TEVU_PARENT_SENTINEL"]).toBeUndefined();
-    expect(recorded.env["TEVU_SYNTH_MODE"]).toBe("events");
+    expect(recorded.env['TEVU_PARENT_SENTINEL']).toBeUndefined();
+    expect(recorded.env['TEVU_SYNTH_MODE']).toBe('events');
   });
 
-  it("reports a case-context protocol error when the run output identifies no root session", async () => {
-    const worktree = join(tempRoot, "worktree-empty");
+  it('reports a case-context protocol error when the run output identifies no root session', async () => {
+    const worktree = join(tempRoot, 'worktree-empty');
     await mkdir(worktree, { recursive: true });
     let onProcessResult: AgentRunResult | undefined;
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies(),
     );
 
     const outcome = await adapter.run({
       identity: IDENTITY,
-      prompt: "synthetic benchmark prompt",
+      prompt: 'synthetic benchmark prompt',
       worktreeDirectory: worktree,
-      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: "empty" }),
+      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: 'empty' }),
       timeoutMs: 10000,
       terminationGraceMs: 250,
       cancellation: new AbortController().signal,
@@ -891,30 +990,30 @@ describe("OpenCode adapter over a synthetic executable", () => {
     });
 
     expect(outcome.ok).toBe(false);
-    if (outcome.ok || outcome.error.kind !== "AgentProtocolError") {
+    if (outcome.ok || outcome.error.kind !== 'AgentProtocolError') {
       throw new Error(`expected a protocol failure, got ${JSON.stringify(outcome)}`);
     }
-    expect(outcome.error.context).toEqual({ phase: "case", caseId: CASE_ID });
-    expect(outcome.error.reason).toBe("run output did not identify a root session");
+    expect(outcome.error.context).toEqual({ phase: 'case', caseId: CASE_ID });
+    expect(outcome.error.reason).toBe('run output did not identify a root session');
     expect(onProcessResult).toBeDefined();
     expect(onProcessResult?.sessionId).toBeNull();
   });
 
-  it("routes non-JSON stdout to diagnostics and fails with a protocol error carrying the line number", async () => {
-    const worktree = join(tempRoot, "worktree-nonjson");
+  it('routes non-JSON stdout to diagnostics and fails with a protocol error carrying the line number', async () => {
+    const worktree = join(tempRoot, 'worktree-nonjson');
     await mkdir(worktree, { recursive: true });
     const diagnostics: string[] = [];
     const delivered: unknown[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies(),
     );
 
     const outcome = await adapter.run({
       identity: IDENTITY,
-      prompt: "synthetic benchmark prompt",
+      prompt: 'synthetic benchmark prompt',
       worktreeDirectory: worktree,
-      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: "nonjson" }),
+      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: 'nonjson' }),
       timeoutMs: 10000,
       terminationGraceMs: 250,
       cancellation: new AbortController().signal,
@@ -929,29 +1028,29 @@ describe("OpenCode adapter over a synthetic executable", () => {
     });
 
     expect(outcome.ok).toBe(false);
-    if (outcome.ok || outcome.error.kind !== "AgentProtocolError") {
+    if (outcome.ok || outcome.error.kind !== 'AgentProtocolError') {
       throw new Error(`expected a protocol failure, got ${JSON.stringify(outcome)}`);
     }
     expect(outcome.error.line).toBe(1);
-    expect(outcome.error.reason).toBe("run output contains malformed JSON event framing");
+    expect(outcome.error.reason).toBe('run output contains malformed JSON event framing');
     expect(delivered).toEqual([]);
-    expect(diagnostics).toEqual(["this stdout line is not JSON at all"]);
+    expect(diagnostics).toEqual(['this stdout line is not JSON at all']);
   });
 
-  it("fails with the decoded event identity error and delivers no record", async () => {
-    const worktree = join(tempRoot, "worktree-malformed");
+  it('fails with the decoded event identity error and delivers no record', async () => {
+    const worktree = join(tempRoot, 'worktree-malformed');
     await mkdir(worktree, { recursive: true });
     const delivered: unknown[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies(),
     );
 
     const outcome = await adapter.run({
       identity: IDENTITY,
-      prompt: "synthetic benchmark prompt",
+      prompt: 'synthetic benchmark prompt',
       worktreeDirectory: worktree,
-      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: "malformed-event" }),
+      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: 'malformed-event' }),
       timeoutMs: 10000,
       terminationGraceMs: 250,
       cancellation: new AbortController().signal,
@@ -963,28 +1062,30 @@ describe("OpenCode adapter over a synthetic executable", () => {
     });
 
     expect(outcome.ok).toBe(false);
-    if (outcome.ok || outcome.error.kind !== "AgentProtocolError") {
+    if (outcome.ok || outcome.error.kind !== 'AgentProtocolError') {
       throw new Error(`expected a protocol failure, got ${JSON.stringify(outcome)}`);
     }
     expect(outcome.error.line).toBe(1);
-    expect(outcome.error.reason).toBe("part identity (sessionID, messageID, id) is missing or malformed");
+    expect(outcome.error.reason).toBe(
+      'part identity (sessionID, messageID, id) is missing or malformed',
+    );
     expect(delivered).toEqual([]);
   });
 
-  it("returns a process error with the exit code for a nonzero run while keeping the session evidence", async () => {
-    const worktree = join(tempRoot, "worktree-exit");
+  it('returns a process error with the exit code for a nonzero run while keeping the session evidence', async () => {
+    const worktree = join(tempRoot, 'worktree-exit');
     await mkdir(worktree, { recursive: true });
     let onProcessResult: AgentRunResult | undefined;
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies(),
     );
 
     const outcome = await adapter.run({
       identity: IDENTITY,
-      prompt: "synthetic benchmark prompt",
+      prompt: 'synthetic benchmark prompt',
       worktreeDirectory: worktree,
-      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: "events", TEVU_SYNTH_EXIT: "7" }),
+      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: 'events', TEVU_SYNTH_EXIT: '7' }),
       timeoutMs: 10000,
       terminationGraceMs: 250,
       cancellation: new AbortController().signal,
@@ -998,8 +1099,8 @@ describe("OpenCode adapter over a synthetic executable", () => {
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.error).toEqual({
-      kind: "AgentProcessError",
-      agent: "opencode",
+      kind: 'AgentProcessError',
+      agent: 'opencode',
       caseId: CASE_ID,
       exitCode: 7,
       signal: null,
@@ -1009,19 +1110,22 @@ describe("OpenCode adapter over a synthetic executable", () => {
     expect(onProcessResult?.process.exitCode).toBe(7);
   });
 
-  it("exports the requested root session with additive fields retained, decodable by normalizeMetrics", async () => {
+  it('exports the requested root session with additive fields retained, decodable by normalizeMetrics', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies(),
     );
 
-    const exported = await adapter.exportSession(SYNTHETIC_SESSION, syntheticEnvironment({ TEVU_SYNTH_EXPORT: "root" }));
+    const exported = await adapter.exportSession(
+      SYNTHETIC_SESSION,
+      syntheticEnvironment({ TEVU_SYNTH_EXPORT: 'root' }),
+    );
 
     expect(exported.ok).toBe(true);
     if (!exported.ok) return;
     const serialized = JSON.stringify(exported.value);
-    expect(serialized).toContain("additiveInfoField");
-    expect(serialized).toContain("additiveTopLevelField");
+    expect(serialized).toContain('additiveInfoField');
+    expect(serialized).toContain('additiveTopLevelField');
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
       sessionId: SYNTHETIC_SESSION,
@@ -1031,32 +1135,38 @@ describe("OpenCode adapter over a synthetic executable", () => {
     expect(normalized.ok).toBe(true);
   });
 
-  it("rejects an export whose identity does not match the requested root session", async () => {
+  it('rejects an export whose identity does not match the requested root session', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies(),
     );
 
-    const exported = await adapter.exportSession(SYNTHETIC_SESSION, syntheticEnvironment({ TEVU_SYNTH_EXPORT: "mismatch" }));
+    const exported = await adapter.exportSession(
+      SYNTHETIC_SESSION,
+      syntheticEnvironment({ TEVU_SYNTH_EXPORT: 'mismatch' }),
+    );
 
     expect(exported.ok).toBe(false);
-    if (exported.ok || exported.error.kind !== "AgentProtocolError") {
+    if (exported.ok || exported.error.kind !== 'AgentProtocolError') {
       throw new Error(`expected a protocol failure, got ${JSON.stringify(exported)}`);
     }
-    expect(exported.error.context).toEqual({ phase: "case", caseId: CASE_ID });
-    expect(exported.error.reason).toBe("export identity does not match the requested root session");
+    expect(exported.error.context).toEqual({ phase: 'case', caseId: CASE_ID });
+    expect(exported.error.reason).toBe('export identity does not match the requested root session');
   });
 
-  it("rejects a child-session export because schema version 1 consumes only the root session", async () => {
+  it('rejects a child-session export because schema version 1 consumes only the root session', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies(),
     );
 
-    const exported = await adapter.exportSession(SYNTHETIC_SESSION, syntheticEnvironment({ TEVU_SYNTH_EXPORT: "child" }));
+    const exported = await adapter.exportSession(
+      SYNTHETIC_SESSION,
+      syntheticEnvironment({ TEVU_SYNTH_EXPORT: 'child' }),
+    );
 
     expect(exported.ok).toBe(false);
-    if (exported.ok || exported.error.kind !== "AgentProtocolError") {
+    if (exported.ok || exported.error.kind !== 'AgentProtocolError') {
       throw new Error(`expected a protocol failure, got ${JSON.stringify(exported)}`);
     }
     expect(exported.error.reason).toBe(
@@ -1064,50 +1174,61 @@ describe("OpenCode adapter over a synthetic executable", () => {
     );
   });
 
-  it("rejects an export whose message identity is malformed", async () => {
+  it('rejects an export whose message identity is malformed', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies(),
     );
 
-    const exported = await adapter.exportSession(SYNTHETIC_SESSION, syntheticEnvironment({ TEVU_SYNTH_EXPORT: "malformed" }));
+    const exported = await adapter.exportSession(
+      SYNTHETIC_SESSION,
+      syntheticEnvironment({ TEVU_SYNTH_EXPORT: 'malformed' }),
+    );
 
     expect(exported.ok).toBe(false);
-    if (exported.ok || exported.error.kind !== "AgentProtocolError") {
+    if (exported.ok || exported.error.kind !== 'AgentProtocolError') {
       throw new Error(`expected a protocol failure, got ${JSON.stringify(exported)}`);
     }
-    expect(exported.error.reason).toBe("export message identity (sessionID, id) is missing or malformed");
+    expect(exported.error.reason).toBe(
+      'export message identity (sessionID, id) is missing or malformed',
+    );
   });
 
-  it("rejects a non-JSON export output with a protocol error", async () => {
+  it('rejects a non-JSON export output with a protocol error', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies(),
     );
 
-    const exported = await adapter.exportSession(SYNTHETIC_SESSION, syntheticEnvironment({ TEVU_SYNTH_EXPORT: "nonjson" }));
+    const exported = await adapter.exportSession(
+      SYNTHETIC_SESSION,
+      syntheticEnvironment({ TEVU_SYNTH_EXPORT: 'nonjson' }),
+    );
 
     expect(exported.ok).toBe(false);
-    if (exported.ok || exported.error.kind !== "AgentProtocolError") {
+    if (exported.ok || exported.error.kind !== 'AgentProtocolError') {
       throw new Error(`expected a protocol failure, got ${JSON.stringify(exported)}`);
     }
-    expect(exported.error.reason).toBe("export output is not valid JSON");
+    expect(exported.error.reason).toBe('export output is not valid JSON');
   });
 
-  it("never leaks a parent-environment sentinel into the synthetic process environment", async () => {
-    const worktree = join(tempRoot, "worktree-sentinel");
+  it('never leaks a parent-environment sentinel into the synthetic process environment', async () => {
+    const worktree = join(tempRoot, 'worktree-sentinel');
     await mkdir(worktree, { recursive: true });
     const recordPath = join(tempRoot, `record-sentinel-${scriptCounter()}.json`);
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies(),
     );
 
     await adapter.run({
       identity: IDENTITY,
-      prompt: "synthetic benchmark prompt",
+      prompt: 'synthetic benchmark prompt',
       worktreeDirectory: worktree,
-      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: "events", TEVU_SYNTH_RECORD: recordPath }),
+      environment: syntheticEnvironment({
+        TEVU_SYNTH_MODE: 'events',
+        TEVU_SYNTH_RECORD: recordPath,
+      }),
       timeoutMs: 10000,
       terminationGraceMs: 250,
       cancellation: new AbortController().signal,
@@ -1115,8 +1236,10 @@ describe("OpenCode adapter over a synthetic executable", () => {
       onDiagnostic: async () => ({ ok: true, value: undefined }),
     });
 
-    const recorded = JSON.parse(await readFile(recordPath, "utf8")) as { env: Record<string, string> };
-    expect(recorded.env["TEVU_PARENT_SENTINEL"]).toBeUndefined();
+    const recorded = JSON.parse(await readFile(recordPath, 'utf8')) as {
+      env: Record<string, string>;
+    };
+    expect(recorded.env['TEVU_PARENT_SENTINEL']).toBeUndefined();
     expect(existsSync(recordPath)).toBe(true);
   });
 });
@@ -1129,14 +1252,14 @@ function buildFakeRunner(stdout: string): ManagedProcessRunner {
       launched: true,
       exitCode: 0,
       signal: null,
-      startedAt: "2026-01-01T00:00:00.000Z",
-      endedAt: "2026-01-01T00:00:01.000Z",
+      startedAt: '2026-01-01T00:00:00.000Z',
+      endedAt: '2026-01-01T00:00:01.000Z',
       durationMs: 1000,
       timedOut: false,
       cancelled: false,
-      terminationStage: "none",
+      terminationStage: 'none',
       stdout: { text: stdout, totalBytes: stdout.length, truncated: false },
-      stderr: { text: "", totalBytes: 0, truncated: false },
+      stderr: { text: '', totalBytes: 0, truncated: false },
     };
     return completion;
   };
@@ -1145,31 +1268,31 @@ function buildFakeRunner(stdout: string): ManagedProcessRunner {
 function buildBareEnvironment(): IsolatedEnvironment {
   return {
     caseId: CASE_ID,
-    recipient: "agent",
-    homeDirectory: "/synthetic/home",
-    temporaryDirectory: "/synthetic/tmp",
+    recipient: 'agent',
+    homeDirectory: '/synthetic/home',
+    temporaryDirectory: '/synthetic/tmp',
     variables: {},
     variableManifest: [],
   };
 }
 
-describe("OpenCode adapter delivery stopping over an injected fake process", () => {
-  it("stops delivering further records after a failed onEvent delivery and reports no protocol failure", async () => {
+describe('OpenCode adapter delivery stopping over an injected fake process', () => {
+  it('stops delivering further records after a failed onEvent delivery and reports no protocol failure', async () => {
     const events = [
-      { type: "error", timestamp: 1, sessionID: SYNTHETIC_SESSION, error: "boom-one" },
-      { type: "error", timestamp: 2, sessionID: SYNTHETIC_SESSION, error: "boom-two" },
+      { type: 'error', timestamp: 1, sessionID: SYNTHETIC_SESSION, error: 'boom-one' },
+      { type: 'error', timestamp: 2, sessionID: SYNTHETIC_SESSION, error: 'boom-two' },
     ];
-    const stdout = events.map((event) => JSON.stringify(event)).join("\n") + "\n";
+    const stdout = events.map((event) => JSON.stringify(event)).join('\n') + '\n';
     const delivered: unknown[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: "fake-opencode" },
+      { agent: 'opencode', executable: 'fake-opencode' },
       buildDependencies({ runProcess: buildFakeRunner(stdout) }),
     );
 
     const outcome = await adapter.run({
       identity: IDENTITY,
-      prompt: "synthetic benchmark prompt",
-      worktreeDirectory: "/synthetic/worktree",
+      prompt: 'synthetic benchmark prompt',
+      worktreeDirectory: '/synthetic/worktree',
       environment: buildBareEnvironment(),
       timeoutMs: 10000,
       terminationGraceMs: 250,
@@ -1178,7 +1301,7 @@ describe("OpenCode adapter delivery stopping over an injected fake process", () 
         delivered.push(event);
         return {
           ok: false,
-          error: { kind: "ArtifactError", operation: "append-event", reason: "disk full" },
+          error: { kind: 'ArtifactError', operation: 'append-event', reason: 'disk full' },
         };
       },
       onDiagnostic: async () => ({ ok: true, value: undefined }),
@@ -1198,22 +1321,25 @@ describe("OpenCode adapter delivery stopping over an injected fake process", () 
 // can never match it; a digit-only secret equal to a numeric field is
 // byte-replaced before parsing and corrupts the record framing. No real
 // OpenCode is involved.
-describe("credential-secret redaction on OpenCode stdout streams", () => {
-  it("removes an escape-serialized secret from decoded run-event string content", async () => {
-    const worktree = join(tempRoot, "worktree-secret-string");
+describe('credential-secret redaction on OpenCode stdout streams', () => {
+  it('removes an escape-serialized secret from decoded run-event string content', async () => {
+    const worktree = join(tempRoot, 'worktree-secret-string');
     await mkdir(worktree, { recursive: true });
     const QUOTED_SECRET = 'tevu"sec\\ret\nx';
     const delivered: unknown[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies({ secrets: buildSecretRedactor([QUOTED_SECRET]) }),
     );
 
     const outcome = await adapter.run({
       identity: IDENTITY,
-      prompt: "synthetic benchmark prompt",
+      prompt: 'synthetic benchmark prompt',
       worktreeDirectory: worktree,
-      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: "secret-string", TEVU_SYNTH_SECRET: QUOTED_SECRET }),
+      environment: syntheticEnvironment({
+        TEVU_SYNTH_MODE: 'secret-string',
+        TEVU_SYNTH_SECRET: QUOTED_SECRET,
+      }),
       timeoutMs: 10000,
       terminationGraceMs: 250,
       cancellation: new AbortController().signal,
@@ -1226,26 +1352,25 @@ describe("credential-secret redaction on OpenCode stdout streams", () => {
 
     expect(outcome.ok).toBe(true);
     const errorEvent = delivered[0] as { error?: { message?: unknown } };
-    const message = String((errorEvent.error as { message?: unknown })["message"]);
+    const message = String((errorEvent.error as { message?: unknown })['message']);
     expect(message).not.toContain(QUOTED_SECRET);
-    expect(message).toContain("[REDACTED]");
+    expect(message).toContain('[REDACTED]');
   });
 
-  it("leaves a digit-only secret appearing as a bare numeric field intact in run output", async () => {
-    const worktree = join(tempRoot, "worktree-secret-number");
+  it('leaves a digit-only secret appearing as a bare numeric field intact in run output', async () => {
+    const worktree = join(tempRoot, 'worktree-secret-number');
     await mkdir(worktree, { recursive: true });
     const delivered: unknown[] = [];
-    const diagnostics: string[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
-      buildDependencies({ secrets: buildSecretRedactor(["45"]) }),
+      { agent: 'opencode', executable: syntheticExecutable },
+      buildDependencies({ secrets: buildSecretRedactor(['45']) }),
     );
 
     const outcome = await adapter.run({
       identity: IDENTITY,
-      prompt: "synthetic benchmark prompt",
+      prompt: 'synthetic benchmark prompt',
       worktreeDirectory: worktree,
-      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: "secret-number" }),
+      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: 'secret-number' }),
       timeoutMs: 10000,
       terminationGraceMs: 250,
       cancellation: new AbortController().signal,
@@ -1260,38 +1385,44 @@ describe("credential-secret redaction on OpenCode stdout streams", () => {
     if (!outcome.ok) return;
     expect(outcome.value.parseFindings).toEqual([]);
     expect(delivered).toHaveLength(1);
-    expect((delivered[0] as { type: string }).type).toBe("error");
+    expect((delivered[0] as { type: string }).type).toBe('error');
     expect((delivered[0] as { timestamp: number }).timestamp).toBe(45);
   });
 
-  it("removes an escape-serialized secret from the decoded export content", async () => {
+  it('removes an escape-serialized secret from the decoded export content', async () => {
     const QUOTED_SECRET = 'tevu"sec\\ret\nx';
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies({ secrets: buildSecretRedactor([QUOTED_SECRET]) }),
     );
 
     const exported = await adapter.exportSession(
       SYNTHETIC_SESSION,
-      syntheticEnvironment({ TEVU_SYNTH_EXPORT: "secret-string", TEVU_SYNTH_SECRET: QUOTED_SECRET }),
+      syntheticEnvironment({
+        TEVU_SYNTH_EXPORT: 'secret-string',
+        TEVU_SYNTH_SECRET: QUOTED_SECRET,
+      }),
     );
 
     expect(exported.ok).toBe(true);
     if (!exported.ok) return;
     const exportRecord = exported.value as unknown as OpenCodeExport;
-    const note = (exportRecord.messages[0]?.info as Record<string, unknown>)["additiveNote"];
-    expect(typeof note).toBe("string");
+    const note = (exportRecord.messages[0]?.info as Record<string, unknown>)['additiveNote'];
+    expect(typeof note).toBe('string');
     expect(String(note)).not.toContain(QUOTED_SECRET);
-    expect(String(note)).toContain("[REDACTED]");
+    expect(String(note)).toContain('[REDACTED]');
   });
 
-  it("leaves a digit-only token metric intact in the exported root session", async () => {
+  it('leaves a digit-only token metric intact in the exported root session', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
-      buildDependencies({ secrets: buildSecretRedactor(["45"]) }),
+      { agent: 'opencode', executable: syntheticExecutable },
+      buildDependencies({ secrets: buildSecretRedactor(['45']) }),
     );
 
-    const exported = await adapter.exportSession(SYNTHETIC_SESSION, syntheticEnvironment({ TEVU_SYNTH_EXPORT: "secret-number" }));
+    const exported = await adapter.exportSession(
+      SYNTHETIC_SESSION,
+      syntheticEnvironment({ TEVU_SYNTH_EXPORT: 'secret-number' }),
+    );
 
     expect(exported.ok).toBe(true);
     if (!exported.ok) return;
@@ -1305,20 +1436,20 @@ describe("credential-secret redaction on OpenCode stdout streams", () => {
     expect(assistant.cost).toBe(0.5);
   });
 
-  it("withholds every record and returns a fixed protocol failure when redaction always fails", async () => {
-    const worktree = join(tempRoot, "worktree-redaction-fails");
+  it('withholds every record and returns a fixed protocol failure when redaction always fails', async () => {
+    const worktree = join(tempRoot, 'worktree-redaction-fails');
     await mkdir(worktree, { recursive: true });
     const delivered: unknown[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: "opencode", executable: syntheticExecutable },
+      { agent: 'opencode', executable: syntheticExecutable },
       buildDependencies({ secrets: buildAlwaysFailingSecretRedactor() }),
     );
 
     const outcome = await adapter.run({
       identity: IDENTITY,
-      prompt: "synthetic benchmark prompt",
+      prompt: 'synthetic benchmark prompt',
       worktreeDirectory: worktree,
-      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: "events" }),
+      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: 'events' }),
       timeoutMs: 10000,
       terminationGraceMs: 250,
       cancellation: new AbortController().signal,
@@ -1330,32 +1461,39 @@ describe("credential-secret redaction on OpenCode stdout streams", () => {
     });
 
     expect(outcome.ok).toBe(false);
-    if (outcome.ok || outcome.error.kind !== "AgentProtocolError") {
+    if (outcome.ok || outcome.error.kind !== 'AgentProtocolError') {
       throw new Error(`expected a protocol failure, got ${JSON.stringify(outcome)}`);
     }
-    expect(outcome.error.reason).toBe("record redaction failed; record withheld");
+    expect(outcome.error.reason).toBe('record redaction failed; record withheld');
     expect(delivered).toEqual([]);
 
-    const exported = await adapter.exportSession(SYNTHETIC_SESSION, syntheticEnvironment({ TEVU_SYNTH_EXPORT: "root" }));
+    const exported = await adapter.exportSession(
+      SYNTHETIC_SESSION,
+      syntheticEnvironment({ TEVU_SYNTH_EXPORT: 'root' }),
+    );
     expect(exported.ok).toBe(false);
-    if (exported.ok || exported.error.kind !== "AgentProtocolError") {
+    if (exported.ok || exported.error.kind !== 'AgentProtocolError') {
       throw new Error(`expected a protocol failure, got ${JSON.stringify(exported)}`);
     }
-    expect(exported.error.reason).toBe("record redaction failed; record withheld");
+    expect(exported.error.reason).toBe('record redaction failed; record withheld');
   });
 });
 
-describe("createSecretRedactor", () => {
-  it("returns ArtifactError instead of throwing for a circular value", () => {
+describe('createSecretRedactor', () => {
+  it('returns ArtifactError instead of throwing for a circular value', () => {
     const redactor = buildSecretRedactor([]);
     const circular: Record<string, unknown> = {};
-    circular["self"] = circular;
+    circular['self'] = circular;
 
     const result = redactor.redactValue(circular);
 
     expect(result).toEqual({
       ok: false,
-      error: { kind: "ArtifactError", operation: "redact-record", reason: "record redaction failed" },
+      error: {
+        kind: 'ArtifactError',
+        operation: 'redact-record',
+        reason: 'record redaction failed',
+      },
     });
   });
 });

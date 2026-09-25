@@ -13,13 +13,13 @@
  * unredacted output.
  */
 
-import { randomBytes } from "node:crypto";
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
+import { randomBytes } from 'node:crypto';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 
-import { readConfigText } from "../config/load.ts";
-import { describeCause } from "../domain/describe-cause.ts";
-import { redactDecodedValue } from "../domain/redaction.ts";
+import { readConfigText } from '@/config/load';
+import { describeCause } from '@/domain/describe-cause';
+import { redactDecodedValue } from '@/domain/redaction';
 
 import type {
   AgentEventRecord,
@@ -32,14 +32,14 @@ import type {
   ConfigStore,
   PatchArtifact,
   Redactor,
-  ReportResult,
   RepeatSetting,
+  ReportResult,
   RunManifest,
   RunResult,
   SetupPhase,
   TevuError,
   TevuResult,
-} from "../domain/types.ts";
+} from '@/domain/types';
 
 /** Construction inputs for the file-backed artifact store. */
 export type ArtifactStoreOptions = {
@@ -53,7 +53,7 @@ export type ConfigStoreOptions = {
 };
 
 /** Run-relative POSIX paths of every artifact one case owns. */
-export type CaseArtifactPaths = {
+type CaseArtifactPaths = {
   events: string;
   diagnostics: string;
   sessionExport: string;
@@ -69,35 +69,35 @@ const RUN_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,127}$/;
 const CASE_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}--[a-z][a-z0-9-]{0,63}--[1-9][0-9]{0,15}$/;
 
 const TERMINAL_LIFECYCLES = new Set<string>([
-  "completed",
-  "process-failed",
-  "timed-out",
-  "cancelled",
-  "infrastructure-failed",
+  'completed',
+  'process-failed',
+  'timed-out',
+  'cancelled',
+  'infrastructure-failed',
 ]);
 
 const CASE_FILE = {
-  events: "events.jsonl",
-  diagnostics: "stderr.log",
-  sessionExport: "session.json",
-  solutionPatch: "solution.patch",
-  checks: "checks.json",
-  assessment: "assessment.json",
-  result: "result.json",
-  setupBeforeAgent: "setup-before-agent.log",
-  setupBeforeChecks: "setup-before-checks.log",
+  events: 'events.jsonl',
+  diagnostics: 'stderr.log',
+  sessionExport: 'session.json',
+  solutionPatch: 'solution.patch',
+  checks: 'checks.json',
+  assessment: 'assessment.json',
+  result: 'result.json',
+  setupBeforeAgent: 'setup-before-agent.log',
+  setupBeforeChecks: 'setup-before-checks.log',
 } as const;
 
-const RUN_MANIFEST_FILE = "run.json";
-const REPORT_FILE = "report.md";
-const CASES_DIRECTORY = "cases";
-const ASSESSMENT_LOCK_DIRECTORY = "assessment.lock";
+const RUN_MANIFEST_FILE = 'run.json';
+const REPORT_FILE = 'report.md';
+const CASES_DIRECTORY = 'cases';
+const ASSESSMENT_LOCK_DIRECTORY = 'assessment.lock';
 
 /**
  * Returns the run-relative POSIX paths of every artifact the given case owns,
  * so orchestration builds its `ArtifactIndex` with the exact store layout.
  */
-export function caseArtifactPaths(caseId: string): CaseArtifactPaths {
+function caseArtifactPaths(caseId: string): CaseArtifactPaths {
   const base = path.posix.join(CASES_DIRECTORY, caseId);
   return {
     events: path.posix.join(base, CASE_FILE.events),
@@ -125,21 +125,21 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
         await fs.access(path.resolve(configPath));
         return true;
       } catch (cause) {
-        return systemErrorCode(cause) !== "ENOENT";
+        return systemErrorCode(cause) !== 'ENOENT';
       }
     },
-    async requireDirectory(configPath: string): Promise<TevuResult<void, "PrerequisiteError">> {
+    async requireDirectory(configPath: string): Promise<TevuResult<void, 'PrerequisiteError'>> {
       const directory = path.dirname(path.resolve(configPath));
       try {
         await fs.access(directory);
       } catch (cause) {
-        if (systemErrorCode(cause) === "ENOENT") {
+        if (systemErrorCode(cause) === 'ENOENT') {
           return {
             ok: false,
             error: {
-              kind: "PrerequisiteError",
-              tool: "configuration directory",
-              expected: "an existing directory",
+              kind: 'PrerequisiteError',
+              tool: 'configuration directory',
+              expected: 'an existing directory',
               actual: `${directory} does not exist`,
             },
           };
@@ -150,18 +150,24 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
     readText(configPath: string) {
       return readConfigText(configPath);
     },
-    async replaceText(configPath: string, text: string): Promise<TevuResult<void, "ArtifactError">> {
-      const operation = "replace-configuration";
+    async replaceText(
+      configPath: string,
+      text: string,
+    ): Promise<TevuResult<void, 'ArtifactError'>> {
+      const operation = 'replace-configuration';
       let redactedText: string;
       try {
         redactedText = options.redact(text);
       } catch (cause) {
-        return artifactFailure(operation, `redaction failed; write aborted: ${describeCause(cause)}`);
+        return artifactFailure(
+          operation,
+          `redaction failed; write aborted: ${describeCause(cause)}`,
+        );
       }
       if (redactedText !== text) {
         return artifactFailure(
           operation,
-          "configuration text contains the value of a secret variable; write aborted",
+          'configuration text contains the value of a secret variable; write aborted',
         );
       }
       const resolvedPath = path.resolve(configPath);
@@ -188,16 +194,18 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
  * temporary file keeps its default mode under the process umask. Any other
  * `stat` failure aborts the write with no mode resolved.
  */
-async function replacedFileMode(resolvedPath: string): Promise<TevuResult<number | undefined, "ArtifactError">> {
+async function replacedFileMode(
+  resolvedPath: string,
+): Promise<TevuResult<number | undefined, 'ArtifactError'>> {
   try {
     const stats = await fs.stat(resolvedPath);
     return { ok: true, value: stats.mode & 0o777 };
   } catch (cause) {
-    if (systemErrorCode(cause) === "ENOENT") {
+    if (systemErrorCode(cause) === 'ENOENT') {
       return { ok: true, value: undefined };
     }
     return artifactFailure(
-      "replace-configuration",
+      'replace-configuration',
       `cannot read the permissions of the configuration file: ${describeCause(cause)}`,
     );
   }
@@ -228,8 +236,8 @@ class FileArtifactStore implements ArtifactStore {
     return caseArtifactPaths(caseId);
   }
 
-  async startRun(manifest: RunManifest): Promise<TevuResult<void, "ArtifactError">> {
-    const operation = "start-run";
+  async startRun(manifest: RunManifest): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'start-run';
     const invalid = describeManifestDefect(manifest);
     if (invalid !== null) {
       return artifactFailure(operation, invalid);
@@ -252,7 +260,7 @@ class FileArtifactStore implements ArtifactStore {
     try {
       await fs.mkdir(runDirectory);
     } catch (cause) {
-      if (systemErrorCode(cause) === "EEXIST") {
+      if (systemErrorCode(cause) === 'EEXIST') {
         return artifactFailure(
           operation,
           `run directory already exists for run ID "${manifest.runId}"; run ID collision rejected`,
@@ -299,8 +307,8 @@ class FileArtifactStore implements ArtifactStore {
   async appendEvent(
     caseId: string,
     event: AgentEventRecord,
-  ): Promise<TevuResult<void, "ArtifactError">> {
-    const operation = "append-event";
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'append-event';
     const active = this.requireActiveCase(operation, caseId);
     if (!active.ok) {
       return active;
@@ -321,10 +329,10 @@ class FileArtifactStore implements ArtifactStore {
       return redacted;
     }
     const line = JSON.stringify(redacted.value);
-    if (line.includes("\n") || line.includes("\r")) {
+    if (line.includes('\n') || line.includes('\r')) {
       return artifactFailure(
         operation,
-        "redaction produced a multi-line event record; JSONL framing write aborted",
+        'redaction produced a multi-line event record; JSONL framing write aborted',
       );
     }
     return this.queueAppend(
@@ -337,8 +345,8 @@ class FileArtifactStore implements ArtifactStore {
   async appendDiagnostic(
     caseId: string,
     diagnosticLine: string,
-  ): Promise<TevuResult<void, "ArtifactError">> {
-    const operation = "append-diagnostic";
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'append-diagnostic';
     const active = this.requireActiveCase(operation, caseId);
     if (!active.ok) {
       return active;
@@ -357,20 +365,25 @@ class FileArtifactStore implements ArtifactStore {
   async writeSessionExport(
     caseId: string,
     sessionExport: AgentSessionExport,
-  ): Promise<TevuResult<void, "ArtifactError">> {
-    const operation = "write-session-export";
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'write-session-export';
     const active = this.requireActiveCase(operation, caseId);
     if (!active.ok) {
       return active;
     }
-    return this.writeJsonSink(operation, active.value.directory, CASE_FILE.sessionExport, sessionExport);
+    return this.writeJsonSink(
+      operation,
+      active.value.directory,
+      CASE_FILE.sessionExport,
+      sessionExport,
+    );
   }
 
   async writePatch(
     caseId: string,
     patch: PatchArtifact,
-  ): Promise<TevuResult<void, "ArtifactError">> {
-    const operation = "write-patch";
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'write-patch';
     const active = this.requireActiveCase(operation, caseId);
     if (!active.ok) {
       return active;
@@ -396,8 +409,8 @@ class FileArtifactStore implements ArtifactStore {
     caseId: string,
     phase: SetupPhase,
     text: string,
-  ): Promise<TevuResult<void, "ArtifactError">> {
-    const operation = "write-setup-log";
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'write-setup-log';
     const active = this.requireActiveCase(operation, caseId);
     if (!active.ok) {
       return active;
@@ -406,15 +419,20 @@ class FileArtifactStore implements ArtifactStore {
     if (!redacted.ok) {
       return redacted;
     }
-    const fileName = phase === "before_agent" ? CASE_FILE.setupBeforeAgent : CASE_FILE.setupBeforeChecks;
-    return this.writeTextFile(operation, path.join(active.value.directory, fileName), redacted.value);
+    const fileName =
+      phase === 'before_agent' ? CASE_FILE.setupBeforeAgent : CASE_FILE.setupBeforeChecks;
+    return this.writeTextFile(
+      operation,
+      path.join(active.value.directory, fileName),
+      redacted.value,
+    );
   }
 
   async writeChecks(
     caseId: string,
     checks: CheckResult[],
-  ): Promise<TevuResult<void, "ArtifactError">> {
-    const operation = "write-checks";
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'write-checks';
     const active = this.requireActiveCase(operation, caseId);
     if (!active.ok) {
       return active;
@@ -428,14 +446,14 @@ class FileArtifactStore implements ArtifactStore {
     return this.writeJsonSink(operation, active.value.directory, CASE_FILE.checks, artifact);
   }
 
-  async finalizeCase(result: CaseResult): Promise<TevuResult<void, "ArtifactError">> {
-    const operation = "finalize-case";
+  async finalizeCase(result: CaseResult): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'finalize-case';
     const active = this.requireActiveCase(operation, result.identity.caseId);
     if (!active.ok) {
       return active;
     }
     if (result.schemaVersion !== 1) {
-      return artifactFailure(operation, "case result schemaVersion must be 1");
+      return artifactFailure(operation, 'case result schemaVersion must be 1');
     }
     if (!TERMINAL_LIFECYCLES.has(result.lifecycle)) {
       return artifactFailure(
@@ -449,10 +467,10 @@ class FileArtifactStore implements ArtifactStore {
   async replaceCaseResult(
     runId: string,
     result: CaseResult,
-  ): Promise<TevuResult<void, "ArtifactError">> {
-    const operation = "replace-case-result";
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'replace-case-result';
     if (result.schemaVersion !== 1) {
-      return artifactFailure(operation, "case result schemaVersion must be 1");
+      return artifactFailure(operation, 'case result schemaVersion must be 1');
     }
     if (!TERMINAL_LIFECYCLES.has(result.lifecycle)) {
       return artifactFailure(
@@ -474,10 +492,10 @@ class FileArtifactStore implements ArtifactStore {
     return this.writeJsonSink(operation, caseDirectory.value, CASE_FILE.result, result);
   }
 
-  async finalizeRun(result: RunResult): Promise<TevuResult<void, "ArtifactError">> {
-    const operation = "finalize-run";
+  async finalizeRun(result: RunResult): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'finalize-run';
     if (result.schemaVersion !== 1 || result.manifest.schemaVersion !== 1) {
-      return artifactFailure(operation, "run result schemaVersion must be 1");
+      return artifactFailure(operation, 'run result schemaVersion must be 1');
     }
     const runId = result.manifest.runId;
     if (!RUN_ID_PATTERN.test(runId)) {
@@ -516,8 +534,8 @@ class FileArtifactStore implements ArtifactStore {
   async writeReport(
     runId: string,
     report: ReportResult,
-  ): Promise<TevuResult<void, "ArtifactError">> {
-    const operation = "write-report";
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'write-report';
     const runDirectory = this.resolveRunDirectory(operation, runId);
     if (!runDirectory.ok) {
       return runDirectory;
@@ -556,7 +574,9 @@ class FileArtifactStore implements ArtifactStore {
       return normalizedSerialized;
     }
     const written = await this.writeTextFile(
-      operation, path.join(runDirectory.value, "result.json"), normalizedSerialized.value,
+      operation,
+      path.join(runDirectory.value, 'result.json'),
+      normalizedSerialized.value,
     );
     if (!written.ok) {
       return written;
@@ -568,8 +588,8 @@ class FileArtifactStore implements ArtifactStore {
     );
   }
 
-  async readRunManifest(runId: string): Promise<TevuResult<RunManifest, "ArtifactError">> {
-    const operation = "read-run-manifest";
+  async readRunManifest(runId: string): Promise<TevuResult<RunManifest, 'ArtifactError'>> {
+    const operation = 'read-run-manifest';
     const runDirectory = this.resolveRunDirectory(operation, runId);
     if (!runDirectory.ok) {
       return runDirectory;
@@ -583,7 +603,7 @@ class FileArtifactStore implements ArtifactStore {
       return artifactFailure(operation, `run record for "${runId}" is not a JSON object`);
     }
     // After finalization run.json holds the full RunResult; before it, the manifest.
-    const manifest = "manifest" in value ? value["manifest"] : value;
+    const manifest = 'manifest' in value ? value['manifest'] : value;
     const defect = describeStoredManifestDefect(manifest, runId);
     if (defect !== null) {
       return artifactFailure(operation, defect);
@@ -591,8 +611,8 @@ class FileArtifactStore implements ArtifactStore {
     return { ok: true, value: manifest as RunManifest };
   }
 
-  async readRunResult(runId: string): Promise<TevuResult<RunResult, "ArtifactError">> {
-    const operation = "read-run-result";
+  async readRunResult(runId: string): Promise<TevuResult<RunResult, 'ArtifactError'>> {
+    const operation = 'read-run-result';
     const runDirectory = this.resolveRunDirectory(operation, runId);
     if (!runDirectory.ok) {
       return runDirectory;
@@ -605,16 +625,20 @@ class FileArtifactStore implements ArtifactStore {
     if (!isRecord(value)) {
       return artifactFailure(operation, `run record for "${runId}" is not a JSON object`);
     }
-    if (!("manifest" in value)) {
+    if (!('manifest' in value)) {
       return artifactFailure(
         operation,
         `run "${runId}" holds only a manifest; the run was never finalized`,
       );
     }
-    if (value["schemaVersion"] !== 1 || !Array.isArray(value["cases"]) || typeof value["exitCode"] !== "number") {
+    if (
+      value['schemaVersion'] !== 1 ||
+      !Array.isArray(value['cases']) ||
+      typeof value['exitCode'] !== 'number'
+    ) {
       return artifactFailure(operation, `run result for "${runId}" has a malformed shape`);
     }
-    const defect = describeStoredManifestDefect(value["manifest"], runId);
+    const defect = describeStoredManifestDefect(value['manifest'], runId);
     if (defect !== null) {
       return artifactFailure(operation, defect);
     }
@@ -624,8 +648,8 @@ class FileArtifactStore implements ArtifactStore {
   async readCaseResult(
     runId: string,
     caseId: string,
-  ): Promise<TevuResult<CaseResult, "ArtifactError">> {
-    const operation = "read-case-result";
+  ): Promise<TevuResult<CaseResult, 'ArtifactError'>> {
+    const operation = 'read-case-result';
     const caseDirectory = this.resolveCaseDirectory(operation, runId, caseId);
     if (!caseDirectory.ok) {
       return caseDirectory;
@@ -637,12 +661,12 @@ class FileArtifactStore implements ArtifactStore {
     const value = parsed.value;
     if (
       !isRecord(value) ||
-      value["schemaVersion"] !== 1 ||
-      !isRecord(value["identity"]) ||
-      value["identity"]["caseId"] !== caseId ||
-      !isNonEmptyString(value["identity"]["agent"]) ||
-      !isPositiveSafeInteger(value["identity"]["attempt"]) ||
-      !isRecord(value["artifacts"])
+      value['schemaVersion'] !== 1 ||
+      !isRecord(value['identity']) ||
+      value['identity']['caseId'] !== caseId ||
+      !isNonEmptyString(value['identity']['agent']) ||
+      !isPositiveSafeInteger(value['identity']['attempt']) ||
+      !isRecord(value['artifacts'])
     ) {
       return artifactFailure(
         operation,
@@ -655,8 +679,8 @@ class FileArtifactStore implements ArtifactStore {
   async readEvents(
     runId: string,
     caseId: string,
-  ): Promise<TevuResult<AgentEventRecord[], "ArtifactError">> {
-    const operation = "read-events";
+  ): Promise<TevuResult<AgentEventRecord[], 'ArtifactError'>> {
+    const operation = 'read-events';
     const caseDirectory = this.resolveCaseDirectory(operation, runId, caseId);
     if (!caseDirectory.ok) {
       return caseDirectory;
@@ -664,25 +688,31 @@ class FileArtifactStore implements ArtifactStore {
     const filePath = path.join(caseDirectory.value, CASE_FILE.events);
     let text: string;
     try {
-      text = await fs.readFile(filePath, "utf8");
+      text = await fs.readFile(filePath, 'utf8');
     } catch (cause) {
-      if (systemErrorCode(cause) === "ENOENT") {
-        return artifactFailure(operation, `events artifact is missing for case "${caseId}" in run "${runId}"`);
+      if (systemErrorCode(cause) === 'ENOENT') {
+        return artifactFailure(
+          operation,
+          `events artifact is missing for case "${caseId}" in run "${runId}"`,
+        );
       }
       return artifactFailure(operation, `cannot read events artifact: ${describeCause(cause)}`);
     }
     const events: AgentEventRecord[] = [];
-    const lines = text.split("\n");
+    const lines = text.split('\n');
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
-      if (line === undefined || line === "") {
+      if (line === undefined || line === '') {
         continue;
       }
       let value: unknown;
       try {
         value = JSON.parse(line);
       } catch {
-        return artifactFailure(operation, `stored event line ${index + 1} is not one valid JSON value`);
+        return artifactFailure(
+          operation,
+          `stored event line ${index + 1} is not one valid JSON value`,
+        );
       }
       events.push(value);
     }
@@ -692,8 +722,8 @@ class FileArtifactStore implements ArtifactStore {
   async readSessionExport(
     runId: string,
     caseId: string,
-  ): Promise<TevuResult<AgentSessionExport | null, "ArtifactError">> {
-    const operation = "read-session-export";
+  ): Promise<TevuResult<AgentSessionExport | null, 'ArtifactError'>> {
+    const operation = 'read-session-export';
     const caseDirectory = this.resolveCaseDirectory(operation, runId, caseId);
     if (!caseDirectory.ok) {
       return caseDirectory;
@@ -701,9 +731,9 @@ class FileArtifactStore implements ArtifactStore {
     const filePath = path.join(caseDirectory.value, CASE_FILE.sessionExport);
     let text: string;
     try {
-      text = await fs.readFile(filePath, "utf8");
+      text = await fs.readFile(filePath, 'utf8');
     } catch (cause) {
-      if (systemErrorCode(cause) !== "ENOENT") {
+      if (systemErrorCode(cause) !== 'ENOENT') {
         return artifactFailure(operation, `cannot read session export: ${describeCause(cause)}`);
       }
       // Absent is legitimate only when the finalized case explicitly recorded
@@ -727,10 +757,10 @@ class FileArtifactStore implements ArtifactStore {
     try {
       value = JSON.parse(text);
     } catch {
-      return artifactFailure(operation, "stored session export is not valid JSON");
+      return artifactFailure(operation, 'stored session export is not valid JSON');
     }
     if (!isRecord(value)) {
-      return artifactFailure(operation, "stored session export is not a JSON object");
+      return artifactFailure(operation, 'stored session export is not a JSON object');
     }
     return { ok: true, value };
   }
@@ -738,8 +768,8 @@ class FileArtifactStore implements ArtifactStore {
   async readChecks(
     runId: string,
     caseId: string,
-  ): Promise<TevuResult<CheckResult[], "ArtifactError">> {
-    const operation = "read-checks";
+  ): Promise<TevuResult<CheckResult[], 'ArtifactError'>> {
+    const operation = 'read-checks';
     const caseDirectory = this.resolveCaseDirectory(operation, runId, caseId);
     if (!caseDirectory.ok) {
       return caseDirectory;
@@ -751,24 +781,24 @@ class FileArtifactStore implements ArtifactStore {
     const value = parsed.value;
     if (
       !isRecord(value) ||
-      value["schemaVersion"] !== 1 ||
-      value["caseId"] !== caseId ||
-      !Array.isArray(value["checks"]) ||
-      !value["checks"].every((check) => isRecord(check) && isNonEmptyString(check["checkId"]))
+      value['schemaVersion'] !== 1 ||
+      value['caseId'] !== caseId ||
+      !Array.isArray(value['checks']) ||
+      !value['checks'].every((check) => isRecord(check) && isNonEmptyString(check['checkId']))
     ) {
       return artifactFailure(
         operation,
         `checks artifact for "${caseId}" in run "${runId}" has a malformed shape`,
       );
     }
-    return { ok: true, value: value["checks"] as CheckResult[] };
+    return { ok: true, value: value['checks'] as CheckResult[] };
   }
 
   async readAssessment(
     runId: string,
     caseId: string,
-  ): Promise<TevuResult<AssessmentArtifact | null, "ArtifactError">> {
-    const operation = "read-assessment";
+  ): Promise<TevuResult<AssessmentArtifact | null, 'ArtifactError'>> {
+    const operation = 'read-assessment';
     const caseDirectory = this.resolveCaseDirectory(operation, runId, caseId);
     if (!caseDirectory.ok) {
       return caseDirectory;
@@ -776,9 +806,9 @@ class FileArtifactStore implements ArtifactStore {
     const filePath = path.join(caseDirectory.value, CASE_FILE.assessment);
     let text: string;
     try {
-      text = await fs.readFile(filePath, "utf8");
+      text = await fs.readFile(filePath, 'utf8');
     } catch (cause) {
-      if (systemErrorCode(cause) === "ENOENT") {
+      if (systemErrorCode(cause) === 'ENOENT') {
         // A case is legitimately unassessed until the first `tevu assess`.
         return { ok: true, value: null };
       }
@@ -800,8 +830,8 @@ class FileArtifactStore implements ArtifactStore {
   async acquireAssessmentLock(
     runId: string,
     caseId: string,
-  ): Promise<TevuResult<AssessmentLock, "AssessmentConflictError" | "ArtifactError">> {
-    const operation = "acquire-assessment-lock";
+  ): Promise<TevuResult<AssessmentLock, 'AssessmentConflictError' | 'ArtifactError'>> {
+    const operation = 'acquire-assessment-lock';
     const caseDirectory = this.resolveCaseDirectory(operation, runId, caseId);
     if (!caseDirectory.ok) {
       return caseDirectory;
@@ -814,11 +844,11 @@ class FileArtifactStore implements ArtifactStore {
     try {
       await fs.mkdir(lockPath);
     } catch (cause) {
-      if (systemErrorCode(cause) === "EEXIST") {
+      if (systemErrorCode(cause) === 'EEXIST') {
         return {
           ok: false,
           error: {
-            kind: "AssessmentConflictError",
+            kind: 'AssessmentConflictError',
             runId,
             caseId,
             reason: `assessment lock already exists at "${lockPath}"; another assess may be running, or the lock is stale and must be removed by the operator`,
@@ -833,15 +863,18 @@ class FileArtifactStore implements ArtifactStore {
       value: {
         runId,
         caseId,
-        release: async (): Promise<TevuResult<void, "ArtifactError">> => {
+        release: async (): Promise<TevuResult<void, 'ArtifactError'>> => {
           if (released) {
-            return artifactFailure("release-assessment-lock", "assessment lock was already released");
+            return artifactFailure(
+              'release-assessment-lock',
+              'assessment lock was already released',
+            );
           }
           try {
             await fs.rmdir(lockPath);
           } catch (cause) {
             return artifactFailure(
-              "release-assessment-lock",
+              'release-assessment-lock',
               `cannot remove assessment lock "${lockPath}": ${describeCause(cause)}`,
             );
           }
@@ -852,8 +885,10 @@ class FileArtifactStore implements ArtifactStore {
     };
   }
 
-  async replaceAssessment(artifact: AssessmentArtifact): Promise<TevuResult<void, "ArtifactError">> {
-    const operation = "replace-assessment";
+  async replaceAssessment(
+    artifact: AssessmentArtifact,
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'replace-assessment';
     const defect = describeAssessmentDefect(artifact, artifact.runId, artifact.caseId);
     if (defect !== null) {
       return artifactFailure(operation, defect);
@@ -875,9 +910,9 @@ class FileArtifactStore implements ArtifactStore {
   private requireActiveCase(
     operation: string,
     caseId: string,
-  ): TevuResult<{ runId: string; directory: string }, "ArtifactError"> {
+  ): TevuResult<{ runId: string; directory: string }, 'ArtifactError'> {
     if (this.activeRun === null) {
-      return artifactFailure(operation, "no run is active; startRun must succeed first");
+      return artifactFailure(operation, 'no run is active; startRun must succeed first');
     }
     const directory = this.activeRun.caseDirectories.get(caseId);
     if (directory === undefined) {
@@ -892,7 +927,7 @@ class FileArtifactStore implements ArtifactStore {
   private resolveRunDirectory(
     operation: string,
     runId: string,
-  ): TevuResult<string, "ArtifactError"> {
+  ): TevuResult<string, 'ArtifactError'> {
     if (!RUN_ID_PATTERN.test(runId)) {
       return artifactFailure(operation, `run ID "${runId}" is not a valid identifier`);
     }
@@ -903,7 +938,7 @@ class FileArtifactStore implements ArtifactStore {
     operation: string,
     runId: string,
     caseId: string,
-  ): TevuResult<string, "ArtifactError"> {
+  ): TevuResult<string, 'ArtifactError'> {
     const runDirectory = this.resolveRunDirectory(operation, runId);
     if (!runDirectory.ok) {
       return runDirectory;
@@ -919,7 +954,7 @@ class FileArtifactStore implements ArtifactStore {
     directory: string,
     fileName: string,
     value: unknown,
-  ): Promise<TevuResult<void, "ArtifactError">> {
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
     const redacted = redactValueForSink(this.redact, operation, value);
     if (!redacted.ok) {
       return redacted;
@@ -935,7 +970,7 @@ class FileArtifactStore implements ArtifactStore {
     operation: string,
     filePath: string,
     content: string,
-  ): Promise<TevuResult<void, "ArtifactError">> {
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
     try {
       await atomicReplaceFile(filePath, content);
     } catch (cause) {
@@ -951,13 +986,12 @@ class FileArtifactStore implements ArtifactStore {
     filePath: string,
     content: string,
     operation: string,
-  ): Promise<TevuResult<void, "ArtifactError">> {
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
     const task = this.manifestChain.then(() => atomicReplaceFile(filePath, content));
     this.manifestChain = task.catch(() => undefined);
     return task.then(
       () => okVoid(),
-      (cause) =>
-        artifactFailure(operation, `cannot write run manifest: ${describeCause(cause)}`),
+      (cause) => artifactFailure(operation, `cannot write run manifest: ${describeCause(cause)}`),
     );
   }
 
@@ -965,10 +999,13 @@ class FileArtifactStore implements ArtifactStore {
     filePath: string,
     text: string,
     operation: string,
-  ): Promise<TevuResult<void, "ArtifactError">> {
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
     const previous = this.appendChains.get(filePath) ?? Promise.resolve();
-    const task = previous.then(() => fs.appendFile(filePath, text, "utf8"));
-    this.appendChains.set(filePath, task.catch(() => undefined));
+    const task = previous.then(() => fs.appendFile(filePath, text, 'utf8'));
+    this.appendChains.set(
+      filePath,
+      task.catch(() => undefined),
+    );
     return task.then(
       () => okVoid(),
       (cause) =>
@@ -984,37 +1021,37 @@ function okVoid(): { ok: true; value: void } {
 function artifactFailure(
   operation: string,
   reason: string,
-): { ok: false; error: Extract<TevuError, { kind: "ArtifactError" }> } {
-  return { ok: false, error: { kind: "ArtifactError", operation, reason } };
+): { ok: false; error: Extract<TevuError, { kind: 'ArtifactError' }> } {
+  return { ok: false, error: { kind: 'ArtifactError', operation, reason } };
 }
 
 function systemErrorCode(cause: unknown): string | null {
-  if (isRecord(cause) && typeof cause["code"] === "string") {
-    return cause["code"];
+  if (isRecord(cause) && typeof cause['code'] === 'string') {
+    return cause['code'];
   }
   return null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
+  return typeof value === 'string' && value.length > 0;
 }
 
 function serializeJsonForSink(
   operation: string,
   value: unknown,
-): TevuResult<string, "ArtifactError"> {
+): TevuResult<string, 'ArtifactError'> {
   let serialized: string;
   try {
     serialized = JSON.stringify(value, null, 2);
   } catch (cause) {
     return artifactFailure(operation, `cannot serialize artifact JSON: ${describeCause(cause)}`);
   }
-  if (typeof serialized !== "string") {
-    return artifactFailure(operation, "artifact serialized to no JSON value");
+  if (typeof serialized !== 'string') {
+    return artifactFailure(operation, 'artifact serialized to no JSON value');
   }
   return { ok: true, value: `${serialized}\n` };
 }
@@ -1023,7 +1060,7 @@ function redactForSink(
   redact: Redactor,
   operation: string,
   text: string,
-): TevuResult<string, "ArtifactError"> {
+): TevuResult<string, 'ArtifactError'> {
   let redacted: string;
   try {
     redacted = redact(text);
@@ -1031,8 +1068,8 @@ function redactForSink(
     return artifactFailure(operation, `redaction failed; write aborted: ${describeCause(cause)}`);
   }
   // The redactor is injected; a non-string result must fail closed, never sink raw text.
-  if (typeof (redacted as unknown) !== "string") {
-    return artifactFailure(operation, "redaction returned no text; write aborted");
+  if (typeof (redacted as unknown) !== 'string') {
+    return artifactFailure(operation, 'redaction returned no text; write aborted');
   }
   return { ok: true, value: redacted };
 }
@@ -1041,7 +1078,7 @@ function redactValueForSink(
   redact: Redactor,
   operation: string,
   value: unknown,
-): TevuResult<unknown, "ArtifactError"> {
+): TevuResult<unknown, 'ArtifactError'> {
   const result = redactDecodedValue(redact, value);
   if (result.ok) {
     return { ok: true, value: result.value };
@@ -1052,12 +1089,12 @@ function redactValueForSink(
 async function readJsonFile(
   operation: string,
   filePath: string,
-): Promise<TevuResult<unknown, "ArtifactError">> {
+): Promise<TevuResult<unknown, 'ArtifactError'>> {
   let text: string;
   try {
-    text = await fs.readFile(filePath, "utf8");
+    text = await fs.readFile(filePath, 'utf8');
   } catch (cause) {
-    if (systemErrorCode(cause) === "ENOENT") {
+    if (systemErrorCode(cause) === 'ENOENT') {
       return artifactFailure(operation, `artifact "${filePath}" is missing`);
     }
     return artifactFailure(operation, `cannot read "${filePath}": ${describeCause(cause)}`);
@@ -1085,15 +1122,19 @@ async function directoryExists(directory: string): Promise<boolean> {
  * @param mode - Permission bits for the temporary (and so the final) file;
  * defaults to `0o644` under the process umask for a brand-new target (E4).
  */
-async function atomicReplaceFile(filePath: string, content: string, preservedMode?: number): Promise<void> {
-  const tempPath = `${filePath}.${randomBytes(6).toString("hex")}.tmp`;
-  const handle = await fs.open(tempPath, "wx", preservedMode ?? 0o644);
+async function atomicReplaceFile(
+  filePath: string,
+  content: string,
+  preservedMode?: number,
+): Promise<void> {
+  const tempPath = `${filePath}.${randomBytes(6).toString('hex')}.tmp`;
+  const handle = await fs.open(tempPath, 'wx', preservedMode ?? 0o644);
   try {
     // The open mode is filtered by the umask, so a preserved mode needs an explicit chmod.
     if (preservedMode !== undefined) {
       await handle.chmod(preservedMode);
     }
-    await handle.writeFile(content, "utf8");
+    await handle.writeFile(content, 'utf8');
     await handle.sync();
   } finally {
     await handle.close();
@@ -1115,14 +1156,14 @@ function isPositiveSafeInteger(value: unknown): value is number {
 function isRepeatSetting(value: unknown): value is RepeatSetting {
   return (
     isRecord(value) &&
-    isPositiveSafeInteger(value["value"]) &&
-    (value["source"] === "config" || value["source"] === "cli")
+    isPositiveSafeInteger(value['value']) &&
+    (value['source'] === 'config' || value['source'] === 'cli')
   );
 }
 
 function describeManifestDefect(manifest: RunManifest): string | null {
   if (manifest.schemaVersion !== 1) {
-    return "run manifest schemaVersion must be 1";
+    return 'run manifest schemaVersion must be 1';
   }
   if (!RUN_ID_PATTERN.test(manifest.runId)) {
     return `run ID "${manifest.runId}" is not a valid identifier`;
@@ -1152,13 +1193,13 @@ function describeManifestDefect(manifest: RunManifest): string | null {
 function describeStoredManifestDefect(manifest: unknown, runId: string): string | null {
   if (
     !isRecord(manifest) ||
-    manifest["schemaVersion"] !== 1 ||
-    manifest["runId"] !== runId ||
-    !Array.isArray(manifest["cases"]) ||
-    !isRecord(manifest["tools"]) ||
-    !isRecord(manifest["tools"]["agentVersions"]) ||
-    !isRecord(manifest["execution"]) ||
-    !isRepeatSetting(manifest["execution"]["repeat"])
+    manifest['schemaVersion'] !== 1 ||
+    manifest['runId'] !== runId ||
+    !Array.isArray(manifest['cases']) ||
+    !isRecord(manifest['tools']) ||
+    !isRecord(manifest['tools']['agentVersions']) ||
+    !isRecord(manifest['execution']) ||
+    !isRepeatSetting(manifest['execution']['repeat'])
   ) {
     return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
   }
@@ -1170,19 +1211,19 @@ function describeAssessmentDefect(value: unknown, runId: string, caseId: string)
     return `assessment artifact for "${caseId}" is not a JSON object`;
   }
   if (
-    value["schemaVersion"] !== 1 ||
-    value["runId"] !== runId ||
-    value["caseId"] !== caseId ||
-    !Number.isInteger(value["revision"]) ||
-    (value["revision"] as number) < 1 ||
-    !Array.isArray(value["current"]) ||
-    !Array.isArray(value["history"]) ||
-    !value["current"].every((record) => isRecord(record) && isNonEmptyString(record["checkId"])) ||
-    !value["history"].every(
+    value['schemaVersion'] !== 1 ||
+    value['runId'] !== runId ||
+    value['caseId'] !== caseId ||
+    !Number.isInteger(value['revision']) ||
+    (value['revision'] as number) < 1 ||
+    !Array.isArray(value['current']) ||
+    !Array.isArray(value['history']) ||
+    !value['current'].every((record) => isRecord(record) && isNonEmptyString(record['checkId'])) ||
+    !value['history'].every(
       (record) =>
         isRecord(record) &&
-        isNonEmptyString(record["checkId"]) &&
-        isNonEmptyString(record["replacedAt"]),
+        isNonEmptyString(record['checkId']) &&
+        isNonEmptyString(record['replacedAt']),
     )
   ) {
     return `assessment artifact for "${caseId}" in run "${runId}" has a malformed shape or mismatched identity`;

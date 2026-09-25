@@ -1,6 +1,12 @@
-import { unavailableBenchmarkMetrics, unavailableMetric } from "../domain/types.ts";
+import { unavailableBenchmarkMetrics, unavailableMetric } from '@/domain/types';
 
-import type { AgentMetrics, BenchmarkMetrics, MetricValue, TevuError, TevuResult } from "../domain/types.ts";
+import type {
+  AgentMetrics,
+  BenchmarkMetrics,
+  MetricValue,
+  TevuError,
+  TevuResult,
+} from '@/domain/types';
 
 /**
  * Reduces one agent's decoded metrics plus process timing into the complete,
@@ -15,8 +21,11 @@ import type { AgentMetrics, BenchmarkMetrics, MetricValue, TevuError, TevuResult
 export function combineCaseMetrics(input: {
   durationMs: number | null;
   elapsedUnavailableReason: string;
-  normalized: TevuResult<AgentMetrics, "AgentProtocolError">;
-}): { metrics: BenchmarkMetrics; protocolFailure: Extract<TevuError, { kind: "AgentProtocolError" }> | null } {
+  normalized: TevuResult<AgentMetrics, 'AgentProtocolError'>;
+}): {
+  metrics: BenchmarkMetrics;
+  protocolFailure: Extract<TevuError, { kind: 'AgentProtocolError' }> | null;
+} {
   const elapsed = measuredElapsed(input.durationMs, input.elapsedUnavailableReason);
   if (input.normalized.ok) {
     const value = input.normalized.value;
@@ -47,6 +56,11 @@ export function combineCaseMetrics(input: {
 
 function measuredElapsed(durationMs: number | null, reason: string): MetricValue {
   return durationMs !== null && Number.isFinite(durationMs)
-    ? { value: durationMs, unit: "millisecond", availability: { status: "available", source: "process" }, scope: "case" }
-    : unavailableMetric("millisecond", reason, "case");
+    ? {
+        value: durationMs,
+        unit: 'millisecond',
+        availability: { status: 'available', source: 'process' },
+        scope: 'case',
+      }
+    : unavailableMetric('millisecond', reason, 'case');
 }

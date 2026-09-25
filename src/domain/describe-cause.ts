@@ -13,6 +13,6 @@ export function describeCause(cause: unknown): string {
   try {
     return String(cause instanceof Error ? cause.message : cause);
   } catch {
-    return "thrown value cannot be converted to text";
+    return 'thrown value cannot be converted to text';
   }
 }

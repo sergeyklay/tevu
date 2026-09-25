@@ -7,17 +7,16 @@
  * or storage logic and imports no concrete adapter.
  */
 
-import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
+import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 
-import { agentNamesInUse, MAX_REPEAT, RepeatSchema } from "../config/schema.ts";
-import { CONFIG_TEMPLATE } from "../config/template.ts";
-import { runAssessmentWizard, runTaskWizard } from "./task-wizard.ts";
+import { agentNamesInUse, MAX_REPEAT, RepeatSchema } from '@/config/schema';
+import { CONFIG_TEMPLATE } from '@/config/template';
 
-import type { Readable, Writable } from "node:stream";
-import type { Help } from "commander";
-import type { AssessmentCaseContext } from "../application/assess.ts";
-import type { TaskWizardInput } from "../application/create-task.ts";
-import type { JiraTrackerSettings, TaskDefinition, TevuConfig } from "../config/schema.ts";
+import { runAssessmentWizard, runTaskWizard } from './task-wizard';
+
+import type { AssessmentCaseContext } from '@/application/assess';
+import type { TaskWizardInput } from '@/application/create-task';
+import type { JiraTrackerSettings, TaskDefinition, TevuConfig } from '@/config/schema';
 import type {
   AgentCapabilityReport,
   AssessmentInput,
@@ -32,7 +31,9 @@ import type {
   TevuResult,
   ValidationFinding,
   ValidationReport,
-} from "../domain/types.ts";
+} from '@/domain/types';
+import type { Help } from 'commander';
+import type { Readable, Writable } from 'node:stream';
 
 /** Standard streams the program reads and writes; wizards additionally require TTY stdin and stdout. */
 export type ProgramIo = {
@@ -56,26 +57,26 @@ export type BenchmarkExecutionHooks = {
 export type ProgramOperations = {
   configExists(configPath: string): Promise<boolean>;
   loadConfig(configPath: string): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>>;
-  requireConfigDirectory(configPath: string): Promise<TevuResult<void, "PrerequisiteError">>;
+  requireConfigDirectory(configPath: string): Promise<TevuResult<void, 'PrerequisiteError'>>;
   importJiraIssue(
     settings: JiraTrackerSettings,
     issueKey: string,
-  ): Promise<TevuResult<IssueSnapshot, "IssueImportError" | "CancellationError">>;
+  ): Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>>;
   importGitHubIssue(
     reference: string,
-  ): Promise<TevuResult<IssueSnapshot, "IssueImportError" | "CancellationError">>;
+  ): Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>>;
   createTask(
     input: TaskWizardInput,
   ): Promise<
     TevuResult<
       TaskDefinition,
-      | "ConfigParseError"
-      | "ConfigValidationError"
-      | "ConfigReadError"
-      | "SourceMaterializationError"
-      | "IssueImportError"
-      | "ArtifactError"
-      | "CancellationError"
+      | 'ConfigParseError'
+      | 'ConfigValidationError'
+      | 'ConfigReadError'
+      | 'SourceMaterializationError'
+      | 'IssueImportError'
+      | 'ArtifactError'
+      | 'CancellationError'
     >
   >;
   validateConfig(
@@ -83,11 +84,11 @@ export type ProgramOperations = {
   ): Promise<
     TevuResult<
       ValidationReport,
-      | "ConfigValidationError"
-      | "PrerequisiteError"
-      | "SourceMaterializationError"
-      | "IsolationError"
-      | "AgentProtocolError"
+      | 'ConfigValidationError'
+      | 'PrerequisiteError'
+      | 'SourceMaterializationError'
+      | 'IsolationError'
+      | 'AgentProtocolError'
     >
   >;
   planBenchmark(config: TevuConfig, repeatOverride?: number): BenchmarkPlan;
@@ -97,34 +98,34 @@ export type ProgramOperations = {
   ): Promise<
     TevuResult<
       RunResult,
-      | "PrerequisiteError"
-      | "SourceMaterializationError"
-      | "IsolationError"
-      | "AgentProcessError"
-      | "AgentProtocolError"
-      | "CaseTimeoutError"
-      | "EvaluationError"
-      | "ArtifactError"
-      | "CancellationError"
-      | "CheckStateError"
+      | 'PrerequisiteError'
+      | 'SourceMaterializationError'
+      | 'IsolationError'
+      | 'AgentProcessError'
+      | 'AgentProtocolError'
+      | 'CaseTimeoutError'
+      | 'EvaluationError'
+      | 'ArtifactError'
+      | 'CancellationError'
+      | 'CheckStateError'
     >
   >;
   rebuildRunReport(
     config: TevuConfig,
     runId: string,
-  ): Promise<TevuResult<ReportResult, "AgentProtocolError" | "ArtifactError">>;
+  ): Promise<TevuResult<ReportResult, 'AgentProtocolError' | 'ArtifactError'>>;
   readAssessmentContext(
     config: TevuConfig,
     runId: string,
     caseId: string,
-  ): Promise<TevuResult<AssessmentCaseContext, "ConfigValidationError" | "ArtifactError">>;
+  ): Promise<TevuResult<AssessmentCaseContext, 'ConfigValidationError' | 'ArtifactError'>>;
   applyAssessment(
     config: TevuConfig,
     input: AssessmentInput,
   ): Promise<
     TevuResult<
       CaseResult,
-      "ConfigValidationError" | "AssessmentConflictError" | "ArtifactError" | "CancellationError"
+      'ConfigValidationError' | 'AssessmentConflictError' | 'ArtifactError' | 'CancellationError'
     >
   >;
 };
@@ -146,7 +147,7 @@ type ExitBox = { code: number };
 
 type LineWriter = (line: string) => void;
 
-const DEFAULT_CONFIG_PATH = "tevu.yaml";
+const DEFAULT_CONFIG_PATH = 'tevu.yaml';
 
 const EXIT_COMPLETED = 0;
 const EXIT_FAILURE = 1;
@@ -154,31 +155,33 @@ const EXIT_CANCELLED = 130;
 
 const HELP_EXAMPLES: Record<string, [string, string][]> = {
   tevu: [
-    ["Define a benchmark task", "tevu task add"],
-    ["Preview a benchmark", "tevu run --dry-run"],
-    ["Run a benchmark", "tevu run"],
+    ['Define a benchmark task', 'tevu task add'],
+    ['Preview a benchmark', 'tevu run --dry-run'],
+    ['Run a benchmark', 'tevu run'],
   ],
-  config: [["Start a configuration file from the template", "tevu config example > tevu.yaml"]],
+  config: [['Start a configuration file from the template', 'tevu config example > tevu.yaml']],
   example: [
-    ["Print the configuration template", "tevu config example"],
-    ["Start a configuration file from the template", "tevu config example > tevu.yaml"],
+    ['Print the configuration template', 'tevu config example'],
+    ['Start a configuration file from the template', 'tevu config example > tevu.yaml'],
   ],
-  task: [["Define a benchmark task", "tevu task add"]],
+  task: [['Define a benchmark task', 'tevu task add']],
   add: [
-    ["Define a task interactively", "tevu task add"],
-    ["Import a task from Jira", "tevu task add --jira PROJ-123"],
-    ["Import a task from GitHub", "tevu task add --github OWNER/REPO#123"],
+    ['Define a task interactively', 'tevu task add'],
+    ['Import a task from Jira', 'tevu task add --jira PROJ-123'],
+    ['Import a task from GitHub', 'tevu task add --github OWNER/REPO#123'],
   ],
   validate: [
-    ["Check the default configuration", "tevu validate"],
-    ["Check a specific configuration", "tevu validate --config benchmarks.yaml"],
+    ['Check the default configuration', 'tevu validate'],
+    ['Check a specific configuration', 'tevu validate --config benchmarks.yaml'],
   ],
   run: [
-    ["Preview the execution plan", "tevu run --dry-run"],
-    ["Run the configured benchmark", "tevu run"],
+    ['Preview the execution plan', 'tevu run --dry-run'],
+    ['Run the configured benchmark', 'tevu run'],
   ],
-  assess: [["Assess a case from a saved run", "tevu assess 20260923t120000z-a1b2c3 task--model--1"]],
-  report: [["Regenerate a saved run's report", "tevu report 20260923t120000z-a1b2c3"]],
+  assess: [
+    ['Assess a case from a saved run', 'tevu assess 20260923t120000z-a1b2c3 task--model--1'],
+  ],
+  report: [["Regenerate a saved run's report", 'tevu report 20260923t120000z-a1b2c3']],
 };
 
 const REPEAT_ARGUMENT_PATTERN = /^[0-9]+$/;
@@ -219,7 +222,7 @@ export async function runProgram(
   const exit: ExitBox = { code: EXIT_COMPLETED };
   const program = buildProgram(dependencies, exit);
   try {
-    await program.parseAsync([...argv], { from: "user" });
+    await program.parseAsync([...argv], { from: 'user' });
   } catch (error) {
     if (error instanceof CommanderError) {
       return error.exitCode === 0 ? EXIT_COMPLETED : EXIT_FAILURE;
@@ -230,37 +233,39 @@ export async function runProgram(
 }
 
 function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command {
-  const program = new Command("tevu");
-  program.description("Compare coding models on your tasks");
+  const program = new Command('tevu');
+  program.description('Compare coding models on your tasks');
 
-  const task = program.command("task").description("Manage benchmark tasks");
+  const task = program.command('task').description('Manage benchmark tasks');
   task
-    .command("add")
-    .description("Add a benchmark task")
-    .option("--config <path>", "Configuration file path", DEFAULT_CONFIG_PATH)
-    .option("--jira <issue-key>", "Import a task from a Jira issue")
-    .addOption(new Option("--github <reference>", "Import a task from a GitHub issue").conflicts("jira"))
+    .command('add')
+    .description('Add a benchmark task')
+    .option('--config <path>', 'Configuration file path', DEFAULT_CONFIG_PATH)
+    .option('--jira <issue-key>', 'Import a task from a Jira issue')
+    .addOption(
+      new Option('--github <reference>', 'Import a task from a GitHub issue').conflicts('jira'),
+    )
     .action(async (options: TaskAddOptionValues) => {
       exit.code = await runTaskAdd(dependencies, options);
     });
 
   program
-    .command("validate")
-    .description("Check configuration and prerequisites")
-    .option("--config <path>", "Configuration file path", DEFAULT_CONFIG_PATH)
+    .command('validate')
+    .description('Check configuration and prerequisites')
+    .option('--config <path>', 'Configuration file path', DEFAULT_CONFIG_PATH)
     .action(async (options: ConfigOptionValues) => {
       exit.code = await runValidate(dependencies, options);
     });
 
   program
-    .command("run")
-    .description("Run the benchmark")
-    .option("--config <path>", "Configuration file path", DEFAULT_CONFIG_PATH)
-    .option("--dry-run", "Show the execution plan without running tasks")
+    .command('run')
+    .description('Run the benchmark')
+    .option('--config <path>', 'Configuration file path', DEFAULT_CONFIG_PATH)
+    .option('--dry-run', 'Show the execution plan without running tasks')
     .addOption(
       new Option(
-        "--repeat <n>",
-        "Attempts per task/model pair for this run; overrides run.repeat",
+        '--repeat <n>',
+        'Attempts per task/model pair for this run; overrides run.repeat',
       ).argParser(parseRepeatOption),
     )
     .action(async (options: RunOptionValues) => {
@@ -268,28 +273,28 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
     });
 
   program
-    .command("assess")
-    .description("Record manual check results")
-    .argument("<run-id>", "Run to assess")
-    .argument("<case-id>", "Case to assess")
-    .option("--config <path>", "Configuration file path", DEFAULT_CONFIG_PATH)
+    .command('assess')
+    .description('Record manual check results')
+    .argument('<run-id>', 'Run to assess')
+    .argument('<case-id>', 'Case to assess')
+    .option('--config <path>', 'Configuration file path', DEFAULT_CONFIG_PATH)
     .action(async (runId: string, caseId: string, options: ConfigOptionValues) => {
       exit.code = await runAssess(dependencies, runId, caseId, options);
     });
 
   program
-    .command("report")
-    .description("Regenerate a report from a saved run")
-    .argument("<run-id>", "Run to report on")
-    .option("--config <path>", "Configuration file path", DEFAULT_CONFIG_PATH)
+    .command('report')
+    .description('Regenerate a report from a saved run')
+    .argument('<run-id>', 'Run to report on')
+    .option('--config <path>', 'Configuration file path', DEFAULT_CONFIG_PATH)
     .action(async (runId: string, options: ConfigOptionValues) => {
       exit.code = await runReport(dependencies, runId, options);
     });
 
-  const config = program.command("config").description("Work with the configuration file");
+  const config = program.command('config').description('Work with the configuration file');
   config
-    .command("example")
-    .description("Print a commented configuration template")
+    .command('example')
+    .description('Print a commented configuration template')
     .action(() => {
       exit.code = runConfigExample(dependencies);
     });
@@ -309,7 +314,7 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
 function configureCommandBoundary(command: Command, dependencies: ProgramDependencies): void {
   command.exitOverride();
   command.helpCommand(false);
-  command.helpOption("-h, --help", "Show help");
+  command.helpOption('-h, --help', 'Show help');
   command.configureHelp({
     subcommandTerm: (subcommand) => subcommand.name(),
     formatHelp: formatCommandHelp,
@@ -318,8 +323,8 @@ function configureCommandBoundary(command: Command, dependencies: ProgramDepende
   command.showSuggestionAfterError(false);
   const examples = HELP_EXAMPLES[command.name()]
     .map(([description, invocation]) => `  # ${description}\n  ${invocation}`)
-    .join("\n\n");
-  command.addHelpText("after", `\nExamples:\n${examples}`);
+    .join('\n\n');
+  command.addHelpText('after', `\nExamples:\n${examples}`);
   command.configureOutput({
     writeOut: (text) => {
       dependencies.io.stdout.write(dependencies.redact(text));
@@ -352,49 +357,59 @@ function commandPath(command: Command): string {
     names.unshift(current.name());
     current = current.parent;
   }
-  return names.join(" ");
+  return names.join(' ');
 }
 
 function formatCommandHelp(command: Command, helper: Help): string {
   const name = commandPath(command);
   const commands = helper.visibleCommands(command);
   const argumentsUsage = command.registeredArguments.map((argument) =>
-    argument.required ? `<${argument.name()}>` : `[${argument.name()}]`);
-  const usage = commands.length > 0
-    ? [`${name} [options]`, `${name} <command> [options]`]
-    : [[name, ...argumentsUsage, "[options]"].join(" ")];
+    argument.required ? `<${argument.name()}>` : `[${argument.name()}]`,
+  );
+  const usage =
+    commands.length > 0
+      ? [`${name} [options]`, `${name} <command> [options]`]
+      : [[name, ...argumentsUsage, '[options]'].join(' ')];
   const width = helper.padWidth(command, helper);
   const formatItem = (term: string, description: string): string =>
     helper.formatItem(term, width, description, helper);
 
   return [
     helper.commandDescription(command),
-    "",
-    "Usage:",
+    '',
+    'Usage:',
     ...usage.map((line) => `  ${line}`),
-    "",
+    '',
     ...helper.formatItemList(
-      "Arguments:",
-      helper.visibleArguments(command).map((argument) =>
-        formatItem(helper.argumentTerm(argument), helper.argumentDescription(argument))),
+      'Arguments:',
+      helper
+        .visibleArguments(command)
+        .map((argument) =>
+          formatItem(helper.argumentTerm(argument), helper.argumentDescription(argument)),
+        ),
       helper,
     ),
     ...helper.formatItemList(
-      "Options:",
-      helper.visibleOptions(command).map((option) =>
-        formatItem(helper.optionTerm(option), helper.optionDescription(option))),
+      'Options:',
+      helper
+        .visibleOptions(command)
+        .map((option) => formatItem(helper.optionTerm(option), helper.optionDescription(option))),
       helper,
     ),
     ...helper.formatItemList(
-      "Commands:",
+      'Commands:',
       commands.map((subcommand) =>
-        formatItem(helper.subcommandTerm(subcommand), helper.subcommandDescription(subcommand))),
+        formatItem(helper.subcommandTerm(subcommand), helper.subcommandDescription(subcommand)),
+      ),
       helper,
     ),
-  ].join("\n");
+  ].join('\n');
 }
 
-function createLineWriters(dependencies: ProgramDependencies): { out: LineWriter; err: LineWriter } {
+function createLineWriters(dependencies: ProgramDependencies): {
+  out: LineWriter;
+  err: LineWriter;
+} {
   return {
     out: (line) => {
       dependencies.io.stdout.write(`${dependencies.redact(line)}\n`);
@@ -417,11 +432,15 @@ async function runTaskAdd(
   const { out, err } = createLineWriters(dependencies);
   const operations = dependencies.operations;
   const wizard = await runTaskWizard(
-    { configPath: options.config, jiraIssueKey: options.jira, githubIssueReference: options.github },
+    {
+      configPath: options.config,
+      jiraIssueKey: options.jira,
+      githubIssueReference: options.github,
+    },
     {
       io: { input: dependencies.io.stdin, output: dependencies.io.stdout },
       readConfig: async (): Promise<
-        TevuResult<TevuConfig | null, LoadConfigErrorKind | "PrerequisiteError">
+        TevuResult<TevuConfig | null, LoadConfigErrorKind | 'PrerequisiteError'>
       > => {
         const exists = await operations.configExists(options.config);
         if (!exists) {
@@ -464,7 +483,7 @@ async function runValidate(
     return reportFailure(err, report.error, dependencies.redact);
   }
   printFindings(out, report.value.findings);
-  out(report.value.valid ? "Configuration is valid." : "Configuration is invalid.");
+  out(report.value.valid ? 'Configuration is valid.' : 'Configuration is invalid.');
   return report.value.valid ? EXIT_COMPLETED : EXIT_FAILURE;
 }
 
@@ -484,7 +503,7 @@ async function runBenchmarkCommand(
   }
   printFindings(out, validation.value.findings);
   if (!validation.value.valid) {
-    out("Configuration is invalid.");
+    out('Configuration is invalid.');
     return EXIT_FAILURE;
   }
   const plan = operations.planBenchmark(loaded.value, options.repeat);
@@ -515,17 +534,21 @@ async function runBenchmarkCommand(
   const runDirectory = `${plan.artifactsDirectory}/${runId}`;
   for (const caseResult of run.cases) {
     const failureSuffix =
-      caseResult.failure === null ? "" : `, runtime failure ${caseResult.failure.error.kind}`;
+      caseResult.failure === null ? '' : `, runtime failure ${caseResult.failure.error.kind}`;
     out(
       `${caseResult.identity.caseId}: lifecycle ${caseResult.lifecycle}, outcome ${caseResult.outcome}${failureSuffix}`,
     );
   }
   for (const finding of run.findings) {
-    out(`${finding.severity}${finding.caseId === null ? "" : ` [${finding.caseId}]`}: ${finding.message}`);
+    out(
+      `${finding.severity}${finding.caseId === null ? '' : ` [${finding.caseId}]`}: ${finding.message}`,
+    );
   }
   out(`Artifacts: ${runDirectory}`);
   if (run.exitCode === EXIT_CANCELLED) {
-    out(`Run cancelled; partial artifacts were finalized. Regenerate the report with: tevu report ${runId}`);
+    out(
+      `Run cancelled; partial artifacts were finalized. Regenerate the report with: tevu report ${runId}`,
+    );
     return EXIT_CANCELLED;
   }
   const rebuilt = await operations.rebuildRunReport(loaded.value, runId);
@@ -600,14 +623,16 @@ function printDryRun(
   plan: BenchmarkPlan,
   capabilities: Readonly<Record<string, AgentCapabilityReport>>,
 ): void {
-  out("Dry run: no artifact, workspace, Jira call, or agent model session is created.");
+  out('Dry run: no artifact, workspace, Jira call, or agent model session is created.');
   out(`Planned cases (${plan.cases.length}, execution order):`);
   for (const identity of plan.cases) {
     out(
       `  ${identity.caseId}: task ${identity.taskId}, model entry ${identity.modelId} (${identity.model}, effort ${identity.effort}), commit ${identity.sourceCommit}`,
     );
   }
-  out(`Manual assessments needed: ${countManualAssessments(plan)} (one tevu assess per case whose task has manual checks)`);
+  out(
+    `Manual assessments needed: ${countManualAssessments(plan)} (one tevu assess per case whose task has manual checks)`,
+  );
   out(
     `Limits: concurrency ${plan.concurrency}, timeout ${plan.caseTimeoutMs}ms, stop grace ${plan.terminationGraceMs}ms`,
   );
@@ -632,19 +657,25 @@ function countManualAssessments(plan: BenchmarkPlan): number {
 
 /** Holds when a task declares at least one check with `manual: true`, required or optional. */
 function taskHasManualCheck(task: TaskDefinition): boolean {
-  return [...task.checks.acceptance, ...task.checks.done].some((check) => "manual" in check);
+  return [...task.checks.acceptance, ...task.checks.done].some((check) => 'manual' in check);
 }
 
-function printCapabilities(out: LineWriter, name: string, report: AgentCapabilityReport | null): void {
+function printCapabilities(
+  out: LineWriter,
+  name: string,
+  report: AgentCapabilityReport | null,
+): void {
   if (report === null) {
     out(`Agent "${name}" capabilities: not probed`);
     return;
   }
   out(
-    `Agent "${name}" capabilities (${report.executable}, detected version: ${report.detectedVersion ?? "not detected"}):`,
+    `Agent "${name}" capabilities (${report.executable}, detected version: ${report.detectedVersion ?? 'not detected'}):`,
   );
   for (const capability of report.capabilities) {
-    out(`  ${capability.name}${capability.required ? "" : " (optional)"}: ${capability.availability}`);
+    out(
+      `  ${capability.name}${capability.required ? '' : ' (optional)'}: ${capability.availability}`,
+    );
   }
   out(`  isolation deny-outside-worktree (optional): ${report.isolation.denyOutsideWorktree}`);
 }
@@ -656,80 +687,93 @@ function printFindings(out: LineWriter, findings: readonly ValidationFinding[]):
 }
 
 /** Prints one typed failure and returns its mapped exit code. */
-function reportFailure(err: LineWriter, error: TevuError, redact: (text: string) => string): number {
+function reportFailure(
+  err: LineWriter,
+  error: TevuError,
+  redact: (text: string) => string,
+): number {
   for (const line of renderTevuError(error, redact)) {
     err(line);
   }
-  return error.kind === "CancellationError" ? EXIT_CANCELLED : EXIT_FAILURE;
+  return error.kind === 'CancellationError' ? EXIT_CANCELLED : EXIT_FAILURE;
 }
 
 function renderTevuError(error: TevuError, redact: (text: string) => string): string[] {
   switch (error.kind) {
-    case "ConfigParseError":
-      return ["error: the configuration could not be parsed", ...renderFindingLines(error.findings)];
-    case "ConfigValidationError":
-      return ["error: the configuration is invalid", ...renderFindingLines(error.findings)];
-    case "ConfigReadError":
+    case 'ConfigParseError':
+      return [
+        'error: the configuration could not be parsed',
+        ...renderFindingLines(error.findings),
+      ];
+    case 'ConfigValidationError':
+      return ['error: the configuration is invalid', ...renderFindingLines(error.findings)];
+    case 'ConfigReadError':
       return renderConfigReadError(error, redact);
-    case "PrerequisiteError":
+    case 'PrerequisiteError':
       return [
-        `error: prerequisite "${error.tool}" is not satisfied; expected ${error.expected}${error.actual === undefined ? "" : `, actual ${error.actual}`}`,
+        `error: prerequisite "${error.tool}" is not satisfied; expected ${error.expected}${error.actual === undefined ? '' : `, actual ${error.actual}`}`,
       ];
-    case "SourceMaterializationError":
+    case 'SourceMaterializationError':
       return [`error: task "${error.taskId}" source cannot be materialized: ${error.reason}`];
-    case "IsolationError":
+    case 'IsolationError':
       return [`error: case "${error.caseId}" isolation failed: ${error.reason}`];
-    case "IssueImportError":
+    case 'IssueImportError':
       return [
-        `error: ${error.tracker === "jira-cloud" ? "Jira" : "GitHub"} issue "${error.reference}" import failed${error.status === undefined ? "" : ` (status ${error.status})`}: ${error.reason}`,
+        `error: ${error.tracker === 'jira-cloud' ? 'Jira' : 'GitHub'} issue "${error.reference}" import failed${error.status === undefined ? '' : ` (status ${error.status})`}: ${error.reason}`,
       ];
-    case "AgentProcessError":
+    case 'AgentProcessError':
       return [
-        `error: agent "${error.agent}" process for case "${error.caseId}" failed (exit code ${error.exitCode ?? "none"}, signal ${error.signal ?? "none"})`,
+        `error: agent "${error.agent}" process for case "${error.caseId}" failed (exit code ${error.exitCode ?? 'none'}, signal ${error.signal ?? 'none'})`,
       ];
-    case "AgentProtocolError":
+    case 'AgentProtocolError':
       return [
-        `error: agent "${error.agent}" protocol failure (${error.context.phase === "probe" ? "probe" : `case ${error.context.caseId}`}): ${error.reason}`,
+        `error: agent "${error.agent}" protocol failure (${error.context.phase === 'probe' ? 'probe' : `case ${error.context.caseId}`}): ${error.reason}`,
       ];
-    case "CaseTimeoutError":
+    case 'CaseTimeoutError':
       return [`error: case "${error.caseId}" exceeded its ${error.timeoutMs}ms timeout`];
-    case "EvaluationError":
+    case 'EvaluationError':
       return [
         `error: check "${error.checkId}" of case "${error.caseId}" could not be evaluated: ${error.reason}`,
       ];
-    case "AssessmentConflictError":
+    case 'AssessmentConflictError':
       return [
         `error: assessment for run "${error.runId}" case "${error.caseId}" is locked: ${error.reason}`,
       ];
-    case "ArtifactError":
+    case 'ArtifactError':
       return [`error: artifact operation "${error.operation}" failed: ${error.reason}`];
-    case "RedactionError":
+    case 'RedactionError':
       return [`error: redaction failed: ${error.reason}`];
-    case "CancellationError":
-      return ["Cancelled."];
-    case "CheckStateError":
+    case 'CancellationError':
+      return ['Cancelled.'];
+    case 'CheckStateError':
       return [`error: check-state ${error.step} failed: ${error.reason}`];
-    case "SetupError":
-      return [`error: setup ${error.phase} command ${JSON.stringify(error.argv)} failed: ${error.reason}`];
+    case 'SetupError':
+      return [
+        `error: setup ${error.phase} command ${JSON.stringify(error.argv)} failed: ${error.reason}`,
+      ];
   }
 }
 
 function renderFindingLines(findings: readonly ValidationFinding[]): string[] {
-  return findings.map((finding) => `  ${finding.severity} ${finding.identifier}: ${finding.message}`);
+  return findings.map(
+    (finding) => `  ${finding.severity} ${finding.identifier}: ${finding.message}`,
+  );
 }
 
 /** Renders the cause line and, for a missing file, the two redacted, shell-safe creation hints. */
 function renderConfigReadError(
-  error: Extract<TevuError, { kind: "ConfigReadError" }>,
+  error: Extract<TevuError, { kind: 'ConfigReadError' }>,
   redact: (text: string) => string,
 ): string[] {
   const firstLine = configReadErrorLine(error);
-  if (error.cause !== "not-found") {
+  if (error.cause !== 'not-found') {
     return [firstLine];
   }
   const word = shellWord(redact(error.requestedPath));
   const taskAddCommand =
-    error.requestedPath === DEFAULT_CONFIG_PATH ? "tevu task add" : `tevu task add --config ${word}`;
+    error.requestedPath === DEFAULT_CONFIG_PATH
+      ? 'tevu task add'
+      : `tevu task add --config ${word}`;
   return [
     firstLine,
     `  create one interactively: ${taskAddCommand}`,
@@ -737,15 +781,15 @@ function renderConfigReadError(
   ];
 }
 
-function configReadErrorLine(error: Extract<TevuError, { kind: "ConfigReadError" }>): string {
+function configReadErrorLine(error: Extract<TevuError, { kind: 'ConfigReadError' }>): string {
   switch (error.cause) {
-    case "not-found":
+    case 'not-found':
       return `error: configuration file not found: ${error.path}`;
-    case "permission-denied":
+    case 'permission-denied':
       return `error: cannot read configuration file ${error.path}: permission denied`;
-    case "not-a-file":
+    case 'not-a-file':
       return `error: configuration path is not a file: ${error.path}`;
-    case "unreadable":
+    case 'unreadable':
       return `error: cannot read configuration file ${error.path}`;
   }
 }

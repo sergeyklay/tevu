@@ -1,7 +1,7 @@
-import { durationMs } from "../config/schema.ts";
-import { describeCause } from "../domain/describe-cause.ts";
+import { durationMs } from '@/config/schema';
+import { describeCause } from '@/domain/describe-cause';
 
-import type { CheckDefinition, CommandCheck, TaskDefinition } from "../config/schema.ts";
+import type { CheckDefinition, CommandCheck, TaskDefinition } from '@/config/schema';
 import type {
   CaseWorkspace,
   CheckResult,
@@ -13,12 +13,12 @@ import type {
   RedactedCapture,
   Redactor,
   TevuResult,
-} from "../domain/types.ts";
+} from '@/domain/types';
 
 /** One configured check paired with the collection it came from. */
 export type OrderedCheck = {
   definition: CheckDefinition;
-  category: "acceptance" | "definition-of-done";
+  category: 'acceptance' | 'definition-of-done';
 };
 
 /** Everything check evaluation needs; all effects arrive through the process adapter. */
@@ -36,21 +36,23 @@ export type CheckEvaluationInput = {
 };
 
 /** Environment names fixed by the evaluator base-environment contract. */
-const FIXED_ENVIRONMENT_NAMES = new Set(["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CI"]);
+const FIXED_ENVIRONMENT_NAMES = new Set(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'CI']);
 
 function isFixedEnvironmentName(name: string): boolean {
-  return FIXED_ENVIRONMENT_NAMES.has(name) || name.startsWith("XDG_");
+  return FIXED_ENVIRONMENT_NAMES.has(name) || name.startsWith('XDG_');
 }
 
 /** Projects a task's checks into evaluation order: acceptance criteria, then Definition of Done. */
-export function orderTaskChecks(task: Pick<TaskDefinition, "checks">): OrderedCheck[] {
+export function orderTaskChecks(task: Pick<TaskDefinition, 'checks'>): OrderedCheck[] {
   return [
-    ...task.checks.acceptance.map(
-      (definition): OrderedCheck => ({ definition, category: "acceptance" }),
-    ),
-    ...task.checks.done.map(
-      (definition): OrderedCheck => ({ definition, category: "definition-of-done" }),
-    ),
+    ...task.checks.acceptance.map((definition): OrderedCheck => ({
+      definition,
+      category: 'acceptance',
+    })),
+    ...task.checks.done.map((definition): OrderedCheck => ({
+      definition,
+      category: 'definition-of-done',
+    })),
   ];
 }
 
@@ -80,12 +82,12 @@ export function buildCheckEnvironment(
 }
 
 /** Projects a manual check as pending until `tevu assess` records a verdict. */
-export function projectManualCheck(check: OrderedCheck): CheckResult {
+function projectManualCheck(check: OrderedCheck): CheckResult {
   return {
     checkId: check.definition.id,
     category: check.category,
-    verdict: "pending",
-    evidence: "awaiting manual assessment",
+    verdict: 'pending',
+    evidence: 'awaiting manual assessment',
     durationMs: null,
   };
 }
@@ -99,13 +101,13 @@ export function projectManualCheck(check: OrderedCheck): CheckResult {
  */
 export async function evaluateChecks(
   input: CheckEvaluationInput,
-): Promise<TevuResult<CheckResult[], "EvaluationError">> {
+): Promise<TevuResult<CheckResult[], 'EvaluationError'>> {
   const results: CheckResult[] = [];
   for (const check of input.checks) {
     if (input.cancellation?.aborted === true) {
       break;
     }
-    if (!("run" in check.definition)) {
+    if (!('run' in check.definition)) {
       results.push(projectManualCheck(check));
       continue;
     }
@@ -124,7 +126,7 @@ export async function evaluateChecks(
 export function reduceRequiredOutcome(
   checks: readonly { id: string; required: boolean }[],
   results: readonly CheckResult[],
-): "passed" | "failed" | "pending" {
+): 'passed' | 'failed' | 'pending' {
   const unresolvedRequired = new Set(
     checks.filter((check) => check.required).map((check) => check.id),
   );
@@ -133,15 +135,15 @@ export function reduceRequiredOutcome(
     if (!unresolvedRequired.has(result.checkId)) {
       continue;
     }
-    if (result.verdict === "failed") {
-      return "failed";
+    if (result.verdict === 'failed') {
+      return 'failed';
     }
-    if (result.verdict !== "passed") {
+    if (result.verdict !== 'passed') {
       pending = true;
     }
     unresolvedRequired.delete(result.checkId);
   }
-  return pending || unresolvedRequired.size > 0 ? "pending" : "passed";
+  return pending || unresolvedRequired.size > 0 ? 'pending' : 'passed';
 }
 
 async function runCommandCheck(
@@ -172,7 +174,7 @@ async function runCommandCheck(
     return {
       checkId: check.definition.id,
       category: check.category,
-      verdict: "failed",
+      verdict: 'failed',
       evidence: input.redact(`launch failed: ${execution.reason}`),
       durationMs: null,
     };
@@ -186,25 +188,25 @@ async function runCommandCheck(
   const statusLine = execution.timedOut
     ? `timed out after ${request.timeoutMs}ms (termination: ${execution.terminationStage})`
     : execution.exitCode !== null
-      ? `exit code ${execution.exitCode}${passed ? "" : " (not a declared success exit code)"}`
-      : `terminated by signal ${execution.signal ?? "unknown"}`;
+      ? `exit code ${execution.exitCode}${passed ? '' : ' (not a declared success exit code)'}`
+      : `terminated by signal ${execution.signal ?? 'unknown'}`;
 
   const evidence = [
     statusLine,
-    describeCapture("stdout", execution.stdout),
-    describeCapture("stderr", execution.stderr),
-  ].join("\n");
+    describeCapture('stdout', execution.stdout),
+    describeCapture('stderr', execution.stderr),
+  ].join('\n');
 
   return {
     checkId: check.definition.id,
     category: check.category,
-    verdict: passed ? "passed" : "failed",
+    verdict: passed ? 'passed' : 'failed',
     evidence: input.redact(evidence),
     durationMs: execution.durationMs,
   };
 }
 
 function describeCapture(stream: string, capture: RedactedCapture): string {
-  const size = `${capture.totalBytes} bytes${capture.truncated ? ", truncated" : ""}`;
+  const size = `${capture.totalBytes} bytes${capture.truncated ? ', truncated' : ''}`;
   return capture.text.length === 0 ? `${stream} (${size})` : `${stream} (${size}): ${capture.text}`;
 }

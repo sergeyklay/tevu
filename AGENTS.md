@@ -6,11 +6,11 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 
 - Run tests: `bun run test` (NOT `bun test`, which starts Bun's own runner on the JavaScriptCore runtime instead of Vitest on Node; from the repository root it prints an error and exits with code 1 before running any test).
 - A change is done when both `bun run typecheck` and `bun run test` pass. Vitest does not type-check.
+- Build: `bun run build` bundles `src/index.ts` with esbuild into `dist/index.js`, leaving `dependencies` external. `dist/index.js` is the only supported way to run tevu; sources do not run under plain Node.
 
 ## Gotchas
 
-- **Sources also run directly under Node's type stripping.** Only erasable TypeScript syntax works: no `enum`, `namespace`, or constructor parameter properties. Vitest transpiles them and passes; `node src/index.ts` crashes. Only `bun run typecheck` and `bun run build` catch it.
-- **Relative imports end in `.ts`, never `.js`.** `tsc` resolves `./module.js` to `module.ts` and the build emits it unchanged, so `bun run typecheck`, `bun run test`, and `bun run build` pass while `node src/index.ts` fails with `ERR_MODULE_NOT_FOUND`. Only `node src/index.ts --help` catches it.
+- **Imports that leave the file's directory use `@/…`, which maps to `src/…`; same-directory imports stay `./x`. No specifier carries a `.ts` or `.js` extension.** The alias comes from `paths` in `tsconfig.json`, which `tsc`, esbuild, Vitest (`resolve.tsconfigPaths`), typescript-eslint, and knip all read; a new tool that resolves `src` imports needs the same.
 - **Dependencies point one way: `domain` <- `config` <- `application` <- `interface`.** `adapters` implement contracts declared in `domain` and import nothing else from `src`. `src/index.ts` is the only module that wires concrete adapters. The code currently violates this in several places; those imports are debt to remove, not precedent to follow.
 - **Errors cross module boundaries as `TevuResult`, never as thrown exceptions.**
 - **Pure modules read time only through the injected clock**, never `Date.now()` or `new Date()`.

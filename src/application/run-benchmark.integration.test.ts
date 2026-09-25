@@ -1,21 +1,22 @@
 // @vitest-environment node
-import { execa } from "execa";
-import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import process from "node:process";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import process from 'node:process';
+import { execa } from 'execa';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { createArtifactStore } from "../adapters/artifact-store.ts";
-import { createGitWorkspaceAdapter } from "../adapters/git.ts";
-import { createEnvironmentAdapter, createEvaluatorProcessAdapter } from "../adapters/process.ts";
-import { TevuConfigSchema } from "../config/schema.ts";
-import { unavailableMetric } from "../domain/types.ts";
-import { planBenchmark, runBenchmark } from "./run-benchmark.ts";
+import { createArtifactStore } from '@/adapters/artifact-store';
+import { createGitWorkspaceAdapter } from '@/adapters/git';
+import { createEnvironmentAdapter, createEvaluatorProcessAdapter } from '@/adapters/process';
+import { TevuConfigSchema } from '@/config/schema';
+import { unavailableMetric } from '@/domain/types';
 
-import type { TevuConfig, TevuConfigInput } from "../config/schema.ts";
+import { planBenchmark, runBenchmark } from './run-benchmark';
+
+import type { TevuConfig, TevuConfigInput } from '@/config/schema';
 import type {
   AgentAdapter,
   AgentMetrics,
@@ -29,61 +30,63 @@ import type {
   RunResult,
   TevuError,
   TevuResult,
-} from "../domain/types.ts";
+} from '@/domain/types';
 
-const FAKE_AGENT_NAME = "fake-agent";
-const GIT_IDENTITY_FLAGS = ["-c", "user.name=tevu", "-c", "user.email=tevu@localhost"];
+const FAKE_AGENT_NAME = 'fake-agent';
+const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 
-const BASE_GUARD_CONTENT = "base-guard-content\n";
-const AGENT_WEAKENED_GUARD_CONTENT = "weakened-guard-content\n";
-const AGENT_ADDED_TEST_CONTENT = "agent added test\n";
-const BASE_FEATURE_CONTENT = "base-feature-content\n";
-const AGENT_FEATURE_CONTENT = "agent-fixed-feature\n";
-const OVERLAY_FILE_NAME = "hidden.test.txt";
-const OVERLAY_CONTENT = "hidden-content\n";
+const BASE_GUARD_CONTENT = 'base-guard-content\n';
+const AGENT_WEAKENED_GUARD_CONTENT = 'weakened-guard-content\n';
+const AGENT_ADDED_TEST_CONTENT = 'agent added test\n';
+const BASE_FEATURE_CONTENT = 'base-feature-content\n';
+const AGENT_FEATURE_CONTENT = 'agent-fixed-feature\n';
+const OVERLAY_FILE_NAME = 'hidden.test.txt';
+const OVERLAY_CONTENT = 'hidden-content\n';
 
 function sha256Hex(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
+  return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
 type GitOutcome = { exitCode: number | null; stdout: string; stderr: string };
 
 async function runGit(cwd: string, args: readonly string[]): Promise<GitOutcome> {
-  const result = await execa("git", [...args], {
+  const result = await execa('git', [...args], {
     cwd,
     env: {
       ...process.env,
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_CONFIG_SYSTEM: "/dev/null",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_TERMINAL_PROMPT: '0',
     },
     reject: false,
-    stdin: "ignore",
+    stdin: 'ignore',
     timeout: 60_000,
   });
   return {
-    exitCode: typeof result.exitCode === "number" ? result.exitCode : null,
-    stdout: typeof result.stdout === "string" ? result.stdout : "",
-    stderr: typeof result.stderr === "string" ? result.stderr : "",
+    exitCode: typeof result.exitCode === 'number' ? result.exitCode : null,
+    stdout: typeof result.stdout === 'string' ? result.stdout : '',
+    stderr: typeof result.stderr === 'string' ? result.stderr : '',
   };
 }
 
-async function createSyntheticRepository(testDirectory: string): Promise<{ path: string; commit: string }> {
-  const path = join(testDirectory, "source-repo");
-  await mkdir(join(path, "tests"), { recursive: true });
-  await mkdir(join(path, "src"), { recursive: true });
-  await writeFile(join(path, "tests/guard.test.txt"), BASE_GUARD_CONTENT);
-  await writeFile(join(path, "src/feature.txt"), BASE_FEATURE_CONTENT);
-  await runGit(path, ["init", "--quiet", "-b", "main"]);
-  await runGit(path, ["add", "-A"]);
-  await runGit(path, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "synthetic base commit"]);
-  const commit = (await runGit(path, ["rev-parse", "HEAD"])).stdout.trim();
+async function createSyntheticRepository(
+  testDirectory: string,
+): Promise<{ path: string; commit: string }> {
+  const path = join(testDirectory, 'source-repo');
+  await mkdir(join(path, 'tests'), { recursive: true });
+  await mkdir(join(path, 'src'), { recursive: true });
+  await writeFile(join(path, 'tests/guard.test.txt'), BASE_GUARD_CONTENT);
+  await writeFile(join(path, 'src/feature.txt'), BASE_FEATURE_CONTENT);
+  await runGit(path, ['init', '--quiet', '-b', 'main']);
+  await runGit(path, ['add', '-A']);
+  await runGit(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'synthetic base commit']);
+  const commit = (await runGit(path, ['rev-parse', 'HEAD'])).stdout.trim();
   return { path, commit };
 }
 
 async function createOverlayDirectory(testDirectory: string): Promise<string> {
-  const directory = join(testDirectory, "overlay");
+  const directory = join(testDirectory, 'overlay');
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, OVERLAY_FILE_NAME), OVERLAY_CONTENT);
   return directory;
@@ -97,8 +100,8 @@ function buildVerificationScript(): string {
     `const overlay = fs.readFileSync(${JSON.stringify(OVERLAY_FILE_NAME)}, 'utf8');`,
     "const feature = fs.readFileSync('src/feature.txt', 'utf8');",
     `const ok = guard === ${JSON.stringify(BASE_GUARD_CONTENT)} && !addedExists && overlay === ${JSON.stringify(OVERLAY_CONTENT)} && feature === ${JSON.stringify(AGENT_FEATURE_CONTENT)};`,
-    "process.exit(ok ? 0 : 1);",
-  ].join("\n");
+    'process.exit(ok ? 0 : 1);',
+  ].join('\n');
 }
 
 /**
@@ -107,43 +110,53 @@ function buildVerificationScript(): string {
  * two model entries (`TevuConfigSchema` requires at least two) rekeyed onto
  * the fake agent so no real coding agent is invoked.
  */
-function buildConfig(options: { repositoryPath: string; commit: string; overlayDirectory: string; outputDirectory: string }): TevuConfig {
+function buildConfig(options: {
+  repositoryPath: string;
+  commit: string;
+  overlayDirectory: string;
+  outputDirectory: string;
+}): TevuConfig {
   const input: TevuConfigInput = {
     version: 1,
-    run: { output_dir: options.outputDirectory, concurrency: 1, timeout: "30s", stop_grace: "500ms" },
-    agents: { opencode: { command: "unused-agent-command", secrets: [], env: [] } },
-    repositories: [{ id: "repo-1", path: options.repositoryPath }],
+    run: {
+      output_dir: options.outputDirectory,
+      concurrency: 1,
+      timeout: '30s',
+      stop_grace: '500ms',
+    },
+    agents: { opencode: { command: 'unused-agent-command', secrets: [], env: [] } },
+    repositories: [{ id: 'repo-1', path: options.repositoryPath }],
     models: [
-      { id: "m1", model: "synthetic/model-a", effort: "fast" },
-      { id: "m2", model: "synthetic/model-b", effort: "deep" },
+      { id: 'm1', model: 'synthetic/model-a', effort: 'fast' },
+      { id: 'm2', model: 'synthetic/model-b', effort: 'deep' },
     ],
     tasks: [
       {
-        id: "guard-task",
-        title: "Guard task",
-        repo: "repo-1",
+        id: 'guard-task',
+        title: 'Guard task',
+        repo: 'repo-1',
         base_commit: options.commit,
-        description: "synthetic task description",
-        prompt: "synthetic task prompt",
-        readiness: ["synthetic ready item"],
+        description: 'synthetic task description',
+        prompt: 'synthetic task prompt',
+        readiness: ['synthetic ready item'],
         checks: {
-          restore: ["tests/**"],
+          restore: ['tests/**'],
           overlay: options.overlayDirectory,
           acceptance: [
             {
-              id: "verify-check-state",
-              description: "observes the restored, removed, and overlaid worktree state",
-              run: [process.execPath, "-e", buildVerificationScript()],
-              timeout: "10s",
+              id: 'verify-check-state',
+              description: 'observes the restored, removed, and overlaid worktree state',
+              run: [process.execPath, '-e', buildVerificationScript()],
+              timeout: '10s',
               exit_codes: [0],
             },
           ],
           done: [
             {
-              id: "trivial-done",
-              description: "always passes",
-              run: [process.execPath, "-e", "process.exit(0);"],
-              timeout: "10s",
+              id: 'trivial-done',
+              description: 'always passes',
+              run: [process.execPath, '-e', 'process.exit(0);'],
+              timeout: '10s',
               exit_codes: [0],
             },
           ],
@@ -170,31 +183,38 @@ function rekeyToFakeAgent(config: TevuConfig): TevuConfig {
 }
 
 function buildProcessResult(): ProcessResult {
-  const startedAt = "2026-01-01T00:00:00.000Z";
-  const endedAt = "2026-01-01T00:00:01.000Z";
-  return { exitCode: 0, signal: null, startedAt, endedAt, durationMs: 1_000, terminationStage: "none" };
+  const startedAt = '2026-01-01T00:00:00.000Z';
+  const endedAt = '2026-01-01T00:00:01.000Z';
+  return {
+    exitCode: 0,
+    signal: null,
+    startedAt,
+    endedAt,
+    durationMs: 1_000,
+    terminationStage: 'none',
+  };
 }
 
 function unavailableAgentMetrics(reason: string): AgentMetrics {
   return {
-    inputTokens: unavailableMetric("token", reason),
-    outputTokens: unavailableMetric("token", reason),
-    reasoningTokens: unavailableMetric("token", reason),
-    cacheReadTokens: unavailableMetric("token", reason),
-    cacheWriteTokens: unavailableMetric("token", reason),
-    turns: unavailableMetric("count", reason),
-    apiCalls: unavailableMetric("count", reason),
-    apiErrors: unavailableMetric("count", reason),
-    toolCalls: unavailableMetric("count", reason),
-    skillCalls: unavailableMetric("count", reason),
-    cost: unavailableMetric("USD", reason),
+    inputTokens: unavailableMetric('token', reason),
+    outputTokens: unavailableMetric('token', reason),
+    reasoningTokens: unavailableMetric('token', reason),
+    cacheReadTokens: unavailableMetric('token', reason),
+    cacheWriteTokens: unavailableMetric('token', reason),
+    turns: unavailableMetric('count', reason),
+    apiCalls: unavailableMetric('count', reason),
+    apiErrors: unavailableMetric('count', reason),
+    toolCalls: unavailableMetric('count', reason),
+    skillCalls: unavailableMetric('count', reason),
+    cost: unavailableMetric('USD', reason),
   };
 }
 
 /** What the fake agent's `run` observed and recorded for the test to assert on afterward. */
 type FakeAgentCapture = { prompt: string; overlayFilePresentDuringRun: boolean };
 
-type OverlayMutation = "overwrite" | "add" | "delete";
+type OverlayMutation = 'overwrite' | 'add' | 'delete';
 
 /**
  * Builds a fake `AgentAdapter` whose `run` edits the worktree directly, in
@@ -214,30 +234,48 @@ function buildFakeAgentAdapter(
       return {
         ok: true,
         value: {
-          executable: "fake-agent",
+          executable: 'fake-agent',
           detectedVersion: null,
           capabilities: [],
-          isolation: { denyOutsideWorktree: "available" },
+          isolation: { denyOutsideWorktree: 'available' },
         },
       };
     },
     async run(input: AgentRunInput): Promise<TevuResult<AgentRunResult, never>> {
       capture.prompt = input.prompt;
-      capture.overlayFilePresentDuringRun = existsSync(join(input.worktreeDirectory, OVERLAY_FILE_NAME));
+      capture.overlayFilePresentDuringRun = existsSync(
+        join(input.worktreeDirectory, OVERLAY_FILE_NAME),
+      );
 
-      await writeFile(join(input.worktreeDirectory, "tests/guard.test.txt"), AGENT_WEAKENED_GUARD_CONTENT);
-      await writeFile(join(input.worktreeDirectory, "tests/added.test.txt"), AGENT_ADDED_TEST_CONTENT);
-      await writeFile(join(input.worktreeDirectory, "src/feature.txt"), AGENT_FEATURE_CONTENT);
+      await writeFile(
+        join(input.worktreeDirectory, 'tests/guard.test.txt'),
+        AGENT_WEAKENED_GUARD_CONTENT,
+      );
+      await writeFile(
+        join(input.worktreeDirectory, 'tests/added.test.txt'),
+        AGENT_ADDED_TEST_CONTENT,
+      );
+      await writeFile(join(input.worktreeDirectory, 'src/feature.txt'), AGENT_FEATURE_CONTENT);
 
-      if (mutateOverlay === "overwrite") {
-        await writeFile(join(overlayDirectory, OVERLAY_FILE_NAME), "agent-mutated-overlay-content\n");
-      } else if (mutateOverlay === "add") {
-        await writeFile(join(overlayDirectory, "agent-added-overlay-file.txt"), "agent added overlay file\n");
-      } else if (mutateOverlay === "delete") {
+      if (mutateOverlay === 'overwrite') {
+        await writeFile(
+          join(overlayDirectory, OVERLAY_FILE_NAME),
+          'agent-mutated-overlay-content\n',
+        );
+      } else if (mutateOverlay === 'add') {
+        await writeFile(
+          join(overlayDirectory, 'agent-added-overlay-file.txt'),
+          'agent added overlay file\n',
+        );
+      } else if (mutateOverlay === 'delete') {
         await rm(overlayDirectory, { recursive: true, force: true });
       }
 
-      const value: AgentRunResult = { process: buildProcessResult(), sessionId: "session-1", parseFindings: [] };
+      const value: AgentRunResult = {
+        process: buildProcessResult(),
+        sessionId: 'session-1',
+        parseFindings: [],
+      };
       input.onProcess?.(value);
       return { ok: true, value } as TevuResult<AgentRunResult, never>;
     },
@@ -245,21 +283,25 @@ function buildFakeAgentAdapter(
       return { ok: true, value: {} };
     },
     normalizeMetrics() {
-      return { ok: true, value: unavailableAgentMetrics("integration test: metrics not measured") };
+      return { ok: true, value: unavailableAgentMetrics('integration test: metrics not measured') };
     },
   };
 }
 
-function buildDependencies(config: TevuConfig, agent: AgentAdapter, testDirectory: string): RunDependencies {
+function buildDependencies(
+  config: TevuConfig,
+  agent: AgentAdapter,
+  testDirectory: string,
+): RunDependencies {
   const prerequisites: PrerequisiteAdapter = {
     async probeHost() {
       return {
         ok: true,
         value: {
-          platform: process.platform === "darwin" ? "darwin" : "linux",
+          platform: process.platform === 'darwin' ? 'darwin' : 'linux',
           nodeVersion: process.version,
-          bunVersion: "n/a",
-          gitVersion: "n/a",
+          bunVersion: 'n/a',
+          gitVersion: 'n/a',
         },
       };
     },
@@ -268,23 +310,29 @@ function buildDependencies(config: TevuConfig, agent: AgentAdapter, testDirector
       return { ok: true, value: undefined };
     },
   };
-  const clock: Clock = { now: () => new Date("2026-01-01T00:00:00.000Z") };
+  const clock: Clock = { now: () => new Date('2026-01-01T00:00:00.000Z') };
   return {
-    git: createGitWorkspaceAdapter({ config, workspacesDirectory: join(testDirectory, "workspaces") }),
+    git: createGitWorkspaceAdapter({
+      config,
+      workspacesDirectory: join(testDirectory, 'workspaces'),
+    }),
     agents: new Map([[FAKE_AGENT_NAME, agent]]),
-    artifacts: createArtifactStore({ artifactsDirectory: config.run.output_dir, redact: (text) => text }),
+    artifacts: createArtifactStore({
+      artifactsDirectory: config.run.output_dir,
+      redact: (text) => text,
+    }),
     evaluatorProcesses: createEvaluatorProcessAdapter(() => []),
     environments: createEnvironmentAdapter(),
     prerequisites,
     clock,
-    generateRunId: () => "run-tamper-proof-it",
-    configDigest: () => "digest-tamper-proof-it",
+    generateRunId: () => 'run-tamper-proof-it',
+    configDigest: () => 'digest-tamper-proof-it',
     redact: (text) => text,
     cancellation: new AbortController().signal,
   };
 }
 
-function unwrapOk<T, K extends TevuError["kind"]>(result: TevuResult<T, K>): T {
+function unwrapOk<T, K extends TevuError['kind']>(result: TevuResult<T, K>): T {
   if (!result.ok) {
     throw new Error(`expected an ok result, received ${result.error.kind}`);
   }
@@ -299,28 +347,32 @@ function caseResultOf(run: RunResult, caseId: string): CaseResult {
   return found;
 }
 
-async function readSolutionPatch(config: TevuConfig, runId: string, caseResult: CaseResult): Promise<string> {
+async function readSolutionPatch(
+  config: TevuConfig,
+  runId: string,
+  caseResult: CaseResult,
+): Promise<string> {
   const relativePath = caseResult.artifacts.solutionPatch;
   if (relativePath === null) {
-    throw new Error("expected the case result to carry a solution patch path");
+    throw new Error('expected the case result to carry a solution patch path');
   }
-  return readFile(join(config.run.output_dir, runId, relativePath), "utf8");
+  return readFile(join(config.run.output_dir, runId, relativePath), 'utf8');
 }
 
-let testDirectory = "";
+let testDirectory = '';
 
 beforeEach(async () => {
-  testDirectory = await mkdtemp(join(tmpdir(), "tevu-check-state-it-"));
+  testDirectory = await mkdtemp(join(tmpdir(), 'tevu-check-state-it-'));
 });
 
 afterEach(async () => {
   if (testDirectory.length > 0) {
     await rm(testDirectory, { recursive: true, force: true });
-    testDirectory = "";
+    testDirectory = '';
   }
 });
 
-describe("runBenchmark tamper-proof check-state (AC-1, P11)", () => {
+describe('runBenchmark tamper-proof check-state (AC-1, P11)', () => {
   it("restores a weakened test file, removes an agent-added file, applies the overlay, and passes the check while the saved patch holds only the agent's edits", async () => {
     const repository = await createSyntheticRepository(testDirectory);
     const overlayDirectory = await createOverlayDirectory(testDirectory);
@@ -328,65 +380,71 @@ describe("runBenchmark tamper-proof check-state (AC-1, P11)", () => {
       repositoryPath: repository.path,
       commit: repository.commit,
       overlayDirectory,
-      outputDirectory: join(testDirectory, "artifacts"),
+      outputDirectory: join(testDirectory, 'artifacts'),
     });
-    const capture: FakeAgentCapture = { prompt: "", overlayFilePresentDuringRun: true };
+    const capture: FakeAgentCapture = { prompt: '', overlayFilePresentDuringRun: true };
     const agent = buildFakeAgentAdapter(capture, overlayDirectory);
     const dependencies = buildDependencies(config, agent, testDirectory);
 
     const result = await runBenchmark(planBenchmark(config), dependencies);
 
     const run = unwrapOk(result);
-    const caseResult = caseResultOf(run, "guard-task--m1--1");
-    expect(caseResult.lifecycle).toBe("completed");
-    expect(caseResult.outcome).toBe("passed");
-    expect(caseResult.checks.map((check) => check.verdict)).toEqual(["passed", "passed"]);
+    const caseResult = caseResultOf(run, 'guard-task--m1--1');
+    expect(caseResult.lifecycle).toBe('completed');
+    expect(caseResult.outcome).toBe('passed');
+    expect(caseResult.checks.map((check) => check.verdict)).toEqual(['passed', 'passed']);
 
     expect(capture.overlayFilePresentDuringRun).toBe(false);
     expect(capture.prompt).not.toContain(overlayDirectory);
     expect(capture.prompt).not.toContain(OVERLAY_CONTENT);
 
     const patch = await readSolutionPatch(config, run.manifest.runId, caseResult);
-    expect(patch).toContain("weakened-guard-content");
-    expect(patch).toContain("tests/added.test.txt");
+    expect(patch).toContain('weakened-guard-content');
+    expect(patch).toContain('tests/added.test.txt');
     expect(patch).not.toContain(overlayDirectory);
     expect(patch).not.toContain(OVERLAY_CONTENT);
 
     expect(caseResult.checkState).toEqual({
-      restore: { restored: ["tests/guard.test.txt"], removed: ["tests/added.test.txt"] },
-      overlay: { files: [{ path: OVERLAY_FILE_NAME, sha256: sha256Hex(OVERLAY_CONTENT) }], removed: [] },
+      restore: { restored: ['tests/guard.test.txt'], removed: ['tests/added.test.txt'] },
+      overlay: {
+        files: [{ path: OVERLAY_FILE_NAME, sha256: sha256Hex(OVERLAY_CONTENT) }],
+        removed: [],
+      },
     });
   });
 });
 
 describe.each([
-  { label: "overwrites the overlay file on disk", mutateOverlay: "overwrite" as const },
-  { label: "adds a file to the overlay directory", mutateOverlay: "add" as const },
-  { label: "deletes the overlay directory", mutateOverlay: "delete" as const },
-])("runBenchmark tamper-proof check-state when the agent $label after the pin (P18)", ({ mutateOverlay }) => {
-  it("still passes the check against only the pinned overlay snapshot", async () => {
-    const repository = await createSyntheticRepository(testDirectory);
-    const overlayDirectory = await createOverlayDirectory(testDirectory);
-    const config = buildConfig({
-      repositoryPath: repository.path,
-      commit: repository.commit,
-      overlayDirectory,
-      outputDirectory: join(testDirectory, "artifacts"),
-    });
-    const capture: FakeAgentCapture = { prompt: "", overlayFilePresentDuringRun: true };
-    const agent = buildFakeAgentAdapter(capture, overlayDirectory, mutateOverlay);
-    const dependencies = buildDependencies(config, agent, testDirectory);
+  { label: 'overwrites the overlay file on disk', mutateOverlay: 'overwrite' as const },
+  { label: 'adds a file to the overlay directory', mutateOverlay: 'add' as const },
+  { label: 'deletes the overlay directory', mutateOverlay: 'delete' as const },
+])(
+  'runBenchmark tamper-proof check-state when the agent $label after the pin (P18)',
+  ({ mutateOverlay }) => {
+    it('still passes the check against only the pinned overlay snapshot', async () => {
+      const repository = await createSyntheticRepository(testDirectory);
+      const overlayDirectory = await createOverlayDirectory(testDirectory);
+      const config = buildConfig({
+        repositoryPath: repository.path,
+        commit: repository.commit,
+        overlayDirectory,
+        outputDirectory: join(testDirectory, 'artifacts'),
+      });
+      const capture: FakeAgentCapture = { prompt: '', overlayFilePresentDuringRun: true };
+      const agent = buildFakeAgentAdapter(capture, overlayDirectory, mutateOverlay);
+      const dependencies = buildDependencies(config, agent, testDirectory);
 
-    const result = await runBenchmark(planBenchmark(config), dependencies);
+      const result = await runBenchmark(planBenchmark(config), dependencies);
 
-    const run = unwrapOk(result);
-    const caseResult = caseResultOf(run, "guard-task--m1--1");
-    expect(caseResult.lifecycle).toBe("completed");
-    expect(caseResult.outcome).toBe("passed");
-    expect(caseResult.checks.map((check) => check.verdict)).toEqual(["passed", "passed"]);
-    expect(caseResult.checkState?.overlay).toEqual({
-      files: [{ path: OVERLAY_FILE_NAME, sha256: sha256Hex(OVERLAY_CONTENT) }],
-      removed: [],
+      const run = unwrapOk(result);
+      const caseResult = caseResultOf(run, 'guard-task--m1--1');
+      expect(caseResult.lifecycle).toBe('completed');
+      expect(caseResult.outcome).toBe('passed');
+      expect(caseResult.checks.map((check) => check.verdict)).toEqual(['passed', 'passed']);
+      expect(caseResult.checkState?.overlay).toEqual({
+        files: [{ path: OVERLAY_FILE_NAME, sha256: sha256Hex(OVERLAY_CONTENT) }],
+        removed: [],
+      });
     });
-  });
-});
+  },
+);

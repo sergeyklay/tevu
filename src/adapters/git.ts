@@ -7,7 +7,7 @@
  * references.
  */
 
-import { createHash } from "node:crypto";
+import { createHash } from 'node:crypto';
 import {
   lstat,
   mkdir,
@@ -21,15 +21,14 @@ import {
   symlink,
   unlink,
   writeFile,
-} from "node:fs/promises";
-import { basename, join } from "node:path";
-import process from "node:process";
-import { execa } from "execa";
+} from 'node:fs/promises';
+import { basename, join } from 'node:path';
+import process from 'node:process';
+import { execa } from 'execa';
 
-import { describeCause } from "../domain/describe-cause.ts";
+import { describeCause } from '@/domain/describe-cause';
 
-import type { Stats } from "node:fs";
-import type { RepositoryDefinition, TevuConfig } from "../config/schema.ts";
+import type { RepositoryDefinition, TevuConfig } from '@/config/schema';
 import type {
   CaseIdentity,
   CaseWorkspace,
@@ -45,7 +44,8 @@ import type {
   RestoreRecord,
   SourceValidation,
   TevuResult,
-} from "../domain/types.ts";
+} from '@/domain/types';
+import type { Stats } from 'node:fs';
 
 /** Construction inputs for the sealed Git workspace adapter. */
 export type GitWorkspaceAdapterOptions = {
@@ -56,20 +56,20 @@ export type GitWorkspaceAdapterOptions = {
 };
 
 const GIT_COMMAND_TIMEOUT_MS = 600_000;
-const FIXED_LOCALE = "C.UTF-8";
-const SUBMODULE_MODE = "160000";
-const LFS_POINTER_SIGNATURE = "https://git-lfs.github.com/spec";
-const LFS_ATTRIBUTE = "filter=lfs";
+const FIXED_LOCALE = 'C.UTF-8';
+const SUBMODULE_MODE = '160000';
+const LFS_POINTER_SIGNATURE = 'https://git-lfs.github.com/spec';
+const LFS_ATTRIBUTE = 'filter=lfs';
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{40,64}$/;
 
 /** Deterministic identity for the synthetic root commit of every sealed case. */
 const SYNTHETIC_COMMIT_IDENTITY: Record<string, string> = {
-  GIT_AUTHOR_NAME: "tevu",
-  GIT_AUTHOR_EMAIL: "tevu@localhost",
-  GIT_AUTHOR_DATE: "1970-01-01T00:00:00Z",
-  GIT_COMMITTER_NAME: "tevu",
-  GIT_COMMITTER_EMAIL: "tevu@localhost",
-  GIT_COMMITTER_DATE: "1970-01-01T00:00:00Z",
+  GIT_AUTHOR_NAME: 'tevu',
+  GIT_AUTHOR_EMAIL: 'tevu@localhost',
+  GIT_AUTHOR_DATE: '1970-01-01T00:00:00Z',
+  GIT_COMMITTER_NAME: 'tevu',
+  GIT_COMMITTER_EMAIL: 'tevu@localhost',
+  GIT_COMMITTER_DATE: '1970-01-01T00:00:00Z',
 };
 
 /**
@@ -77,14 +77,14 @@ const SYNTHETIC_COMMIT_IDENTITY: Record<string, string> = {
  * needing no configuration: it reads only the `repository`/`commit`
  * parameters it is called with.
  */
-export function createSourceValidator(): Pick<GitWorkspaceAdapter, "validateSource"> {
+export function createSourceValidator(): Pick<GitWorkspaceAdapter, 'validateSource'> {
   return { validateSource };
 }
 
 async function validateSource(
   repository: RepositoryDefinition,
   commit: string,
-): Promise<TevuResult<SourceValidation, "SourceMaterializationError">> {
+): Promise<TevuResult<SourceValidation, 'SourceMaterializationError'>> {
   const resolvedCommit = await resolveCommit(repository.path, commit);
   if (resolvedCommit === null) {
     return sourceError(
@@ -121,7 +121,7 @@ export function createGitWorkspaceAdapter(
 
     async createIsolatedCase(
       identity: CaseIdentity,
-    ): Promise<TevuResult<CaseWorkspace, "SourceMaterializationError" | "IsolationError">> {
+    ): Promise<TevuResult<CaseWorkspace, 'SourceMaterializationError' | 'IsolationError'>> {
       const task = config.tasks.find((candidate) => candidate.id === identity.taskId);
       if (task === undefined) {
         return sourceError(
@@ -129,9 +129,7 @@ export function createGitWorkspaceAdapter(
           `task "${identity.taskId}" is not defined in the configuration`,
         );
       }
-      const repository = config.repositories.find(
-        (candidate) => candidate.id === task.repo,
-      );
+      const repository = config.repositories.find((candidate) => candidate.id === task.repo);
       if (repository === undefined) {
         return sourceError(
           identity.taskId,
@@ -146,15 +144,15 @@ export function createGitWorkspaceAdapter(
         );
       }
       const sourceObjects = await runGit(repository.path, [
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-path",
-        "objects",
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-path',
+        'objects',
       ]);
       if (sourceObjects.exitCode !== 0 || sourceObjects.stdout.length === 0) {
         return sourceError(
           identity.taskId,
-          `repository "${repository.id}": ${describeGitFailure("rev-parse --git-path objects", sourceObjects)}`,
+          `repository "${repository.id}": ${describeGitFailure('rev-parse --git-path objects', sourceObjects)}`,
         );
       }
 
@@ -170,13 +168,13 @@ export function createGitWorkspaceAdapter(
     async capturePatch(
       workspace: CaseWorkspace,
       base?: PatchBase,
-    ): Promise<TevuResult<PatchArtifact, "SourceMaterializationError" | "ArtifactError">> {
+    ): Promise<TevuResult<PatchArtifact, 'SourceMaterializationError' | 'ArtifactError'>> {
       // A private throwaway index leaves the case repository's own index
       // untouched while `add --all` snapshots the complete worktree state.
       // With a patch base, `GIT_OBJECT_DIRECTORY` reads through its private
       // object directory and the diff target becomes the base's tree, so
       // `before_agent` output the base already holds never appears as added.
-      const patchIndexFile = join(workspace.runtimeDirectory, "patch-index");
+      const patchIndexFile = join(workspace.runtimeDirectory, 'patch-index');
       const indexEnvironment = {
         GIT_INDEX_FILE: patchIndexFile,
         ...(base === undefined ? {} : { GIT_OBJECT_DIRECTORY: base.objectDirectory }),
@@ -184,19 +182,19 @@ export function createGitWorkspaceAdapter(
       const diffTarget = base?.tree ?? workspace.syntheticCommit;
       try {
         await rm(patchIndexFile, { force: true });
-        const staged = await runGit(workspace.worktreeDirectory, ["add", "--all"], {
+        const staged = await runGit(workspace.worktreeDirectory, ['add', '--all'], {
           environment: indexEnvironment,
         });
         if (staged.exitCode !== 0) {
-          return artifactError("capture-patch", describeGitFailure("add --all", staged));
+          return artifactError('capture-patch', describeGitFailure('add --all', staged));
         }
         const diff = await runGit(
           workspace.worktreeDirectory,
-          ["diff", "--cached", "--binary", "--no-color", "--no-ext-diff", diffTarget],
+          ['diff', '--cached', '--binary', '--no-color', '--no-ext-diff', diffTarget],
           { environment: indexEnvironment, keepFinalNewline: true },
         );
         if (diff.exitCode !== 0) {
-          return artifactError("capture-patch", describeGitFailure("diff --cached", diff));
+          return artifactError('capture-patch', describeGitFailure('diff --cached', diff));
         }
         return {
           ok: true,
@@ -211,40 +209,42 @@ export function createGitWorkspaceAdapter(
       }
     },
 
-    async snapshotPatchBase(workspace: CaseWorkspace): Promise<TevuResult<PatchBase, "ArtifactError">> {
-      const baseDirectory = join(workspace.runtimeDirectory, "patch-base");
+    async snapshotPatchBase(
+      workspace: CaseWorkspace,
+    ): Promise<TevuResult<PatchBase, 'ArtifactError'>> {
+      const baseDirectory = join(workspace.runtimeDirectory, 'patch-base');
       try {
         await mkdir(baseDirectory);
       } catch (cause) {
         return artifactError(
-          "snapshot-patch-base",
+          'snapshot-patch-base',
           `patch base directory cannot be created exclusively: ${describeCause(cause)}`,
         );
       }
-      const objectDirectory = join(baseDirectory, "objects");
+      const objectDirectory = join(baseDirectory, 'objects');
       try {
-        await mkdir(join(objectDirectory, "info"), { recursive: true });
+        await mkdir(join(objectDirectory, 'info'), { recursive: true });
         await writeFile(
-          join(objectDirectory, "info", "alternates"),
+          join(objectDirectory, 'info', 'alternates'),
           `${workspace.repositoryDirectory}/objects\n`,
-          "utf8",
+          'utf8',
         );
       } catch (cause) {
         return artifactError(
-          "snapshot-patch-base",
+          'snapshot-patch-base',
           `patch base object directory cannot be prepared: ${describeCause(cause)}`,
         );
       }
-      const indexFile = join(baseDirectory, "index");
+      const indexFile = join(baseDirectory, 'index');
       const environment = { GIT_INDEX_FILE: indexFile, GIT_OBJECT_DIRECTORY: objectDirectory };
       try {
-        const staged = await runGit(workspace.worktreeDirectory, ["add", "--all"], { environment });
+        const staged = await runGit(workspace.worktreeDirectory, ['add', '--all'], { environment });
         if (staged.exitCode !== 0) {
-          return artifactError("snapshot-patch-base", describeGitFailure("add --all", staged));
+          return artifactError('snapshot-patch-base', describeGitFailure('add --all', staged));
         }
-        const written = await runGit(workspace.worktreeDirectory, ["write-tree"], { environment });
+        const written = await runGit(workspace.worktreeDirectory, ['write-tree'], { environment });
         if (written.exitCode !== 0 || written.stdout.length === 0) {
-          return artifactError("snapshot-patch-base", describeGitFailure("write-tree", written));
+          return artifactError('snapshot-patch-base', describeGitFailure('write-tree', written));
         }
         return { ok: true, value: { tree: written.stdout, objectDirectory } };
       } finally {
@@ -252,14 +252,14 @@ export function createGitWorkspaceAdapter(
       }
     },
 
-    async dispose(workspace: CaseWorkspace): Promise<TevuResult<void, "ArtifactError">> {
+    async dispose(workspace: CaseWorkspace): Promise<TevuResult<void, 'ArtifactError'>> {
       const caseDirectory = join(workspacesDirectory, workspace.caseId);
       try {
         await rm(caseDirectory, { recursive: true, force: true });
         return { ok: true, value: undefined };
       } catch (cause) {
         return artifactError(
-          "dispose-case-workspace",
+          'dispose-case-workspace',
           `retained ${caseDirectory}: ${describeCause(cause)}`,
         );
       }
@@ -267,10 +267,10 @@ export function createGitWorkspaceAdapter(
 
     async isReadable(workspace: CaseWorkspace): Promise<boolean> {
       const outcome = await runGit(workspace.worktreeDirectory, [
-        "rev-parse",
-        "--verify",
-        "--quiet",
-        "HEAD",
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        'HEAD',
       ]);
       return outcome.exitCode === 0;
     },
@@ -295,12 +295,12 @@ type SealCaseInput = {
  */
 async function sealCase(
   input: SealCaseInput,
-): Promise<TevuResult<CaseWorkspace, "SourceMaterializationError" | "IsolationError">> {
+): Promise<TevuResult<CaseWorkspace, 'SourceMaterializationError' | 'IsolationError'>> {
   const { identity, repository, resolvedCommit, workspacesDirectory } = input;
   const caseDirectory = join(workspacesDirectory, identity.caseId);
-  const repositoryDirectory = join(caseDirectory, "repo.git");
-  const worktreeDirectory = join(caseDirectory, "worktree");
-  const runtimeDirectory = join(caseDirectory, "runtime");
+  const repositoryDirectory = join(caseDirectory, 'repo.git');
+  const worktreeDirectory = join(caseDirectory, 'worktree');
+  const runtimeDirectory = join(caseDirectory, 'runtime');
   const branch = identity.caseId;
 
   await mkdir(workspacesDirectory, { recursive: true });
@@ -315,7 +315,7 @@ async function sealCase(
 
   const fail = async (
     reason: string,
-  ): Promise<{ ok: false; error: { kind: "IsolationError"; caseId: string; reason: string } }> => {
+  ): Promise<{ ok: false; error: { kind: 'IsolationError'; caseId: string; reason: string } }> => {
     await rm(caseDirectory, { recursive: true, force: true }).catch(() => undefined);
     return isolationError(identity.caseId, reason);
   };
@@ -327,72 +327,72 @@ async function sealCase(
   }
 
   const init = await runGit(workspacesDirectory, [
-    "init",
-    "--quiet",
+    'init',
+    '--quiet',
     `--initial-branch=${branch}`,
     `--separate-git-dir=${repositoryDirectory}`,
     worktreeDirectory,
   ]);
   if (init.exitCode !== 0) {
-    return fail(describeGitFailure("init", init));
+    return fail(describeGitFailure('init', init));
   }
   for (const [key, value] of [
-    ["core.logAllRefUpdates", "false"],
-    ["gc.auto", "0"],
+    ['core.logAllRefUpdates', 'false'],
+    ['gc.auto', '0'],
   ] as const) {
-    const configured = await runGit(worktreeDirectory, ["config", key, value]);
+    const configured = await runGit(worktreeDirectory, ['config', key, value]);
     if (configured.exitCode !== 0) {
       return fail(describeGitFailure(`config ${key}`, configured));
     }
   }
 
-  const alternatesFile = join(repositoryDirectory, "objects", "info", "alternates");
+  const alternatesFile = join(repositoryDirectory, 'objects', 'info', 'alternates');
   try {
-    await writeFile(alternatesFile, `${input.sourceObjectsDirectory}\n`, "utf8");
+    await writeFile(alternatesFile, `${input.sourceObjectsDirectory}\n`, 'utf8');
   } catch (cause) {
     return fail(`temporary alternates link cannot be written: ${describeCause(cause)}`);
   }
 
-  const tree = await runGit(worktreeDirectory, ["rev-parse", `${resolvedCommit}^{tree}`]);
+  const tree = await runGit(worktreeDirectory, ['rev-parse', `${resolvedCommit}^{tree}`]);
   if (tree.exitCode !== 0 || tree.stdout.length === 0) {
-    return fail(describeGitFailure("rev-parse tree", tree));
+    return fail(describeGitFailure('rev-parse tree', tree));
   }
   const committed = await runGit(
     worktreeDirectory,
-    ["commit-tree", tree.stdout, "-m", `tevu sealed case ${identity.caseId}`],
+    ['commit-tree', tree.stdout, '-m', `tevu sealed case ${identity.caseId}`],
     { environment: SYNTHETIC_COMMIT_IDENTITY },
   );
   if (committed.exitCode !== 0 || committed.stdout.length === 0) {
-    return fail(describeGitFailure("commit-tree", committed));
+    return fail(describeGitFailure('commit-tree', committed));
   }
   const syntheticCommit = committed.stdout;
 
   const branchRef = await runGit(worktreeDirectory, [
-    "update-ref",
+    'update-ref',
     `refs/heads/${branch}`,
     syntheticCommit,
   ]);
   if (branchRef.exitCode !== 0) {
-    return fail(describeGitFailure("update-ref", branchRef));
+    return fail(describeGitFailure('update-ref', branchRef));
   }
-  const repacked = await runGit(worktreeDirectory, ["repack", "-a", "-d", "--quiet"]);
+  const repacked = await runGit(worktreeDirectory, ['repack', '-a', '-d', '--quiet']);
   if (repacked.exitCode !== 0) {
-    return fail(describeGitFailure("repack", repacked));
+    return fail(describeGitFailure('repack', repacked));
   }
   try {
     await rm(alternatesFile, { force: true });
-    await rm(join(repositoryDirectory, "logs"), { recursive: true, force: true });
+    await rm(join(repositoryDirectory, 'logs'), { recursive: true, force: true });
   } catch (cause) {
     return fail(`sealing cleanup failed: ${describeCause(cause)}`);
   }
 
-  const populated = await runGit(worktreeDirectory, ["reset", "--hard", "--quiet"]);
+  const populated = await runGit(worktreeDirectory, ['reset', '--hard', '--quiet']);
   if (populated.exitCode !== 0) {
-    return fail(describeGitFailure("reset --hard", populated));
+    return fail(describeGitFailure('reset --hard', populated));
   }
-  const sealedTree = await runGit(worktreeDirectory, ["rev-parse", "HEAD^{tree}"]);
+  const sealedTree = await runGit(worktreeDirectory, ['rev-parse', 'HEAD^{tree}']);
   if (sealedTree.exitCode !== 0 || sealedTree.stdout !== tree.stdout) {
-    return fail("sealed tree does not match the pinned source tree");
+    return fail('sealed tree does not match the pinned source tree');
   }
 
   return {
@@ -417,65 +417,62 @@ type TreeInspection = { ok: true } | { ok: false; reason: string };
  * LFS attribute configuration, and Git LFS pointer blobs. Reasons carry counts
  * only; source filenames never enter error messages.
  */
-async function inspectSourceTree(
-  repositoryPath: string,
-  commit: string,
-): Promise<TreeInspection> {
-  const listed = await runGit(repositoryPath, ["ls-tree", "-r", "-z", commit]);
+async function inspectSourceTree(repositoryPath: string, commit: string): Promise<TreeInspection> {
+  const listed = await runGit(repositoryPath, ['ls-tree', '-r', '-z', commit]);
   if (listed.exitCode !== 0) {
-    return { ok: false, reason: describeGitFailure("ls-tree", listed) };
+    return { ok: false, reason: describeGitFailure('ls-tree', listed) };
   }
   let submoduleCount = 0;
   const attributeFilePaths: string[] = [];
-  for (const entry of listed.stdout.split("\0")) {
+  for (const entry of listed.stdout.split('\0')) {
     if (entry.length === 0) {
       continue;
     }
-    const tabIndex = entry.indexOf("\t");
-    const [mode] = entry.slice(0, tabIndex).split(" ");
+    const tabIndex = entry.indexOf('\t');
+    const [mode] = entry.slice(0, tabIndex).split(' ');
     const path = entry.slice(tabIndex + 1);
     if (mode === SUBMODULE_MODE) {
       submoduleCount += 1;
     }
-    if (basename(path) === ".gitattributes") {
+    if (basename(path) === '.gitattributes') {
       attributeFilePaths.push(path);
     }
   }
   if (submoduleCount > 0) {
     return {
       ok: false,
-      reason: `source tree contains ${submoduleCount} unsupported submodule entr${submoduleCount === 1 ? "y" : "ies"}`,
+      reason: `source tree contains ${submoduleCount} unsupported submodule entr${submoduleCount === 1 ? 'y' : 'ies'}`,
     };
   }
 
   for (const path of attributeFilePaths) {
-    const attributes = await runGit(repositoryPath, ["cat-file", "blob", `${commit}:${path}`]);
+    const attributes = await runGit(repositoryPath, ['cat-file', 'blob', `${commit}:${path}`]);
     if (attributes.exitCode !== 0) {
-      return { ok: false, reason: describeGitFailure("cat-file .gitattributes", attributes) };
+      return { ok: false, reason: describeGitFailure('cat-file .gitattributes', attributes) };
     }
     if (attributes.stdout.includes(LFS_ATTRIBUTE)) {
-      return { ok: false, reason: "source tree configures unsupported Git LFS attributes" };
+      return { ok: false, reason: 'source tree configures unsupported Git LFS attributes' };
     }
   }
 
   const pointers = await runGit(repositoryPath, [
-    "grep",
-    "-I",
-    "--fixed-strings",
-    "--name-only",
-    "-e",
+    'grep',
+    '-I',
+    '--fixed-strings',
+    '--name-only',
+    '-e',
     LFS_POINTER_SIGNATURE,
     commit,
   ]);
   if (pointers.exitCode === 0) {
-    const pointerCount = pointers.stdout.split("\n").filter((line) => line.length > 0).length;
+    const pointerCount = pointers.stdout.split('\n').filter((line) => line.length > 0).length;
     return {
       ok: false,
-      reason: `source tree contains ${pointerCount} unsupported Git LFS pointer blob${pointerCount === 1 ? "" : "s"}`,
+      reason: `source tree contains ${pointerCount} unsupported Git LFS pointer blob${pointerCount === 1 ? '' : 's'}`,
     };
   }
   if (pointers.exitCode !== 1) {
-    return { ok: false, reason: describeGitFailure("grep", pointers) };
+    return { ok: false, reason: describeGitFailure('grep', pointers) };
   }
   return { ok: true };
 }
@@ -483,10 +480,10 @@ async function inspectSourceTree(
 /** Resolves a reference to exactly one full commit hash, or `null`. */
 async function resolveCommit(repositoryPath: string, reference: string): Promise<string | null> {
   const outcome = await runGit(repositoryPath, [
-    "rev-parse",
-    "--verify",
-    "--quiet",
-    "--end-of-options",
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    '--end-of-options',
     `${reference}^{commit}`,
   ]);
   if (outcome.exitCode !== 0 || !COMMIT_HASH_PATTERN.test(outcome.stdout)) {
@@ -513,19 +510,19 @@ async function runGit(
   args: readonly string[],
   options: RunGitOptions = {},
 ): Promise<GitCommandOutcome> {
-  const result = await execa("git", [...args], {
+  const result = await execa('git', [...args], {
     cwd,
     env: { ...baseGitEnvironment(), ...options.environment },
     extendEnv: false,
-    ...(options.stdin === undefined ? { stdin: "ignore" } : { input: options.stdin }),
+    ...(options.stdin === undefined ? { stdin: 'ignore' } : { input: options.stdin }),
     reject: false,
     timeout: GIT_COMMAND_TIMEOUT_MS,
     stripFinalNewline: options.keepFinalNewline !== true,
   });
   return {
-    exitCode: typeof result.exitCode === "number" ? result.exitCode : null,
-    stdout: typeof result.stdout === "string" ? result.stdout : "",
-    stderr: typeof result.stderr === "string" ? result.stderr : "",
+    exitCode: typeof result.exitCode === 'number' ? result.exitCode : null,
+    stdout: typeof result.stdout === 'string' ? result.stdout : '',
+    stderr: typeof result.stderr === 'string' ? result.stderr : '',
   };
 }
 
@@ -537,12 +534,12 @@ async function runGit(
  */
 function baseGitEnvironment(): Record<string, string> {
   const environment: Record<string, string> = {
-    PATH: process.env.PATH ?? "",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_SYSTEM: "/dev/null",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_OPTIONAL_LOCKS: "0",
+    PATH: process.env.PATH ?? '',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
     LANG: FIXED_LOCALE,
     LC_ALL: FIXED_LOCALE,
   };
@@ -562,27 +559,26 @@ function describeGitFailure(subcommand: string, outcome: GitCommandOutcome): str
 }
 
 /** Which check-state step a failure belongs to. */
-type CheckStateStep = "restore" | "overlay";
+type CheckStateStep = 'restore' | 'overlay';
 
 /** A regular file's bytes and owner-executable bit, or a symbolic link's target; restore and overlay share `place`. */
 type Source =
-  | { kind: "file"; bytes: Uint8Array; executable: boolean }
-  | { kind: "symlink"; target: string };
+  { kind: 'file'; bytes: Uint8Array; executable: boolean } | { kind: 'symlink'; target: string };
 
 function checkStateFailure(
   step: CheckStateStep,
   reason: string,
-): { ok: false; error: { kind: "CheckStateError"; step: CheckStateStep; reason: string } } {
-  return { ok: false, error: { kind: "CheckStateError", step, reason } };
+): { ok: false; error: { kind: 'CheckStateError'; step: CheckStateStep; reason: string } } {
+  return { ok: false, error: { kind: 'CheckStateError', step, reason } };
 }
 
 /** Node.js system error code of a thrown value, or `null` when it carries none. */
 function systemErrorCode(cause: unknown): string | null {
   if (
-    typeof cause === "object" &&
+    typeof cause === 'object' &&
     cause !== null &&
-    "code" in cause &&
-    typeof (cause as { code: unknown }).code === "string"
+    'code' in cause &&
+    typeof (cause as { code: unknown }).code === 'string'
   ) {
     return (cause as { code: string }).code;
   }
@@ -596,11 +592,11 @@ function sortedUnique(paths: readonly string[]): string[] {
 
 /** Splits a `git ... -z` NUL-terminated byte stream into its worktree-relative paths. */
 function splitNulSeparated(text: string): string[] {
-  return text.split("\0").filter((entry) => entry.length > 0);
+  return text.split('\0').filter((entry) => entry.length > 0);
 }
 
 function sha256Hex(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 /**
@@ -611,7 +607,7 @@ async function deleteEntry(
   step: CheckStateStep,
   worktreeDirectory: string,
   relativePath: string,
-): Promise<TevuResult<string[], "CheckStateError">> {
+): Promise<TevuResult<string[], 'CheckStateError'>> {
   const listed = await listNonDirectoryEntries(step, worktreeDirectory, relativePath);
   if (!listed.ok) {
     return listed;
@@ -632,7 +628,7 @@ async function listNonDirectoryEntries(
   step: CheckStateStep,
   worktreeDirectory: string,
   relativePath: string,
-): Promise<TevuResult<string[], "CheckStateError">> {
+): Promise<TevuResult<string[], 'CheckStateError'>> {
   const absolutePath = join(worktreeDirectory, relativePath);
   let entryStat: Stats;
   try {
@@ -666,11 +662,11 @@ async function lstatOrNull(
   step: CheckStateStep,
   absolutePath: string,
   relativePath: string,
-): Promise<TevuResult<Stats | null, "CheckStateError">> {
+): Promise<TevuResult<Stats | null, 'CheckStateError'>> {
   try {
     return { ok: true, value: await lstat(absolutePath) };
   } catch (cause) {
-    if (systemErrorCode(cause) === "ENOENT") {
+    if (systemErrorCode(cause) === 'ENOENT') {
       return { ok: true, value: null };
     }
     return checkStateFailure(step, `read failed for "${relativePath}": ${describeCause(cause)}`);
@@ -681,7 +677,7 @@ async function tryMkdir(
   step: CheckStateStep,
   absolutePath: string,
   relativePath: string,
-): Promise<TevuResult<void, "CheckStateError">> {
+): Promise<TevuResult<void, 'CheckStateError'>> {
   try {
     await mkdir(absolutePath);
     return { ok: true, value: undefined };
@@ -694,7 +690,7 @@ async function tryUnlink(
   step: CheckStateStep,
   absolutePath: string,
   relativePath: string,
-): Promise<TevuResult<void, "CheckStateError">> {
+): Promise<TevuResult<void, 'CheckStateError'>> {
   try {
     await unlink(absolutePath);
     return { ok: true, value: undefined };
@@ -708,7 +704,7 @@ async function trySymlink(
   target: string,
   absolutePath: string,
   relativePath: string,
-): Promise<TevuResult<void, "CheckStateError">> {
+): Promise<TevuResult<void, 'CheckStateError'>> {
   try {
     await symlink(target, absolutePath);
     return { ok: true, value: undefined };
@@ -724,10 +720,10 @@ async function tryCreateFile(
   relativePath: string,
   bytes: Uint8Array,
   mode: number,
-): Promise<TevuResult<void, "CheckStateError">> {
+): Promise<TevuResult<void, 'CheckStateError'>> {
   let handle;
   try {
-    handle = await open(absolutePath, "wx", mode);
+    handle = await open(absolutePath, 'wx', mode);
   } catch (cause) {
     return checkStateFailure(step, `create failed for "${relativePath}": ${describeCause(cause)}`);
   }
@@ -750,12 +746,12 @@ async function ensureDirectories(
   step: CheckStateStep,
   worktreeDirectory: string,
   segments: readonly string[],
-): Promise<TevuResult<string[], "CheckStateError">> {
+): Promise<TevuResult<string[], 'CheckStateError'>> {
   const deleted: string[] = [];
   const accumulated: string[] = [];
   for (const segment of segments) {
     accumulated.push(segment);
-    const relativeDir = accumulated.join("/");
+    const relativeDir = accumulated.join('/');
     const absoluteDir = join(worktreeDirectory, relativeDir);
     const probe = await lstatOrNull(step, absoluteDir, relativeDir);
     if (!probe.ok) {
@@ -792,8 +788,8 @@ async function place(
   worktreeDirectory: string,
   relativePath: string,
   source: Source,
-): Promise<TevuResult<string[], "CheckStateError">> {
-  const segments = relativePath.split("/");
+): Promise<TevuResult<string[], 'CheckStateError'>> {
+  const segments = relativePath.split('/');
   const parents = await ensureDirectories(step, worktreeDirectory, segments.slice(0, -1));
   if (!parents.ok) {
     return parents;
@@ -818,7 +814,7 @@ async function place(
       }
     }
   }
-  if (source.kind === "symlink") {
+  if (source.kind === 'symlink') {
     const linked = await trySymlink(step, source.target, absolutePath, relativePath);
     if (!linked.ok) {
       return linked;
@@ -838,8 +834,8 @@ async function placeDirectory(
   step: CheckStateStep,
   worktreeDirectory: string,
   relativePath: string,
-): Promise<TevuResult<string[], "CheckStateError">> {
-  return ensureDirectories(step, worktreeDirectory, relativePath.split("/"));
+): Promise<TevuResult<string[], 'CheckStateError'>> {
+  return ensureDirectories(step, worktreeDirectory, relativePath.split('/'));
 }
 
 /** Reads one path's bytes and owner-executable bit, or its link target, as a restore `Source`. */
@@ -847,7 +843,7 @@ async function readSource(
   step: CheckStateStep,
   absolutePath: string,
   relativePath: string,
-): Promise<TevuResult<Source, "CheckStateError">> {
+): Promise<TevuResult<Source, 'CheckStateError'>> {
   let entryStat: Stats;
   try {
     entryStat = await lstat(absolutePath);
@@ -856,14 +852,14 @@ async function readSource(
   }
   if (entryStat.isSymbolicLink()) {
     try {
-      return { ok: true, value: { kind: "symlink", target: await readlink(absolutePath) } };
+      return { ok: true, value: { kind: 'symlink', target: await readlink(absolutePath) } };
     } catch (cause) {
       return checkStateFailure(step, `read failed for "${relativePath}": ${describeCause(cause)}`);
     }
   }
   try {
     const bytes = await readFile(absolutePath);
-    return { ok: true, value: { kind: "file", bytes, executable: (entryStat.mode & 0o100) !== 0 } };
+    return { ok: true, value: { kind: 'file', bytes, executable: (entryStat.mode & 0o100) !== 0 } };
   } catch (cause) {
     return checkStateFailure(step, `read failed for "${relativePath}": ${describeCause(cause)}`);
   }
@@ -875,13 +871,17 @@ async function readSource(
  * entry has the same type, and a regular file's owner-executable bit and
  * bytes match, or a symbolic link's target matches.
  */
-async function sameEntry(expectedPath: string, worktreeDirectory: string, relativePath: string): Promise<boolean> {
-  const segments = relativePath.split("/");
+async function sameEntry(
+  expectedPath: string,
+  worktreeDirectory: string,
+  relativePath: string,
+): Promise<boolean> {
+  const segments = relativePath.split('/');
   const leadingDirs: string[] = [];
   for (const segment of segments.slice(0, -1)) {
     leadingDirs.push(segment);
     try {
-      const dirStat = await lstat(join(worktreeDirectory, leadingDirs.join("/")));
+      const dirStat = await lstat(join(worktreeDirectory, leadingDirs.join('/')));
       if (!dirStat.isDirectory()) {
         return false;
       }
@@ -937,88 +937,103 @@ async function sameEntry(expectedPath: string, worktreeDirectory: string, relati
 async function restoreStep(
   workspace: CaseWorkspace,
   patterns: readonly string[],
-): Promise<TevuResult<RestoreRecord, "CheckStateError">> {
-  const step: CheckStateStep = "restore";
+): Promise<TevuResult<RestoreRecord, 'CheckStateError'>> {
+  const step: CheckStateStep = 'restore';
   let privateDirectory: string;
   try {
-    privateDirectory = await mkdtemp(join(workspace.runtimeDirectory, "check-state-"));
+    privateDirectory = await mkdtemp(join(workspace.runtimeDirectory, 'check-state-'));
   } catch (cause) {
-    return checkStateFailure(step, `create failed for a private restore directory: ${describeCause(cause)}`);
+    return checkStateFailure(
+      step,
+      `create failed for a private restore directory: ${describeCause(cause)}`,
+    );
   }
-  const cleanup = (): Promise<void> => rm(privateDirectory, { recursive: true, force: true }).catch(() => undefined);
+  const cleanup = (): Promise<void> =>
+    rm(privateDirectory, { recursive: true, force: true }).catch(() => undefined);
 
-  const privateGitDirectory = join(privateDirectory, "git");
-  const initialized = await runGit(privateDirectory, ["init", "--bare", "--quiet", privateGitDirectory]);
+  const privateGitDirectory = join(privateDirectory, 'git');
+  const initialized = await runGit(privateDirectory, [
+    'init',
+    '--bare',
+    '--quiet',
+    privateGitDirectory,
+  ]);
   if (initialized.exitCode !== 0) {
     await cleanup();
-    return checkStateFailure(step, describeGitFailure("init --bare", initialized));
+    return checkStateFailure(step, describeGitFailure('init --bare', initialized));
   }
   try {
     await writeFile(
-      join(privateGitDirectory, "objects", "info", "alternates"),
+      join(privateGitDirectory, 'objects', 'info', 'alternates'),
       `${workspace.repositoryDirectory}/objects\n`,
-      "utf8",
+      'utf8',
     );
   } catch (cause) {
     await cleanup();
-    return checkStateFailure(step, `create failed for a private alternates file: ${describeCause(cause)}`);
+    return checkStateFailure(
+      step,
+      `create failed for a private alternates file: ${describeCause(cause)}`,
+    );
   }
 
   const privateEnvironment = {
     GIT_DIR: privateGitDirectory,
-    GIT_INDEX_FILE: join(privateGitDirectory, "index"),
+    GIT_INDEX_FILE: join(privateGitDirectory, 'index'),
   };
   const pathspecs = patterns.map((pattern) => `:(glob)${pattern}`);
 
-  const read = await runGit(privateDirectory, ["read-tree", workspace.syntheticCommit], {
+  const read = await runGit(privateDirectory, ['read-tree', workspace.syntheticCommit], {
     environment: privateEnvironment,
   });
   if (read.exitCode !== 0) {
     await cleanup();
-    return checkStateFailure(step, describeGitFailure("read-tree", read));
+    return checkStateFailure(step, describeGitFailure('read-tree', read));
   }
 
   const worktreeEnvironment = { ...privateEnvironment, GIT_WORK_TREE: workspace.worktreeDirectory };
   const cached = await runGit(
     workspace.worktreeDirectory,
-    ["ls-files", "-z", "--cached", "--", ...pathspecs],
+    ['ls-files', '-z', '--cached', '--', ...pathspecs],
     { environment: worktreeEnvironment, keepFinalNewline: true },
   );
   if (cached.exitCode !== 0) {
     await cleanup();
-    return checkStateFailure(step, describeGitFailure("ls-files --cached", cached));
+    return checkStateFailure(step, describeGitFailure('ls-files --cached', cached));
   }
   const others = await runGit(
     workspace.worktreeDirectory,
-    ["ls-files", "-z", "--others", "--", ...pathspecs],
+    ['ls-files', '-z', '--others', '--', ...pathspecs],
     { environment: worktreeEnvironment, keepFinalNewline: true },
   );
   if (others.exitCode !== 0) {
     await cleanup();
-    return checkStateFailure(step, describeGitFailure("ls-files --others", others));
+    return checkStateFailure(step, describeGitFailure('ls-files --others', others));
   }
   const matched = splitNulSeparated(cached.stdout);
   const untracked = splitNulSeparated(others.stdout);
 
-  const baseDirectory = join(privateDirectory, "base");
+  const baseDirectory = join(privateDirectory, 'base');
   try {
     await mkdir(baseDirectory);
   } catch (cause) {
     await cleanup();
-    return checkStateFailure(step, `create failed for a private base directory: ${describeCause(cause)}`);
+    return checkStateFailure(
+      step,
+      `create failed for a private base directory: ${describeCause(cause)}`,
+    );
   }
-  const checkedOut = await runGit(baseDirectory, ["checkout-index", "-f", "-z", "--stdin"], {
+  const checkedOut = await runGit(baseDirectory, ['checkout-index', '-f', '-z', '--stdin'], {
     environment: { ...privateEnvironment, GIT_WORK_TREE: baseDirectory },
-    stdin: matched.map((path) => `${path}\0`).join(""),
+    stdin: matched.map((path) => `${path}\0`).join(''),
   });
   if (checkedOut.exitCode !== 0) {
     await cleanup();
-    return checkStateFailure(step, describeGitFailure("checkout-index", checkedOut));
+    return checkStateFailure(step, describeGitFailure('checkout-index', checkedOut));
   }
 
   const removed: string[] = [];
   for (const entry of untracked) {
-    const relative = entry.endsWith("/") ? entry.slice(0, -1) : entry;
+    const relative = entry.endsWith('/') ? entry.slice(0, -1) : entry;
     const deleted = await deleteEntry(step, workspace.worktreeDirectory, relative);
     if (!deleted.ok) {
       await cleanup();
@@ -1055,12 +1070,12 @@ async function restoreStep(
 async function overlayStep(
   worktreeDirectory: string,
   snapshot: OverlaySnapshot,
-): Promise<TevuResult<OverlayRecord, "CheckStateError">> {
-  const step: CheckStateStep = "overlay";
+): Promise<TevuResult<OverlayRecord, 'CheckStateError'>> {
+  const step: CheckStateStep = 'overlay';
   const files: OverlayFileRecord[] = [];
   const removed: string[] = [];
   for (const entry of snapshot) {
-    if (entry.kind === "directory") {
+    if (entry.kind === 'directory') {
       const placed = await placeDirectory(step, worktreeDirectory, entry.path);
       if (!placed.ok) {
         return placed;
@@ -1068,7 +1083,7 @@ async function overlayStep(
       removed.push(...placed.value);
     } else {
       const placed = await place(step, worktreeDirectory, entry.path, {
-        kind: "file",
+        kind: 'file',
         bytes: entry.bytes,
         executable: entry.executable,
       });
@@ -1088,39 +1103,44 @@ async function overlayStep(
  * entry, an entry named `.git`, and an unreadable file or directory, then
  * returns every entry sorted ascending by its path relative to `directory`.
  */
-async function readOverlay(directory: string): Promise<TevuResult<OverlaySnapshot, "CheckStateError">> {
+async function readOverlay(
+  directory: string,
+): Promise<TevuResult<OverlaySnapshot, 'CheckStateError'>> {
   let rootStat: Stats;
   try {
     rootStat = await stat(directory);
   } catch (cause) {
     const code = systemErrorCode(cause);
-    if (code === "ENOENT" || code === "ENOTDIR") {
-      return checkStateFailure("overlay", `overlay directory "${directory}" does not exist`);
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return checkStateFailure('overlay', `overlay directory "${directory}" does not exist`);
     }
-    return checkStateFailure("overlay", `overlay directory "${directory}" cannot be read: ${describeCause(cause)}`);
+    return checkStateFailure(
+      'overlay',
+      `overlay directory "${directory}" cannot be read: ${describeCause(cause)}`,
+    );
   }
   if (!rootStat.isDirectory()) {
-    return checkStateFailure("overlay", `overlay path "${directory}" is not a directory`);
+    return checkStateFailure('overlay', `overlay path "${directory}" is not a directory`);
   }
 
   const entries: OverlayEntry[] = [];
 
-  const walk = async (relative: string): Promise<TevuResult<void, "CheckStateError">> => {
+  const walk = async (relative: string): Promise<TevuResult<void, 'CheckStateError'>> => {
     const absoluteDirectory = relative.length === 0 ? directory : join(directory, relative);
     let names: string[];
     try {
       names = await readdir(absoluteDirectory);
     } catch (cause) {
       return checkStateFailure(
-        "overlay",
+        'overlay',
         `overlay directory "${directory}" entry "${relative}" cannot be read: ${describeCause(cause)}`,
       );
     }
     for (const name of [...names].sort()) {
       const childRelative = relative.length === 0 ? name : `${relative}/${name}`;
-      if (name === ".git") {
+      if (name === '.git') {
         return checkStateFailure(
-          "overlay",
+          'overlay',
           `overlay directory "${directory}" must not contain an entry named .git; found "${childRelative}"`,
         );
       }
@@ -1129,18 +1149,18 @@ async function readOverlay(directory: string): Promise<TevuResult<OverlaySnapsho
         childStat = await lstat(join(directory, childRelative));
       } catch (cause) {
         return checkStateFailure(
-          "overlay",
+          'overlay',
           `overlay directory "${directory}" entry "${childRelative}" cannot be read: ${describeCause(cause)}`,
         );
       }
       if (childStat.isSymbolicLink()) {
         return checkStateFailure(
-          "overlay",
+          'overlay',
           `overlay directory "${directory}" must contain only regular files and directories; "${childRelative}" is a symbolic link`,
         );
       }
       if (childStat.isDirectory()) {
-        entries.push({ kind: "directory", path: childRelative });
+        entries.push({ kind: 'directory', path: childRelative });
         const nested = await walk(childRelative);
         if (!nested.ok) {
           return nested;
@@ -1149,16 +1169,21 @@ async function readOverlay(directory: string): Promise<TevuResult<OverlaySnapsho
       }
       if (!childStat.isFile()) {
         return checkStateFailure(
-          "overlay",
+          'overlay',
           `overlay directory "${directory}" must contain only regular files and directories; "${childRelative}" is neither a regular file nor a directory`,
         );
       }
       try {
         const bytes = await readFile(join(directory, childRelative));
-        entries.push({ kind: "file", path: childRelative, executable: (childStat.mode & 0o100) !== 0, bytes });
+        entries.push({
+          kind: 'file',
+          path: childRelative,
+          executable: (childStat.mode & 0o100) !== 0,
+          bytes,
+        });
       } catch (cause) {
         return checkStateFailure(
-          "overlay",
+          'overlay',
           `overlay directory "${directory}" entry "${childRelative}" cannot be read: ${describeCause(cause)}`,
         );
       }
@@ -1166,7 +1191,7 @@ async function readOverlay(directory: string): Promise<TevuResult<OverlaySnapsho
     return { ok: true, value: undefined };
   };
 
-  const walked = await walk("");
+  const walked = await walk('');
   if (!walked.ok) {
     return walked;
   }
@@ -1184,8 +1209,8 @@ async function readOverlay(directory: string): Promise<TevuResult<OverlaySnapsho
 async function applyCheckState(
   workspace: CaseWorkspace,
   request: CheckStateRequest,
-): Promise<TevuResult<CheckStateRecord, "CheckStateError">> {
-  const first: CheckStateStep = request.restore.length === 0 ? "overlay" : "restore";
+): Promise<TevuResult<CheckStateRecord, 'CheckStateError'>> {
+  const first: CheckStateStep = request.restore.length === 0 ? 'overlay' : 'restore';
   let rootStat: Stats;
   try {
     rootStat = await lstat(workspace.worktreeDirectory);
@@ -1193,7 +1218,7 @@ async function applyCheckState(
     return checkStateFailure(first, `read failed for ".": ${describeCause(cause)}`);
   }
   if (!rootStat.isDirectory()) {
-    return checkStateFailure(first, "worktree root is not a directory");
+    return checkStateFailure(first, 'worktree root is not a directory');
   }
 
   let restore: RestoreRecord | null = null;
@@ -1218,20 +1243,20 @@ async function applyCheckState(
 function sourceError(
   taskId: string,
   reason: string,
-): { ok: false; error: { kind: "SourceMaterializationError"; taskId: string; reason: string } } {
-  return { ok: false, error: { kind: "SourceMaterializationError", taskId, reason } };
+): { ok: false; error: { kind: 'SourceMaterializationError'; taskId: string; reason: string } } {
+  return { ok: false, error: { kind: 'SourceMaterializationError', taskId, reason } };
 }
 
 function isolationError(
   caseId: string,
   reason: string,
-): { ok: false; error: { kind: "IsolationError"; caseId: string; reason: string } } {
-  return { ok: false, error: { kind: "IsolationError", caseId, reason } };
+): { ok: false; error: { kind: 'IsolationError'; caseId: string; reason: string } } {
+  return { ok: false, error: { kind: 'IsolationError', caseId, reason } };
 }
 
 function artifactError(
   operation: string,
   reason: string,
-): { ok: false; error: { kind: "ArtifactError"; operation: string; reason: string } } {
-  return { ok: false, error: { kind: "ArtifactError", operation, reason } };
+): { ok: false; error: { kind: 'ArtifactError'; operation: string; reason: string } } {
+  return { ok: false, error: { kind: 'ArtifactError', operation, reason } };
 }

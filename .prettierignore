@@ -1,0 +1,5 @@
+# Documents are formatted by hand.
+*.md
+
+# Test fixtures are compared byte for byte or are deliberately malformed.
+src/**/fixtures/
