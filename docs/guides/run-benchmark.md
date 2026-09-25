@@ -58,7 +58,7 @@ This command starts model sessions and can incur provider charges. Open the `rep
 For pending manual checks, use the run and case IDs shown in the output. The following IDs are examples; replace them with yours:
 
 ```sh
-tevu assess 20260923t120000z-a1b2c3 csv-export--high
+tevu assess 20260923t120000z-a1b2c3 csv-export--high--1
 ```
 
 The assessment command records your verdicts and rebuilds the report. To rebuild it again from saved evidence:

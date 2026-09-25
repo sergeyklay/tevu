@@ -113,10 +113,17 @@ function tryReferencedVariableName(value: string): string | undefined {
   return match === null ? undefined : match[1];
 }
 
+/** Most attempts per task/model pair that `run.repeat` and `tevu run --repeat` accept. */
+export const MAX_REPEAT = 100;
+
+/** Attempts per task/model pair: a whole number from 1 through {@link MAX_REPEAT}. */
+export const RepeatSchema = z.int().min(1).max(MAX_REPEAT);
+
 /** Settings shared by every benchmark case. */
 export const RunSettingsSchema = z.strictObject({
   output_dir: z.string().min(1),
   concurrency: z.int().min(1).max(32),
+  repeat: RepeatSchema.default(1),
   timeout: DurationSchema,
   stop_grace: DurationSchema,
   check_timeout: DurationSchema.optional(),
@@ -125,7 +132,7 @@ export const RunSettingsSchema = z.strictObject({
 /** Parsed run settings, all defaults materialized except the genuinely optional `check_timeout`. */
 export type RunSettings = z.infer<typeof RunSettingsSchema>;
 
-/** File-shape run settings; identical to {@link RunSettings} since it declares no local defaults. */
+/** File-shape run settings; `repeat` and `check_timeout` are the only optional keys. */
 export type RunSettingsInput = z.input<typeof RunSettingsSchema>;
 
 function checkNoFixedNames(

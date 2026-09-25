@@ -12,6 +12,7 @@ import { agentNamesInUse, durationMs } from "../config/schema.ts";
 import { unavailableBenchmarkMetrics } from "../domain/types.ts";
 import { evaluateChecks, orderTaskChecks, reduceRequiredOutcome } from "../evaluation/checks.ts";
 import { combineCaseMetrics } from "../evaluation/metrics.ts";
+import { compareCaseIds } from "../evaluation/report.ts";
 import { buildTaskPrompt } from "./task-prompt.ts";
 import { describeSourceCommitInPrompt } from "./source-commit-in-prompt.ts";
 
@@ -35,6 +36,7 @@ import type {
   GitWorkspaceAdapter,
   OverlaySnapshot,
   ParentEnvironmentSnapshot,
+  RepeatSetting,
   RunDependencies,
   RunFinding,
   RunManifest,
@@ -66,28 +68,43 @@ type RunBenchmarkErrorKind =
   | "CheckStateError";
 
 /**
- * Builds the deterministic task-by-contender execution plan purely from
- * configuration: cases in configuration task order then contender order, with
- * the declared (not yet resolved) start commit and the configured limits.
+ * Builds the deterministic attempt-major execution plan purely from
+ * configuration: cases loop attempt outermost, then configuration task order,
+ * then contender order, with the declared (not yet resolved) start commit and
+ * the configured limits.
+ *
+ * `repeatOverride`, when present, becomes `plan.repeat` with source `"cli"`,
+ * whatever its value; otherwise `plan.repeat` is `config.run.repeat` with
+ * source `"config"`. `config` is returned unmodified: `plan.config.run.repeat`
+ * always keeps the configured value, even when `repeatOverride` overrides it
+ * for this plan.
  */
-export function planBenchmark(config: TevuConfig): BenchmarkPlan {
+export function planBenchmark(config: TevuConfig, repeatOverride?: number): BenchmarkPlan {
+  const repeat: RepeatSetting =
+    repeatOverride === undefined
+      ? { value: config.run.repeat, source: "config" }
+      : { value: repeatOverride, source: "cli" };
   const cases: CaseIdentity[] = [];
-  for (const task of config.tasks) {
-    for (const model of config.models) {
-      cases.push({
-        caseId: `${task.id}--${model.id}`,
-        taskId: task.id,
-        modelId: model.id,
-        sourceCommit: task.base_commit,
-        model: model.model,
-        effort: model.effort,
-        agent: model.agent,
-      });
+  for (let attempt = 1; attempt <= repeat.value; attempt += 1) {
+    for (const task of config.tasks) {
+      for (const model of config.models) {
+        cases.push({
+          caseId: `${task.id}--${model.id}--${attempt}`,
+          taskId: task.id,
+          modelId: model.id,
+          attempt,
+          sourceCommit: task.base_commit,
+          model: model.model,
+          effort: model.effort,
+          agent: model.agent,
+        });
+      }
     }
   }
   return {
     config,
     cases,
+    repeat,
     concurrency: config.run.concurrency,
     caseTimeoutMs: durationMs(config.run.timeout),
     terminationGraceMs: durationMs(config.run.stop_grace),
@@ -197,7 +214,7 @@ export async function runBenchmark(
       bunVersion: host.value.bunVersion,
     },
     tools: { gitVersion: host.value.gitVersion, agentVersions },
-    execution: { concurrency: plan.concurrency, caseTimeoutMs: plan.caseTimeoutMs },
+    execution: { concurrency: plan.concurrency, caseTimeoutMs: plan.caseTimeoutMs, repeat: plan.repeat },
     cases: pinned.value.map((entry) => entry.identity),
     context: { config: plan.config, capabilities },
   };
@@ -239,9 +256,10 @@ export async function runBenchmark(
     const result = run.results.get(entry.identity.caseId);
     return result === undefined ? [] : [result];
   });
+  const identities = new Map(manifest.cases.map((identity) => [identity.caseId, identity]));
   const findings = [...run.findings].sort(
     (a, b) =>
-      compareStrings(a.caseId ?? "", b.caseId ?? "") || compareStrings(a.message, b.message),
+      compareCaseIds(identities, a.caseId, b.caseId) || compareStrings(a.message, b.message),
   );
   const result: RunResult = {
     schemaVersion: 1,

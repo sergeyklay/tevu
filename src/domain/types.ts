@@ -79,11 +79,19 @@ export type TevuError =
   | { kind: "CancellationError"; activeCaseIds: string[] }
   | { kind: "CheckStateError"; step: "restore" | "overlay"; reason: string };
 
-/** Identity of one benchmark case: one task executed once by one model entry. */
+/** Where a run's effective repeat came from: the configuration (set or defaulted) or `tevu run --repeat`. */
+export type RepeatSource = "config" | "cli";
+
+/** Effective attempts per task/model pair for one run. */
+export type RepeatSetting = { value: number; source: RepeatSource };
+
+/** Identity of one benchmark case: one attempt of one task/model pair. */
 export type CaseIdentity = {
   caseId: string;
   taskId: string;
   modelId: string;
+  /** 1 through the run's `RepeatSetting.value`. */
+  attempt: number;
   sourceCommit: string;
   model: string;
   effort: string;
@@ -141,7 +149,7 @@ export type RunManifest = {
     bunVersion: string;
   };
   tools: { gitVersion: string; agentVersions: Record<string, string | null> };
-  execution: { concurrency: number; caseTimeoutMs: number };
+  execution: { concurrency: number; caseTimeoutMs: number; repeat: RepeatSetting };
   cases: CaseIdentity[];
   context?: {
     /** Decode through `decodeRunConfig`; never read directly as a `TevuConfig`. */
@@ -768,10 +776,11 @@ export type ValidationReport = {
   capabilities: Record<string, AgentCapabilityReport>;
 };
 
-/** Deterministic task-by-contender execution plan derived purely from configuration. */
+/** Deterministic attempt-major execution plan derived purely from configuration. */
 export type BenchmarkPlan = {
   config: TevuConfig;
   cases: CaseIdentity[];
+  repeat: RepeatSetting;
   concurrency: number;
   caseTimeoutMs: number;
   terminationGraceMs: number;

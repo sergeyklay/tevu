@@ -1,6 +1,7 @@
 import type {
   AgentCapabilityReport,
   AssessmentArtifact,
+  CaseIdentity,
   CaseResult,
   CheckRecord,
   CheckResult,
@@ -29,6 +30,18 @@ export type ReportInput = {
   assessments: readonly AssessmentArtifact[];
 };
 
+/** Attempt counts of one task/model pair, derived while building the report. */
+export type PairSummary = {
+  taskId: string;
+  modelId: string;
+  /** Every planned attempt of this pair, `manifest.execution.repeat.value`. */
+  planned: number;
+  outcomes: Record<CaseResult["outcome"], number>;
+  passedOfPlanned: string;
+  /** Holds exactly when `outcomes.passed === planned`. */
+  allPassed: boolean;
+};
+
 /** Deterministic report model; identical source artifacts produce an identical model. */
 export type NormalizedRunModel = {
   schemaVersion: 1;
@@ -41,16 +54,55 @@ export type NormalizedRunModel = {
   tasks: TaskRecord[];
   cases: CaseResult[];
   assessments: AssessmentArtifact[];
+  pairs: PairSummary[];
 };
+
+/**
+ * Compares two case IDs in case order, reading the identity each ID names from `identities`.
+ *
+ * Both IDs name an identity: the case order (task, then model, then numeric
+ * attempt) of the two identities decides. Only one names an identity: the
+ * other sorts first. Neither names one (`null`, or absent from `identities`):
+ * `compareStrings(a ?? "", b ?? "")` decides, which keeps run-level findings
+ * (`null` case ID) first.
+ */
+export function compareCaseIds(
+  identities: ReadonlyMap<string, CaseIdentity>,
+  a: string | null,
+  b: string | null,
+): number {
+  const identityA = a === null ? undefined : identities.get(a);
+  const identityB = b === null ? undefined : identities.get(b);
+  if (identityA !== undefined && identityB !== undefined) {
+    return compareCaseIdentities(identityA, identityB);
+  }
+  if (identityA !== undefined) {
+    return 1;
+  }
+  if (identityB !== undefined) {
+    return -1;
+  }
+  return compareStrings(a ?? "", b ?? "");
+}
+
+/** Case order: task ID, then model ID (both `compareStrings`), then attempt numerically. */
+function compareCaseIdentities(a: CaseIdentity, b: CaseIdentity): number {
+  return (
+    compareStrings(a.taskId, b.taskId) || compareStrings(a.modelId, b.modelId) || a.attempt - b.attempt
+  );
+}
 
 /** Builds the sorted, sensitive-content-free report model from preserved records. */
 export function buildNormalizedRun(input: ReportInput): NormalizedRunModel {
+  const identities = new Map(
+    input.run.manifest.cases.map((identity) => [identity.caseId, identity]),
+  );
   return {
     schemaVersion: 1,
     manifest: input.run.manifest,
     exitCode: input.run.exitCode,
     findings: [...input.run.findings].sort(
-      (a, b) => compareStrings(a.caseId ?? "", b.caseId ?? "") || compareStrings(a.message, b.message),
+      (a, b) => compareCaseIds(identities, a.caseId, b.caseId) || compareStrings(a.message, b.message),
     ),
     capabilities: input.capabilities,
     repositories: sortById(input.repositories),
@@ -60,13 +112,13 @@ export function buildNormalizedRun(input: ReportInput): NormalizedRunModel {
       checks: [...task.checks].sort((a, b) => compareStrings(a.id, b.id)),
     })),
     cases: [...input.run.cases]
-      .sort((a, b) => compareStrings(a.identity.caseId, b.identity.caseId))
+      .sort((a, b) => compareCaseIdentities(a.identity, b.identity))
       .map((caseResult) => ({
         ...caseResult,
         checks: [...caseResult.checks].sort((a, b) => compareStrings(a.checkId, b.checkId)),
       })),
     assessments: [...input.assessments]
-      .sort((a, b) => compareStrings(a.caseId, b.caseId))
+      .sort((a, b) => compareCaseIds(identities, a.caseId, b.caseId))
       .map((artifact) => ({
         ...artifact,
         current: [...artifact.current].sort((a, b) => compareStrings(a.checkId, b.checkId)),
@@ -74,7 +126,62 @@ export function buildNormalizedRun(input: ReportInput): NormalizedRunModel {
           (a, b) => compareStrings(a.checkId, b.checkId) || compareStrings(a.replacedAt, b.replacedAt),
         ),
       })),
+    pairs: buildPairSummaries(input.run.manifest.cases, input.run.cases),
   };
+}
+
+/**
+ * Computes one {@link PairSummary} per distinct `(taskId, modelId)` of
+ * `manifestCases`, sorted by task ID then model ID with `compareStrings`. A
+ * planned attempt without a matching case result counts as `not-evaluated`,
+ * so the four outcome counts always sum to `planned`.
+ */
+function buildPairSummaries(
+  manifestCases: readonly CaseIdentity[],
+  caseResults: readonly CaseResult[],
+): PairSummary[] {
+  const pairKey = (taskId: string, modelId: string): string => `${taskId}\u0000${modelId}`;
+
+  const planned = new Map<string, { taskId: string; modelId: string; count: number }>();
+  for (const identity of manifestCases) {
+    const key = pairKey(identity.taskId, identity.modelId);
+    const entry = planned.get(key);
+    if (entry === undefined) {
+      planned.set(key, { taskId: identity.taskId, modelId: identity.modelId, count: 1 });
+    } else {
+      entry.count += 1;
+    }
+  }
+
+  const results = new Map<string, CaseResult[]>();
+  for (const caseResult of caseResults) {
+    const key = pairKey(caseResult.identity.taskId, caseResult.identity.modelId);
+    const entries = results.get(key);
+    if (entries === undefined) {
+      results.set(key, [caseResult]);
+    } else {
+      entries.push(caseResult);
+    }
+  }
+
+  return [...planned.values()]
+    .sort((a, b) => compareStrings(a.taskId, b.taskId) || compareStrings(a.modelId, b.modelId))
+    .map(({ taskId, modelId, count }) => {
+      const outcomes: PairSummary["outcomes"] = { passed: 0, failed: 0, pending: 0, "not-evaluated": 0 };
+      const pairResults = results.get(pairKey(taskId, modelId)) ?? [];
+      for (const caseResult of pairResults) {
+        outcomes[caseResult.outcome] += 1;
+      }
+      outcomes["not-evaluated"] += count - pairResults.length;
+      return {
+        taskId,
+        modelId,
+        planned: count,
+        outcomes,
+        passedOfPlanned: `${outcomes.passed}/${count}`,
+        allPassed: outcomes.passed === count,
+      };
+    });
 }
 
 /** Serializes the report model as deterministic JSON with recursively sorted object keys. */
@@ -127,6 +234,7 @@ export function renderMarkdownReport(model: NormalizedRunModel): string {
     ...renderAgentCapabilityLines(tools.agentVersions, model.capabilities),
     `- Concurrency: ${manifest.execution.concurrency}`,
     `- Case timeout: ${manifest.execution.caseTimeoutMs}ms`,
+    `- Repeat: ${manifest.execution.repeat.value} (source: ${manifest.execution.repeat.source})`,
     `- Run exit code: ${model.exitCode}`,
     "",
   );
@@ -143,13 +251,12 @@ export function renderMarkdownReport(model: NormalizedRunModel): string {
   const repositoriesById = new Map(model.repositories.map((repository) => [repository.id, repository]));
   const assessmentsByCase = new Map(model.assessments.map((artifact) => [artifact.caseId, artifact]));
 
-  const taskIds = [...new Set(model.cases.map((caseResult) => caseResult.identity.taskId))].sort(
-    compareStrings,
-  );
+  const taskIds = [...new Set(model.pairs.map((pair) => pair.taskId))].sort(compareStrings);
 
   for (const taskId of taskIds) {
     const task = tasksById.get(taskId);
     const taskCases = model.cases.filter((caseResult) => caseResult.identity.taskId === taskId);
+    const taskPairs = model.pairs.filter((pair) => pair.taskId === taskId);
 
     lines.push(`## Task ${taskId}`, "");
     if (task !== undefined) {
@@ -164,20 +271,24 @@ export function renderMarkdownReport(model: NormalizedRunModel): string {
       );
     }
 
-    lines.push(
-      "| Outcome | Model entry | Model | Effort | Lifecycle | Runtime failure | Elapsed |",
-      "|---|---|---|---|---|---|---|",
-    );
-    for (const caseResult of taskCases) {
-      const identity = caseResult.identity;
-      lines.push(
-        `| ${caseResult.outcome} | ${cell(identity.modelId)} | ${cell(identity.model)} | ${cell(identity.effort)} | ${caseResult.lifecycle} | ${caseResult.failure ? cell(caseResult.failure.error.kind) : "none"} | ${cell(formatMetricValue(caseResult.metrics.elapsed))} |`,
-      );
-    }
-    lines.push("");
+    lines.push(...renderPairSummary(taskPairs));
 
-    for (const caseResult of taskCases) {
-      renderCase(lines, caseResult, task, assessmentsByCase.get(caseResult.identity.caseId));
+    if (taskCases.length > 0) {
+      lines.push(
+        "| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |",
+        "|---|---|---|---|---|---|---|---|",
+      );
+      for (const caseResult of taskCases) {
+        const identity = caseResult.identity;
+        lines.push(
+          `| ${caseResult.outcome} | ${cell(identity.modelId)} | ${identity.attempt} | ${cell(identity.model)} | ${cell(identity.effort)} | ${caseResult.lifecycle} | ${caseResult.failure ? cell(caseResult.failure.error.kind) : "none"} | ${cell(formatMetricValue(caseResult.metrics.elapsed))} |`,
+        );
+      }
+      lines.push("");
+
+      for (const caseResult of taskCases) {
+        renderCase(lines, caseResult, task, assessmentsByCase.get(caseResult.identity.caseId));
+      }
     }
   }
 
@@ -205,6 +316,23 @@ function renderAgentCapabilityLines(
       `- Agent "${name}" isolation control (deny outside worktree): ${capabilities[name]?.isolation.denyOutsideWorktree ?? "not probed"}`,
     );
   }
+  return lines;
+}
+
+/** Renders the `Pair summary:` block for one task's pairs, in `pairs` order. */
+function renderPairSummary(pairs: readonly PairSummary[]): string[] {
+  const lines: string[] = ["Pair summary:", ""];
+  lines.push(
+    "| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |",
+    "|---|---|---|---|---|---|---|---|",
+  );
+  for (const pair of pairs) {
+    const outcomes = pair.outcomes;
+    lines.push(
+      `| ${cell(pair.modelId)} | ${pair.planned} | ${outcomes.passed} | ${outcomes.failed} | ${outcomes.pending} | ${outcomes["not-evaluated"]} | ${pair.passedOfPlanned} | ${pair.allPassed ? "yes" : "no"} |`,
+    );
+  }
+  lines.push("");
   return lines;
 }
 
