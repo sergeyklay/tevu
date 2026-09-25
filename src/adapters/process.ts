@@ -7,28 +7,27 @@
  * inherit the parent environment so version-manager shims keep working.
  */
 
-import { Buffer } from "node:buffer";
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import process from "node:process";
-import { execa } from "execa";
+import { Buffer } from 'node:buffer';
+import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import process from 'node:process';
+import { execa } from 'execa';
 
-import { evaluatorEnvironmentNames, referencedVariableName } from "../config/schema.ts";
-import { describeCause } from "../domain/describe-cause.ts";
-import { redactDecodedValue } from "../domain/redaction.ts";
+import { evaluatorEnvironmentNames, referencedVariableName } from '@/config/schema';
+import { describeCause } from '@/domain/describe-cause';
+import { redactDecodedValue } from '@/domain/redaction';
 
-import type { TevuConfig } from "../config/schema.ts";
+import type { TevuConfig } from '@/config/schema';
 import type {
   CaseEnvironments,
   CaseWorkspace,
+  EnvironmentAdapter,
   EnvironmentVariableRecord,
   EvaluatorProcessAdapter,
   EvaluatorProcessRequest,
   EvaluatorProcessResult,
-  EnvironmentAdapter,
   HostProbe,
   IsolatedEnvironment,
-  ManagedProcessCompletion,
   ManagedProcessLaunchFailure,
   ManagedProcessRequest,
   ManagedProcessResult,
@@ -39,7 +38,7 @@ import type {
   SecretRedactor,
   TerminationStage,
   TevuResult,
-} from "../domain/types.ts";
+} from '@/domain/types';
 
 /** Chunk-safe redactor holding back partial secret prefixes across chunk boundaries. */
 export type StreamingRedactor = {
@@ -47,9 +46,9 @@ export type StreamingRedactor = {
   flush(): string;
 };
 
-const REDACTION_MASK = "[REDACTED]";
+const REDACTION_MASK = '[REDACTED]';
 const DEFAULT_MAX_CAPTURE_BYTES = 64 * 1024;
-const FIXED_LOCALE = "C.UTF-8";
+const FIXED_LOCALE = 'C.UTF-8';
 const PROBE_TIMEOUT_MS = 10_000;
 
 /**
@@ -79,7 +78,7 @@ export function createRedactor(secretValues: readonly string[]): Redactor {
 export function createStreamingRedactor(secretValues: readonly string[]): StreamingRedactor {
   const secrets = normalizeSecrets(secretValues);
   const redact = createRedactor(secrets);
-  let carry = "";
+  let carry = '';
 
   const holdLength = (text: string): number => {
     let hold = 0;
@@ -99,12 +98,12 @@ export function createStreamingRedactor(secretValues: readonly string[]): Stream
     push(chunk) {
       const combined = redact(carry + chunk);
       const hold = holdLength(combined);
-      carry = hold === 0 ? "" : combined.slice(combined.length - hold);
+      carry = hold === 0 ? '' : combined.slice(combined.length - hold);
       return combined.slice(0, combined.length - hold);
     },
     flush() {
       const emitted = redact(carry);
-      carry = "";
+      carry = '';
       return emitted;
     },
   };
@@ -116,7 +115,10 @@ export function createStreamingRedactor(secretValues: readonly string[]): Stream
  * redaction boundary. `redactValue` never throws: it maps a `RedactionError`
  * from `redactDecodedValue` to a fixed `ArtifactError`.
  */
-export function createSecretRedactor(secretValues: () => readonly string[], redact: Redactor): SecretRedactor {
+export function createSecretRedactor(
+  secretValues: () => readonly string[],
+  redact: Redactor,
+): SecretRedactor {
   return {
     secretValues,
     redactText: (text) => redact(text),
@@ -127,7 +129,11 @@ export function createSecretRedactor(secretValues: () => readonly string[], reda
       }
       return {
         ok: false,
-        error: { kind: "ArtifactError", operation: "redact-record", reason: "record redaction failed" },
+        error: {
+          kind: 'ArtifactError',
+          operation: 'redact-record',
+          reason: 'record redaction failed',
+        },
       };
     },
   };
@@ -147,7 +153,7 @@ export async function runManagedProcess(
   const secretValues = request.secretValues ?? [];
   const redact = createRedactor(secretValues);
   if (request.cancellation?.aborted === true) {
-    return { launched: false, reason: "cancelled before launch" };
+    return { launched: false, reason: 'cancelled before launch' };
   }
 
   const [file, ...args] = request.argv;
@@ -158,9 +164,9 @@ export async function runManagedProcess(
       cwd: request.cwd,
       env: request.environment,
       extendEnv: false,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
       buffer: false,
       reject: false,
       detached: true,
@@ -171,11 +177,11 @@ export async function runManagedProcess(
   }
 
   const maxCaptureBytes = request.maxCaptureBytes ?? DEFAULT_MAX_CAPTURE_BYTES;
-  const stdoutSecretValues = request.stdoutRedaction === "structured" ? [] : secretValues;
+  const stdoutSecretValues = request.stdoutRedaction === 'structured' ? [] : secretValues;
   const stdoutCapture = createStreamCapture(stdoutSecretValues, maxCaptureBytes, request.onStdout);
   const stderrCapture = createStreamCapture(secretValues, maxCaptureBytes, request.onStderr);
-  subprocess.stdout?.on("data", stdoutCapture.onData);
-  subprocess.stderr?.on("data", stderrCapture.onData);
+  subprocess.stdout?.on('data', stdoutCapture.onData);
+  subprocess.stderr?.on('data', stderrCapture.onData);
 
   const signalGroup = (signal: NodeJS.Signals): void => {
     const pid = subprocess.pid;
@@ -189,40 +195,40 @@ export async function runManagedProcess(
     }
   };
 
-  let terminationStage: TerminationStage = "none";
+  let terminationStage: TerminationStage = 'none';
   let timedOut = false;
   let cancelled = false;
   let graceTimer: NodeJS.Timeout | undefined;
   let survivorTimer: NodeJS.Timeout | undefined;
 
-  const beginTermination = (trigger: "timeout" | "cancellation"): void => {
+  const beginTermination = (trigger: 'timeout' | 'cancellation'): void => {
     if (timedOut || cancelled) {
       return;
     }
-    if (trigger === "timeout") {
+    if (trigger === 'timeout') {
       timedOut = true;
     } else {
       cancelled = true;
     }
-    terminationStage = "graceful";
-    signalGroup("SIGTERM");
+    terminationStage = 'graceful';
+    signalGroup('SIGTERM');
     graceTimer = setTimeout(() => {
-      terminationStage = "forced";
-      signalGroup("SIGKILL");
+      terminationStage = 'forced';
+      signalGroup('SIGKILL');
     }, request.terminationGraceMs);
     graceTimer.unref();
   };
 
-  const timeoutTimer = setTimeout(() => beginTermination("timeout"), request.timeoutMs);
+  const timeoutTimer = setTimeout(() => beginTermination('timeout'), request.timeoutMs);
   timeoutTimer.unref();
-  const onAbort = (): void => beginTermination("cancellation");
-  request.cancellation?.addEventListener("abort", onAbort, { once: true });
+  const onAbort = (): void => beginTermination('cancellation');
+  request.cancellation?.addEventListener('abort', onAbort, { once: true });
 
   // A grandchild holding the inherited stdio pipes would otherwise keep the
   // await pending forever after the supervised process itself has exited.
-  subprocess.nodeChildProcess.once("exit", () => {
-    signalGroup("SIGTERM");
-    survivorTimer = setTimeout(() => signalGroup("SIGKILL"), request.terminationGraceMs);
+  subprocess.nodeChildProcess.once('exit', () => {
+    signalGroup('SIGTERM');
+    survivorTimer = setTimeout(() => signalGroup('SIGKILL'), request.terminationGraceMs);
     survivorTimer.unref();
   });
 
@@ -235,11 +241,11 @@ export async function runManagedProcess(
   if (survivorTimer !== undefined) {
     clearTimeout(survivorTimer);
   }
-  request.cancellation?.removeEventListener("abort", onAbort);
-  signalGroup("SIGKILL");
+  request.cancellation?.removeEventListener('abort', onAbort);
+  signalGroup('SIGKILL');
 
-  const exitCode = typeof result.exitCode === "number" ? result.exitCode : null;
-  const signal = typeof result.signal === "string" ? result.signal : null;
+  const exitCode = typeof result.exitCode === 'number' ? result.exitCode : null;
+  const signal = typeof result.signal === 'string' ? result.signal : null;
   if (exitCode === null && signal === null) {
     return launchFailure(redact(describeSpawnFailure(result)), result.code);
   }
@@ -305,7 +311,7 @@ export function createEvaluatorProcessAdapter(
  */
 export function createEnvironmentAdapter(): EnvironmentAdapter {
   return {
-    snapshotParent(config: TevuConfig): TevuResult<ParentEnvironmentSnapshot, "PrerequisiteError"> {
+    snapshotParent(config: TevuConfig): TevuResult<ParentEnvironmentSnapshot, 'PrerequisiteError'> {
       return snapshotParentEnvironment(config);
     },
     async createCaseEnvironments(
@@ -313,13 +319,13 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
       snapshot: ParentEnvironmentSnapshot,
       config: TevuConfig,
       agent: string,
-    ): Promise<TevuResult<CaseEnvironments, "IsolationError">> {
+    ): Promise<TevuResult<CaseEnvironments, 'IsolationError'>> {
       const agentSettings = config.agents[agent];
       if (agentSettings === undefined) {
         return {
           ok: false,
           error: {
-            kind: "IsolationError",
+            kind: 'IsolationError',
             caseId: workspace.caseId,
             reason: `no agent block is configured for agent "${agent}"`,
           },
@@ -329,33 +335,33 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
         const agentValues = snapshot.agentValues;
         const agentEnvironment = await buildIsolatedEnvironment({
           caseId: workspace.caseId,
-          recipient: "agent",
-          baseDirectory: join(workspace.runtimeDirectory, "agent"),
+          recipient: 'agent',
+          baseDirectory: join(workspace.runtimeDirectory, 'agent'),
           path: snapshot.path,
           additions: [
             ...agentSettings.secrets.map((name) => ({
               name,
-              classification: "secret" as const,
+              classification: 'secret' as const,
               value: agentValues[name],
             })),
             ...agentSettings.env.map((name) => ({
               name,
-              classification: "ordinary" as const,
+              classification: 'ordinary' as const,
               value: agentValues[name],
             })),
           ],
         });
         const evaluator = await buildIsolatedEnvironment({
           caseId: workspace.caseId,
-          recipient: "evaluator",
-          baseDirectory: join(workspace.runtimeDirectory, "evaluator"),
+          recipient: 'evaluator',
+          baseDirectory: join(workspace.runtimeDirectory, 'evaluator'),
           path: snapshot.path,
           // Ordinary evaluator values are added per check by the evaluation
           // module from its declared allowlist, so only their names enter the
           // manifest here and no value enters the fixed base.
           additions: evaluatorEnvironmentNames(config).map((name) => ({
             name,
-            classification: "ordinary" as const,
+            classification: 'ordinary' as const,
           })),
         });
         return { ok: true, value: { agent: agentEnvironment, evaluator } };
@@ -363,7 +369,7 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
         return {
           ok: false,
           error: {
-            kind: "IsolationError",
+            kind: 'IsolationError',
             caseId: workspace.caseId,
             reason: describeCause(cause),
           },
@@ -376,16 +382,16 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
 /** Creates the host, environment-presence, and artifact-writability probes. */
 export function createPrerequisiteAdapter(): PrerequisiteAdapter {
   return {
-    async probeHost(): Promise<TevuResult<HostProbe, "PrerequisiteError">> {
+    async probeHost(): Promise<TevuResult<HostProbe, 'PrerequisiteError'>> {
       const platform = process.platform;
-      if (platform !== "linux" && platform !== "darwin") {
-        return prerequisiteError("platform", "linux or darwin", platform);
+      if (platform !== 'linux' && platform !== 'darwin') {
+        return prerequisiteError('platform', 'linux or darwin', platform);
       }
-      const bunVersion = await probeToolVersion("bun");
+      const bunVersion = await probeToolVersion('bun');
       if (!bunVersion.ok) {
         return bunVersion;
       }
-      const gitVersion = await probeToolVersion("git");
+      const gitVersion = await probeToolVersion('git');
       if (!gitVersion.ok) {
         return gitVersion;
       }
@@ -402,15 +408,17 @@ export function createPrerequisiteAdapter(): PrerequisiteAdapter {
     hasEnvironmentVariable(name: string): boolean {
       return process.env[name] !== undefined;
     },
-    async probeWritableDirectory(directory: string): Promise<TevuResult<void, "PrerequisiteError">> {
+    async probeWritableDirectory(
+      directory: string,
+    ): Promise<TevuResult<void, 'PrerequisiteError'>> {
       try {
         const anchor = await nearestExistingAncestor(resolve(directory));
-        const probeDirectory = await mkdtemp(join(anchor, ".tevu-write-probe-"));
+        const probeDirectory = await mkdtemp(join(anchor, '.tevu-write-probe-'));
         await rm(probeDirectory, { recursive: true, force: true });
         return { ok: true, value: undefined };
       } catch (cause) {
         return prerequisiteError(
-          "artifact-directory",
+          'artifact-directory',
           `writable directory at ${directory}`,
           describeCause(cause),
         );
@@ -429,9 +437,9 @@ function createStreamCapture(
   maxCaptureBytes: number,
   sink: ((text: string) => void) | undefined,
 ): StreamCapture {
-  const decoder = new TextDecoder("utf-8", { fatal: false });
+  const decoder = new TextDecoder('utf-8', { fatal: false });
   const redactor = createStreamingRedactor(secretValues);
-  let text = "";
+  let text = '';
   let capturedBytes = 0;
   let totalBytes = 0;
   let truncated = false;
@@ -440,11 +448,11 @@ function createStreamCapture(
     if (emitted.length === 0) {
       return;
     }
-    totalBytes += Buffer.byteLength(emitted, "utf8");
+    totalBytes += Buffer.byteLength(emitted, 'utf8');
     if (!truncated) {
       const kept = utf8Prefix(emitted, maxCaptureBytes - capturedBytes);
       text += kept;
-      capturedBytes += Buffer.byteLength(kept, "utf8");
+      capturedBytes += Buffer.byteLength(kept, 'utf8');
       if (kept.length < emitted.length) {
         truncated = true;
       }
@@ -466,15 +474,15 @@ function createStreamCapture(
 
 function utf8Prefix(text: string, maxBytes: number): string {
   if (maxBytes <= 0) {
-    return "";
+    return '';
   }
-  if (Buffer.byteLength(text, "utf8") <= maxBytes) {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) {
     return text;
   }
   let bytes = 0;
   let end = 0;
   for (const character of text) {
-    const characterBytes = Buffer.byteLength(character, "utf8");
+    const characterBytes = Buffer.byteLength(character, 'utf8');
     if (bytes + characterBytes > maxBytes) {
       break;
     }
@@ -492,11 +500,11 @@ function normalizeSecrets(secretValues: readonly string[]): string[] {
 
 /** Extracts a Node.js-specific error code (e.g. `ENOENT`) from a caught value, when present. */
 function describeErrorCode(cause: unknown): string | undefined {
-  if (typeof cause !== "object" || cause === null || !("code" in cause)) {
+  if (typeof cause !== 'object' || cause === null || !('code' in cause)) {
     return undefined;
   }
   const code = (cause as { code: unknown }).code;
-  return typeof code === "string" && code.length > 0 ? code : undefined;
+  return typeof code === 'string' && code.length > 0 ? code : undefined;
 }
 
 function launchFailure(reason: string, code: string | undefined): ManagedProcessLaunchFailure {
@@ -509,19 +517,19 @@ function describeSpawnFailure(result: {
   message?: unknown;
 }): string {
   for (const candidate of [result.originalMessage, result.shortMessage, result.message]) {
-    if (typeof candidate === "string" && candidate.length > 0) {
+    if (typeof candidate === 'string' && candidate.length > 0) {
       return candidate;
     }
   }
-  return "process could not be started";
+  return 'process could not be started';
 }
 
 function snapshotParentEnvironment(
   config: TevuConfig,
-): TevuResult<ParentEnvironmentSnapshot, "PrerequisiteError"> {
+): TevuResult<ParentEnvironmentSnapshot, 'PrerequisiteError'> {
   const path = process.env.PATH;
   if (path === undefined || path.length === 0) {
-    return prerequisiteError("environment", "non-empty parent PATH", "empty");
+    return prerequisiteError('environment', 'non-empty parent PATH', 'empty');
   }
 
   const agentValues: Record<string, string> = {};
@@ -574,13 +582,13 @@ function snapshotParentEnvironment(
 
 type EnvironmentAddition = {
   name: string;
-  classification: "secret" | "ordinary";
+  classification: 'secret' | 'ordinary';
   value?: string;
 };
 
 type IsolatedEnvironmentInput = {
   caseId: string;
-  recipient: "agent" | "evaluator";
+  recipient: 'agent' | 'evaluator';
   baseDirectory: string;
   path: string;
   additions: EnvironmentAddition[];
@@ -589,13 +597,13 @@ type IsolatedEnvironmentInput = {
 async function buildIsolatedEnvironment(
   input: IsolatedEnvironmentInput,
 ): Promise<IsolatedEnvironment> {
-  const homeDirectory = join(input.baseDirectory, "home");
-  const temporaryDirectory = join(input.baseDirectory, "tmp");
+  const homeDirectory = join(input.baseDirectory, 'home');
+  const temporaryDirectory = join(input.baseDirectory, 'tmp');
   const xdgDirectories = {
-    XDG_CONFIG_HOME: join(homeDirectory, ".config"),
-    XDG_DATA_HOME: join(homeDirectory, ".local", "share"),
-    XDG_CACHE_HOME: join(homeDirectory, ".cache"),
-    XDG_STATE_HOME: join(homeDirectory, ".local", "state"),
+    XDG_CONFIG_HOME: join(homeDirectory, '.config'),
+    XDG_DATA_HOME: join(homeDirectory, '.local', 'share'),
+    XDG_CACHE_HOME: join(homeDirectory, '.cache'),
+    XDG_STATE_HOME: join(homeDirectory, '.local', 'state'),
   };
   for (const directory of [temporaryDirectory, ...Object.values(xdgDirectories)]) {
     await mkdir(directory, { recursive: true });
@@ -608,11 +616,11 @@ async function buildIsolatedEnvironment(
     TMPDIR: temporaryDirectory,
     LANG: FIXED_LOCALE,
     LC_ALL: FIXED_LOCALE,
-    CI: "1",
+    CI: '1',
   };
   const variableManifest: EnvironmentVariableRecord[] = Object.keys(variables).map((name) => ({
     name,
-    classification: "fixed",
+    classification: 'fixed',
     recipient: input.recipient,
   }));
 
@@ -654,17 +662,17 @@ async function nearestExistingAncestor(target: string): Promise<string> {
 }
 
 async function probeToolVersion(
-  tool: "bun" | "git",
-): Promise<TevuResult<string, "PrerequisiteError">> {
+  tool: 'bun' | 'git',
+): Promise<TevuResult<string, 'PrerequisiteError'>> {
   // Version probes are local prerequisite checks, not case processes, so they
   // inherit the parent environment: version-manager shims (asdf, mise) need
   // HOME and friends to resolve the pinned tool. No value is persisted.
-  const result = await execa(tool, ["--version"], {
-    stdin: "ignore",
+  const result = await execa(tool, ['--version'], {
+    stdin: 'ignore',
     reject: false,
     timeout: PROBE_TIMEOUT_MS,
   });
-  const stdout = typeof result.stdout === "string" ? result.stdout.trim() : "";
+  const stdout = typeof result.stdout === 'string' ? result.stdout.trim() : '';
   if (result.failed || result.exitCode !== 0 || stdout.length === 0) {
     return prerequisiteError(
       tool,
@@ -680,12 +688,16 @@ function prerequisiteError(
   tool: string,
   expected: string,
   actual: string,
-): { ok: false; error: { kind: "PrerequisiteError"; tool: string; expected: string; actual: string } } {
-  return { ok: false, error: { kind: "PrerequisiteError", tool, expected, actual } };
+): {
+  ok: false;
+  error: { kind: 'PrerequisiteError'; tool: string; expected: string; actual: string };
+} {
+  return { ok: false, error: { kind: 'PrerequisiteError', tool, expected, actual } };
 }
 
-function missingVariableError(
-  name: string,
-): { ok: false; error: { kind: "PrerequisiteError"; tool: string; expected: string; actual: string } } {
-  return prerequisiteError("environment", `environment variable ${name} set`, "unset");
+function missingVariableError(name: string): {
+  ok: false;
+  error: { kind: 'PrerequisiteError'; tool: string; expected: string; actual: string };
+} {
+  return prerequisiteError('environment', `environment variable ${name} set`, 'unset');
 }

@@ -7,9 +7,9 @@
  * Entry point: {@link runSetupPhase}.
  */
 
-import { describeCause } from "../domain/describe-cause.ts";
+import { describeCause } from '@/domain/describe-cause';
 
-import type { SetupCommand } from "../config/schema.ts";
+import type { SetupCommand } from '@/config/schema';
 import type {
   EvaluatorProcessAdapter,
   EvaluatorProcessResult,
@@ -17,7 +17,7 @@ import type {
   SetupCommandRecord,
   SetupPhase,
   TevuError,
-} from "../domain/types.ts";
+} from '@/domain/types';
 
 /** Everything one setup phase's commands need to run. */
 export type SetupPhaseInput = {
@@ -33,14 +33,14 @@ export type SetupPhaseInput = {
 
 /** Terminal outcome of one setup phase, with every started command's record and the phase log text. */
 export type SetupPhaseOutcome =
-  | { status: "passed"; commands: SetupCommandRecord[]; log: string }
+  | { status: 'passed'; commands: SetupCommandRecord[]; log: string }
   | {
-      status: "failed";
+      status: 'failed';
       commands: SetupCommandRecord[];
       log: string;
-      error: Extract<TevuError, { kind: "SetupError" }>;
+      error: Extract<TevuError, { kind: 'SetupError' }>;
     }
-  | { status: "cancelled"; commands: SetupCommandRecord[]; log: string };
+  | { status: 'cancelled'; commands: SetupCommandRecord[]; log: string };
 
 /**
  * Runs one phase's commands sequentially in declared order, stopping at the
@@ -57,7 +57,7 @@ export async function runSetupPhase(input: SetupPhaseInput): Promise<SetupPhaseO
 
   for (const argv of input.commands) {
     if (input.cancellation.aborted) {
-      return { status: "cancelled", commands: records, log: buildLog(sections) };
+      return { status: 'cancelled', commands: records, log: buildLog(sections) };
     }
 
     let execution: EvaluatorProcessResult;
@@ -74,24 +74,35 @@ export async function runSetupPhase(input: SetupPhaseInput): Promise<SetupPhaseO
       execution = { launched: false, reason: describeCause(cause) };
     }
 
-    const classified = classify(input.phase, argv, execution, input.timeoutMs, input.cancellation.aborted);
+    const classified = classify(
+      input.phase,
+      argv,
+      execution,
+      input.timeoutMs,
+      input.cancellation.aborted,
+    );
     records.push(classified.record);
     sections.push(buildSection(argv, classified.statusLine, execution));
 
-    if (classified.record.outcome === "cancelled") {
-      return { status: "cancelled", commands: records, log: buildLog(sections) };
+    if (classified.record.outcome === 'cancelled') {
+      return { status: 'cancelled', commands: records, log: buildLog(sections) };
     }
-    if (classified.record.outcome !== "passed") {
+    if (classified.record.outcome !== 'passed') {
       return {
-        status: "failed",
+        status: 'failed',
         commands: records,
         log: buildLog(sections),
-        error: { kind: "SetupError", phase: input.phase, argv: [...argv], reason: classified.reason },
+        error: {
+          kind: 'SetupError',
+          phase: input.phase,
+          argv: [...argv],
+          reason: classified.reason,
+        },
       };
     }
   }
 
-  return { status: "passed", commands: records, log: buildLog(sections) };
+  return { status: 'passed', commands: records, log: buildLog(sections) };
 }
 
 type Classification = { record: SetupCommandRecord; statusLine: string; reason: string };
@@ -112,13 +123,25 @@ function classify(
   if (!execution.launched) {
     if (aborted) {
       return {
-        record: { phase, argv: commandArgv, exitCode: null, durationMs: null, outcome: "cancelled" },
-        statusLine: "cancelled before launch",
-        reason: "",
+        record: {
+          phase,
+          argv: commandArgv,
+          exitCode: null,
+          durationMs: null,
+          outcome: 'cancelled',
+        },
+        statusLine: 'cancelled before launch',
+        reason: '',
       };
     }
     return {
-      record: { phase, argv: commandArgv, exitCode: null, durationMs: null, outcome: "launch-failed" },
+      record: {
+        phase,
+        argv: commandArgv,
+        exitCode: null,
+        durationMs: null,
+        outcome: 'launch-failed',
+      },
       statusLine: `launch failed: ${execution.reason}`,
       reason: `could not be started: ${execution.reason}`,
     };
@@ -127,59 +150,63 @@ function classify(
   const { exitCode, durationMs, signal, timedOut, terminationStage } = execution;
   if (timedOut) {
     return {
-      record: { phase, argv: commandArgv, exitCode, durationMs, outcome: "timed-out" },
+      record: { phase, argv: commandArgv, exitCode, durationMs, outcome: 'timed-out' },
       statusLine: `timed out after ${timeoutMs}ms (termination: ${terminationStage})`,
       reason: `timed out after ${timeoutMs}ms`,
     };
   }
   if (exitCode === 0) {
     return {
-      record: { phase, argv: commandArgv, exitCode, durationMs, outcome: "passed" },
-      statusLine: "exit code 0",
-      reason: "",
+      record: { phase, argv: commandArgv, exitCode, durationMs, outcome: 'passed' },
+      statusLine: 'exit code 0',
+      reason: '',
     };
   }
   if (aborted) {
     return {
-      record: { phase, argv: commandArgv, exitCode, durationMs, outcome: "cancelled" },
+      record: { phase, argv: commandArgv, exitCode, durationMs, outcome: 'cancelled' },
       statusLine: `cancelled (termination: ${terminationStage})`,
-      reason: "",
+      reason: '',
     };
   }
   if (exitCode !== null) {
     return {
-      record: { phase, argv: commandArgv, exitCode, durationMs, outcome: "failed" },
+      record: { phase, argv: commandArgv, exitCode, durationMs, outcome: 'failed' },
       statusLine: `exit code ${exitCode}`,
       reason: `exited with code ${exitCode}`,
     };
   }
   return {
-    record: { phase, argv: commandArgv, exitCode, durationMs, outcome: "failed" },
-    statusLine: `terminated by signal ${signal ?? "unknown"}`,
-    reason: `terminated by signal ${signal ?? "unknown"}`,
+    record: { phase, argv: commandArgv, exitCode, durationMs, outcome: 'failed' },
+    statusLine: `terminated by signal ${signal ?? 'unknown'}`,
+    reason: `terminated by signal ${signal ?? 'unknown'}`,
   };
 }
 
 /** Builds one command's phase-log section: header, status, and, when launched, stdout and stderr. */
-function buildSection(argv: readonly string[], statusLine: string, execution: EvaluatorProcessResult): string {
+function buildSection(
+  argv: readonly string[],
+  statusLine: string,
+  execution: EvaluatorProcessResult,
+): string {
   const parts = [`$ ${JSON.stringify(argv)}`, statusLine];
   if (execution.launched) {
-    parts.push(captureLine("stdout", execution.stdout), captureLine("stderr", execution.stderr));
+    parts.push(captureLine('stdout', execution.stdout), captureLine('stderr', execution.stderr));
   }
-  return parts.join("\n");
+  return parts.join('\n');
 }
 
 /** Renders one captured stream as its own log line(s), trimmed of a trailing blank line. */
-function captureLine(stream: "stdout" | "stderr", capture: RedactedCapture): string {
-  const size = `${capture.totalBytes} bytes${capture.truncated ? ", truncated" : ""}`;
+function captureLine(stream: 'stdout' | 'stderr', capture: RedactedCapture): string {
+  const size = `${capture.totalBytes} bytes${capture.truncated ? ', truncated' : ''}`;
   const header = `${stream} (${size}):`;
   if (capture.text.length === 0) {
     return header;
   }
-  return `${header}\n${capture.text.replace(/\n+$/, "")}`;
+  return `${header}\n${capture.text.replace(/\n+$/, '')}`;
 }
 
 /** Joins every started command's section with one empty line, ending with a trailing newline. */
 function buildLog(sections: readonly string[]): string {
-  return `${sections.join("\n\n")}\n`;
+  return `${sections.join('\n\n')}\n`;
 }

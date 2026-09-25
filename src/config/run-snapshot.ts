@@ -10,12 +10,12 @@
  * leaves stored runs decodable.
  */
 
-import { z } from "zod";
+import { z } from 'zod';
 
-import type { CheckRecord, RunConfigRecord, TaskRecord, TevuResult } from "../domain/types.ts";
+import type { CheckRecord, RunConfigRecord, TaskRecord, TevuResult } from '@/domain/types';
 
 const projectionSourceSchema = z.object({
-  kind: z.enum(["jira", "github"]),
+  kind: z.enum(['jira', 'github']),
   key: z.string(),
   url: z.string(),
 });
@@ -57,19 +57,19 @@ const projectionConfigSchema = z.object({
  * @throws never; a snapshot that fails the projection is returned as an
  * `ArtifactError`, never thrown.
  */
-export function decodeRunConfig(snapshot: unknown): TevuResult<RunConfigRecord, "ArtifactError"> {
+export function decodeRunConfig(snapshot: unknown): TevuResult<RunConfigRecord, 'ArtifactError'> {
   const parsed = projectionConfigSchema.safeParse(snapshot);
   if (!parsed.success) {
     const firstIssue = parsed.error.issues[0];
     const path =
       firstIssue === undefined || firstIssue.path.length === 0
-        ? "(root)"
-        : firstIssue.path.map((segment) => String(segment)).join(".");
+        ? '(root)'
+        : firstIssue.path.map((segment) => String(segment)).join('.');
     return {
       ok: false,
       error: {
-        kind: "ArtifactError",
-        operation: "decode-run-configuration",
+        kind: 'ArtifactError',
+        operation: 'decode-run-configuration',
         reason: `run configuration snapshot does not match the current configuration layout at ${path}`,
       },
     };
@@ -82,16 +82,23 @@ export function decodeRunConfig(snapshot: unknown): TevuResult<RunConfigRecord, 
     description: task.description,
     source: projectSource(task.title, task.source),
     checks: [
-      ...task.checks.acceptance.map((check) => projectCheck(check, "acceptance")),
-      ...task.checks.done.map((check) => projectCheck(check, "definition-of-done")),
+      ...task.checks.acceptance.map((check) => projectCheck(check, 'acceptance')),
+      ...task.checks.done.map((check) => projectCheck(check, 'definition-of-done')),
     ],
   }));
   return {
     ok: true,
     value: {
       tasks,
-      models: data.models.map((model) => ({ id: model.id, model: model.model, effort: model.effort })),
-      repositories: data.repositories.map((repository) => ({ id: repository.id, path: repository.path })),
+      models: data.models.map((model) => ({
+        id: model.id,
+        model: model.model,
+        effort: model.effort,
+      })),
+      repositories: data.repositories.map((repository) => ({
+        id: repository.id,
+        path: repository.path,
+      })),
     },
   };
 }
@@ -99,24 +106,24 @@ export function decodeRunConfig(snapshot: unknown): TevuResult<RunConfigRecord, 
 function projectSource(
   title: string,
   source: z.infer<typeof projectionSourceSchema> | undefined,
-): TaskRecord["source"] {
+): TaskRecord['source'] {
   if (source === undefined) {
-    return { kind: "manual", reference: null, title };
+    return { kind: 'manual', reference: null, title };
   }
-  return source.kind === "jira"
-    ? { kind: "jira-cloud", issueKey: source.key, issueUrl: source.url }
-    : { kind: "github-issue", issueKey: source.key, issueUrl: source.url };
+  return source.kind === 'jira'
+    ? { kind: 'jira-cloud', issueKey: source.key, issueUrl: source.url }
+    : { kind: 'github-issue', issueKey: source.key, issueUrl: source.url };
 }
 
 function projectCheck(
   check: z.infer<typeof projectionCheckSchema>,
-  category: CheckRecord["category"],
+  category: CheckRecord['category'],
 ): CheckRecord {
   return {
     id: check.id,
     category,
     description: check.description,
     required: check.required,
-    evaluator: check.manual === true ? "manual" : "command",
+    evaluator: check.manual === true ? 'manual' : 'command',
   };
 }

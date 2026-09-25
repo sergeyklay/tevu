@@ -7,17 +7,16 @@
  * dependency wiring and signal forwarding live here; no orchestration,
  * evaluation, transport, or persistence logic.
  */
+import { createHash, randomBytes } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import process from 'node:process';
+import { pathToFileURL } from 'node:url';
 
-import { createHash, randomBytes } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
-import * as path from "node:path";
-import process from "node:process";
-import { pathToFileURL } from "node:url";
-
-import { createArtifactStore, createConfigStore } from "./adapters/artifact-store.ts";
-import { createOpenCodeAdapter } from "./adapters/agents/opencode/opencode.ts";
-import { createGitWorkspaceAdapter, createSourceValidator } from "./adapters/git.ts";
+import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
+import { createArtifactStore, createConfigStore } from '@/adapters/artifact-store';
+import { createGitWorkspaceAdapter, createSourceValidator } from '@/adapters/git';
 import {
   createEnvironmentAdapter,
   createEvaluatorProcessAdapter,
@@ -25,22 +24,22 @@ import {
   createRedactor,
   createSecretRedactor,
   runManagedProcess,
-} from "./adapters/process.ts";
+} from '@/adapters/process';
 import {
   createGitHubIssuesAdapter,
   GH_CREDENTIAL_ENVIRONMENT_VARIABLES,
-} from "./adapters/trackers/github-issues.ts";
-import { createJiraCloudAdapter } from "./adapters/trackers/jira-cloud.ts";
-import { assessCase, readAssessmentContext, rebuildReport } from "./application/assess.ts";
-import { createTask } from "./application/create-task.ts";
-import { planBenchmark, runBenchmark } from "./application/run-benchmark.ts";
-import { validateConfig } from "./application/validate.ts";
-import { canonicalConfigSerialization, loadConfig } from "./config/load.ts";
-import { referencedVariableName } from "./config/schema.ts";
-import { runProgram } from "./interface/program.ts";
+} from '@/adapters/trackers/github-issues';
+import { createJiraCloudAdapter } from '@/adapters/trackers/jira-cloud';
+import { assessCase, readAssessmentContext, rebuildReport } from '@/application/assess';
+import { createTask } from '@/application/create-task';
+import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
+import { validateConfig } from '@/application/validate';
+import { canonicalConfigSerialization, loadConfig } from '@/config/load';
+import { referencedVariableName } from '@/config/schema';
+import { runProgram } from '@/interface/program';
 
-import type { JiraCloudSettings } from "./adapters/trackers/jira-cloud.ts";
-import type { TevuConfig } from "./config/schema.ts";
+import type { JiraCloudSettings } from '@/adapters/trackers/jira-cloud';
+import type { TevuConfig } from '@/config/schema';
 import type {
   AgentRegistry,
   ArtifactStore,
@@ -49,12 +48,8 @@ import type {
   GitWorkspaceAdapter,
   LoadConfigErrorKind,
   TevuResult,
-} from "./domain/types.ts";
-import type {
-  ProgramDependencies,
-  ProgramIo,
-  ProgramOperations,
-} from "./interface/program.ts";
+} from '@/domain/types';
+import type { ProgramDependencies, ProgramIo, ProgramOperations } from '@/interface/program';
 
 /** Optional overrides for composing the production dependency graph. */
 export type CompositionOptions = {
@@ -106,13 +101,13 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
   const agentsFor = (config: TevuConfig): AgentRegistry =>
     new Map([
       [
-        "opencode",
+        'opencode',
         createOpenCodeAdapter(
-          { agent: "opencode", executable: config.agents.opencode.command },
+          { agent: 'opencode', executable: config.agents.opencode.command },
           {
             runProcess: runManagedProcess,
             secrets,
-            probeEnvironment: { PATH: process.env["PATH"] ?? "" },
+            probeEnvironment: { PATH: process.env['PATH'] ?? '' },
             probeDirectory: process.cwd(),
           },
         ),
@@ -148,7 +143,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
             ...request,
             cwd: process.cwd(),
             secretValues: registry.read(),
-            stdoutRedaction: "structured",
+            stdoutRedaction: 'structured',
           }),
         parentEnvironment: process.env,
         cancellation,
@@ -172,28 +167,31 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       }),
     planBenchmark,
     executeBenchmark: async (plan, hooks) => {
-      const clearCancellationExit = scheduleBoundedCancellationExit(hooks.cancellation, plan.terminationGraceMs);
+      const clearCancellationExit = scheduleBoundedCancellationExit(
+        hooks.cancellation,
+        plan.terminationGraceMs,
+      );
       try {
         return await runBenchmark(plan, {
-        git: gitFor(plan.config),
-        agents: agentsFor(plan.config),
-        artifacts: createArtifactStore({
-          artifactsDirectory: plan.artifactsDirectory,
+          git: gitFor(plan.config),
+          agents: agentsFor(plan.config),
+          artifacts: createArtifactStore({
+            artifactsDirectory: plan.artifactsDirectory,
+            redact: registry.redact,
+          }),
+          evaluatorProcesses: createEvaluatorProcessAdapter(registry.read),
+          environments,
+          prerequisites,
+          clock,
+          generateRunId: (startedAt) => {
+            const runId = generateRunId(startedAt);
+            hooks.onRunId?.(runId);
+            return runId;
+          },
+          configDigest: (config) => sha256Hex(canonicalConfigSerialization(config)),
           redact: registry.redact,
-        }),
-        evaluatorProcesses: createEvaluatorProcessAdapter(registry.read),
-        environments,
-        prerequisites,
-        clock,
-        generateRunId: (startedAt) => {
-          const runId = generateRunId(startedAt);
-          hooks.onRunId?.(runId);
-          return runId;
-        },
-        configDigest: (config) => sha256Hex(canonicalConfigSerialization(config)),
-        redact: registry.redact,
-        cancellation: hooks.cancellation,
-        onLifecycle: hooks.onLifecycle,
+          cancellation: hooks.cancellation,
+          onLifecycle: hooks.onLifecycle,
         });
       } finally {
         clearCancellationExit();
@@ -222,13 +220,13 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const controller = new AbortController();
   const onInterrupt = createInterruptHandler(controller);
-  process.on("SIGINT", onInterrupt);
-  process.on("SIGTERM", onInterrupt);
+  process.on('SIGINT', onInterrupt);
+  process.on('SIGTERM', onInterrupt);
   try {
     return await runProgram(argv, composeProgramDependencies({ cancellation: controller.signal }));
   } finally {
-    process.off("SIGINT", onInterrupt);
-    process.off("SIGTERM", onInterrupt);
+    process.off('SIGINT', onInterrupt);
+    process.off('SIGTERM', onInterrupt);
   }
 }
 
@@ -284,20 +282,20 @@ function wrapEnvironmentAdapter(
 
 /** One private sealed-workspace root per adapter instance, outside repositories and artifacts. */
 function createWorkspacesRoot(): string {
-  return path.join(tmpdir(), `tevu-workspaces-${randomBytes(6).toString("hex")}`);
+  return path.join(tmpdir(), `tevu-workspaces-${randomBytes(6).toString('hex')}`);
 }
 
 /** UTC basic timestamp plus a collision-resistant lowercase hexadecimal suffix. */
 function generateRunId(startedAt: Date): string {
-  const pad = (value: number): string => String(value).padStart(2, "0");
+  const pad = (value: number): string => String(value).padStart(2, '0');
   const stamp =
     `${startedAt.getUTCFullYear()}${pad(startedAt.getUTCMonth() + 1)}${pad(startedAt.getUTCDate())}` +
     `t${pad(startedAt.getUTCHours())}${pad(startedAt.getUTCMinutes())}${pad(startedAt.getUTCSeconds())}z`;
-  return `${stamp}-${randomBytes(6).toString("hex")}`;
+  return `${stamp}-${randomBytes(6).toString('hex')}`;
 }
 
 function sha256Hex(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
+  return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
 /**
@@ -319,10 +317,10 @@ function scheduleBoundedCancellationExit(
   if (cancellation.aborted) {
     arm();
   } else {
-    cancellation.addEventListener("abort", arm, { once: true });
+    cancellation.addEventListener('abort', arm, { once: true });
   }
   return () => {
-    cancellation.removeEventListener("abort", arm);
+    cancellation.removeEventListener('abort', arm);
     clearTimeout(timer);
   };
 }
@@ -345,7 +343,7 @@ if (isDirectExecution()) {
       process.exitCode = code;
     },
     () => {
-      process.stderr.write("tevu failed unexpectedly; command could not complete\n");
+      process.stderr.write('tevu failed unexpectedly; command could not complete\n');
       process.exitCode = 1;
     },
   );

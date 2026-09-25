@@ -6,7 +6,7 @@
  * Entry point: {@link createGitHubIssuesAdapter}.
  */
 
-import type { IssueSnapshot, IssueTrackerAdapter, TevuResult } from "../../domain/types.ts";
+import type { IssueSnapshot, IssueTrackerAdapter, TevuResult } from '@/domain/types';
 
 /** Literal-argv `gh` invocation request; a subset of the process adapter's own request shape. */
 export type GhRunRequest = {
@@ -47,10 +47,10 @@ export type GitHubIssuesDependencies = {
 
 /** Token variables gh 2.86.0 reads (`gh help environment`); registered as secrets before every import. */
 export const GH_CREDENTIAL_ENVIRONMENT_VARIABLES: readonly string[] = [
-  "GH_TOKEN",
-  "GITHUB_TOKEN",
-  "GH_ENTERPRISE_TOKEN",
-  "GITHUB_ENTERPRISE_TOKEN",
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
 ];
 
 const TIMEOUT_MS = 30_000;
@@ -59,9 +59,10 @@ const MAX_CAPTURE_BYTES = 1_048_576;
 const EXCERPT_MAX_CODE_POINTS = 200;
 
 const MALFORMED_REFERENCE_REASON =
-  "reference must be OWNER/REPO#NUMBER or https://HOST/OWNER/REPO/issues/NUMBER";
-const PULL_REQUEST_REASON = "the reference points to a pull request, not an issue";
-const GH_READ_FAILURE_REASON = "gh could not read the issue (not found, no access, or no connection)";
+  'reference must be OWNER/REPO#NUMBER or https://HOST/OWNER/REPO/issues/NUMBER';
+const PULL_REQUEST_REASON = 'the reference points to a pull request, not an issue';
+const GH_READ_FAILURE_REASON =
+  'gh could not read the issue (not found, no access, or no connection)';
 
 const MAX_ISSUE_NUMBER = 2_147_483_647;
 
@@ -72,19 +73,19 @@ const ISSUE_PATH_PATTERN =
 
 /** Environment variables gh 2.86.0 must never see, per gh's own documented behavior. */
 const GH_ENVIRONMENT_EXCLUSIONS = new Set([
-  "CLICOLOR_FORCE",
-  "GH_FORCE_TTY",
-  "GH_DEBUG",
-  "DEBUG",
-  "GH_ENTERPRISE_TOKEN",
-  "GITHUB_ENTERPRISE_TOKEN",
+  'CLICOLOR_FORCE',
+  'GH_FORCE_TTY',
+  'GH_DEBUG',
+  'DEBUG',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
 ]);
 
 /** GitHub token shapes masked from a stderr excerpt before line selection and truncation. */
 const TOKEN_SHAPE_PATTERN = /gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}/g;
 
 /** Repository path segment parsed out of a short-form reference or an issue URL. */
-type IssuePath = { owner: string; repo: string; kind: "issues" | "pull"; number: number };
+type IssuePath = { owner: string; repo: string; kind: 'issues' | 'pull'; number: number };
 
 /** Fully parsed reference, including the host the short form implies. */
 type ParsedReference = IssuePath & { host: string };
@@ -97,17 +98,19 @@ type ParsedReference = IssuePath & { host: string };
  * clock and no process global; every effect arrives through
  * {@link GitHubIssuesDependencies}.
  */
-export function createGitHubIssuesAdapter(dependencies: GitHubIssuesDependencies): IssueTrackerAdapter {
+export function createGitHubIssuesAdapter(
+  dependencies: GitHubIssuesDependencies,
+): IssueTrackerAdapter {
   return {
     async readIssue(
       input: string,
-    ): Promise<TevuResult<IssueSnapshot, "IssueImportError" | "CancellationError">> {
+    ): Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>> {
       const reference = input.trim();
       const parsed = parseReference(reference);
       if (parsed === null) {
         return trackerError(reference, MALFORMED_REFERENCE_REASON);
       }
-      if (parsed.kind === "pull") {
+      if (parsed.kind === 'pull') {
         return trackerError(reference, PULL_REQUEST_REASON);
       }
       if (dependencies.cancellation.aborted) {
@@ -115,7 +118,7 @@ export function createGitHubIssuesAdapter(dependencies: GitHubIssuesDependencies
       }
 
       const result = await dependencies.runGh({
-        argv: ["gh", "issue", "view", canonicalIssueUrl(parsed), "--json", "number,title,body,url"],
+        argv: ['gh', 'issue', 'view', canonicalIssueUrl(parsed), '--json', 'number,title,body,url'],
         environment: ghEnvironment(dependencies.parentEnvironment),
         timeoutMs: TIMEOUT_MS,
         terminationGraceMs: TERMINATION_GRACE_MS,
@@ -127,12 +130,15 @@ export function createGitHubIssuesAdapter(dependencies: GitHubIssuesDependencies
         return cancellationFailure();
       }
       if (!result.launched) {
-        return result.code === "ENOENT"
+        return result.code === 'ENOENT'
           ? trackerError(
               reference,
-              "GitHub CLI (gh) is not installed or not on PATH; install it from https://cli.github.com or enter the task manually",
+              'GitHub CLI (gh) is not installed or not on PATH; install it from https://cli.github.com or enter the task manually',
             )
-          : trackerError(reference, `GitHub CLI (gh) could not be started: ${result.code ?? result.reason}`);
+          : trackerError(
+              reference,
+              `GitHub CLI (gh) could not be started: ${result.code ?? result.reason}`,
+            );
       }
       if (result.timedOut) {
         return trackerError(reference, `gh did not respond within ${TIMEOUT_MS / 1000} seconds`);
@@ -144,13 +150,19 @@ export function createGitHubIssuesAdapter(dependencies: GitHubIssuesDependencies
         case 4:
           return trackerError(reference, authenticationReason(parsed.host));
         case 1:
-          return trackerError(reference, withExcerptSuffix(GH_READ_FAILURE_REASON, result.stderr.text));
+          return trackerError(
+            reference,
+            withExcerptSuffix(GH_READ_FAILURE_REASON, result.stderr.text),
+          );
         case 2:
-          return trackerError(reference, "import cancelled (gh exited with code 2)");
+          return trackerError(reference, 'import cancelled (gh exited with code 2)');
         default:
           return trackerError(
             reference,
-            withExcerptSuffix(unexpectedExitReason(result.exitCode, result.signal), result.stderr.text),
+            withExcerptSuffix(
+              unexpectedExitReason(result.exitCode, result.signal),
+              result.stderr.text,
+            ),
           );
       }
     },
@@ -158,15 +170,15 @@ export function createGitHubIssuesAdapter(dependencies: GitHubIssuesDependencies
 }
 
 function authenticationReason(host: string): string {
-  return host === "github.com"
-    ? "gh is not authenticated; run gh auth login"
+  return host === 'github.com'
+    ? 'gh is not authenticated; run gh auth login'
     : `gh is not authenticated for ${host}; run gh auth login --hostname ${host}`;
 }
 
 function unexpectedExitReason(exitCode: number | null, signal: string | null): string {
   return exitCode !== null
     ? `gh exited unexpectedly (exit code ${exitCode})`
-    : `gh exited unexpectedly (signal ${signal ?? "unknown"})`;
+    : `gh exited unexpectedly (signal ${signal ?? 'unknown'})`;
 }
 
 /** Parses the short form `OWNER/REPO#NUMBER` or an issue/pull-request URL; returns `null` when malformed. */
@@ -178,7 +190,7 @@ function parseReference(reference: string): ParsedReference | null {
       return null;
     }
     const number = toIssueNumber(numberText);
-    return number === null ? null : { host: "github.com", owner, repo, kind: "issues", number };
+    return number === null ? null : { host: 'github.com', owner, repo, kind: 'issues', number };
   }
 
   let url: URL;
@@ -187,7 +199,7 @@ function parseReference(reference: string): ParsedReference | null {
   } catch {
     return null;
   }
-  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.port !== "") {
+  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.port !== '') {
     return null;
   }
   const path = parseIssuePath(url.pathname);
@@ -200,7 +212,7 @@ function canonicalIssueUrl(parsed: ParsedReference): string {
 }
 
 function parseIssuePath(pathname: string): IssuePath | null {
-  const path = pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
+  const path = pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
   const match = ISSUE_PATH_PATTERN.exec(path);
   if (match === null) {
     return null;
@@ -210,11 +222,11 @@ function parseIssuePath(pathname: string): IssuePath | null {
     return null;
   }
   const number = toIssueNumber(numberText);
-  return number === null ? null : { owner, repo, kind: kind as "issues" | "pull", number };
+  return number === null ? null : { owner, repo, kind: kind as 'issues' | 'pull', number };
 }
 
 function isReservedRepoName(repo: string): boolean {
-  return repo === "." || repo === "..";
+  return repo === '.' || repo === '..';
 }
 
 function toIssueNumber(numberText: string): number | null {
@@ -227,16 +239,18 @@ function toIssueNumber(numberText: string): number | null {
  * variable except the excluded set, plus the fixed non-interactive settings
  * gh always receives.
  */
-function ghEnvironment(parentEnvironment: Readonly<Record<string, string | undefined>>): Record<string, string> {
+function ghEnvironment(
+  parentEnvironment: Readonly<Record<string, string | undefined>>,
+): Record<string, string> {
   const environment: Record<string, string> = {};
   for (const [name, value] of Object.entries(parentEnvironment)) {
     if (value !== undefined && !GH_ENVIRONMENT_EXCLUSIONS.has(name)) {
       environment[name] = value;
     }
   }
-  environment["GH_PROMPT_DISABLED"] = "1";
-  environment["GH_NO_UPDATE_NOTIFIER"] = "1";
-  environment["NO_COLOR"] = "1";
+  environment['GH_PROMPT_DISABLED'] = '1';
+  environment['GH_NO_UPDATE_NOTIFIER'] = '1';
+  environment['NO_COLOR'] = '1';
   return environment;
 }
 
@@ -249,7 +263,7 @@ function decodeResponse(
   reference: string,
   host: string,
   stdout: GhCapture,
-): TevuResult<IssueSnapshot, "IssueImportError"> {
+): TevuResult<IssueSnapshot, 'IssueImportError'> {
   if (stdout.truncated) {
     return decodeError(reference, `output exceeds ${MAX_CAPTURE_BYTES} bytes`);
   }
@@ -257,27 +271,27 @@ function decodeResponse(
   try {
     value = JSON.parse(stdout.text);
   } catch {
-    return decodeError(reference, "output is not valid JSON");
+    return decodeError(reference, 'output is not valid JSON');
   }
-  if (value === null || Array.isArray(value) || typeof value !== "object") {
-    return decodeError(reference, "output is not a JSON object");
+  if (value === null || Array.isArray(value) || typeof value !== 'object') {
+    return decodeError(reference, 'output is not a JSON object');
   }
   const record = value as Record<string, unknown>;
 
-  const number = record["number"];
-  if (typeof number !== "number" || !Number.isSafeInteger(number) || number < 1) {
+  const number = record['number'];
+  if (typeof number !== 'number' || !Number.isSafeInteger(number) || number < 1) {
     return decodeError(reference, 'field "number" is missing or not a positive integer');
   }
-  const title = record["title"];
-  if (typeof title !== "string") {
+  const title = record['title'];
+  if (typeof title !== 'string') {
     return decodeError(reference, 'field "title" is missing or not a string');
   }
-  const body = record["body"];
-  if (typeof body !== "string") {
+  const body = record['body'];
+  if (typeof body !== 'string') {
     return decodeError(reference, 'field "body" is missing or not a string');
   }
-  const url = record["url"];
-  if (typeof url !== "string") {
+  const url = record['url'];
+  if (typeof url !== 'string') {
     return decodeError(reference, 'field "url" is missing or not a string');
   }
 
@@ -285,7 +299,7 @@ function decodeResponse(
   if (target === null || target.number !== number) {
     return decodeError(reference, `field "url" is not an issue URL on ${host}`);
   }
-  if (target.kind === "pull") {
+  if (target.kind === 'pull') {
     return trackerError(reference, PULL_REQUEST_REASON);
   }
   return {
@@ -299,7 +313,7 @@ function decodeResponse(
   };
 }
 
-function decodeError(reference: string, detail: string): TevuResult<never, "IssueImportError"> {
+function decodeError(reference: string, detail: string): TevuResult<never, 'IssueImportError'> {
   return trackerError(reference, `unexpected response from gh: ${detail}`);
 }
 
@@ -312,13 +326,13 @@ function parseIssueUrlOnHost(urlText: string, host: string): IssuePath | null {
     return null;
   }
   if (
-    url.protocol !== "https:" ||
+    url.protocol !== 'https:' ||
     url.hostname.toLowerCase() !== host.toLowerCase() ||
-    url.username !== "" ||
-    url.password !== "" ||
-    url.port !== "" ||
-    url.search !== "" ||
-    url.hash !== ""
+    url.username !== '' ||
+    url.password !== '' ||
+    url.port !== '' ||
+    url.search !== '' ||
+    url.hash !== ''
   ) {
     return null;
   }
@@ -332,8 +346,8 @@ function parseIssueUrlOnHost(urlText: string, host: string): IssuePath | null {
  * longer matches.
  */
 function excerpt(stderrText: string): string {
-  const masked = stderrText.replace(TOKEN_SHAPE_PATTERN, "[REDACTED]");
-  for (const line of masked.split("\n")) {
+  const masked = stderrText.replace(TOKEN_SHAPE_PATTERN, '[REDACTED]');
+  for (const line of masked.split('\n')) {
     const candidate = line.trim();
     if (candidate.length === 0) {
       continue;
@@ -341,9 +355,9 @@ function excerpt(stderrText: string): string {
     const codePoints = [...candidate];
     return codePoints.length <= EXCERPT_MAX_CODE_POINTS
       ? candidate
-      : `${codePoints.slice(0, EXCERPT_MAX_CODE_POINTS).join("")}...`;
+      : `${codePoints.slice(0, EXCERPT_MAX_CODE_POINTS).join('')}...`;
   }
-  return "";
+  return '';
 }
 
 function withExcerptSuffix(reason: string, stderrText: string): string {
@@ -351,13 +365,19 @@ function withExcerptSuffix(reason: string, stderrText: string): string {
   return text.length === 0 ? reason : `${reason}: ${text}`;
 }
 
-function cancellationFailure(): TevuResult<never, "CancellationError"> {
-  return { ok: false, error: { kind: "CancellationError", activeCaseIds: [] } };
+function cancellationFailure(): TevuResult<never, 'CancellationError'> {
+  return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
 }
 
 function trackerError(
   reference: string,
   reason: string,
-): { ok: false; error: { kind: "IssueImportError"; tracker: "github-issue"; reference: string; reason: string } } {
-  return { ok: false, error: { kind: "IssueImportError", tracker: "github-issue", reference, reason } };
+): {
+  ok: false;
+  error: { kind: 'IssueImportError'; tracker: 'github-issue'; reference: string; reason: string };
+} {
+  return {
+    ok: false,
+    error: { kind: 'IssueImportError', tracker: 'github-issue', reference, reason },
+  };
 }

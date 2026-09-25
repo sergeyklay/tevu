@@ -1,8 +1,8 @@
-import * as path from "node:path";
+import * as path from 'node:path';
 
-import { appendToConfigText, renderConfigDocument } from "../config/document.ts";
-import { parseConfigText, resolveConfig, resolveConfigPath } from "../config/load.ts";
-import { referencedVariableName } from "../config/schema.ts";
+import { appendToConfigText, renderConfigDocument } from '@/config/document';
+import { parseConfigText, resolveConfig, resolveConfigPath } from '@/config/load';
+import { referencedVariableName } from '@/config/schema';
 
 import type {
   RepositoryDefinition,
@@ -11,37 +11,37 @@ import type {
   TaskInput,
   TevuConfig,
   TevuConfigInput,
-} from "../config/schema.ts";
+} from '@/config/schema';
 import type {
   ConfigStore,
   GitWorkspaceAdapter,
   TevuResult,
   ValidationFinding,
-} from "../domain/types.ts";
+} from '@/domain/types';
 
 /** Error kinds task creation can produce. */
 type CreateTaskErrorKind =
-  | "ConfigParseError"
-  | "ConfigValidationError"
-  | "ConfigReadError"
-  | "SourceMaterializationError"
-  | "ArtifactError"
-  | "CancellationError";
+  | 'ConfigParseError'
+  | 'ConfigValidationError'
+  | 'ConfigReadError'
+  | 'SourceMaterializationError'
+  | 'ArtifactError'
+  | 'CancellationError';
 
 /** Typed wizard answers handed to the task-creation use case, which owns the single write. */
 export type TaskWizardInput = {
   configPath: string;
   /** Present only when the configuration file did not exist; `base_commit` as typed, unpinned. */
-  bootstrap?: Omit<TevuConfigInput, "version" | "tasks">;
+  bootstrap?: Omit<TevuConfigInput, 'version' | 'tasks'>;
   /** `tevu task add` never interviews for `setup`; a newly added repository never carries it. */
-  newRepository?: Omit<RepositoryInput, "setup">;
+  newRepository?: Omit<RepositoryInput, 'setup'>;
   task: TaskInput;
 };
 
 /** Effects injected into the task-creation use case. */
 export type TaskDependencies = {
   configStore: ConfigStore;
-  git: Pick<GitWorkspaceAdapter, "validateSource">;
+  git: Pick<GitWorkspaceAdapter, 'validateSource'>;
   registerSecrets: (variableNames: readonly string[]) => void;
   redact: (text: string) => string;
   cancellation?: AbortSignal;
@@ -53,7 +53,7 @@ export type TaskDependencies = {
  * brand-new document.
  */
 type BaseDocument =
-  | { text: null; base: Omit<TevuConfigInput, "version" | "tasks"> }
+  | { text: null; base: Omit<TevuConfigInput, 'version' | 'tasks'> }
   | { text: string; base: TevuConfig };
 
 /**
@@ -84,7 +84,9 @@ export async function createTask(
   dependencies.registerSecrets(collectBaseSecretNames(doc.base));
 
   const repositories: RepositoryDefinition[] =
-    input.newRepository === undefined ? doc.base.repositories : [...doc.base.repositories, input.newRepository];
+    input.newRepository === undefined
+      ? doc.base.repositories
+      : [...doc.base.repositories, input.newRepository];
   const matched = matchRepository(repositories, input.task.repo, input.task.id);
   if (!matched.ok) {
     return matched;
@@ -96,7 +98,10 @@ export async function createTask(
     ...repository,
     path: resolveConfigPath(configDirectory, repository.path),
   };
-  const sourceValidation = await dependencies.git.validateSource(resolvedRepository, input.task.base_commit);
+  const sourceValidation = await dependencies.git.validateSource(
+    resolvedRepository,
+    input.task.base_commit,
+  );
   if (!sourceValidation.ok) {
     return { ok: false, error: { ...sourceValidation.error, taskId: input.task.id } };
   }
@@ -119,7 +124,11 @@ export async function createTask(
           },
           rendering,
         )
-      : appendToConfigText(doc.text, { task: renderedTask, repository: input.newRepository }, rendering);
+      : appendToConfigText(
+          doc.text,
+          { task: renderedTask, repository: input.newRepository },
+          rendering,
+        );
   if (!candidate.ok) {
     return candidate;
   }
@@ -144,7 +153,7 @@ export async function createTask(
   const task = resolved.value.tasks.find((candidateTask) => candidateTask.id === renderedTask.id);
   if (task === undefined) {
     return artifactFailure(
-      "replace-configuration",
+      'replace-configuration',
       `task "${renderedTask.id}" was written but cannot be found in the replaced configuration`,
     );
   }
@@ -161,7 +170,9 @@ export async function createTask(
 async function loadBaseDocument(
   input: TaskWizardInput,
   dependencies: TaskDependencies,
-): Promise<TevuResult<BaseDocument, "ConfigParseError" | "ConfigValidationError" | "ConfigReadError">> {
+): Promise<
+  TevuResult<BaseDocument, 'ConfigParseError' | 'ConfigValidationError' | 'ConfigReadError'>
+> {
   const exists = await dependencies.configStore.exists(input.configPath);
   if (exists) {
     const text = await dependencies.configStore.readText(input.configPath);
@@ -181,16 +192,16 @@ async function loadBaseDocument(
   if (input.bootstrap === undefined) {
     return validationFailure([
       {
-        severity: "error",
-        identifier: "config",
-        message: "configuration file is missing and no bootstrap answers were captured",
+        severity: 'error',
+        identifier: 'config',
+        message: 'configuration file is missing and no bootstrap answers were captured',
       },
     ]);
   }
   return { ok: true, value: { text: null, base: input.bootstrap } };
 }
 
-function collectBaseSecretNames(base: BaseDocument["base"]): string[] {
+function collectBaseSecretNames(base: BaseDocument['base']): string[] {
   const names = Object.values(base.agents).flatMap((settings) => settings.secrets ?? []);
   const token = base.trackers?.jira?.token;
   if (token !== undefined) {
@@ -203,13 +214,13 @@ function matchRepository(
   repositories: readonly RepositoryDefinition[],
   requestedRepo: string | undefined,
   taskId: string,
-): TevuResult<RepositoryDefinition, "ConfigValidationError"> {
+): TevuResult<RepositoryDefinition, 'ConfigValidationError'> {
   if (requestedRepo !== undefined) {
     const repository = repositories.find((candidate) => candidate.id === requestedRepo);
     if (repository === undefined) {
       return validationFailure([
         {
-          severity: "error",
+          severity: 'error',
           identifier: `tasks.${taskId}.repo`,
           message: `repo "${requestedRepo}" does not reference a configured or newly added repository`,
         },
@@ -225,9 +236,9 @@ function matchRepository(
   }
   return validationFailure([
     {
-      severity: "error",
+      severity: 'error',
       identifier: `tasks.${taskId}.repo`,
-      message: "repo is required when more than one repository is configured",
+      message: 'repo is required when more than one repository is configured',
     },
   ]);
 }
@@ -236,14 +247,16 @@ function isCancelled(dependencies: TaskDependencies): boolean {
   return dependencies.cancellation?.aborted === true;
 }
 
-function cancellationFailure(): TevuResult<never, "CancellationError"> {
-  return { ok: false, error: { kind: "CancellationError", activeCaseIds: [] } };
+function cancellationFailure(): TevuResult<never, 'CancellationError'> {
+  return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
 }
 
-function validationFailure(findings: ValidationFinding[]): TevuResult<never, "ConfigValidationError"> {
-  return { ok: false, error: { kind: "ConfigValidationError", findings } };
+function validationFailure(
+  findings: ValidationFinding[],
+): TevuResult<never, 'ConfigValidationError'> {
+  return { ok: false, error: { kind: 'ConfigValidationError', findings } };
 }
 
-function artifactFailure(operation: string, reason: string): TevuResult<never, "ArtifactError"> {
-  return { ok: false, error: { kind: "ArtifactError", operation, reason } };
+function artifactFailure(operation: string, reason: string): TevuResult<never, 'ArtifactError'> {
+  return { ok: false, error: { kind: 'ArtifactError', operation, reason } };
 }

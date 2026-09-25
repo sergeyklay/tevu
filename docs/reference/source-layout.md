@@ -13,6 +13,6 @@
 
 Product tests are colocated with the behavior they verify as `*.test.ts` or `*.integration.test.ts`. Protocol fixtures are adjacent to the protocol adapter. TypeScript module exports are internal; the CLI is the public interface.
 
-`bun run build` compiles production modules into `dist/` at the same relative paths using `tsconfig.build.json`. `dist/index.js` is the `tevu` executable. Test files and fixtures are not compiled.
+`bun run build` bundles `src/index.ts` and the production modules it imports into the single file `dist/index.js` with esbuild. `dist/index.js` is the `tevu` executable and the only supported way to run it. Packages from `dependencies` are not bundled and load from `node_modules` at run time. Test files and fixtures are not part of the bundle.
 
 Verification commands are in the [change verification guide](../guides/verify-change.md).

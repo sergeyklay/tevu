@@ -1,27 +1,41 @@
 // @vitest-environment node
-import { execa } from "execa";
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
-import process from "node:process";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  readlink,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, relative, resolve } from 'node:path';
+import process from 'node:process';
+import { execa } from 'execa';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { planBenchmark, runBenchmark } from "../application/run-benchmark.ts";
-import { TevuConfigSchema } from "../config/schema.ts";
-import { buildCheckEnvironment } from "../evaluation/checks.ts";
-import { createArtifactStore } from "./artifact-store.ts";
-import { createGitWorkspaceAdapter } from "./git.ts";
+import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
+import { TevuConfigSchema } from '@/config/schema';
+import { buildCheckEnvironment } from '@/evaluation/checks';
+
+import { createArtifactStore } from './artifact-store';
+import { createGitWorkspaceAdapter } from './git';
 import {
   createEnvironmentAdapter,
   createEvaluatorProcessAdapter,
   createRedactor,
   createStreamingRedactor,
   runManagedProcess,
-} from "./process.ts";
+} from './process';
 
+import type { TaskInput, TevuConfig, TevuConfigInput } from '@/config/schema';
 import type {
   AgentAdapter,
   AgentRunInput,
@@ -37,21 +51,20 @@ import type {
   RunDependencies,
   TevuError,
   TevuResult,
-} from "../domain/types.ts";
-import type { TaskInput, TevuConfig, TevuConfigInput } from "../config/schema.ts";
+} from '@/domain/types';
 
-const PROVIDER_NAME = "TEVU_IT_PROVIDER_KEY";
-const PROVIDER_VALUE = "synthetic-provider-secret-9f2";
-const SECRET_NAME = "TEVU_IT_SECRET_VALUE";
-const SECRET_VALUE = "synthetic-secret-token-7b4";
-const EVAL_NAME = "TEVU_IT_ORDINARY";
-const ORDINARY_VALUE = "ordinary-evaluator-value";
-const HOST_SENTINEL_NAME = "TEVU_IT_HOST_ONLY";
-const HOST_SENTINEL_VALUE = "host-only-sentinel";
-const UNLISTED_NAME = "TEVU_IT_UNLISTED";
-const UNLISTED_VALUE = "unlisted-parent-value";
-const LAUNCH_FAILURE_SECRET = "synthetic-launch-failure-secret-4c1";
-const HOST_XDG_DATA = "/host/xdg-data-synthetic";
+const PROVIDER_NAME = 'TEVU_IT_PROVIDER_KEY';
+const PROVIDER_VALUE = 'synthetic-provider-secret-9f2';
+const SECRET_NAME = 'TEVU_IT_SECRET_VALUE';
+const SECRET_VALUE = 'synthetic-secret-token-7b4';
+const EVAL_NAME = 'TEVU_IT_ORDINARY';
+const ORDINARY_VALUE = 'ordinary-evaluator-value';
+const HOST_SENTINEL_NAME = 'TEVU_IT_HOST_ONLY';
+const HOST_SENTINEL_VALUE = 'host-only-sentinel';
+const UNLISTED_NAME = 'TEVU_IT_UNLISTED';
+const UNLISTED_VALUE = 'unlisted-parent-value';
+const LAUNCH_FAILURE_SECRET = 'synthetic-launch-failure-secret-4c1';
+const HOST_XDG_DATA = '/host/xdg-data-synthetic';
 
 const MANAGED_ENV_KEYS = [
   PROVIDER_NAME,
@@ -59,41 +72,40 @@ const MANAGED_ENV_KEYS = [
   EVAL_NAME,
   HOST_SENTINEL_NAME,
   UNLISTED_NAME,
-  "XDG_DATA_HOME",
+  'XDG_DATA_HOME',
 ] as const;
 
 const FIXED_EVALUATOR_KEYS = [
-  "PATH",
-  "HOME",
-  "XDG_CONFIG_HOME",
-  "XDG_DATA_HOME",
-  "XDG_CACHE_HOME",
-  "XDG_STATE_HOME",
-  "TMPDIR",
-  "LANG",
-  "LC_ALL",
-  "CI",
+  'PATH',
+  'HOME',
+  'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME',
+  'XDG_CACHE_HOME',
+  'XDG_STATE_HOME',
+  'TMPDIR',
+  'LANG',
+  'LC_ALL',
+  'CI',
 ];
 
 const AGENT_ENV_KEYS = [...FIXED_EVALUATOR_KEYS, PROVIDER_NAME, SECRET_NAME].sort();
-const EVALUATOR_ALLOWLISTED_KEYS = [...FIXED_EVALUATOR_KEYS, EVAL_NAME].sort();
 
-const SOURCE_TEXT = "synthetic source line one\n";
+const SOURCE_TEXT = 'synthetic source line one\n';
 const SOURCE_BINARY = Buffer.from([0x00, 0x01, 0xff, 0xfe, 0x41, 0x42, 0x43, 0x0a]);
-const SOURCE_SCRIPT = "#!/bin/sh\necho synthetic\n";
-const SYMLINK_TARGET = "../src/welcome.txt";
+const SOURCE_SCRIPT = '#!/bin/sh\necho synthetic\n';
+const SYMLINK_TARGET = '../src/welcome.txt';
 
-const GIT_IDENTITY_FLAGS = ["-c", "user.name=tevu", "-c", "user.email=tevu@localhost"];
+const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 
 const ENVIRONMENT_PROBE_SCRIPT =
-  "process.stdout.write(JSON.stringify({ home: process.env.HOME, provider: process.env.TEVU_IT_PROVIDER_KEY, secret: process.env.TEVU_IT_SECRET_VALUE, ordinary: process.env.TEVU_IT_ORDINARY, hostSentinel: process.env.TEVU_IT_HOST_ONLY, keys: Object.keys(process.env).sort() }));";
+  'process.stdout.write(JSON.stringify({ home: process.env.HOME, provider: process.env.TEVU_IT_PROVIDER_KEY, secret: process.env.TEVU_IT_SECRET_VALUE, ordinary: process.env.TEVU_IT_ORDINARY, hostSentinel: process.env.TEVU_IT_HOST_ONLY, keys: Object.keys(process.env).sort() }));';
 const STDERR_SECRET_PROBE_SCRIPT =
   "process.stderr.write(String(process.env.TEVU_IT_PROVIDER_KEY) + '\\n');\n";
 
 const SURVIVOR_GRANDCHILD_SCRIPT = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
-const MORTAL_GRANDCHILD_SCRIPT = "setInterval(() => {}, 1000);";
+const MORTAL_GRANDCHILD_SCRIPT = 'setInterval(() => {}, 1000);';
 
-let testDirectory = "";
+let testDirectory = '';
 let savedEnvironment: Array<readonly [string, string | undefined]> = [];
 
 beforeEach(async () => {
@@ -104,7 +116,7 @@ beforeEach(async () => {
   process.env[HOST_SENTINEL_NAME] = HOST_SENTINEL_VALUE;
   process.env[UNLISTED_NAME] = UNLISTED_VALUE;
   process.env.XDG_DATA_HOME = HOST_XDG_DATA;
-  testDirectory = await mkdtemp(join(tmpdir(), "tevu-isolation-"));
+  testDirectory = await mkdtemp(join(tmpdir(), 'tevu-isolation-'));
 });
 
 afterEach(async () => {
@@ -117,11 +129,11 @@ afterEach(async () => {
   }
   if (testDirectory.length > 0) {
     await rm(testDirectory, { recursive: true, force: true });
-    testDirectory = "";
+    testDirectory = '';
   }
 });
 
-function unwrapOk<T, K extends TevuError["kind"]>(result: TevuResult<T, K>): T {
+function unwrapOk<T, K extends TevuError['kind']>(result: TevuResult<T, K>): T {
   if (!result.ok) {
     throw new Error(`expected an ok result, received ${result.error.kind}`);
   }
@@ -131,7 +143,7 @@ function unwrapOk<T, K extends TevuError["kind"]>(result: TevuResult<T, K>): T {
 /** `createCaseEnvironments` always populates `agent`; narrows past its still-optional shim type. */
 function requireAgentEnvironment(environments: CaseEnvironments): IsolatedEnvironment {
   if (environments.agent === undefined) {
-    throw new Error("expected createCaseEnvironments to populate the agent environment");
+    throw new Error('expected createCaseEnvironments to populate the agent environment');
   }
   return environments.agent;
 }
@@ -139,52 +151,52 @@ function requireAgentEnvironment(environments: CaseEnvironments): IsolatedEnviro
 type GitOutcome = { exitCode: number | null; stdout: string; stderr: string };
 
 async function runGit(cwd: string, args: readonly string[]): Promise<GitOutcome> {
-  const result = await execa("git", [...args], {
+  const result = await execa('git', [...args], {
     cwd,
     env: {
       ...process.env,
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_CONFIG_SYSTEM: "/dev/null",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_TERMINAL_PROMPT: '0',
     },
     reject: false,
-    stdin: "ignore",
+    stdin: 'ignore',
     timeout: 60_000,
   });
   return {
-    exitCode: typeof result.exitCode === "number" ? result.exitCode : null,
-    stdout: typeof result.stdout === "string" ? result.stdout : "",
-    stderr: typeof result.stderr === "string" ? result.stderr : "",
+    exitCode: typeof result.exitCode === 'number' ? result.exitCode : null,
+    stdout: typeof result.stdout === 'string' ? result.stdout : '',
+    stderr: typeof result.stderr === 'string' ? result.stderr : '',
   };
 }
 
 function buildTask(sourceCommit: string): TaskInput {
   return {
-    id: "task-1",
-    title: "Synthetic isolation task",
-    repo: "repo-1",
+    id: 'task-1',
+    title: 'Synthetic isolation task',
+    repo: 'repo-1',
     base_commit: sourceCommit,
-    description: "synthetic task description",
-    prompt: "implement the synthetic feature",
-    readiness: ["synthetic ready item"],
+    description: 'synthetic task description',
+    prompt: 'implement the synthetic feature',
+    readiness: ['synthetic ready item'],
     checks: {
       acceptance: [
         {
-          id: "acc-1",
-          description: "acceptance command exits zero",
-          run: ["/synthetic/acceptance-probe", "--suite", "synthetic"],
-          timeout: "5s",
+          id: 'acc-1',
+          description: 'acceptance command exits zero',
+          run: ['/synthetic/acceptance-probe', '--suite', 'synthetic'],
+          timeout: '5s',
           exit_codes: [0],
           env: [EVAL_NAME],
         },
       ],
       done: [
         {
-          id: "dod-1",
-          description: "Definition of Done command exits zero",
-          run: ["/synthetic/dod-probe", "--suite", "synthetic"],
-          timeout: "5s",
+          id: 'dod-1',
+          description: 'Definition of Done command exits zero',
+          run: ['/synthetic/dod-probe', '--suite', 'synthetic'],
+          timeout: '5s',
           exit_codes: [0],
         },
       ],
@@ -195,12 +207,19 @@ function buildTask(sourceCommit: string): TaskInput {
 function buildConfig(repositoryPath: string, sourceCommit: string): TevuConfig {
   const config: TevuConfigInput = {
     version: 1,
-    run: { output_dir: join(testDirectory, "artifacts"), concurrency: 1, timeout: "1m", stop_grace: "250ms" },
-    agents: { opencode: { command: "/synthetic/agent", secrets: [PROVIDER_NAME, SECRET_NAME], env: [] } },
-    repositories: [{ id: "repo-1", path: repositoryPath }],
+    run: {
+      output_dir: join(testDirectory, 'artifacts'),
+      concurrency: 1,
+      timeout: '1m',
+      stop_grace: '250ms',
+    },
+    agents: {
+      opencode: { command: '/synthetic/agent', secrets: [PROVIDER_NAME, SECRET_NAME], env: [] },
+    },
+    repositories: [{ id: 'repo-1', path: repositoryPath }],
     models: [
-      { id: "c1", model: "synthetic/model-a", effort: "fast" },
-      { id: "c2", model: "synthetic/model-b", effort: "deep" },
+      { id: 'c1', model: 'synthetic/model-a', effort: 'fast' },
+      { id: 'c2', model: 'synthetic/model-b', effort: 'deep' },
     ],
     tasks: [buildTask(sourceCommit)],
   };
@@ -210,46 +229,48 @@ function buildConfig(repositoryPath: string, sourceCommit: string): TevuConfig {
 function buildIdentity(caseId: string, sourceCommit: string): CaseIdentity {
   return {
     caseId,
-    taskId: "task-1",
-    modelId: "c1",
+    taskId: 'task-1',
+    modelId: 'c1',
     attempt: 1,
     sourceCommit,
-    model: "synthetic/model-a",
-    effort: "fast",
-    agent: "opencode",
+    model: 'synthetic/model-a',
+    effort: 'fast',
+    agent: 'opencode',
   };
 }
 
 async function createSyntheticRepository(): Promise<{ path: string; commit: string }> {
-  const path = join(testDirectory, "source-repository");
+  const path = join(testDirectory, 'source-repository');
   await mkdir(path, { recursive: true });
-  for (const directory of ["src", "assets", "scripts", "docs"]) {
+  for (const directory of ['src', 'assets', 'scripts', 'docs']) {
     await mkdir(join(path, directory));
   }
-  await writeFile(join(path, "src/welcome.txt"), SOURCE_TEXT);
-  await writeFile(join(path, "assets/logo.bin"), SOURCE_BINARY);
-  await writeFile(join(path, "scripts/run.sh"), SOURCE_SCRIPT);
-  await chmod(join(path, "scripts/run.sh"), 0o755);
-  await symlink(SYMLINK_TARGET, join(path, "docs/latest.txt"));
-  await runGit(path, ["init", "--quiet", "-b", "main"]);
-  await runGit(path, ["add", "-A"]);
-  await runGit(path, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "synthetic pinned commit"]);
-  const commit = (await runGit(path, ["rev-parse", "HEAD"])).stdout.trim();
-  await writeFile(join(path, "untracked.txt"), "untracked source file\n");
-  await writeFile(join(path, "src/welcome.txt"), `${SOURCE_TEXT}dirty local edit\n`);
+  await writeFile(join(path, 'src/welcome.txt'), SOURCE_TEXT);
+  await writeFile(join(path, 'assets/logo.bin'), SOURCE_BINARY);
+  await writeFile(join(path, 'scripts/run.sh'), SOURCE_SCRIPT);
+  await chmod(join(path, 'scripts/run.sh'), 0o755);
+  await symlink(SYMLINK_TARGET, join(path, 'docs/latest.txt'));
+  await runGit(path, ['init', '--quiet', '-b', 'main']);
+  await runGit(path, ['add', '-A']);
+  await runGit(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'synthetic pinned commit']);
+  const commit = (await runGit(path, ['rev-parse', 'HEAD'])).stdout.trim();
+  await writeFile(join(path, 'untracked.txt'), 'untracked source file\n');
+  await writeFile(join(path, 'src/welcome.txt'), `${SOURCE_TEXT}dirty local edit\n`);
   return { path, commit };
 }
 
 function createGitAdapter(repositoryPath: string, sourceCommit: string): GitWorkspaceAdapter {
   return createGitWorkspaceAdapter({
     config: buildConfig(repositoryPath, sourceCommit),
-    workspacesDirectory: join(testDirectory, "workspaces"),
+    workspacesDirectory: join(testDirectory, 'workspaces'),
   });
 }
 
-async function sealCaseFromSyntheticRepository(
-  caseId: string,
-): Promise<{ repository: { path: string; commit: string }; adapter: GitWorkspaceAdapter; workspace: CaseWorkspace }> {
+async function sealCaseFromSyntheticRepository(caseId: string): Promise<{
+  repository: { path: string; commit: string };
+  adapter: GitWorkspaceAdapter;
+  workspace: CaseWorkspace;
+}> {
   const repository = await createSyntheticRepository();
   const adapter = createGitAdapter(repository.path, repository.commit);
   const sealed = await adapter.createIsolatedCase(buildIdentity(caseId, repository.commit));
@@ -259,58 +280,65 @@ async function sealCaseFromSyntheticRepository(
 function buildFabricatedWorkspace(caseId: string): CaseWorkspace {
   return {
     caseId,
-    sourceRepositoryPath: "/synthetic/source",
-    sourceCommit: "f".repeat(40),
-    repositoryDirectory: join(testDirectory, "ws", caseId, "repo.git"),
-    worktreeDirectory: join(testDirectory, "ws", caseId, "worktree"),
-    runtimeDirectory: join(testDirectory, "ws", caseId, "runtime"),
+    sourceRepositoryPath: '/synthetic/source',
+    sourceCommit: 'f'.repeat(40),
+    repositoryDirectory: join(testDirectory, 'ws', caseId, 'repo.git'),
+    worktreeDirectory: join(testDirectory, 'ws', caseId, 'worktree'),
+    runtimeDirectory: join(testDirectory, 'ws', caseId, 'runtime'),
     branch: caseId,
-    syntheticCommit: "f".repeat(40),
+    syntheticCommit: 'f'.repeat(40),
   };
 }
 
-function pidState(pid: number | null): "gone" | "zombie" | "alive" {
+function pidState(pid: number | null): 'gone' | 'zombie' | 'alive' {
   if (pid === null) {
-    return "gone";
+    return 'gone';
   }
   try {
     process.kill(pid, 0);
   } catch {
-    return "gone";
+    return 'gone';
   }
   try {
-    const statText = readFileSync(`/proc/${String(pid)}/stat`, "utf8");
-    const state = statText.slice(statText.lastIndexOf(")") + 2).trimStart().split(" ")[0] ?? "";
-    return state === "Z" ? "zombie" : "alive";
+    const statText = readFileSync(`/proc/${String(pid)}/stat`, 'utf8');
+    const state =
+      statText
+        .slice(statText.lastIndexOf(')') + 2)
+        .trimStart()
+        .split(' ')[0] ?? '';
+    return state === 'Z' ? 'zombie' : 'alive';
   } catch {
-    return "gone";
+    return 'gone';
   }
 }
 
 async function waitForDescendantsReaped(pidFile: string): Promise<void> {
   const deadline = Date.now() + 5_000;
   for (;;) {
-    const pids = JSON.parse(readFileSync(pidFile, "utf8")) as { child: number; grandchild: number };
-    const alive = [pids.child, pids.grandchild].filter((pid) => pidState(pid) === "alive");
+    const pids = JSON.parse(readFileSync(pidFile, 'utf8')) as { child: number; grandchild: number };
+    const alive = [pids.child, pids.grandchild].filter((pid) => pidState(pid) === 'alive');
     if (alive.length === 0) {
       return;
     }
     if (Date.now() > deadline) {
-      throw new Error(`descendant processes were not reaped within 5s: ${alive.join(", ")}`);
+      throw new Error(`descendant processes were not reaped within 5s: ${alive.join(', ')}`);
     }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
   }
 }
 
-function buildChildScript(pidFile: string, options: {
-  trapSignal: boolean;
-  exitAfterMs?: number;
-  grandchildScript: string;
-}): string {
-  const trap = options.trapSignal ? "process.on('SIGTERM', () => {});\n" : "";
+function buildChildScript(
+  pidFile: string,
+  options: {
+    trapSignal: boolean;
+    exitAfterMs?: number;
+    grandchildScript: string;
+  },
+): string {
+  const trap = options.trapSignal ? "process.on('SIGTERM', () => {});\n" : '';
   const stayAlive =
     options.exitAfterMs === undefined
-      ? "setInterval(() => {}, 1000);\n"
+      ? 'setInterval(() => {}, 1000);\n'
       : `setTimeout(() => process.exit(0), ${String(options.exitAfterMs)});\n`;
   return [
     "const fs = require('node:fs');",
@@ -319,154 +347,193 @@ function buildChildScript(pidFile: string, options: {
       `const grandchild = cp.spawn(process.execPath, ['-e', ${JSON.stringify(options.grandchildScript)}], { stdio: ['ignore', 'inherit', 'inherit'] });`,
     `fs.writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ child: process.pid, grandchild: grandchild.pid }));`,
     stayAlive,
-  ].join("\n");
+  ].join('\n');
 }
 
-function expectLaunched(result: ManagedProcessResult): Extract<ManagedProcessResult, { launched: true }> {
+function expectLaunched(
+  result: ManagedProcessResult,
+): Extract<ManagedProcessResult, { launched: true }> {
   if (!result.launched) {
     throw new Error(`expected a launched process, received: ${result.reason}`);
   }
   return result;
 }
 
-describe("sealed Git case materialization", () => {
-  it("materializes one synthetic root commit whose tree is byte-equivalent to the pinned source tree", async () => {
-    const { workspace } = await sealCaseFromSyntheticRepository("task-1--c1");
+describe('sealed Git case materialization', () => {
+  it('materializes one synthetic root commit whose tree is byte-equivalent to the pinned source tree', async () => {
+    const { workspace } = await sealCaseFromSyntheticRepository('task-1--c1');
 
-    const sourceTree = await runGit(workspace.sourceRepositoryPath, ["rev-parse", `${workspace.sourceCommit}^{tree}`]);
-    const sealedTree = await runGit(workspace.worktreeDirectory, ["rev-parse", "HEAD^{tree}"]);
-    const rootCount = await runGit(workspace.worktreeDirectory, ["rev-list", "--all", "--count"]);
-    const head = await runGit(workspace.worktreeDirectory, ["rev-parse", "HEAD"]);
-    const branch = await runGit(workspace.worktreeDirectory, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    const sourceTree = await runGit(workspace.sourceRepositoryPath, [
+      'rev-parse',
+      `${workspace.sourceCommit}^{tree}`,
+    ]);
+    const sealedTree = await runGit(workspace.worktreeDirectory, ['rev-parse', 'HEAD^{tree}']);
+    const rootCount = await runGit(workspace.worktreeDirectory, ['rev-list', '--all', '--count']);
+    const head = await runGit(workspace.worktreeDirectory, ['rev-parse', 'HEAD']);
+    const branch = await runGit(workspace.worktreeDirectory, ['rev-parse', '--abbrev-ref', 'HEAD']);
 
     expect(sealedTree.stdout).toBe(sourceTree.stdout);
     expect(Number(rootCount.stdout)).toBe(1);
     expect(head.stdout).toBe(workspace.syntheticCommit);
-    expect(branch.stdout).toBe("task-1--c1");
+    expect(branch.stdout).toBe('task-1--c1');
     expect(workspace.syntheticCommit).not.toBe(workspace.sourceCommit);
 
-    const text = await readFile(join(workspace.worktreeDirectory, "src/welcome.txt"), "utf8");
+    const text = await readFile(join(workspace.worktreeDirectory, 'src/welcome.txt'), 'utf8');
     expect(text).toBe(SOURCE_TEXT);
-    const binary = await readFile(join(workspace.worktreeDirectory, "assets/logo.bin"));
+    const binary = await readFile(join(workspace.worktreeDirectory, 'assets/logo.bin'));
     expect(binary.equals(SOURCE_BINARY)).toBe(true);
-    const executable = await stat(join(workspace.worktreeDirectory, "scripts/run.sh"));
+    const executable = await stat(join(workspace.worktreeDirectory, 'scripts/run.sh'));
     expect(executable.mode & 0o111).not.toBe(0);
-    const link = await lstat(join(workspace.worktreeDirectory, "docs/latest.txt"));
+    const link = await lstat(join(workspace.worktreeDirectory, 'docs/latest.txt'));
     expect(link.isSymbolicLink()).toBe(true);
-    await expect(readlink(join(workspace.worktreeDirectory, "docs/latest.txt"), "utf8")).resolves.toBe(SYMLINK_TARGET);
+    await expect(
+      readlink(join(workspace.worktreeDirectory, 'docs/latest.txt'), 'utf8'),
+    ).resolves.toBe(SYMLINK_TARGET);
   }, 30_000);
 
-  it("excludes untracked and dirty source state from the sealed worktree", async () => {
-    const { workspace } = await sealCaseFromSyntheticRepository("task-1--c1");
+  it('excludes untracked and dirty source state from the sealed worktree', async () => {
+    const { workspace } = await sealCaseFromSyntheticRepository('task-1--c1');
 
-    const status = await runGit(workspace.worktreeDirectory, ["status", "--porcelain"]);
+    const status = await runGit(workspace.worktreeDirectory, ['status', '--porcelain']);
 
-    expect(existsSync(join(workspace.worktreeDirectory, "untracked.txt"))).toBe(false);
-    expect((await readFile(join(workspace.worktreeDirectory, "src/welcome.txt"), "utf8"))).toBe(SOURCE_TEXT);
-    expect(status.stdout).toBe("");
+    expect(existsSync(join(workspace.worktreeDirectory, 'untracked.txt'))).toBe(false);
+    expect(await readFile(join(workspace.worktreeDirectory, 'src/welcome.txt'), 'utf8')).toBe(
+      SOURCE_TEXT,
+    );
+    expect(status.stdout).toBe('');
   });
 
-  it("keeps one private object database with no remotes, alternates, tags, stashes, reflogs, later refs, or host identity", async () => {
-    const { repository, workspace } = await sealCaseFromSyntheticRepository("task-1--c1");
+  it('keeps one private object database with no remotes, alternates, tags, stashes, reflogs, later refs, or host identity', async () => {
+    const { repository, workspace } = await sealCaseFromSyntheticRepository('task-1--c1');
 
-    const refs = await runGit(workspace.worktreeDirectory, ["for-each-ref", "--format=%(refname)"]);
-    const tags = await runGit(workspace.worktreeDirectory, ["tag", "--list"]);
-    const remotes = await runGit(workspace.worktreeDirectory, ["remote"]);
-    const stashes = await runGit(workspace.worktreeDirectory, ["stash", "--list"]);
-    const objectsPath = await runGit(workspace.worktreeDirectory, ["rev-parse", "--git-path", "objects"]);
-    const hostIdentity = await runGit(workspace.worktreeDirectory, ["config", "--local", "--get-regexp", "^user\\."]);
-    const sourceCommitLookup = await runGit(workspace.repositoryDirectory, ["cat-file", "-e", repository.commit]);
+    const refs = await runGit(workspace.worktreeDirectory, ['for-each-ref', '--format=%(refname)']);
+    const tags = await runGit(workspace.worktreeDirectory, ['tag', '--list']);
+    const remotes = await runGit(workspace.worktreeDirectory, ['remote']);
+    const stashes = await runGit(workspace.worktreeDirectory, ['stash', '--list']);
+    const objectsPath = await runGit(workspace.worktreeDirectory, [
+      'rev-parse',
+      '--git-path',
+      'objects',
+    ]);
+    const hostIdentity = await runGit(workspace.worktreeDirectory, [
+      'config',
+      '--local',
+      '--get-regexp',
+      '^user\\.',
+    ]);
+    const sourceCommitLookup = await runGit(workspace.repositoryDirectory, [
+      'cat-file',
+      '-e',
+      repository.commit,
+    ]);
 
-    expect(refs.stdout.split("\n").filter((line) => line.length > 0)).toEqual([`refs/heads/task-1--c1`]);
-    expect(tags.stdout).toBe("");
-    expect(remotes.stdout).toBe("");
-    expect(stashes.stdout).toBe("");
-    expect(existsSync(join(workspace.repositoryDirectory, "objects/info/alternates"))).toBe(false);
-    expect(existsSync(join(workspace.repositoryDirectory, "logs"))).toBe(false);
+    expect(refs.stdout.split('\n').filter((line) => line.length > 0)).toEqual([
+      `refs/heads/task-1--c1`,
+    ]);
+    expect(tags.stdout).toBe('');
+    expect(remotes.stdout).toBe('');
+    expect(stashes.stdout).toBe('');
+    expect(existsSync(join(workspace.repositoryDirectory, 'objects/info/alternates'))).toBe(false);
+    expect(existsSync(join(workspace.repositoryDirectory, 'logs'))).toBe(false);
     expect(resolve(workspace.worktreeDirectory, objectsPath.stdout.trim())).toBe(
-      join(workspace.repositoryDirectory, "objects"),
+      join(workspace.repositoryDirectory, 'objects'),
     );
     expect(hostIdentity.exitCode).not.toBe(0);
     expect(sourceCommitLookup.exitCode).not.toBe(0);
   });
 
-  it("separates sibling cases with disjoint directories, object storage, and branches", async () => {
+  it('separates sibling cases with disjoint directories, object storage, and branches', async () => {
     const repository = await createSyntheticRepository();
     const adapter = createGitWorkspaceAdapter({
       config: buildConfig(repository.path, repository.commit),
-      workspacesDirectory: join(testDirectory, "workspaces"),
+      workspacesDirectory: join(testDirectory, 'workspaces'),
     });
-    const first = unwrapOk(await adapter.createIsolatedCase(buildIdentity("task-1--c1", repository.commit)));
-    const second = unwrapOk(await adapter.createIsolatedCase(buildIdentity("task-1--c2", repository.commit)));
+    const first = unwrapOk(
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+    );
+    const second = unwrapOk(
+      await adapter.createIsolatedCase(buildIdentity('task-1--c2', repository.commit)),
+    );
 
     expect(first.repositoryDirectory).not.toBe(second.repositoryDirectory);
     expect(first.worktreeDirectory).not.toBe(second.worktreeDirectory);
     expect(first.runtimeDirectory).not.toBe(second.runtimeDirectory);
     expect(first.syntheticCommit).not.toBe(second.syntheticCommit);
-    expect(first.branch).toBe("task-1--c1");
-    expect(second.branch).toBe("task-1--c2");
+    expect(first.branch).toBe('task-1--c1');
+    expect(second.branch).toBe('task-1--c2');
 
-    const secondCommitLookup = await runGit(first.repositoryDirectory, ["cat-file", "-e", second.syntheticCommit]);
+    const secondCommitLookup = await runGit(first.repositoryDirectory, [
+      'cat-file',
+      '-e',
+      second.syntheticCommit,
+    ]);
     expect(secondCommitLookup.exitCode).not.toBe(0);
-    expect(existsSync(join(first.repositoryDirectory, "objects/info/alternates"))).toBe(false);
+    expect(existsSync(join(first.repositoryDirectory, 'objects/info/alternates'))).toBe(false);
   });
 
-  it("leaves the source repository state unchanged across materialization and disposal", async () => {
+  it('leaves the source repository state unchanged across materialization and disposal', async () => {
     const repository = await createSyntheticRepository();
     const adapter = createGitWorkspaceAdapter({
       config: buildConfig(repository.path, repository.commit),
-      workspacesDirectory: join(testDirectory, "workspaces"),
+      workspacesDirectory: join(testDirectory, 'workspaces'),
     });
-    const headBefore = await runGit(repository.path, ["rev-parse", "HEAD"]);
-    const statusBefore = await runGit(repository.path, ["status", "--porcelain"]);
-    const refsBefore = await runGit(repository.path, ["for-each-ref"]);
-    const objectsBefore = await runGit(repository.path, ["count-objects", "-v"]);
+    const headBefore = await runGit(repository.path, ['rev-parse', 'HEAD']);
+    const statusBefore = await runGit(repository.path, ['status', '--porcelain']);
+    const refsBefore = await runGit(repository.path, ['for-each-ref']);
+    const objectsBefore = await runGit(repository.path, ['count-objects', '-v']);
 
-    const sealed = await adapter.createIsolatedCase(buildIdentity("task-1--c1", repository.commit));
+    const sealed = await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit));
     await adapter.dispose(unwrapOk(sealed));
 
-    const headAfter = await runGit(repository.path, ["rev-parse", "HEAD"]);
-    const statusAfter = await runGit(repository.path, ["status", "--porcelain"]);
-    const refsAfter = await runGit(repository.path, ["for-each-ref"]);
-    const objectsAfter = await runGit(repository.path, ["count-objects", "-v"]);
+    const headAfter = await runGit(repository.path, ['rev-parse', 'HEAD']);
+    const statusAfter = await runGit(repository.path, ['status', '--porcelain']);
+    const refsAfter = await runGit(repository.path, ['for-each-ref']);
+    const objectsAfter = await runGit(repository.path, ['count-objects', '-v']);
 
     expect(headAfter.stdout).toBe(headBefore.stdout);
     expect(statusAfter.stdout).toBe(statusBefore.stdout);
-    expect(statusBefore.stdout).toContain("M src/welcome.txt");
-    expect(statusBefore.stdout).toContain("?? untracked.txt");
+    expect(statusBefore.stdout).toContain('M src/welcome.txt');
+    expect(statusBefore.stdout).toContain('?? untracked.txt');
     expect(refsAfter.stdout).toBe(refsBefore.stdout);
     expect(objectsAfter.stdout).toBe(objectsBefore.stdout);
   });
 
-  it("validates a pinned commit and rejects references that are not exactly one commit", async () => {
+  it('validates a pinned commit and rejects references that are not exactly one commit', async () => {
     const repository = await createSyntheticRepository();
     const adapter = createGitWorkspaceAdapter({
       config: buildConfig(repository.path, repository.commit),
-      workspacesDirectory: join(testDirectory, "workspaces"),
+      workspacesDirectory: join(testDirectory, 'workspaces'),
     });
 
-    const validated = await adapter.validateSource({ id: "repo-1", path: repository.path }, repository.commit);
+    const validated = await adapter.validateSource(
+      { id: 'repo-1', path: repository.path },
+      repository.commit,
+    );
     const rejected = await adapter.validateSource(
-      { id: "repo-1", path: repository.path },
-      "f".repeat(40),
+      { id: 'repo-1', path: repository.path },
+      'f'.repeat(40),
     );
 
     expect(validated).toEqual({
       ok: true,
-      value: { repositoryId: "repo-1", requestedCommit: repository.commit, resolvedCommit: repository.commit },
+      value: {
+        repositoryId: 'repo-1',
+        requestedCommit: repository.commit,
+        resolvedCommit: repository.commit,
+      },
     });
     expect(rejected.ok).toBe(false);
     if (!rejected.ok) {
-      expect(rejected.error.kind).toBe("SourceMaterializationError");
-      expect(rejected.error.taskId).toBe("repo-1");
+      expect(rejected.error.kind).toBe('SourceMaterializationError');
+      expect(rejected.error.taskId).toBe('repo-1');
     }
   });
 
-  it("reports workspace readability and disposes the case directory", async () => {
-    const { adapter, workspace } = await sealCaseFromSyntheticRepository("task-1--c1");
+  it('reports workspace readability and disposes the case directory', async () => {
+    const { adapter, workspace } = await sealCaseFromSyntheticRepository('task-1--c1');
     const readableBefore = await adapter.isReadable?.(workspace);
 
-    await rm(join(workspace.repositoryDirectory, "HEAD"));
+    await rm(join(workspace.repositoryDirectory, 'HEAD'));
 
     const readableAfterCorruption = await adapter.isReadable?.(workspace);
     const disposed = await adapter.dispose(workspace);
@@ -474,17 +541,17 @@ describe("sealed Git case materialization", () => {
     expect(readableBefore).toBe(true);
     expect(readableAfterCorruption).toBe(false);
     expect(disposed.ok).toBe(true);
-    expect(existsSync(join(testDirectory, "workspaces", "task-1--c1"))).toBe(false);
+    expect(existsSync(join(testDirectory, 'workspaces', 'task-1--c1'))).toBe(false);
   });
 });
 
 async function createBaseRepository(name: string): Promise<string> {
   const path = join(testDirectory, name);
   await mkdir(path, { recursive: true });
-  await runGit(path, ["init", "--quiet", "-b", "main"]);
-  await writeFile(join(path, "README.md"), "synthetic source\n");
-  await runGit(path, ["add", "-A"]);
-  await runGit(path, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "synthetic base commit"]);
+  await runGit(path, ['init', '--quiet', '-b', 'main']);
+  await writeFile(join(path, 'README.md'), 'synthetic source\n');
+  await runGit(path, ['add', '-A']);
+  await runGit(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'synthetic base commit']);
   return path;
 }
 
@@ -493,28 +560,34 @@ async function sourceFingerprint(repositoryPath: string): Promise<{
   status: string;
   objects: string;
 }> {
-  const head = await runGit(repositoryPath, ["rev-parse", "HEAD"]);
-  const status = await runGit(repositoryPath, ["status", "--porcelain"]);
-  const objects = await runGit(repositoryPath, ["count-objects", "-v"]);
+  const head = await runGit(repositoryPath, ['rev-parse', 'HEAD']);
+  const status = await runGit(repositoryPath, ['status', '--porcelain']);
+  const objects = await runGit(repositoryPath, ['count-objects', '-v']);
   return { head: head.stdout, status: status.stdout, objects: objects.stdout };
 }
 
-describe("unsupported source rejection", () => {
-  it("rejects a synthetic gitlink without disclosing the submodule path", async () => {
-    const repositoryPath = await createBaseRepository("gitlink-source");
-    const baseCommit = (await runGit(repositoryPath, ["rev-parse", "HEAD"])).stdout.trim();
+describe('unsupported source rejection', () => {
+  it('rejects a synthetic gitlink without disclosing the submodule path', async () => {
+    const repositoryPath = await createBaseRepository('gitlink-source');
+    const baseCommit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
     await runGit(repositoryPath, [
-      "update-index",
-      "--add",
-      "--cacheinfo",
+      'update-index',
+      '--add',
+      '--cacheinfo',
       `160000,${baseCommit},vendor/dependency`,
     ]);
-    await runGit(repositoryPath, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "synthetic gitlink commit"]);
-    const commit = (await runGit(repositoryPath, ["rev-parse", "HEAD"])).stdout.trim();
+    await runGit(repositoryPath, [
+      ...GIT_IDENTITY_FLAGS,
+      'commit',
+      '--quiet',
+      '-m',
+      'synthetic gitlink commit',
+    ]);
+    const commit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
     const before = await sourceFingerprint(repositoryPath);
 
     const rejected = await createGitAdapter(repositoryPath, commit).validateSource(
-      { id: "repo-1", path: repositoryPath },
+      { id: 'repo-1', path: repositoryPath },
       commit,
     );
     const after = await sourceFingerprint(repositoryPath);
@@ -522,28 +595,34 @@ describe("unsupported source rejection", () => {
     expect(rejected.ok).toBe(false);
     if (!rejected.ok) {
       expect(rejected.error).toEqual({
-        kind: "SourceMaterializationError",
-        taskId: "repo-1",
+        kind: 'SourceMaterializationError',
+        taskId: 'repo-1',
         reason: 'repository "repo-1": source tree contains 1 unsupported submodule entry',
       });
     }
     expect(after).toEqual(before);
   });
 
-  it("rejects a tracked Git LFS pointer without disclosing the blob filename", async () => {
-    const repositoryPath = await createBaseRepository("lfs-pointer-source");
-    await mkdir(join(repositoryPath, "assets"), { recursive: true });
+  it('rejects a tracked Git LFS pointer without disclosing the blob filename', async () => {
+    const repositoryPath = await createBaseRepository('lfs-pointer-source');
+    await mkdir(join(repositoryPath, 'assets'), { recursive: true });
     await writeFile(
-      join(repositoryPath, "assets/model.bin"),
-      "version https://git-lfs.github.com/spec/v1\noid sha256:0000000000000000000000000000000000000000000000000000000000000000\nsize 12\n",
+      join(repositoryPath, 'assets/model.bin'),
+      'version https://git-lfs.github.com/spec/v1\noid sha256:0000000000000000000000000000000000000000000000000000000000000000\nsize 12\n',
     );
-    await runGit(repositoryPath, ["add", "assets/model.bin"]);
-    await runGit(repositoryPath, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "synthetic lfs pointer commit"]);
-    const commit = (await runGit(repositoryPath, ["rev-parse", "HEAD"])).stdout.trim();
+    await runGit(repositoryPath, ['add', 'assets/model.bin']);
+    await runGit(repositoryPath, [
+      ...GIT_IDENTITY_FLAGS,
+      'commit',
+      '--quiet',
+      '-m',
+      'synthetic lfs pointer commit',
+    ]);
+    const commit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
     const before = await sourceFingerprint(repositoryPath);
 
     const rejected = await createGitAdapter(repositoryPath, commit).validateSource(
-      { id: "repo-1", path: repositoryPath },
+      { id: 'repo-1', path: repositoryPath },
       commit,
     );
     const after = await sourceFingerprint(repositoryPath);
@@ -551,27 +630,33 @@ describe("unsupported source rejection", () => {
     expect(rejected.ok).toBe(false);
     if (!rejected.ok) {
       expect(rejected.error).toEqual({
-        kind: "SourceMaterializationError",
-        taskId: "repo-1",
+        kind: 'SourceMaterializationError',
+        taskId: 'repo-1',
         reason: 'repository "repo-1": source tree contains 1 unsupported Git LFS pointer blob',
       });
     }
     expect(after).toEqual(before);
   });
 
-  it("rejects Git LFS attributes without disclosing the attributes path", async () => {
-    const repositoryPath = await createBaseRepository("lfs-attributes-source");
+  it('rejects Git LFS attributes without disclosing the attributes path', async () => {
+    const repositoryPath = await createBaseRepository('lfs-attributes-source');
     await writeFile(
-      join(repositoryPath, ".gitattributes"),
-      "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+      join(repositoryPath, '.gitattributes'),
+      '*.bin filter=lfs diff=lfs merge=lfs -text\n',
     );
-    await runGit(repositoryPath, ["add", ".gitattributes"]);
-    await runGit(repositoryPath, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "synthetic lfs attributes commit"]);
-    const commit = (await runGit(repositoryPath, ["rev-parse", "HEAD"])).stdout.trim();
+    await runGit(repositoryPath, ['add', '.gitattributes']);
+    await runGit(repositoryPath, [
+      ...GIT_IDENTITY_FLAGS,
+      'commit',
+      '--quiet',
+      '-m',
+      'synthetic lfs attributes commit',
+    ]);
+    const commit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
     const before = await sourceFingerprint(repositoryPath);
 
     const rejected = await createGitAdapter(repositoryPath, commit).validateSource(
-      { id: "repo-1", path: repositoryPath },
+      { id: 'repo-1', path: repositoryPath },
       commit,
     );
     const after = await sourceFingerprint(repositoryPath);
@@ -579,8 +664,8 @@ describe("unsupported source rejection", () => {
     expect(rejected.ok).toBe(false);
     if (!rejected.ok) {
       expect(rejected.error).toEqual({
-        kind: "SourceMaterializationError",
-        taskId: "repo-1",
+        kind: 'SourceMaterializationError',
+        taskId: 'repo-1',
         reason: 'repository "repo-1": source tree configures unsupported Git LFS attributes',
       });
     }
@@ -588,35 +673,54 @@ describe("unsupported source rejection", () => {
   });
 });
 
-describe("pre-evaluation patch capture", () => {
-  it("captures model commits and new files while excluding later evaluator mutations", async () => {
-    const { adapter, workspace } = await sealCaseFromSyntheticRepository("task-1--c1");
+describe('pre-evaluation patch capture', () => {
+  it('captures model commits and new files while excluding later evaluator mutations', async () => {
+    const { adapter, workspace } = await sealCaseFromSyntheticRepository('task-1--c1');
 
-    await writeFile(join(workspace.worktreeDirectory, "src/welcome.txt"), `${SOURCE_TEXT}model edit\n`);
     await writeFile(
-      join(workspace.worktreeDirectory, "assets/logo.bin"),
+      join(workspace.worktreeDirectory, 'src/welcome.txt'),
+      `${SOURCE_TEXT}model edit\n`,
+    );
+    await writeFile(
+      join(workspace.worktreeDirectory, 'assets/logo.bin'),
       Buffer.concat([SOURCE_BINARY, Buffer.from([0x01, 0x02, 0x03])]),
     );
-    await runGit(workspace.worktreeDirectory, ["add", "-A"]);
-    await runGit(workspace.worktreeDirectory, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "synthetic model commit"]);
-    await writeFile(join(workspace.worktreeDirectory, "src/model-added.txt"), "added by the model\n");
+    await runGit(workspace.worktreeDirectory, ['add', '-A']);
+    await runGit(workspace.worktreeDirectory, [
+      ...GIT_IDENTITY_FLAGS,
+      'commit',
+      '--quiet',
+      '-m',
+      'synthetic model commit',
+    ]);
+    await writeFile(
+      join(workspace.worktreeDirectory, 'src/model-added.txt'),
+      'added by the model\n',
+    );
 
     const modelPatch = unwrapOk(await adapter.capturePatch(workspace));
 
-    await writeFile(join(workspace.worktreeDirectory, "src/evaluator-mutation.txt"), "evaluator mutation\n");
+    await writeFile(
+      join(workspace.worktreeDirectory, 'src/evaluator-mutation.txt'),
+      'evaluator mutation\n',
+    );
     const postEvaluationPatch = unwrapOk(await adapter.capturePatch(workspace));
 
     expect(modelPatch.isEmpty).toBe(false);
-    expect(modelPatch.content).toContain("diff --git a/src/welcome.txt");
-    expect(modelPatch.content).toContain("GIT binary patch");
-    expect(modelPatch.content).toContain("new file mode");
-    expect(modelPatch.content).toContain("src/model-added.txt");
-    expect(modelPatch.content).not.toContain("evaluator-mutation");
+    expect(modelPatch.content).toContain('diff --git a/src/welcome.txt');
+    expect(modelPatch.content).toContain('GIT binary patch');
+    expect(modelPatch.content).toContain('new file mode');
+    expect(modelPatch.content).toContain('src/model-added.txt');
+    expect(modelPatch.content).not.toContain('evaluator-mutation');
 
-    expect(postEvaluationPatch.content).toContain("src/evaluator-mutation.txt");
+    expect(postEvaluationPatch.content).toContain('src/evaluator-mutation.txt');
 
-    const stagedInRealIndex = await runGit(workspace.worktreeDirectory, ["diff", "--cached", "--name-only"]);
-    expect(stagedInRealIndex.stdout).toBe("");
+    const stagedInRealIndex = await runGit(workspace.worktreeDirectory, [
+      'diff',
+      '--cached',
+      '--name-only',
+    ]);
+    expect(stagedInRealIndex.stdout).toBe('');
   });
 });
 
@@ -638,29 +742,36 @@ async function snapshotDirectory(root: string): Promise<Record<string, string>> 
   return files;
 }
 
-describe("patch base (P2, P3)", () => {
-  it("adds no object, ref, or index change to the sealed repository, and the recorded tree is unreadable without the private object environment", async () => {
-    const { workspace, adapter } = await sealCaseFromSyntheticRepository("task-1--c1");
+describe('patch base (P2, P3)', () => {
+  it('adds no object, ref, or index change to the sealed repository, and the recorded tree is unreadable without the private object environment', async () => {
+    const { workspace, adapter } = await sealCaseFromSyntheticRepository('task-1--c1');
     const filesBefore = await snapshotDirectory(workspace.repositoryDirectory);
 
-    await writeFile(join(workspace.worktreeDirectory, "src/welcome.txt"), `${SOURCE_TEXT}setup edit\n`);
+    await writeFile(
+      join(workspace.worktreeDirectory, 'src/welcome.txt'),
+      `${SOURCE_TEXT}setup edit\n`,
+    );
     const statusBefore = await runGit(workspace.worktreeDirectory, [
-      "status",
-      "--porcelain=v1",
-      "--ignored",
-      "--untracked-files=all",
+      'status',
+      '--porcelain=v1',
+      '--ignored',
+      '--untracked-files=all',
     ]);
     const base = unwrapOk(await adapter.snapshotPatchBase(workspace));
 
     const filesAfter = await snapshotDirectory(workspace.repositoryDirectory);
     const statusAfter = await runGit(workspace.worktreeDirectory, [
-      "status",
-      "--porcelain=v1",
-      "--ignored",
-      "--untracked-files=all",
+      'status',
+      '--porcelain=v1',
+      '--ignored',
+      '--untracked-files=all',
     ]);
-    const rootCount = await runGit(workspace.worktreeDirectory, ["rev-list", "--all", "--count"]);
-    const treeOutsideBase = await runGit(workspace.worktreeDirectory, ["cat-file", "-t", base.tree]);
+    const rootCount = await runGit(workspace.worktreeDirectory, ['rev-list', '--all', '--count']);
+    const treeOutsideBase = await runGit(workspace.worktreeDirectory, [
+      'cat-file',
+      '-t',
+      base.tree,
+    ]);
 
     expect(filesAfter).toEqual(filesBefore);
     expect(statusAfter.stdout).toBe(statusBefore.stdout);
@@ -669,42 +780,56 @@ describe("patch base (P2, P3)", () => {
   }, 30_000);
 
   it("keeps a captured patch base usable after the agent commits and prunes the worktree's repository (P3)", async () => {
-    const { workspace, adapter } = await sealCaseFromSyntheticRepository("task-1--c1");
+    const { workspace, adapter } = await sealCaseFromSyntheticRepository('task-1--c1');
     const base = unwrapOk(await adapter.snapshotPatchBase(workspace));
 
-    await writeFile(join(workspace.worktreeDirectory, "src/model-added.txt"), "added by the agent\n");
-    await runGit(workspace.worktreeDirectory, ["add", "-A"]);
-    await runGit(workspace.worktreeDirectory, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "agent commit"]);
-    await runGit(workspace.worktreeDirectory, ["gc", "--prune=now"]);
-    await runGit(workspace.worktreeDirectory, ["prune"]);
+    await writeFile(
+      join(workspace.worktreeDirectory, 'src/model-added.txt'),
+      'added by the agent\n',
+    );
+    await runGit(workspace.worktreeDirectory, ['add', '-A']);
+    await runGit(workspace.worktreeDirectory, [
+      ...GIT_IDENTITY_FLAGS,
+      'commit',
+      '--quiet',
+      '-m',
+      'agent commit',
+    ]);
+    await runGit(workspace.worktreeDirectory, ['gc', '--prune=now']);
+    await runGit(workspace.worktreeDirectory, ['prune']);
 
     const patch = await adapter.capturePatch(workspace, base);
 
     expect(patch.ok).toBe(true);
     if (patch.ok) {
-      expect(patch.value.content).toContain("src/model-added.txt");
+      expect(patch.value.content).toContain('src/model-added.txt');
       expect(patch.value.isEmpty).toBe(false);
     }
   }, 30_000);
 });
 
-describe("isolated case environments", () => {
-  it("builds separate replacement environments with private homes and no host state", async () => {
-    const config = buildConfig("/synthetic/source", "f".repeat(40));
+describe('isolated case environments', () => {
+  it('builds separate replacement environments with private homes and no host state', async () => {
+    const config = buildConfig('/synthetic/source', 'f'.repeat(40));
     const adapter = createEnvironmentAdapter();
     const snapshot = adapter.snapshotParent(config);
-    const workspace = buildFabricatedWorkspace("task-1--c1");
+    const workspace = buildFabricatedWorkspace('task-1--c1');
     await mkdir(workspace.runtimeDirectory, { recursive: true });
 
-    const environments = await adapter.createCaseEnvironments(workspace, unwrapOk(snapshot), config, "opencode");
+    const environments = await adapter.createCaseEnvironments(
+      workspace,
+      unwrapOk(snapshot),
+      config,
+      'opencode',
+    );
     const { evaluator } = unwrapOk(environments);
     const agent = requireAgentEnvironment(unwrapOk(environments));
 
     expect(Object.keys(agent.variables).sort()).toEqual(AGENT_ENV_KEYS);
     expect(Object.keys(evaluator.variables).sort()).toEqual([...FIXED_EVALUATOR_KEYS].sort());
-    expect(agent.variables.LANG).toBe("C.UTF-8");
-    expect(agent.variables.LC_ALL).toBe("C.UTF-8");
-    expect(agent.variables.CI).toBe("1");
+    expect(agent.variables.LANG).toBe('C.UTF-8');
+    expect(agent.variables.LC_ALL).toBe('C.UTF-8');
+    expect(agent.variables.CI).toBe('1');
     expect(agent.variables.PATH).toBe(unwrapOk(snapshot).path);
     expect(agent.variables[PROVIDER_NAME]).toBe(PROVIDER_VALUE);
     expect(agent.variables[SECRET_NAME]).toBe(SECRET_VALUE);
@@ -739,34 +864,40 @@ describe("isolated case environments", () => {
 
     expect(agent.variableManifest).toEqual(
       expect.arrayContaining([
-        { name: PROVIDER_NAME, classification: "secret", recipient: "agent" },
-        { name: SECRET_NAME, classification: "secret", recipient: "agent" },
+        { name: PROVIDER_NAME, classification: 'secret', recipient: 'agent' },
+        { name: SECRET_NAME, classification: 'secret', recipient: 'agent' },
       ]),
     );
     expect(evaluator.variableManifest).toEqual(
-      expect.arrayContaining([{ name: EVAL_NAME, classification: "ordinary", recipient: "evaluator" }]),
+      expect.arrayContaining([
+        { name: EVAL_NAME, classification: 'ordinary', recipient: 'evaluator' },
+      ]),
     );
-    expect(JSON.stringify([...agent.variableManifest, ...evaluator.variableManifest])).not.toContain(PROVIDER_VALUE);
-    expect(JSON.stringify([...agent.variableManifest, ...evaluator.variableManifest])).not.toContain(SECRET_VALUE);
+    expect(
+      JSON.stringify([...agent.variableManifest, ...evaluator.variableManifest]),
+    ).not.toContain(PROVIDER_VALUE);
+    expect(
+      JSON.stringify([...agent.variableManifest, ...evaluator.variableManifest]),
+    ).not.toContain(SECRET_VALUE);
   });
 
-  it("keeps the parent snapshot immutable and passes only allowlisted ordinary values to evaluator checks", async () => {
-    const config = buildConfig("/synthetic/source", "f".repeat(40));
+  it('keeps the parent snapshot immutable and passes only allowlisted ordinary values to evaluator checks', async () => {
+    const config = buildConfig('/synthetic/source', 'f'.repeat(40));
     const adapter = createEnvironmentAdapter();
     const snapshot = adapter.snapshotParent(config);
     const snapshotValue = unwrapOk(snapshot);
     const snapshotClone = JSON.parse(JSON.stringify(snapshotValue)) as typeof snapshotValue;
 
-    const firstWorkspace = buildFabricatedWorkspace("task-1--c1");
-    const secondWorkspace = buildFabricatedWorkspace("task-1--c2");
+    const firstWorkspace = buildFabricatedWorkspace('task-1--c1');
+    const secondWorkspace = buildFabricatedWorkspace('task-1--c2');
     for (const workspace of [firstWorkspace, secondWorkspace]) {
       await mkdir(workspace.runtimeDirectory, { recursive: true });
     }
     const firstEnvironments = unwrapOk(
-      await adapter.createCaseEnvironments(firstWorkspace, snapshotValue, config, "opencode"),
+      await adapter.createCaseEnvironments(firstWorkspace, snapshotValue, config, 'opencode'),
     );
     const secondEnvironments = unwrapOk(
-      await adapter.createCaseEnvironments(secondWorkspace, snapshotValue, config, "opencode"),
+      await adapter.createCaseEnvironments(secondWorkspace, snapshotValue, config, 'opencode'),
     );
     const firstAgent = requireAgentEnvironment(firstEnvironments);
     const secondAgent = requireAgentEnvironment(secondEnvironments);
@@ -775,19 +906,21 @@ describe("isolated case environments", () => {
     expect(secondAgent.variables.PATH).toBe(snapshotValue.path);
     expect(firstAgent.variables[PROVIDER_NAME]).toBe(snapshotValue.agentValues?.[PROVIDER_NAME]);
     expect(firstAgent.variables).not.toBe(secondAgent.variables);
-    secondEnvironments.evaluator.variables.TEVU_IT_SCRATCH = "scratch";
+    secondEnvironments.evaluator.variables.TEVU_IT_SCRATCH = 'scratch';
     expect(firstEnvironments.evaluator.variables.TEVU_IT_SCRATCH).toBeUndefined();
     expect(snapshotValue).toEqual(snapshotClone);
 
     const checkEnvironment = buildCheckEnvironment(firstEnvironments.evaluator, snapshotValue, [
       EVAL_NAME,
-      "HOME",
-      "TEVU_IT_MISSING",
+      'HOME',
+      'TEVU_IT_MISSING',
     ]);
 
     expect(checkEnvironment[EVAL_NAME]).toBe(ORDINARY_VALUE);
     expect(checkEnvironment.HOME).toBe(firstEnvironments.evaluator.variables.HOME);
-    expect(Object.keys(checkEnvironment).sort()).toEqual([...FIXED_EVALUATOR_KEYS, EVAL_NAME].sort());
+    expect(Object.keys(checkEnvironment).sort()).toEqual(
+      [...FIXED_EVALUATOR_KEYS, EVAL_NAME].sort(),
+    );
     expect(checkEnvironment.TEVU_IT_MISSING).toBeUndefined();
     expect(JSON.stringify(checkEnvironment)).not.toContain(PROVIDER_VALUE);
     expect(JSON.stringify(checkEnvironment)).not.toContain(SECRET_VALUE);
@@ -798,18 +931,20 @@ describe("isolated case environments", () => {
     expect(snapshotValue.secretValues).toContain(SECRET_VALUE);
   });
 
-  it("runs a real process whose environment is exactly the isolated replacement set", async () => {
-    const config = buildConfig("/synthetic/source", "f".repeat(40));
+  it('runs a real process whose environment is exactly the isolated replacement set', async () => {
+    const config = buildConfig('/synthetic/source', 'f'.repeat(40));
     const adapter = createEnvironmentAdapter();
     const snapshotValue = unwrapOk(adapter.snapshotParent(config));
-    const workspace = buildFabricatedWorkspace("task-1--c1");
+    const workspace = buildFabricatedWorkspace('task-1--c1');
     await mkdir(workspace.runtimeDirectory, { recursive: true });
-    const environments = unwrapOk(await adapter.createCaseEnvironments(workspace, snapshotValue, config, "opencode"));
+    const environments = unwrapOk(
+      await adapter.createCaseEnvironments(workspace, snapshotValue, config, 'opencode'),
+    );
     const agent = requireAgentEnvironment(environments);
 
     const outcome = expectLaunched(
       await runManagedProcess({
-        argv: [process.execPath, "-e", ENVIRONMENT_PROBE_SCRIPT],
+        argv: [process.execPath, '-e', ENVIRONMENT_PROBE_SCRIPT],
         cwd: testDirectory,
         environment: agent.variables,
         timeoutMs: 10_000,
@@ -827,10 +962,10 @@ describe("isolated case environments", () => {
       keys: string[];
     };
     expect(outcome.exitCode).toBe(0);
-    expect(outcome.terminationStage).toBe("none");
+    expect(outcome.terminationStage).toBe('none');
     expect(reported.home).toBe(agent.homeDirectory);
-    expect(reported.provider).toBe("[REDACTED]");
-    expect(reported.secret).toBe("[REDACTED]");
+    expect(reported.provider).toBe('[REDACTED]');
+    expect(reported.secret).toBe('[REDACTED]');
     expect(reported.ordinary).toBeUndefined();
     expect(reported.hostSentinel).toBeUndefined();
     expect(reported.keys).toEqual(AGENT_ENV_KEYS);
@@ -839,7 +974,7 @@ describe("isolated case environments", () => {
 
     const evaluatorOutcome = expectLaunched(
       await runManagedProcess({
-        argv: [process.execPath, "-e", ENVIRONMENT_PROBE_SCRIPT],
+        argv: [process.execPath, '-e', ENVIRONMENT_PROBE_SCRIPT],
         cwd: testDirectory,
         environment: buildCheckEnvironment(environments.evaluator, snapshotValue, [EVAL_NAME]),
         timeoutMs: 10_000,
@@ -857,12 +992,12 @@ describe("isolated case environments", () => {
     expect(evaluatorReported.home).toBe(environments.evaluator.homeDirectory);
     expect(evaluatorReported.ordinary).toBe(ORDINARY_VALUE);
     expect(evaluatorReported.provider).toBeUndefined();
-    expect(evaluatorOutcome.stdout.text).not.toContain("[REDACTED]");
+    expect(evaluatorOutcome.stdout.text).not.toContain('[REDACTED]');
   });
 });
 
-describe("credential-secret redaction", () => {
-  it("redacts secrets that span streaming chunk boundaries without losing text", () => {
+describe('credential-secret redaction', () => {
+  it('redacts secrets that span streaming chunk boundaries without losing text', () => {
     const first = createStreamingRedactor([PROVIDER_VALUE]);
     const second = createStreamingRedactor([PROVIDER_VALUE]);
     const third = createStreamingRedactor([PROVIDER_VALUE]);
@@ -873,29 +1008,29 @@ describe("credential-secret redaction", () => {
       second.push(PROVIDER_VALUE.slice(21, 28)),
       second.push(`${PROVIDER_VALUE.slice(28)} done`),
       second.flush(),
-    ].join("");
-    const danglingPartial = `${third.push("tail synthetic-sec")}${third.flush()}`;
+    ].join('');
+    const danglingPartial = `${third.push('tail synthetic-sec')}${third.flush()}`;
 
-    expect(twoWay).toBe("before [REDACTED] after");
+    expect(twoWay).toBe('before [REDACTED] after');
     expect(twoWay).not.toContain(PROVIDER_VALUE);
-    expect(threeWay).toBe("prefix [REDACTED] done");
-    expect(danglingPartial).toBe("tail synthetic-sec");
+    expect(threeWay).toBe('prefix [REDACTED] done');
+    expect(danglingPartial).toBe('tail synthetic-sec');
 
-    const wholeText = createRedactor(["alpha-secret-extended", "secret-extended"]);
-    expect(wholeText("x alpha-secret-extended y")).toBe("x [REDACTED] y");
-    expect(createRedactor([""])("plain text")).toBe("plain text");
+    const wholeText = createRedactor(['alpha-secret-extended', 'secret-extended']);
+    expect(wholeText('x alpha-secret-extended y')).toBe('x [REDACTED] y');
+    expect(createRedactor([''])('plain text')).toBe('plain text');
   });
 
-  it("redacts secrets at the managed stderr sink before capture", async () => {
-    const config = buildConfig("/synthetic/source", "f".repeat(40));
+  it('redacts secrets at the managed stderr sink before capture', async () => {
+    const config = buildConfig('/synthetic/source', 'f'.repeat(40));
     const snapshotValue = unwrapOk(createEnvironmentAdapter().snapshotParent(config));
 
     const outcome = expectLaunched(
       await runManagedProcess({
-        argv: [process.execPath, "-e", STDERR_SECRET_PROBE_SCRIPT],
+        argv: [process.execPath, '-e', STDERR_SECRET_PROBE_SCRIPT],
         cwd: testDirectory,
         environment: {
-          PATH: process.env.PATH ?? "",
+          PATH: process.env.PATH ?? '',
           [PROVIDER_NAME]: PROVIDER_VALUE,
         },
         timeoutMs: 10_000,
@@ -905,17 +1040,17 @@ describe("credential-secret redaction", () => {
     );
 
     expect(outcome.exitCode).toBe(0);
-    expect(outcome.stderr.text).toBe("[REDACTED]\n");
+    expect(outcome.stderr.text).toBe('[REDACTED]\n');
     expect(outcome.stderr.text).not.toContain(PROVIDER_VALUE);
-    expect(outcome.stderr.totalBytes).toBe(Buffer.byteLength("[REDACTED]\n", "utf8"));
+    expect(outcome.stderr.totalBytes).toBe(Buffer.byteLength('[REDACTED]\n', 'utf8'));
   });
 
-  it("bounds captured output and reports the untruncated total size", async () => {
+  it('bounds captured output and reports the untruncated total size', async () => {
     const outcome = expectLaunched(
       await runManagedProcess({
-        argv: [process.execPath, "-e", "process.stdout.write('0123456789'.repeat(10));"],
+        argv: [process.execPath, '-e', "process.stdout.write('0123456789'.repeat(10));"],
         cwd: testDirectory,
-        environment: { PATH: process.env.PATH ?? "" },
+        environment: { PATH: process.env.PATH ?? '' },
         timeoutMs: 10_000,
         terminationGraceMs: 250,
         maxCaptureBytes: 16,
@@ -924,31 +1059,31 @@ describe("credential-secret redaction", () => {
 
     expect(outcome.exitCode).toBe(0);
     expect(outcome.stdout.truncated).toBe(true);
-    expect(Buffer.byteLength(outcome.stdout.text, "utf8")).toBeLessThanOrEqual(16);
+    expect(Buffer.byteLength(outcome.stdout.text, 'utf8')).toBeLessThanOrEqual(16);
     expect(outcome.stdout.totalBytes).toBe(100);
   });
 });
 
-describe("process-group termination", () => {
-  it("reports a launch failure with the ENOENT code for a nonexistent executable", async () => {
+describe('process-group termination', () => {
+  it('reports a launch failure with the ENOENT code for a nonexistent executable', async () => {
     const result = await runManagedProcess({
-      argv: ["definitely-not-installed", "--version"],
+      argv: ['definitely-not-installed', '--version'],
       cwd: testDirectory,
-      environment: { PATH: process.env.PATH ?? "", HOME: testDirectory },
+      environment: { PATH: process.env.PATH ?? '', HOME: testDirectory },
       timeoutMs: 1_000,
       terminationGraceMs: 250,
     });
 
     expect(result.launched).toBe(false);
     if (result.launched) return;
-    expect(result.code).toBe("ENOENT");
+    expect(result.code).toBe('ENOENT');
   });
 
-  it("redacts a secret from a synchronous launch failure", async () => {
+  it('redacts a secret from a synchronous launch failure', async () => {
     const result = await runManagedProcess({
       argv: [process.execPath, `--token=${LAUNCH_FAILURE_SECRET}\0`],
       cwd: testDirectory,
-      environment: { PATH: process.env.PATH ?? "", HOME: testDirectory },
+      environment: { PATH: process.env.PATH ?? '', HOME: testDirectory },
       timeoutMs: 1_000,
       terminationGraceMs: 250,
       secretValues: [LAUNCH_FAILURE_SECRET],
@@ -956,66 +1091,78 @@ describe("process-group termination", () => {
 
     expect(result.launched).toBe(false);
     if (result.launched) return;
-    expect(result.reason).toContain("[REDACTED]");
+    expect(result.reason).toContain('[REDACTED]');
     expect(result.reason).not.toContain(LAUNCH_FAILURE_SECRET);
   });
 
-  it("terminates a timed-out process group gracefully and reaps descendants", async () => {
-    const pidFile = join(testDirectory, "pids-graceful.json");
+  it('terminates a timed-out process group gracefully and reaps descendants', async () => {
+    const pidFile = join(testDirectory, 'pids-graceful.json');
 
     const outcome = expectLaunched(
       await runManagedProcess({
-        argv: [process.execPath, "-e", buildChildScript(pidFile, {
-          trapSignal: false,
-          grandchildScript: MORTAL_GRANDCHILD_SCRIPT,
-        })],
+        argv: [
+          process.execPath,
+          '-e',
+          buildChildScript(pidFile, {
+            trapSignal: false,
+            grandchildScript: MORTAL_GRANDCHILD_SCRIPT,
+          }),
+        ],
         cwd: testDirectory,
-        environment: { PATH: process.env.PATH ?? "", HOME: testDirectory },
+        environment: { PATH: process.env.PATH ?? '', HOME: testDirectory },
         timeoutMs: 1_000,
         terminationGraceMs: 250,
       }),
     );
 
     expect(outcome.timedOut).toBe(true);
-    expect(outcome.terminationStage).toBe("graceful");
-    expect(outcome.signal).toBe("SIGTERM");
+    expect(outcome.terminationStage).toBe('graceful');
+    expect(outcome.signal).toBe('SIGTERM');
     await waitForDescendantsReaped(pidFile);
   });
 
-  it("forces termination when the group traps SIGTERM and reaps trapped descendants", async () => {
-    const pidFile = join(testDirectory, "pids-forced.json");
+  it('forces termination when the group traps SIGTERM and reaps trapped descendants', async () => {
+    const pidFile = join(testDirectory, 'pids-forced.json');
 
     const outcome = expectLaunched(
       await runManagedProcess({
-        argv: [process.execPath, "-e", buildChildScript(pidFile, {
-          trapSignal: true,
-          grandchildScript: SURVIVOR_GRANDCHILD_SCRIPT,
-        })],
+        argv: [
+          process.execPath,
+          '-e',
+          buildChildScript(pidFile, {
+            trapSignal: true,
+            grandchildScript: SURVIVOR_GRANDCHILD_SCRIPT,
+          }),
+        ],
         cwd: testDirectory,
-        environment: { PATH: process.env.PATH ?? "", HOME: testDirectory },
+        environment: { PATH: process.env.PATH ?? '', HOME: testDirectory },
         timeoutMs: 1_000,
         terminationGraceMs: 250,
       }),
     );
 
     expect(outcome.timedOut).toBe(true);
-    expect(outcome.terminationStage).toBe("forced");
-    expect(outcome.signal).toBe("SIGKILL");
+    expect(outcome.terminationStage).toBe('forced');
+    expect(outcome.signal).toBe('SIGKILL');
     await waitForDescendantsReaped(pidFile);
   });
 
-  it("reaps a grandchild that outlives the supervised process while holding its output pipes", async () => {
-    const pidFile = join(testDirectory, "pids-survivor.json");
+  it('reaps a grandchild that outlives the supervised process while holding its output pipes', async () => {
+    const pidFile = join(testDirectory, 'pids-survivor.json');
 
     const outcome = expectLaunched(
       await runManagedProcess({
-        argv: [process.execPath, "-e", buildChildScript(pidFile, {
-          trapSignal: false,
-          exitAfterMs: 150,
-          grandchildScript: SURVIVOR_GRANDCHILD_SCRIPT,
-        })],
+        argv: [
+          process.execPath,
+          '-e',
+          buildChildScript(pidFile, {
+            trapSignal: false,
+            exitAfterMs: 150,
+            grandchildScript: SURVIVOR_GRANDCHILD_SCRIPT,
+          }),
+        ],
         cwd: testDirectory,
-        environment: { PATH: process.env.PATH ?? "", HOME: testDirectory },
+        environment: { PATH: process.env.PATH ?? '', HOME: testDirectory },
         timeoutMs: 10_000,
         terminationGraceMs: 300,
       }),
@@ -1023,13 +1170,13 @@ describe("process-group termination", () => {
 
     expect(outcome.exitCode).toBe(0);
     expect(outcome.timedOut).toBe(false);
-    expect(outcome.terminationStage).toBe("none");
+    expect(outcome.terminationStage).toBe('none');
     await waitForDescendantsReaped(pidFile);
   });
 });
 
 function sha256Hex(bytes: Buffer): string {
-  return createHash("sha256").update(bytes).digest("hex");
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 /** Asserts a `CheckStateRecord` path list is sorted ascending and holds no duplicates. */
@@ -1039,87 +1186,107 @@ function expectSortedAndDeduplicated(paths: readonly string[]): void {
 }
 
 async function createCheckStateSourceRepository(): Promise<{ path: string; commit: string }> {
-  const path = join(testDirectory, "check-state-source");
-  await mkdir(join(path, "tests"), { recursive: true });
-  await mkdir(join(path, "src"), { recursive: true });
-  await writeFile(join(path, "tests/committed.txt"), "base-committed\n");
-  await writeFile(join(path, "tests/uncommitted.txt"), "base-uncommitted\n");
-  await writeFile(join(path, "tests/deleted.txt"), "base-deleted\n");
-  await writeFile(join(path, "tests/executable.sh"), "#!/bin/sh\necho base\n");
-  await chmod(join(path, "tests/executable.sh"), 0o755);
-  await writeFile(join(path, "tests/target-base.txt"), "base-target\n");
-  await symlink("target-base.txt", join(path, "tests/symlink.txt"));
-  await writeFile(join(path, "src/unmatched.txt"), "base-unmatched\n");
-  await runGit(path, ["init", "--quiet", "-b", "main"]);
-  await runGit(path, ["add", "-A"]);
-  await runGit(path, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "check-state base commit"]);
-  const commit = (await runGit(path, ["rev-parse", "HEAD"])).stdout.trim();
+  const path = join(testDirectory, 'check-state-source');
+  await mkdir(join(path, 'tests'), { recursive: true });
+  await mkdir(join(path, 'src'), { recursive: true });
+  await writeFile(join(path, 'tests/committed.txt'), 'base-committed\n');
+  await writeFile(join(path, 'tests/uncommitted.txt'), 'base-uncommitted\n');
+  await writeFile(join(path, 'tests/deleted.txt'), 'base-deleted\n');
+  await writeFile(join(path, 'tests/executable.sh'), '#!/bin/sh\necho base\n');
+  await chmod(join(path, 'tests/executable.sh'), 0o755);
+  await writeFile(join(path, 'tests/target-base.txt'), 'base-target\n');
+  await symlink('target-base.txt', join(path, 'tests/symlink.txt'));
+  await writeFile(join(path, 'src/unmatched.txt'), 'base-unmatched\n');
+  await runGit(path, ['init', '--quiet', '-b', 'main']);
+  await runGit(path, ['add', '-A']);
+  await runGit(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'check-state base commit']);
+  const commit = (await runGit(path, ['rev-parse', 'HEAD'])).stdout.trim();
   return { path, commit };
 }
 
-describe("check-state restore step (P1, P2, P3, P4, P7)", () => {
-  it("resets committed and uncommitted modifications, a deletion, an executable-bit change, and a symlink entry to the base tree, removes matched untracked and gitignored files, and leaves unmatched files and the case repository untouched", async () => {
+describe('check-state restore step (P1, P2, P3, P4, P7)', () => {
+  it('resets committed and uncommitted modifications, a deletion, an executable-bit change, and a symlink entry to the base tree, removes matched untracked and gitignored files, and leaves unmatched files and the case repository untouched', async () => {
     const repository = await createCheckStateSourceRepository();
     const adapter = createGitAdapter(repository.path, repository.commit);
     const workspace = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity("task-1--c1", repository.commit)),
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
     );
 
-    await writeFile(join(workspace.worktreeDirectory, "tests/committed.txt"), "committed-modification\n");
-    await runGit(workspace.worktreeDirectory, ["add", "tests/committed.txt"]);
-    await runGit(workspace.worktreeDirectory, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "agent commit"]);
-    await writeFile(join(workspace.worktreeDirectory, "tests/uncommitted.txt"), "uncommitted-modification\n");
-    await rm(join(workspace.worktreeDirectory, "tests/deleted.txt"));
-    await chmod(join(workspace.worktreeDirectory, "tests/executable.sh"), 0o644);
-    await rm(join(workspace.worktreeDirectory, "tests/symlink.txt"));
-    await symlink("other-target.txt", join(workspace.worktreeDirectory, "tests/symlink.txt"));
-    await writeFile(join(workspace.worktreeDirectory, ".gitignore"), "tests/ignored.txt\n");
-    await writeFile(join(workspace.worktreeDirectory, "tests/ignored.txt"), "agent added, gitignored\n");
-    await writeFile(join(workspace.worktreeDirectory, "src/unmatched.txt"), "unmatched-modification\n");
+    await writeFile(
+      join(workspace.worktreeDirectory, 'tests/committed.txt'),
+      'committed-modification\n',
+    );
+    await runGit(workspace.worktreeDirectory, ['add', 'tests/committed.txt']);
+    await runGit(workspace.worktreeDirectory, [
+      ...GIT_IDENTITY_FLAGS,
+      'commit',
+      '--quiet',
+      '-m',
+      'agent commit',
+    ]);
+    await writeFile(
+      join(workspace.worktreeDirectory, 'tests/uncommitted.txt'),
+      'uncommitted-modification\n',
+    );
+    await rm(join(workspace.worktreeDirectory, 'tests/deleted.txt'));
+    await chmod(join(workspace.worktreeDirectory, 'tests/executable.sh'), 0o644);
+    await rm(join(workspace.worktreeDirectory, 'tests/symlink.txt'));
+    await symlink('other-target.txt', join(workspace.worktreeDirectory, 'tests/symlink.txt'));
+    await writeFile(join(workspace.worktreeDirectory, '.gitignore'), 'tests/ignored.txt\n');
+    await writeFile(
+      join(workspace.worktreeDirectory, 'tests/ignored.txt'),
+      'agent added, gitignored\n',
+    );
+    await writeFile(
+      join(workspace.worktreeDirectory, 'src/unmatched.txt'),
+      'unmatched-modification\n',
+    );
 
-    const indexBefore = await readFile(join(workspace.repositoryDirectory, "index"));
-    const headBefore = await runGit(workspace.worktreeDirectory, ["rev-parse", "HEAD"]);
-    const refsBefore = await runGit(workspace.worktreeDirectory, ["for-each-ref"]);
+    const indexBefore = await readFile(join(workspace.repositoryDirectory, 'index'));
+    const headBefore = await runGit(workspace.worktreeDirectory, ['rev-parse', 'HEAD']);
+    const refsBefore = await runGit(workspace.worktreeDirectory, ['for-each-ref']);
 
     const applied = unwrapOk(
-      await adapter.applyCheckState(workspace, { restore: ["tests/**"], overlay: null }),
+      await adapter.applyCheckState(workspace, { restore: ['tests/**'], overlay: null }),
     );
 
-    const indexAfter = await readFile(join(workspace.repositoryDirectory, "index"));
-    const headAfter = await runGit(workspace.worktreeDirectory, ["rev-parse", "HEAD"]);
-    const refsAfter = await runGit(workspace.worktreeDirectory, ["for-each-ref"]);
+    const indexAfter = await readFile(join(workspace.repositoryDirectory, 'index'));
+    const headAfter = await runGit(workspace.worktreeDirectory, ['rev-parse', 'HEAD']);
+    const refsAfter = await runGit(workspace.worktreeDirectory, ['for-each-ref']);
 
-    expect(await readFile(join(workspace.worktreeDirectory, "tests/committed.txt"), "utf8")).toBe(
-      "base-committed\n",
+    expect(await readFile(join(workspace.worktreeDirectory, 'tests/committed.txt'), 'utf8')).toBe(
+      'base-committed\n',
     );
-    expect(await readFile(join(workspace.worktreeDirectory, "tests/uncommitted.txt"), "utf8")).toBe(
-      "base-uncommitted\n",
+    expect(await readFile(join(workspace.worktreeDirectory, 'tests/uncommitted.txt'), 'utf8')).toBe(
+      'base-uncommitted\n',
     );
-    expect(await readFile(join(workspace.worktreeDirectory, "tests/deleted.txt"), "utf8")).toBe("base-deleted\n");
-    const executableStat = await stat(join(workspace.worktreeDirectory, "tests/executable.sh"));
+    expect(await readFile(join(workspace.worktreeDirectory, 'tests/deleted.txt'), 'utf8')).toBe(
+      'base-deleted\n',
+    );
+    const executableStat = await stat(join(workspace.worktreeDirectory, 'tests/executable.sh'));
     expect(executableStat.mode & 0o100).not.toBe(0);
-    expect(await readFile(join(workspace.worktreeDirectory, "tests/executable.sh"), "utf8")).toBe(
-      "#!/bin/sh\necho base\n",
+    expect(await readFile(join(workspace.worktreeDirectory, 'tests/executable.sh'), 'utf8')).toBe(
+      '#!/bin/sh\necho base\n',
     );
-    const symlinkStat = await lstat(join(workspace.worktreeDirectory, "tests/symlink.txt"));
+    const symlinkStat = await lstat(join(workspace.worktreeDirectory, 'tests/symlink.txt'));
     expect(symlinkStat.isSymbolicLink()).toBe(true);
-    await expect(readlink(join(workspace.worktreeDirectory, "tests/symlink.txt"))).resolves.toBe(
-      "target-base.txt",
+    await expect(readlink(join(workspace.worktreeDirectory, 'tests/symlink.txt'))).resolves.toBe(
+      'target-base.txt',
     );
-    expect(existsSync(join(workspace.worktreeDirectory, "tests/ignored.txt"))).toBe(false);
-    expect(await readFile(join(workspace.worktreeDirectory, "src/unmatched.txt"), "utf8")).toBe(
-      "unmatched-modification\n",
+    expect(existsSync(join(workspace.worktreeDirectory, 'tests/ignored.txt'))).toBe(false);
+    expect(await readFile(join(workspace.worktreeDirectory, 'src/unmatched.txt'), 'utf8')).toBe(
+      'unmatched-modification\n',
     );
 
     expect(applied.restore).toEqual({
       restored: [
-        "tests/committed.txt",
-        "tests/deleted.txt",
-        "tests/executable.sh",
-        "tests/symlink.txt",
-        "tests/uncommitted.txt",
+        'tests/committed.txt',
+        'tests/deleted.txt',
+        'tests/executable.sh',
+        'tests/symlink.txt',
+        'tests/uncommitted.txt',
       ],
-      removed: ["tests/ignored.txt"],
+      removed: ['tests/ignored.txt'],
     });
     expectSortedAndDeduplicated(applied.restore?.restored ?? []);
     expectSortedAndDeduplicated(applied.restore?.removed ?? []);
@@ -1130,287 +1297,321 @@ describe("check-state restore step (P1, P2, P3, P4, P7)", () => {
     expect(refsAfter).toEqual(refsBefore);
   }, 30_000);
 
-  it("produces base blob bytes despite a case-configured smudge filter, a matching worktree .gitattributes, core.autocrlf, and an agent-created .gitattributes in a directory the base tree has none for (P2)", async () => {
-    const path = join(testDirectory, "smudge-source");
-    await mkdir(join(path, "tests/nested"), { recursive: true });
-    await writeFile(join(path, "tests/smudge.txt"), "base-smudge-content\n");
-    await writeFile(join(path, "tests/nested/eol.txt"), "base-eol-content\n");
-    await runGit(path, ["init", "--quiet", "-b", "main"]);
-    await runGit(path, ["add", "-A"]);
-    await runGit(path, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "smudge base commit"]);
-    const commit = (await runGit(path, ["rev-parse", "HEAD"])).stdout.trim();
+  it('produces base blob bytes despite a case-configured smudge filter, a matching worktree .gitattributes, core.autocrlf, and an agent-created .gitattributes in a directory the base tree has none for (P2)', async () => {
+    const path = join(testDirectory, 'smudge-source');
+    await mkdir(join(path, 'tests/nested'), { recursive: true });
+    await writeFile(join(path, 'tests/smudge.txt'), 'base-smudge-content\n');
+    await writeFile(join(path, 'tests/nested/eol.txt'), 'base-eol-content\n');
+    await runGit(path, ['init', '--quiet', '-b', 'main']);
+    await runGit(path, ['add', '-A']);
+    await runGit(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'smudge base commit']);
+    const commit = (await runGit(path, ['rev-parse', 'HEAD'])).stdout.trim();
     const adapter = createGitAdapter(path, commit);
-    const workspace = unwrapOk(await adapter.createIsolatedCase(buildIdentity("task-1--c1", commit)));
+    const workspace = unwrapOk(
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', commit)),
+    );
 
     await runGit(workspace.worktreeDirectory, [
-      "config",
-      "filter.mangle.smudge",
-      "sed s/base-smudge-content/SMUDGED-BY-FILTER/",
+      'config',
+      'filter.mangle.smudge',
+      'sed s/base-smudge-content/SMUDGED-BY-FILTER/',
     ]);
-    await runGit(workspace.worktreeDirectory, ["config", "filter.mangle.clean", "cat"]);
-    await runGit(workspace.worktreeDirectory, ["config", "core.autocrlf", "true"]);
-    await writeFile(join(workspace.worktreeDirectory, "tests/.gitattributes"), "smudge.txt filter=mangle\n");
-    await writeFile(join(workspace.worktreeDirectory, "tests/nested/.gitattributes"), "eol.txt eol=crlf\n");
-    await writeFile(join(workspace.worktreeDirectory, "tests/smudge.txt"), "agent-modified\n");
-    await writeFile(join(workspace.worktreeDirectory, "tests/nested/eol.txt"), "agent-modified\n");
-
-    unwrapOk(await adapter.applyCheckState(workspace, { restore: ["tests/**"], overlay: null }));
-
-    expect(await readFile(join(workspace.worktreeDirectory, "tests/smudge.txt"), "utf8")).toBe(
-      "base-smudge-content\n",
+    await runGit(workspace.worktreeDirectory, ['config', 'filter.mangle.clean', 'cat']);
+    await runGit(workspace.worktreeDirectory, ['config', 'core.autocrlf', 'true']);
+    await writeFile(
+      join(workspace.worktreeDirectory, 'tests/.gitattributes'),
+      'smudge.txt filter=mangle\n',
     );
-    expect(await readFile(join(workspace.worktreeDirectory, "tests/nested/eol.txt"), "utf8")).toBe(
-      "base-eol-content\n",
+    await writeFile(
+      join(workspace.worktreeDirectory, 'tests/nested/.gitattributes'),
+      'eol.txt eol=crlf\n',
+    );
+    await writeFile(join(workspace.worktreeDirectory, 'tests/smudge.txt'), 'agent-modified\n');
+    await writeFile(join(workspace.worktreeDirectory, 'tests/nested/eol.txt'), 'agent-modified\n');
+
+    unwrapOk(await adapter.applyCheckState(workspace, { restore: ['tests/**'], overlay: null }));
+
+    expect(await readFile(join(workspace.worktreeDirectory, 'tests/smudge.txt'), 'utf8')).toBe(
+      'base-smudge-content\n',
+    );
+    expect(await readFile(join(workspace.worktreeDirectory, 'tests/nested/eol.txt'), 'utf8')).toBe(
+      'base-eol-content\n',
     );
   }, 30_000);
 
   it("rebuilds a leading directory replaced by a symbolic link to an outside sentinel-holding directory, leaving the sentinel untouched and recording the link's path as removed (P3)", async () => {
-    const path2 = join(testDirectory, "check-state-source-2");
-    await mkdir(join(path2, "tests/nested"), { recursive: true });
-    await writeFile(join(path2, "tests/nested/file.txt"), "base-nested-content\n");
-    await runGit(path2, ["init", "--quiet", "-b", "main"]);
-    await runGit(path2, ["add", "-A"]);
-    await runGit(path2, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "nested base commit"]);
-    const commit = (await runGit(path2, ["rev-parse", "HEAD"])).stdout.trim();
+    const path2 = join(testDirectory, 'check-state-source-2');
+    await mkdir(join(path2, 'tests/nested'), { recursive: true });
+    await writeFile(join(path2, 'tests/nested/file.txt'), 'base-nested-content\n');
+    await runGit(path2, ['init', '--quiet', '-b', 'main']);
+    await runGit(path2, ['add', '-A']);
+    await runGit(path2, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'nested base commit']);
+    const commit = (await runGit(path2, ['rev-parse', 'HEAD'])).stdout.trim();
     const adapter = createGitAdapter(path2, commit);
-    const workspace = unwrapOk(await adapter.createIsolatedCase(buildIdentity("task-1--c1", commit)));
+    const workspace = unwrapOk(
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', commit)),
+    );
 
-    const outsideDirectory = join(testDirectory, "outside-nested");
+    const outsideDirectory = join(testDirectory, 'outside-nested');
     await mkdir(outsideDirectory, { recursive: true });
-    await writeFile(join(outsideDirectory, "sentinel.txt"), "sentinel-content\n");
-    await rm(join(workspace.worktreeDirectory, "tests/nested"), { recursive: true });
-    await symlink(outsideDirectory, join(workspace.worktreeDirectory, "tests/nested"));
+    await writeFile(join(outsideDirectory, 'sentinel.txt'), 'sentinel-content\n');
+    await rm(join(workspace.worktreeDirectory, 'tests/nested'), { recursive: true });
+    await symlink(outsideDirectory, join(workspace.worktreeDirectory, 'tests/nested'));
 
     const applied = unwrapOk(
-      await adapter.applyCheckState(workspace, { restore: ["tests/**"], overlay: null }),
+      await adapter.applyCheckState(workspace, { restore: ['tests/**'], overlay: null }),
     );
 
-    const nestedStat = await lstat(join(workspace.worktreeDirectory, "tests/nested"));
+    const nestedStat = await lstat(join(workspace.worktreeDirectory, 'tests/nested'));
     expect(nestedStat.isDirectory()).toBe(true);
     expect(nestedStat.isSymbolicLink()).toBe(false);
-    expect(await readFile(join(workspace.worktreeDirectory, "tests/nested/file.txt"), "utf8")).toBe(
-      "base-nested-content\n",
+    expect(await readFile(join(workspace.worktreeDirectory, 'tests/nested/file.txt'), 'utf8')).toBe(
+      'base-nested-content\n',
     );
-    expect(await readFile(join(outsideDirectory, "sentinel.txt"), "utf8")).toBe("sentinel-content\n");
-    expect(applied.restore?.removed).toContain("tests/nested");
+    expect(await readFile(join(outsideDirectory, 'sentinel.txt'), 'utf8')).toBe(
+      'sentinel-content\n',
+    );
+    expect(applied.restore?.removed).toContain('tests/nested');
   }, 30_000);
 
   it("fails with 'worktree root is not a directory' and leaves the target directory untouched when the worktree root is a symbolic link (P3)", async () => {
     const repository = await createCheckStateSourceRepository();
     const adapter = createGitAdapter(repository.path, repository.commit);
     const workspace = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity("task-1--c1", repository.commit)),
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
     );
-    const outsideRoot = join(testDirectory, "outside-root");
+    const outsideRoot = join(testDirectory, 'outside-root');
     await mkdir(outsideRoot, { recursive: true });
-    await writeFile(join(outsideRoot, "sentinel.txt"), "root-sentinel\n");
+    await writeFile(join(outsideRoot, 'sentinel.txt'), 'root-sentinel\n');
 
     await rm(workspace.worktreeDirectory, { recursive: true, force: true });
     await symlink(outsideRoot, workspace.worktreeDirectory);
 
-    const result = await adapter.applyCheckState(workspace, { restore: ["tests/**"], overlay: null });
+    const result = await adapter.applyCheckState(workspace, {
+      restore: ['tests/**'],
+      overlay: null,
+    });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toEqual({
-        kind: "CheckStateError",
-        step: "restore",
-        reason: "worktree root is not a directory",
+        kind: 'CheckStateError',
+        step: 'restore',
+        reason: 'worktree root is not a directory',
       });
     }
-    expect(await readFile(join(outsideRoot, "sentinel.txt"), "utf8")).toBe("root-sentinel\n");
+    expect(await readFile(join(outsideRoot, 'sentinel.txt'), 'utf8')).toBe('root-sentinel\n');
   }, 30_000);
 
   it("replaces a directory blocking a matched base file path with the restored file, recording the blocked directory's unmatched content as removed (P4)", async () => {
-    const path = join(testDirectory, "blocker-source");
-    await mkdir(join(path, "tests"), { recursive: true });
-    await writeFile(join(path, "tests/blocked.txt"), "base-blocked-content\n");
-    await runGit(path, ["init", "--quiet", "-b", "main"]);
-    await runGit(path, ["add", "-A"]);
-    await runGit(path, [...GIT_IDENTITY_FLAGS, "commit", "--quiet", "-m", "blocker base commit"]);
-    const commit = (await runGit(path, ["rev-parse", "HEAD"])).stdout.trim();
+    const path = join(testDirectory, 'blocker-source');
+    await mkdir(join(path, 'tests'), { recursive: true });
+    await writeFile(join(path, 'tests/blocked.txt'), 'base-blocked-content\n');
+    await runGit(path, ['init', '--quiet', '-b', 'main']);
+    await runGit(path, ['add', '-A']);
+    await runGit(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'blocker base commit']);
+    const commit = (await runGit(path, ['rev-parse', 'HEAD'])).stdout.trim();
     const adapter = createGitAdapter(path, commit);
-    const workspace = unwrapOk(await adapter.createIsolatedCase(buildIdentity("task-1--c1", commit)));
+    const workspace = unwrapOk(
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', commit)),
+    );
 
-    await rm(join(workspace.worktreeDirectory, "tests/blocked.txt"));
-    await mkdir(join(workspace.worktreeDirectory, "tests/blocked.txt"));
+    await rm(join(workspace.worktreeDirectory, 'tests/blocked.txt'));
+    await mkdir(join(workspace.worktreeDirectory, 'tests/blocked.txt'));
     await writeFile(
-      join(workspace.worktreeDirectory, "tests/blocked.txt/unmatched-nested.txt"),
-      "nested content\n",
+      join(workspace.worktreeDirectory, 'tests/blocked.txt/unmatched-nested.txt'),
+      'nested content\n',
     );
 
     const applied = unwrapOk(
-      await adapter.applyCheckState(workspace, { restore: ["tests/blocked.tx?"], overlay: null }),
+      await adapter.applyCheckState(workspace, { restore: ['tests/blocked.tx?'], overlay: null }),
     );
 
-    const blockedStat = await lstat(join(workspace.worktreeDirectory, "tests/blocked.txt"));
+    const blockedStat = await lstat(join(workspace.worktreeDirectory, 'tests/blocked.txt'));
     expect(blockedStat.isFile()).toBe(true);
-    expect(await readFile(join(workspace.worktreeDirectory, "tests/blocked.txt"), "utf8")).toBe(
-      "base-blocked-content\n",
+    expect(await readFile(join(workspace.worktreeDirectory, 'tests/blocked.txt'), 'utf8')).toBe(
+      'base-blocked-content\n',
     );
     expect(applied.restore).toEqual({
-      restored: ["tests/blocked.txt"],
-      removed: ["tests/blocked.txt/unmatched-nested.txt"],
+      restored: ['tests/blocked.txt'],
+      removed: ['tests/blocked.txt/unmatched-nested.txt'],
     });
   }, 30_000);
 });
 
-describe("check-state overlay step (P5, P7)", () => {
+describe('check-state overlay step (P5, P7)', () => {
   it("records every snapshot file's SHA-256, overwrites an existing file, replaces a symbolic link at a destination without writing through it, and creates missing and empty directories", async () => {
-    const overlayDirectory = join(testDirectory, "overlay-source");
-    await mkdir(join(overlayDirectory, "subdir"), { recursive: true });
-    await mkdir(join(overlayDirectory, "subdir-with-file"), { recursive: true });
-    await writeFile(join(overlayDirectory, "file-new.txt"), "new-file-content\n");
-    await writeFile(join(overlayDirectory, "file-overwrite.txt"), "overwrite-content\n");
-    await writeFile(join(overlayDirectory, "subdir-with-file/nested.txt"), "nested-content\n");
-    await writeFile(join(overlayDirectory, "replace-symlink-target.txt"), "replacement-content\n");
-    await writeFile(join(overlayDirectory, "blocked-by-dir.txt"), "blocker-replacement-content\n");
+    const overlayDirectory = join(testDirectory, 'overlay-source');
+    await mkdir(join(overlayDirectory, 'subdir'), { recursive: true });
+    await mkdir(join(overlayDirectory, 'subdir-with-file'), { recursive: true });
+    await writeFile(join(overlayDirectory, 'file-new.txt'), 'new-file-content\n');
+    await writeFile(join(overlayDirectory, 'file-overwrite.txt'), 'overwrite-content\n');
+    await writeFile(join(overlayDirectory, 'subdir-with-file/nested.txt'), 'nested-content\n');
+    await writeFile(join(overlayDirectory, 'replace-symlink-target.txt'), 'replacement-content\n');
+    await writeFile(join(overlayDirectory, 'blocked-by-dir.txt'), 'blocker-replacement-content\n');
 
-    const workspace = buildFabricatedWorkspace("overlay-c1");
+    const workspace = buildFabricatedWorkspace('overlay-c1');
     await mkdir(workspace.worktreeDirectory, { recursive: true });
     await mkdir(workspace.runtimeDirectory, { recursive: true });
-    await writeFile(join(workspace.worktreeDirectory, "file-overwrite.txt"), "old-content-to-be-overwritten\n");
-    const outsideSentinel = join(testDirectory, "overlay-outside-sentinel.txt");
-    await writeFile(outsideSentinel, "sentinel-untouched\n");
-    await symlink(outsideSentinel, join(workspace.worktreeDirectory, "replace-symlink-target.txt"));
-    await mkdir(join(workspace.worktreeDirectory, "blocked-by-dir.txt"), { recursive: true });
-    await writeFile(join(workspace.worktreeDirectory, "blocked-by-dir.txt/inner.txt"), "inner\n");
+    await writeFile(
+      join(workspace.worktreeDirectory, 'file-overwrite.txt'),
+      'old-content-to-be-overwritten\n',
+    );
+    const outsideSentinel = join(testDirectory, 'overlay-outside-sentinel.txt');
+    await writeFile(outsideSentinel, 'sentinel-untouched\n');
+    await symlink(outsideSentinel, join(workspace.worktreeDirectory, 'replace-symlink-target.txt'));
+    await mkdir(join(workspace.worktreeDirectory, 'blocked-by-dir.txt'), { recursive: true });
+    await writeFile(join(workspace.worktreeDirectory, 'blocked-by-dir.txt/inner.txt'), 'inner\n');
 
-    const adapter = createGitAdapter("/synthetic/unused-source", "f".repeat(40));
+    const adapter = createGitAdapter('/synthetic/unused-source', 'f'.repeat(40));
     const snapshot = unwrapOk(await adapter.readOverlay(overlayDirectory));
-    const applied = unwrapOk(await adapter.applyCheckState(workspace, { restore: [], overlay: snapshot }));
+    const applied = unwrapOk(
+      await adapter.applyCheckState(workspace, { restore: [], overlay: snapshot }),
+    );
 
-    expect(await readFile(join(workspace.worktreeDirectory, "file-new.txt"), "utf8")).toBe("new-file-content\n");
-    expect(await readFile(join(workspace.worktreeDirectory, "file-overwrite.txt"), "utf8")).toBe(
-      "overwrite-content\n",
+    expect(await readFile(join(workspace.worktreeDirectory, 'file-new.txt'), 'utf8')).toBe(
+      'new-file-content\n',
     );
-    const subdirStat = await stat(join(workspace.worktreeDirectory, "subdir"));
+    expect(await readFile(join(workspace.worktreeDirectory, 'file-overwrite.txt'), 'utf8')).toBe(
+      'overwrite-content\n',
+    );
+    const subdirStat = await stat(join(workspace.worktreeDirectory, 'subdir'));
     expect(subdirStat.isDirectory()).toBe(true);
-    expect(await readFile(join(workspace.worktreeDirectory, "subdir-with-file/nested.txt"), "utf8")).toBe(
-      "nested-content\n",
+    expect(
+      await readFile(join(workspace.worktreeDirectory, 'subdir-with-file/nested.txt'), 'utf8'),
+    ).toBe('nested-content\n');
+    const replacedStat = await lstat(
+      join(workspace.worktreeDirectory, 'replace-symlink-target.txt'),
     );
-    const replacedStat = await lstat(join(workspace.worktreeDirectory, "replace-symlink-target.txt"));
     expect(replacedStat.isSymbolicLink()).toBe(false);
     expect(replacedStat.isFile()).toBe(true);
-    expect(await readFile(join(workspace.worktreeDirectory, "replace-symlink-target.txt"), "utf8")).toBe(
-      "replacement-content\n",
-    );
-    expect(await readFile(outsideSentinel, "utf8")).toBe("sentinel-untouched\n");
-    const blockedStat = await lstat(join(workspace.worktreeDirectory, "blocked-by-dir.txt"));
+    expect(
+      await readFile(join(workspace.worktreeDirectory, 'replace-symlink-target.txt'), 'utf8'),
+    ).toBe('replacement-content\n');
+    expect(await readFile(outsideSentinel, 'utf8')).toBe('sentinel-untouched\n');
+    const blockedStat = await lstat(join(workspace.worktreeDirectory, 'blocked-by-dir.txt'));
     expect(blockedStat.isFile()).toBe(true);
-    expect(await readFile(join(workspace.worktreeDirectory, "blocked-by-dir.txt"), "utf8")).toBe(
-      "blocker-replacement-content\n",
+    expect(await readFile(join(workspace.worktreeDirectory, 'blocked-by-dir.txt'), 'utf8')).toBe(
+      'blocker-replacement-content\n',
     );
 
     const expectedFiles = [
-      { path: "blocked-by-dir.txt", bytes: "blocker-replacement-content\n" },
-      { path: "file-new.txt", bytes: "new-file-content\n" },
-      { path: "file-overwrite.txt", bytes: "overwrite-content\n" },
-      { path: "replace-symlink-target.txt", bytes: "replacement-content\n" },
-      { path: "subdir-with-file/nested.txt", bytes: "nested-content\n" },
+      { path: 'blocked-by-dir.txt', bytes: 'blocker-replacement-content\n' },
+      { path: 'file-new.txt', bytes: 'new-file-content\n' },
+      { path: 'file-overwrite.txt', bytes: 'overwrite-content\n' },
+      { path: 'replace-symlink-target.txt', bytes: 'replacement-content\n' },
+      { path: 'subdir-with-file/nested.txt', bytes: 'nested-content\n' },
     ];
     expect(applied.overlay?.files).toEqual(
       expectedFiles.map(({ path, bytes }) => ({ path, sha256: sha256Hex(Buffer.from(bytes)) })),
     );
-    expect(applied.overlay?.removed).toEqual(["blocked-by-dir.txt/inner.txt"]);
+    expect(applied.overlay?.removed).toEqual(['blocked-by-dir.txt/inner.txt']);
     expectSortedAndDeduplicated(applied.overlay?.files.map((file) => file.path) ?? []);
     expectSortedAndDeduplicated(applied.overlay?.removed ?? []);
     expect(applied.restore).toBeNull();
   }, 30_000);
 });
 
-describe("readOverlay (P6)", () => {
-  const adapter = createGitAdapter("/synthetic/unused-source", "f".repeat(40));
+describe('readOverlay (P6)', () => {
+  const adapter = createGitAdapter('/synthetic/unused-source', 'f'.repeat(40));
 
-  it("reports a missing overlay directory", async () => {
-    const directory = join(testDirectory, "does-not-exist");
+  it('reports a missing overlay directory', async () => {
+    const directory = join(testDirectory, 'does-not-exist');
 
     const result = await adapter.readOverlay(directory);
 
     expect(result).toEqual({
       ok: false,
-      error: { kind: "CheckStateError", step: "overlay", reason: `overlay directory "${directory}" does not exist` },
+      error: {
+        kind: 'CheckStateError',
+        step: 'overlay',
+        reason: `overlay directory "${directory}" does not exist`,
+      },
     });
   });
 
-  it("reports a regular file in place of a directory", async () => {
-    const filePath = join(testDirectory, "overlay-as-file.txt");
-    await writeFile(filePath, "not a directory\n");
+  it('reports a regular file in place of a directory', async () => {
+    const filePath = join(testDirectory, 'overlay-as-file.txt');
+    await writeFile(filePath, 'not a directory\n');
 
     const result = await adapter.readOverlay(filePath);
 
     expect(result).toEqual({
       ok: false,
-      error: { kind: "CheckStateError", step: "overlay", reason: `overlay path "${filePath}" is not a directory` },
+      error: {
+        kind: 'CheckStateError',
+        step: 'overlay',
+        reason: `overlay path "${filePath}" is not a directory`,
+      },
     });
   });
 
-  it("reports a directory holding a symbolic link", async () => {
-    const directory = join(testDirectory, "overlay-with-link");
+  it('reports a directory holding a symbolic link', async () => {
+    const directory = join(testDirectory, 'overlay-with-link');
     await mkdir(directory, { recursive: true });
-    await symlink(testDirectory, join(directory, "escape-link"));
+    await symlink(testDirectory, join(directory, 'escape-link'));
 
     const result = await adapter.readOverlay(directory);
 
     expect(result).toEqual({
       ok: false,
       error: {
-        kind: "CheckStateError",
-        step: "overlay",
+        kind: 'CheckStateError',
+        step: 'overlay',
         reason: `overlay directory "${directory}" must contain only regular files and directories; "escape-link" is a symbolic link`,
       },
     });
   });
 
-  it("reports a directory holding a FIFO", async () => {
-    const directory = join(testDirectory, "overlay-with-fifo");
+  it('reports a directory holding a FIFO', async () => {
+    const directory = join(testDirectory, 'overlay-with-fifo');
     await mkdir(directory, { recursive: true });
-    const fifoPath = join(directory, "pipe");
-    execFileSync("mkfifo", [fifoPath]);
+    const fifoPath = join(directory, 'pipe');
+    execFileSync('mkfifo', [fifoPath]);
 
     const result = await adapter.readOverlay(directory);
 
     expect(result).toEqual({
       ok: false,
       error: {
-        kind: "CheckStateError",
-        step: "overlay",
+        kind: 'CheckStateError',
+        step: 'overlay',
         reason: `overlay directory "${directory}" must contain only regular files and directories; "pipe" is neither a regular file nor a directory`,
       },
     });
   });
 
-  it("reports a directory holding an entry named .git", async () => {
-    const directory = join(testDirectory, "overlay-with-git");
-    await mkdir(join(directory, ".git"), { recursive: true });
+  it('reports a directory holding an entry named .git', async () => {
+    const directory = join(testDirectory, 'overlay-with-git');
+    await mkdir(join(directory, '.git'), { recursive: true });
 
     const result = await adapter.readOverlay(directory);
 
     expect(result).toEqual({
       ok: false,
       error: {
-        kind: "CheckStateError",
-        step: "overlay",
+        kind: 'CheckStateError',
+        step: 'overlay',
         reason: `overlay directory "${directory}" must not contain an entry named .git; found ".git"`,
       },
     });
   });
 
-  it("returns every regular file and directory sorted by path, with kind and, for a file, the executable bit and bytes", async () => {
-    const directory = join(testDirectory, "overlay-tree");
-    await mkdir(join(directory, "sub"), { recursive: true });
-    await writeFile(join(directory, "a.txt"), "content-a\n");
-    await writeFile(join(directory, "sub/b.sh"), "content-b\n");
-    await chmod(join(directory, "sub/b.sh"), 0o755);
+  it('returns every regular file and directory sorted by path, with kind and, for a file, the executable bit and bytes', async () => {
+    const directory = join(testDirectory, 'overlay-tree');
+    await mkdir(join(directory, 'sub'), { recursive: true });
+    await writeFile(join(directory, 'a.txt'), 'content-a\n');
+    await writeFile(join(directory, 'sub/b.sh'), 'content-b\n');
+    await chmod(join(directory, 'sub/b.sh'), 0o755);
 
     const result = await adapter.readOverlay(directory);
 
     expect(result).toEqual({
       ok: true,
       value: [
-        { kind: "file", path: "a.txt", executable: false, bytes: Buffer.from("content-a\n") },
-        { kind: "directory", path: "sub" },
-        { kind: "file", path: "sub/b.sh", executable: true, bytes: Buffer.from("content-b\n") },
+        { kind: 'file', path: 'a.txt', executable: false, bytes: Buffer.from('content-a\n') },
+        { kind: 'directory', path: 'sub' },
+        { kind: 'file', path: 'sub/b.sh', executable: true, bytes: Buffer.from('content-b\n') },
       ],
     });
   });
@@ -1421,7 +1622,12 @@ function buildTrivialAgentAdapter(): AgentAdapter {
     async probe() {
       return {
         ok: true,
-        value: { executable: "fake-agent", detectedVersion: null, capabilities: [], isolation: { denyOutsideWorktree: "available" } },
+        value: {
+          executable: 'fake-agent',
+          detectedVersion: null,
+          capabilities: [],
+          isolation: { denyOutsideWorktree: 'available' },
+        },
       };
     },
     async run(input: AgentRunInput): Promise<TevuResult<AgentRunResult, never>> {
@@ -1429,10 +1635,10 @@ function buildTrivialAgentAdapter(): AgentAdapter {
         process: {
           exitCode: 0,
           signal: null,
-          startedAt: "2026-01-01T00:00:00.000Z",
-          endedAt: "2026-01-01T00:00:01.000Z",
+          startedAt: '2026-01-01T00:00:00.000Z',
+          endedAt: '2026-01-01T00:00:01.000Z',
           durationMs: 1_000,
-          terminationStage: "none",
+          terminationStage: 'none',
         },
         sessionId: `session-${input.identity.caseId}`,
         parseFindings: [],
@@ -1447,61 +1653,122 @@ function buildTrivialAgentAdapter(): AgentAdapter {
       return {
         ok: true,
         value: {
-          inputTokens: { value: null, unit: "token", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
-          outputTokens: { value: null, unit: "token", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
-          reasoningTokens: { value: null, unit: "token", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
-          cacheReadTokens: { value: null, unit: "token", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
-          cacheWriteTokens: { value: null, unit: "token", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
-          turns: { value: null, unit: "count", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
-          apiCalls: { value: null, unit: "count", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
-          apiErrors: { value: null, unit: "count", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
-          toolCalls: { value: null, unit: "count", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
-          skillCalls: { value: null, unit: "count", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
-          cost: { value: null, unit: "USD", availability: { status: "unavailable", reason: "not measured" }, scope: "root-session" },
+          inputTokens: {
+            value: null,
+            unit: 'token',
+            availability: { status: 'unavailable', reason: 'not measured' },
+            scope: 'root-session',
+          },
+          outputTokens: {
+            value: null,
+            unit: 'token',
+            availability: { status: 'unavailable', reason: 'not measured' },
+            scope: 'root-session',
+          },
+          reasoningTokens: {
+            value: null,
+            unit: 'token',
+            availability: { status: 'unavailable', reason: 'not measured' },
+            scope: 'root-session',
+          },
+          cacheReadTokens: {
+            value: null,
+            unit: 'token',
+            availability: { status: 'unavailable', reason: 'not measured' },
+            scope: 'root-session',
+          },
+          cacheWriteTokens: {
+            value: null,
+            unit: 'token',
+            availability: { status: 'unavailable', reason: 'not measured' },
+            scope: 'root-session',
+          },
+          turns: {
+            value: null,
+            unit: 'count',
+            availability: { status: 'unavailable', reason: 'not measured' },
+            scope: 'root-session',
+          },
+          apiCalls: {
+            value: null,
+            unit: 'count',
+            availability: { status: 'unavailable', reason: 'not measured' },
+            scope: 'root-session',
+          },
+          apiErrors: {
+            value: null,
+            unit: 'count',
+            availability: { status: 'unavailable', reason: 'not measured' },
+            scope: 'root-session',
+          },
+          toolCalls: {
+            value: null,
+            unit: 'count',
+            availability: { status: 'unavailable', reason: 'not measured' },
+            scope: 'root-session',
+          },
+          skillCalls: {
+            value: null,
+            unit: 'count',
+            availability: { status: 'unavailable', reason: 'not measured' },
+            scope: 'root-session',
+          },
+          cost: {
+            value: null,
+            unit: 'USD',
+            availability: { status: 'unavailable', reason: 'not measured' },
+            scope: 'root-session',
+          },
         },
       };
     },
   };
 }
 
-describe("file-backed artifact store with repeated attempts (AC-13)", () => {
-  it("finalizes a run with repeat: 2 through the real ArtifactStore, with a case directory for every attempt of every pair", async () => {
+describe('file-backed artifact store with repeated attempts (AC-13)', () => {
+  it('finalizes a run with repeat: 2 through the real ArtifactStore, with a case directory for every attempt of every pair', async () => {
     const repository = await createSyntheticRepository();
-    const outputDirectory = join(testDirectory, "artifacts");
+    const outputDirectory = join(testDirectory, 'artifacts');
     const config: TevuConfig = TevuConfigSchema.parse({
       version: 1,
-      run: { output_dir: outputDirectory, concurrency: 2, repeat: 2, timeout: "30s", stop_grace: "500ms" },
-      agents: { opencode: { command: "unused-agent-command", secrets: [], env: [] } },
-      repositories: [{ id: "repo-1", path: repository.path }],
+      run: {
+        output_dir: outputDirectory,
+        concurrency: 2,
+        repeat: 2,
+        timeout: '30s',
+        stop_grace: '500ms',
+      },
+      agents: { opencode: { command: 'unused-agent-command', secrets: [], env: [] } },
+      repositories: [{ id: 'repo-1', path: repository.path }],
       models: [
-        { id: "m1", model: "synthetic/model-a", effort: "fast" },
-        { id: "m2", model: "synthetic/model-b", effort: "deep" },
+        { id: 'm1', model: 'synthetic/model-a', effort: 'fast' },
+        { id: 'm2', model: 'synthetic/model-b', effort: 'deep' },
       ],
       tasks: [
         {
-          id: "guard-task",
-          title: "Guard task",
-          repo: "repo-1",
+          id: 'guard-task',
+          title: 'Guard task',
+          repo: 'repo-1',
           base_commit: repository.commit,
-          description: "synthetic task description",
-          prompt: "synthetic task prompt",
-          readiness: ["synthetic ready item"],
+          description: 'synthetic task description',
+          prompt: 'synthetic task prompt',
+          readiness: ['synthetic ready item'],
           checks: {
             acceptance: [
               {
-                id: "acc-1",
-                description: "always passes",
-                run: [process.execPath, "-e", "process.exit(0);"],
-                timeout: "10s",
+                id: 'acc-1',
+                description: 'always passes',
+                run: [process.execPath, '-e', 'process.exit(0);'],
+                timeout: '10s',
                 exit_codes: [0],
               },
             ],
             done: [
               {
-                id: "dod-1",
-                description: "always passes",
-                run: [process.execPath, "-e", "process.exit(0);"],
-                timeout: "10s",
+                id: 'dod-1',
+                description: 'always passes',
+                run: [process.execPath, '-e', 'process.exit(0);'],
+                timeout: '10s',
                 exit_codes: [0],
               },
             ],
@@ -1514,10 +1781,10 @@ describe("file-backed artifact store with repeated attempts (AC-13)", () => {
         return {
           ok: true,
           value: {
-            platform: process.platform === "darwin" ? "darwin" : "linux",
+            platform: process.platform === 'darwin' ? 'darwin' : 'linux',
             nodeVersion: process.version,
-            bunVersion: "n/a",
-            gitVersion: "n/a",
+            bunVersion: 'n/a',
+            gitVersion: 'n/a',
           },
         };
       },
@@ -1526,17 +1793,23 @@ describe("file-backed artifact store with repeated attempts (AC-13)", () => {
         return { ok: true, value: undefined };
       },
     };
-    const clock: Clock = { now: () => new Date("2026-01-01T00:00:00.000Z") };
+    const clock: Clock = { now: () => new Date('2026-01-01T00:00:00.000Z') };
     const dependencies: RunDependencies = {
-      git: createGitWorkspaceAdapter({ config, workspacesDirectory: join(testDirectory, "workspaces") }),
-      agents: new Map([["opencode", buildTrivialAgentAdapter()]]),
-      artifacts: createArtifactStore({ artifactsDirectory: config.run.output_dir, redact: (text) => text }),
+      git: createGitWorkspaceAdapter({
+        config,
+        workspacesDirectory: join(testDirectory, 'workspaces'),
+      }),
+      agents: new Map([['opencode', buildTrivialAgentAdapter()]]),
+      artifacts: createArtifactStore({
+        artifactsDirectory: config.run.output_dir,
+        redact: (text) => text,
+      }),
       evaluatorProcesses: createEvaluatorProcessAdapter(() => []),
       environments: createEnvironmentAdapter(),
       prerequisites,
       clock,
-      generateRunId: () => "run-ac13-repeat-synthetic",
-      configDigest: () => "digest-ac13-synthetic",
+      generateRunId: () => 'run-ac13-repeat-synthetic',
+      configDigest: () => 'digest-ac13-synthetic',
       redact: (text) => text,
       cancellation: new AbortController().signal,
     };
@@ -1548,9 +1821,11 @@ describe("file-backed artifact store with repeated attempts (AC-13)", () => {
     const run = result.value;
     expect(run.exitCode).toBe(0);
     const runDirectory = join(outputDirectory, run.manifest.runId);
-    for (const modelId of ["m1", "m2"]) {
+    for (const modelId of ['m1', 'm2']) {
       for (const attempt of [1, 2]) {
-        expect(existsSync(join(runDirectory, "cases", `guard-task--${modelId}--${attempt}`))).toBe(true);
+        expect(existsSync(join(runDirectory, 'cases', `guard-task--${modelId}--${attempt}`))).toBe(
+          true,
+        );
       }
     }
   }, 30_000);

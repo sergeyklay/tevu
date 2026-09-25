@@ -6,10 +6,10 @@
  * behavior.
  */
 
-import { decodeEvent, decodeExport } from "./opencode-protocol.ts";
-import { normalizeMetrics as normalizeOpenCodeMetrics } from "./opencode-metrics.ts";
+import { normalizeMetrics as normalizeOpenCodeMetrics } from './opencode-metrics';
+import { decodeEvent, decodeExport } from './opencode-protocol';
 
-import type { ProtocolContext, ProtocolErrorShape } from "./opencode-protocol.ts";
+import type { ProtocolContext, ProtocolErrorShape } from './opencode-protocol';
 import type {
   AgentAdapter,
   AgentCapability,
@@ -28,7 +28,7 @@ import type {
   SecretRedactor,
   TevuError,
   TevuResult,
-} from "../../../domain/types.ts";
+} from '@/domain/types';
 
 /** Construction inputs identifying this adapter instance within the `AgentRegistry`. */
 export type OpenCodeAdapterSettings = {
@@ -63,7 +63,9 @@ export function createOpenCodeAdapter(
   dependencies: OpenCodeAdapterDependencies,
 ): AgentAdapter {
   return {
-    async probe(): Promise<TevuResult<AgentCapabilityReport, "PrerequisiteError" | "AgentProtocolError">> {
+    async probe(): Promise<
+      TevuResult<AgentCapabilityReport, 'PrerequisiteError' | 'AgentProtocolError'>
+    > {
       return probeCapabilities(settings, dependencies);
     },
     async run(
@@ -71,7 +73,7 @@ export function createOpenCodeAdapter(
     ): Promise<
       TevuResult<
         AgentRunResult,
-        "AgentProcessError" | "AgentProtocolError" | "CaseTimeoutError" | "CancellationError"
+        'AgentProcessError' | 'AgentProtocolError' | 'CaseTimeoutError' | 'CancellationError'
       >
     > {
       return runCase(settings, dependencies, input);
@@ -79,10 +81,10 @@ export function createOpenCodeAdapter(
     async exportSession(
       sessionId: string,
       environment: IsolatedEnvironment,
-    ): Promise<TevuResult<AgentSessionExport, "AgentProcessError" | "AgentProtocolError">> {
+    ): Promise<TevuResult<AgentSessionExport, 'AgentProcessError' | 'AgentProtocolError'>> {
       return exportRootSession(settings, dependencies, sessionId, environment);
     },
-    normalizeMetrics(input: AgentMetricsInput): TevuResult<AgentMetrics, "AgentProtocolError"> {
+    normalizeMetrics(input: AgentMetricsInput): TevuResult<AgentMetrics, 'AgentProtocolError'> {
       const normalized = normalizeOpenCodeMetrics(input);
       if (normalized.ok) {
         return normalized;
@@ -99,15 +101,15 @@ async function runCase(
 ): Promise<
   TevuResult<
     AgentRunResult,
-    "AgentProcessError" | "AgentProtocolError" | "CaseTimeoutError" | "CancellationError"
+    'AgentProcessError' | 'AgentProtocolError' | 'CaseTimeoutError' | 'CancellationError'
   >
 > {
   const caseId = input.identity.caseId;
-  const context: ProtocolContext = { phase: "case", caseId };
+  const context: ProtocolContext = { phase: 'case', caseId };
   const secretValues = dependencies.secrets.secretValues();
   const parseFindings: string[] = [];
   let sessionId: string | null = null;
-  let protocolFailure: Extract<TevuError, { kind: "AgentProtocolError" }> | null = null;
+  let protocolFailure: Extract<TevuError, { kind: 'AgentProtocolError' }> | null = null;
   let deliveryStopped = false;
   let delivery: Promise<void> = Promise.resolve();
   let stdoutLineNumber = 0;
@@ -135,11 +137,13 @@ async function runCase(
     try {
       parsed = JSON.parse(line);
     } catch {
-      parseFindings.push(`stdout line ${stdoutLineNumber} is not valid JSON; routed to diagnostics`);
+      parseFindings.push(
+        `stdout line ${stdoutLineNumber} is not valid JSON; routed to diagnostics`,
+      );
       protocolFailure ??= agentProtocolError(
         settings.agent,
         context,
-        "run output contains malformed JSON event framing",
+        'run output contains malformed JSON event framing',
         stdoutLineNumber,
       ).error;
       await deliverDiagnostic(dependencies.secrets.redactText(line));
@@ -166,7 +170,7 @@ async function runCase(
       protocolFailure ??= agentProtocolError(
         settings.agent,
         context,
-        "record redaction failed; record withheld",
+        'record redaction failed; record withheld',
       ).error;
       return;
     }
@@ -182,12 +186,12 @@ async function runCase(
   const outcome = await dependencies.runProcess({
     argv: [
       settings.executable,
-      "run",
-      "--format",
-      "json",
-      "--model",
+      'run',
+      '--format',
+      'json',
+      '--model',
       input.identity.model,
-      "--variant",
+      '--variant',
       input.identity.effort,
       input.prompt,
     ],
@@ -197,7 +201,7 @@ async function runCase(
     terminationGraceMs: input.terminationGraceMs,
     cancellation: input.cancellation,
     secretValues,
-    stdoutRedaction: "structured",
+    stdoutRedaction: 'structured',
     onStdout: stdoutLines.push,
     onStderr: stderrLines.push,
   });
@@ -209,7 +213,13 @@ async function runCase(
     await deliverDiagnostic(`opencode process could not be started: ${outcome.reason}`);
     return {
       ok: false,
-      error: { kind: "AgentProcessError", agent: settings.agent, caseId, exitCode: null, signal: null },
+      error: {
+        kind: 'AgentProcessError',
+        agent: settings.agent,
+        caseId,
+        exitCode: null,
+        signal: null,
+      },
     };
   }
 
@@ -225,22 +235,26 @@ async function runCase(
   input.onProcess?.(runResult);
 
   if (outcome.cancelled) {
-    return { ok: false, error: { kind: "CancellationError", activeCaseIds: [caseId] } };
+    return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [caseId] } };
   }
   if (outcome.timedOut) {
-    return { ok: false, error: { kind: "CaseTimeoutError", caseId, timeoutMs: input.timeoutMs } };
+    return { ok: false, error: { kind: 'CaseTimeoutError', caseId, timeoutMs: input.timeoutMs } };
   }
   if (protocolFailure !== null) {
     return { ok: false, error: protocolFailure };
   }
   if (sessionId === null) {
-    return agentProtocolError(settings.agent, context, "run output did not identify a root session");
+    return agentProtocolError(
+      settings.agent,
+      context,
+      'run output did not identify a root session',
+    );
   }
   if (outcome.exitCode !== 0) {
     return {
       ok: false,
       error: {
-        kind: "AgentProcessError",
+        kind: 'AgentProcessError',
         agent: settings.agent,
         caseId,
         exitCode: outcome.exitCode,
@@ -256,11 +270,11 @@ async function exportRootSession(
   dependencies: OpenCodeAdapterDependencies,
   sessionId: string,
   environment: IsolatedEnvironment,
-): Promise<TevuResult<AgentSessionExport, "AgentProcessError" | "AgentProtocolError">> {
+): Promise<TevuResult<AgentSessionExport, 'AgentProcessError' | 'AgentProtocolError'>> {
   const caseId = environment.caseId;
-  const context: ProtocolContext = { phase: "case", caseId };
+  const context: ProtocolContext = { phase: 'case', caseId };
   const outcome = await dependencies.runProcess({
-    argv: [settings.executable, "export", sessionId],
+    argv: [settings.executable, 'export', sessionId],
     cwd: environment.homeDirectory,
     environment: environment.variables,
     timeoutMs: EXPORT_TIMEOUT_MS,
@@ -269,20 +283,26 @@ async function exportRootSession(
     // The export is one structured JSON document: it is captured raw within
     // this boundary, decoded, and redacted as a value so numeric metrics
     // survive; the raw capture never reaches a sink.
-    stdoutRedaction: "structured",
+    stdoutRedaction: 'structured',
     maxCaptureBytes: EXPORT_MAX_CAPTURE_BYTES,
   });
   if (!outcome.launched) {
     return {
       ok: false,
-      error: { kind: "AgentProcessError", agent: settings.agent, caseId, exitCode: null, signal: null },
+      error: {
+        kind: 'AgentProcessError',
+        agent: settings.agent,
+        caseId,
+        exitCode: null,
+        signal: null,
+      },
     };
   }
   if (outcome.exitCode !== 0) {
     return {
       ok: false,
       error: {
-        kind: "AgentProcessError",
+        kind: 'AgentProcessError',
         agent: settings.agent,
         caseId,
         exitCode: outcome.exitCode,
@@ -291,24 +311,32 @@ async function exportRootSession(
     };
   }
   if (outcome.stdout.truncated) {
-    return agentProtocolError(settings.agent, context, "export output exceeded the capture bound and cannot be decoded");
+    return agentProtocolError(
+      settings.agent,
+      context,
+      'export output exceeded the capture bound and cannot be decoded',
+    );
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(outcome.stdout.text);
   } catch {
-    return agentProtocolError(settings.agent, context, "export output is not valid JSON");
+    return agentProtocolError(settings.agent, context, 'export output is not valid JSON');
   }
   const decoded = decodeExport(parsed, context);
   if (!decoded.ok) {
     return { ok: false, error: toAgentProtocolError(settings.agent, decoded.error) };
   }
   if (decoded.value.info.id !== sessionId) {
-    return agentProtocolError(settings.agent, context, "export identity does not match the requested root session");
+    return agentProtocolError(
+      settings.agent,
+      context,
+      'export identity does not match the requested root session',
+    );
   }
   const redacted = dependencies.secrets.redactValue(decoded.value);
   if (!redacted.ok) {
-    return agentProtocolError(settings.agent, context, "record redaction failed; record withheld");
+    return agentProtocolError(settings.agent, context, 'record redaction failed; record withheld');
   }
   // `redactValue` redacts every string of the decoded export in place, so the
   // result still satisfies the export's opaque, JSON-object shape.
@@ -318,15 +346,15 @@ async function exportRootSession(
 async function probeCapabilities(
   settings: OpenCodeAdapterSettings,
   dependencies: OpenCodeAdapterDependencies,
-): Promise<TevuResult<AgentCapabilityReport, "PrerequisiteError" | "AgentProtocolError">> {
+): Promise<TevuResult<AgentCapabilityReport, 'PrerequisiteError' | 'AgentProtocolError'>> {
   const executable = settings.executable;
   const environment = { ...dependencies.probeEnvironment };
-  const rootHelp = await probeInvocation(dependencies, [executable, "--help"], environment);
+  const rootHelp = await probeInvocation(dependencies, [executable, '--help'], environment);
   if (!rootHelp.launched) {
     return {
       ok: false,
       error: {
-        kind: "PrerequisiteError",
+        kind: 'PrerequisiteError',
         tool: settings.agent,
         expected: `configured executable "${executable}" starts`,
         actual: rootHelp.reason,
@@ -337,7 +365,7 @@ async function probeCapabilities(
     return {
       ok: false,
       error: {
-        kind: "PrerequisiteError",
+        kind: 'PrerequisiteError',
         tool: settings.agent,
         expected: `"${executable} --help" exits 0`,
         actual: describeSettledProcess(rootHelp),
@@ -346,22 +374,40 @@ async function probeCapabilities(
   }
 
   const detectedVersion = await probeVersion(dependencies, executable, environment);
-  const runHelp = await probeInvocation(dependencies, [executable, "run", "--help"], environment);
-  const exportHelp = await probeInvocation(dependencies, [executable, "export", "--help"], environment);
+  const runHelp = await probeInvocation(dependencies, [executable, 'run', '--help'], environment);
+  const exportHelp = await probeInvocation(
+    dependencies,
+    [executable, 'export', '--help'],
+    environment,
+  );
   const runHelpText = combinedOutput(runHelp);
   const availableWhen = (available: boolean): CapabilityAvailability =>
-    available ? "available" : "unavailable";
+    available ? 'available' : 'unavailable';
 
   const capabilities: AgentCapability[] = [
-    { name: "run command", required: true, availability: availableWhen(helpSucceeded(runHelp)) },
-    { name: "export command", required: true, availability: availableWhen(helpSucceeded(exportHelp)) },
+    { name: 'run command', required: true, availability: availableWhen(helpSucceeded(runHelp)) },
     {
-      name: "run --format json",
+      name: 'export command',
       required: true,
-      availability: availableWhen(runHelpText.includes("--format") && /\bjson\b/i.test(runHelpText)),
+      availability: availableWhen(helpSucceeded(exportHelp)),
     },
-    { name: "run --model", required: true, availability: availableWhen(runHelpText.includes("--model")) },
-    { name: "run --variant", required: true, availability: availableWhen(runHelpText.includes("--variant")) },
+    {
+      name: 'run --format json',
+      required: true,
+      availability: availableWhen(
+        runHelpText.includes('--format') && /\bjson\b/i.test(runHelpText),
+      ),
+    },
+    {
+      name: 'run --model',
+      required: true,
+      availability: availableWhen(runHelpText.includes('--model')),
+    },
+    {
+      name: 'run --variant',
+      required: true,
+      availability: availableWhen(runHelpText.includes('--variant')),
+    },
   ];
 
   const report: AgentCapabilityReport = {
@@ -370,18 +416,18 @@ async function probeCapabilities(
     capabilities,
     isolation: {
       // A generic permission flag does not establish an enforceable external-directory policy.
-      denyOutsideWorktree: "unavailable",
+      denyOutsideWorktree: 'unavailable',
     },
   };
 
   const missing = capabilities
-    .filter((capability) => capability.required && capability.availability === "unavailable")
+    .filter((capability) => capability.required && capability.availability === 'unavailable')
     .map((capability) => capability.name);
   if (missing.length > 0) {
     return agentProtocolError(
       settings.agent,
-      { phase: "probe" },
-      `configured OpenCode executable is missing required capabilities: ${missing.join(", ")}`,
+      { phase: 'probe' },
+      `configured OpenCode executable is missing required capabilities: ${missing.join(', ')}`,
     );
   }
   return { ok: true, value: report };
@@ -392,11 +438,11 @@ async function probeVersion(
   executable: string,
   environment: Record<string, string>,
 ): Promise<string | null> {
-  const outcome = await probeInvocation(dependencies, [executable, "--version"], environment);
+  const outcome = await probeInvocation(dependencies, [executable, '--version'], environment);
   if (!outcome.launched || outcome.exitCode !== 0) {
     return null;
   }
-  const firstLine = outcome.stdout.text.split("\n", 1)[0]?.trim() ?? "";
+  const firstLine = outcome.stdout.text.split('\n', 1)[0]?.trim() ?? '';
   return firstLine.length > 0 ? firstLine : null;
 }
 
@@ -420,7 +466,7 @@ function helpSucceeded(outcome: ManagedProcessResult): boolean {
 
 function combinedOutput(outcome: ManagedProcessResult): string {
   if (!outcome.launched) {
-    return "";
+    return '';
   }
   return `${outcome.stdout.text}\n${outcome.stderr.text}`;
 }
@@ -428,7 +474,7 @@ function combinedOutput(outcome: ManagedProcessResult): string {
 function describeSettledProcess(outcome: ManagedProcessCompletion): string {
   return outcome.exitCode !== null
     ? `exit code ${outcome.exitCode}`
-    : `terminated by signal ${outcome.signal ?? "unknown"}`;
+    : `terminated by signal ${outcome.signal ?? 'unknown'}`;
 }
 
 type LineSplitter = {
@@ -437,15 +483,15 @@ type LineSplitter = {
 };
 
 function createLineSplitter(deliver: (line: string) => void): LineSplitter {
-  let buffer = "";
+  let buffer = '';
   const emit = (line: string): void => {
-    deliver(line.endsWith("\r") ? line.slice(0, -1) : line);
+    deliver(line.endsWith('\r') ? line.slice(0, -1) : line);
   };
   return {
     push(text: string): void {
       buffer += text;
       for (;;) {
-        const newlineIndex = buffer.indexOf("\n");
+        const newlineIndex = buffer.indexOf('\n');
         if (newlineIndex === -1) {
           return;
         }
@@ -456,7 +502,7 @@ function createLineSplitter(deliver: (line: string) => void): LineSplitter {
     flush(): void {
       if (buffer.length > 0) {
         emit(buffer);
-        buffer = "";
+        buffer = '';
       }
     },
   };
@@ -467,13 +513,13 @@ function agentProtocolError(
   context: ProtocolContext,
   reason: string,
   line?: number,
-): { ok: false; error: Extract<TevuError, { kind: "AgentProtocolError" }> } {
+): { ok: false; error: Extract<TevuError, { kind: 'AgentProtocolError' }> } {
   return {
     ok: false,
     error:
       line === undefined
-        ? { kind: "AgentProtocolError", agent, context, reason }
-        : { kind: "AgentProtocolError", agent, context, line, reason },
+        ? { kind: 'AgentProtocolError', agent, context, reason }
+        : { kind: 'AgentProtocolError', agent, context, line, reason },
   };
 }
 
@@ -481,8 +527,14 @@ function agentProtocolError(
 function toAgentProtocolError(
   agent: string,
   error: ProtocolErrorShape,
-): Extract<TevuError, { kind: "AgentProtocolError" }> {
+): Extract<TevuError, { kind: 'AgentProtocolError' }> {
   return error.line === undefined
-    ? { kind: "AgentProtocolError", agent, context: error.context, reason: error.reason }
-    : { kind: "AgentProtocolError", agent, context: error.context, line: error.line, reason: error.reason };
+    ? { kind: 'AgentProtocolError', agent, context: error.context, reason: error.reason }
+    : {
+        kind: 'AgentProtocolError',
+        agent,
+        context: error.context,
+        line: error.line,
+        reason: error.reason,
+      };
 }

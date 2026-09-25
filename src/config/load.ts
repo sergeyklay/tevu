@@ -1,11 +1,16 @@
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-import { parseDocument } from "yaml";
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { parseDocument } from 'yaml';
 
-import { TevuConfigSchema } from "./schema.ts";
+import { TevuConfigSchema } from './schema';
 
-import type { TevuConfig } from "./schema.ts";
-import type { ConfigReadCause, LoadConfigErrorKind, TevuResult, ValidationFinding } from "../domain/types.ts";
+import type { TevuConfig } from './schema';
+import type {
+  ConfigReadCause,
+  LoadConfigErrorKind,
+  TevuResult,
+  ValidationFinding,
+} from '@/domain/types';
 
 /**
  * Reads the UTF-8 configuration text at the given path.
@@ -17,7 +22,7 @@ import type { ConfigReadCause, LoadConfigErrorKind, TevuResult, ValidationFindin
  */
 export async function readConfigText(
   configPath: string,
-): Promise<TevuResult<string, "ConfigReadError">> {
+): Promise<TevuResult<string, 'ConfigReadError'>> {
   const absoluteConfigPath = path.resolve(configPath);
 
   let stats: Awaited<ReturnType<typeof fs.stat>>;
@@ -27,11 +32,11 @@ export async function readConfigText(
     return configReadFailure(absoluteConfigPath, configPath, classify(cause));
   }
   if (!stats.isFile()) {
-    return configReadFailure(absoluteConfigPath, configPath, "not-a-file");
+    return configReadFailure(absoluteConfigPath, configPath, 'not-a-file');
   }
 
   try {
-    const text = await fs.readFile(absoluteConfigPath, "utf8");
+    const text = await fs.readFile(absoluteConfigPath, 'utf8');
     return { ok: true, value: text };
   } catch (cause) {
     return configReadFailure(absoluteConfigPath, configPath, classify(cause));
@@ -44,15 +49,15 @@ export async function readConfigText(
  */
 export function parseConfigText(
   text: string,
-): TevuResult<TevuConfig, "ConfigParseError" | "ConfigValidationError"> {
-  const document = parseDocument(text, { version: "1.2", schema: "core" });
+): TevuResult<TevuConfig, 'ConfigParseError' | 'ConfigValidationError'> {
+  const document = parseDocument(text, { version: '1.2', schema: 'core' });
   if (document.errors.length > 0) {
     return {
       ok: false,
       error: {
-        kind: "ConfigParseError",
+        kind: 'ConfigParseError',
         findings: document.errors.map((error) => ({
-          severity: "error",
+          severity: 'error',
           identifier: `line ${error.linePos?.[0]?.line ?? 0}`,
           message: `Invalid YAML (${error.code})`,
         })),
@@ -67,8 +72,10 @@ export function parseConfigText(
     return {
       ok: false,
       error: {
-        kind: "ConfigParseError",
-        findings: [{ severity: "error", identifier: "config", message: "Cannot resolve YAML aliases" }],
+        kind: 'ConfigParseError',
+        findings: [
+          { severity: 'error', identifier: 'config', message: 'Cannot resolve YAML aliases' },
+        ],
       },
     };
   }
@@ -77,11 +84,12 @@ export function parseConfigText(
     return {
       ok: false,
       error: {
-        kind: "ConfigValidationError",
+        kind: 'ConfigValidationError',
         findings: parsed.error.issues.map((issue) => ({
-          severity: "error",
+          severity: 'error',
           identifier: issuePathIdentifier(issue.path),
-          message: issue.code === "unrecognized_keys" ? "Unknown configuration field" : issue.message,
+          message:
+            issue.code === 'unrecognized_keys' ? 'Unknown configuration field' : issue.message,
         })),
       },
     };
@@ -97,7 +105,7 @@ export function parseConfigText(
 export async function resolveConfig(
   config: TevuConfig,
   configPath: string,
-): Promise<TevuResult<TevuConfig, "ConfigValidationError">> {
+): Promise<TevuResult<TevuConfig, 'ConfigValidationError'>> {
   const configDirectory = path.dirname(path.resolve(configPath));
   const resolved: TevuConfig = {
     ...config,
@@ -125,7 +133,10 @@ export async function resolveConfig(
         ? task
         : {
             ...task,
-            checks: { ...task.checks, overlay: resolveConfigPath(configDirectory, task.checks.overlay) },
+            checks: {
+              ...task.checks,
+              overlay: resolveConfigPath(configDirectory, task.checks.overlay),
+            },
           },
     ),
   };
@@ -134,7 +145,7 @@ export async function resolveConfig(
   if (separationFindings.length > 0) {
     return {
       ok: false,
-      error: { kind: "ConfigValidationError", findings: separationFindings },
+      error: { kind: 'ConfigValidationError', findings: separationFindings },
     };
   }
 
@@ -184,7 +195,7 @@ function sortKeysDeep(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(sortKeysDeep);
   }
-  if (value !== null && typeof value === "object") {
+  if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>;
     return Object.fromEntries(
       Object.keys(record)
@@ -204,13 +215,13 @@ async function collectSeparationFindings(config: TevuConfig): Promise<Validation
     repositoryReals.push({ id: repository.id, real: repositoryReal });
     if (isSamePathOrInside(repositoryReal, outputReal)) {
       findings.push({
-        severity: "error",
-        identifier: "run.output_dir",
+        severity: 'error',
+        identifier: 'run.output_dir',
         message: `run.output_dir must be outside repository "${repository.id}" after real-path resolution`,
       });
     } else if (isSamePathOrInside(outputReal, repositoryReal)) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: `repositories.${repository.id}.path`,
         message: `repository "${repository.id}" overlaps the run output directory after real-path resolution`,
       });
@@ -225,23 +236,26 @@ async function collectSeparationFindings(config: TevuConfig): Promise<Validation
     for (const repository of repositoryReals) {
       if (isSamePathOrInside(repository.real, overlayReal)) {
         findings.push({
-          severity: "error",
+          severity: 'error',
           identifier: `tasks.${task.id}.checks.overlay`,
           message: `overlay must be outside repository "${repository.id}" after real-path resolution`,
         });
       } else if (isSamePathOrInside(overlayReal, repository.real)) {
         findings.push({
-          severity: "error",
+          severity: 'error',
           identifier: `tasks.${task.id}.checks.overlay`,
           message: `overlay contains repository "${repository.id}" after real-path resolution`,
         });
       }
     }
-    if (isSamePathOrInside(outputReal, overlayReal) || isSamePathOrInside(overlayReal, outputReal)) {
+    if (
+      isSamePathOrInside(outputReal, overlayReal) ||
+      isSamePathOrInside(overlayReal, outputReal)
+    ) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: `tasks.${task.id}.checks.overlay`,
-        message: "overlay must not overlap run.output_dir after real-path resolution",
+        message: 'overlay must not overlap run.output_dir after real-path resolution',
       });
     }
   }
@@ -272,24 +286,32 @@ async function canonicalRealPath(target: string): Promise<string> {
 
 function isSamePathOrInside(ancestor: string, candidate: string): boolean {
   const relative = path.relative(ancestor, candidate);
-  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  return (
+    relative === '' ||
+    (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  );
 }
 
 function issuePathIdentifier(issuePath: ReadonlyArray<PropertyKey>): string {
   if (issuePath.length === 0) {
-    return "config";
+    return 'config';
   }
   return issuePath
-    .map((segment) => (typeof segment === "symbol" ? String(segment.description ?? "symbol") : String(segment)))
-    .join(".");
+    .map((segment) =>
+      typeof segment === 'symbol' ? String(segment.description ?? 'symbol') : String(segment),
+    )
+    .join('.');
 }
 
 function configReadFailure(
   absolutePath: string,
   requestedPath: string,
   cause: ConfigReadCause,
-): TevuResult<never, "ConfigReadError"> {
-  return { ok: false, error: { kind: "ConfigReadError", path: absolutePath, requestedPath, cause } };
+): TevuResult<never, 'ConfigReadError'> {
+  return {
+    ok: false,
+    error: { kind: 'ConfigReadError', path: absolutePath, requestedPath, cause },
+  };
 }
 
 /**
@@ -301,21 +323,26 @@ function configReadFailure(
 function classify(cause: unknown): ConfigReadCause {
   const code = systemErrorCode(cause);
   switch (code) {
-    case "ENOENT":
-    case "ENOTDIR":
-      return "not-found";
-    case "EACCES":
-    case "EPERM":
-      return "permission-denied";
-    case "EISDIR":
-      return "not-a-file";
+    case 'ENOENT':
+    case 'ENOTDIR':
+      return 'not-found';
+    case 'EACCES':
+    case 'EPERM':
+      return 'permission-denied';
+    case 'EISDIR':
+      return 'not-a-file';
     default:
-      return "unreadable";
+      return 'unreadable';
   }
 }
 
 function systemErrorCode(cause: unknown): string | null {
-  if (typeof cause === "object" && cause !== null && "code" in cause && typeof (cause as { code: unknown }).code === "string") {
+  if (
+    typeof cause === 'object' &&
+    cause !== null &&
+    'code' in cause &&
+    typeof (cause as { code: unknown }).code === 'string'
+  ) {
     return (cause as { code: string }).code;
   }
   return null;

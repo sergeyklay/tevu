@@ -1,4 +1,4 @@
-import type { TaskDefinition } from "../config/schema.ts";
+import type { TaskDefinition } from '@/config/schema';
 
 /**
  * Builds the contender-independent task prompt from only the task's own
@@ -17,8 +17,8 @@ export function buildTaskPrompt(task: TaskDefinition): string {
   return [
     task.prompt,
     task.description,
-    ["Acceptance criteria:", ...acceptance].join("\n"),
-    ["Definition of Done:", ...definitionOfDone].join("\n"),
+    ['Acceptance criteria:', ...acceptance].join('\n'),
+    ['Definition of Done:', ...definitionOfDone].join('\n'),
     "Work only inside the current repository. Do not read or modify any path outside this repository's working tree.",
-  ].join("\n\n");
+  ].join('\n\n');
 }

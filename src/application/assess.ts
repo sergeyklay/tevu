@@ -10,11 +10,12 @@
  * module; every effect flows through the injected `ArtifactStore`.
  */
 
-import { decodeRunConfig } from "../config/run-snapshot.ts";
-import { reduceRequiredOutcome } from "../evaluation/checks.ts";
-import { combineCaseMetrics } from "../evaluation/metrics.ts";
-import { buildReport } from "../evaluation/report.ts";
-import { reduceRunExitCode } from "./run-benchmark.ts";
+import { decodeRunConfig } from '@/config/run-snapshot';
+import { reduceRequiredOutcome } from '@/evaluation/checks';
+import { combineCaseMetrics } from '@/evaluation/metrics';
+import { buildReport } from '@/evaluation/report';
+
+import { reduceRunExitCode } from './run-benchmark';
 
 import type {
   AgentEventRecord,
@@ -34,12 +35,12 @@ import type {
   TevuError,
   TevuResult,
   ValidationFinding,
-} from "../domain/types.ts";
+} from '@/domain/types';
 
 /** One manual check of the assessed case, in configuration order. */
 export type ManualCheckSummary = {
   checkId: string;
-  category: "acceptance" | "definition-of-done";
+  category: 'acceptance' | 'definition-of-done';
   description: string;
   required: boolean;
 };
@@ -54,13 +55,10 @@ export type AssessmentCaseContext = {
 
 /** Error kinds the manual assessment contract declares. */
 type AssessCaseErrorKind =
-  | "ConfigValidationError"
-  | "AssessmentConflictError"
-  | "ArtifactError"
-  | "CancellationError";
+  'ConfigValidationError' | 'AssessmentConflictError' | 'ArtifactError' | 'CancellationError';
 
 /** Error kinds the report regeneration contract declares. */
-type RebuildReportErrorKind = "AgentProtocolError" | "ArtifactError";
+type RebuildReportErrorKind = 'AgentProtocolError' | 'ArtifactError';
 
 /** Derived records produced by one regeneration pass over a finalized run. */
 type RebuiltRun = {
@@ -68,8 +66,8 @@ type RebuiltRun = {
   report: ReportResult;
 };
 
-const EXPORT_ABSENT_REASON = "the preserved case artifacts contain no session export";
-const ELAPSED_ABSENT_REASON = "the preserved case result contains no process timing evidence";
+const EXPORT_ABSENT_REASON = 'the preserved case artifacts contain no session export';
+const ELAPSED_ABSENT_REASON = 'the preserved case result contains no process timing evidence';
 
 /**
  * Records manual verdicts for one case's pending manual checks and rebuilds
@@ -97,7 +95,7 @@ export async function assessCase(
   const context = manifest.value.context;
   if (context === undefined) {
     return artifactFailure(
-      "assess-case",
+      'assess-case',
       `run "${input.runId}" manifest does not preserve the configuration context required for assessment`,
     );
   }
@@ -105,7 +103,7 @@ export async function assessCase(
   if (identity === undefined) {
     return configValidationFailure([
       {
-        severity: "error",
+        severity: 'error',
         identifier: input.caseId,
         message: `case "${input.caseId}" is not part of run "${input.runId}"`,
       },
@@ -118,15 +116,15 @@ export async function assessCase(
   const task = decoded.value.tasks.find((entry) => entry.id === identity.taskId);
   if (task === undefined) {
     return artifactFailure(
-      "assess-case",
+      'assess-case',
       `preserved configuration for run "${input.runId}" does not define task "${identity.taskId}"`,
     );
   }
-  const manualChecks = task.checks.filter((check) => check.evaluator === "manual");
+  const manualChecks = task.checks.filter((check) => check.evaluator === 'manual');
   if (manualChecks.length === 0) {
     return configValidationFailure([
       {
-        severity: "error",
+        severity: 'error',
         identifier: input.caseId,
         message: `case "${input.caseId}" has no manual checks; there is nothing to assess`,
       },
@@ -136,10 +134,10 @@ export async function assessCase(
   if (!storedCase.ok) {
     return storedCase;
   }
-  if (storedCase.value.lifecycle !== "completed") {
+  if (storedCase.value.lifecycle !== 'completed') {
     return configValidationFailure([
       {
-        severity: "error",
+        severity: 'error',
         identifier: input.caseId,
         message: `case "${input.caseId}" ended "${storedCase.value.lifecycle}"; manual assessment requires a completed case`,
       },
@@ -177,7 +175,7 @@ export async function assessCase(
   if (!rebuilt.ok) {
     await lock.value.release();
     return artifactFailure(
-      "assess-case",
+      'assess-case',
       `assessment revision ${next.revision} for case "${input.caseId}" is committed, but derived regeneration failed (${describeRebuildError(rebuilt.error)}); run \`tevu report ${input.runId}\` to regenerate the derived results and report`,
     );
   }
@@ -188,7 +186,7 @@ export async function assessCase(
   const derived = rebuilt.value.run.cases.find((entry) => entry.identity.caseId === input.caseId);
   if (derived === undefined) {
     return artifactFailure(
-      "assess-case",
+      'assess-case',
       `assessment revision ${next.revision} for case "${input.caseId}" is committed, but the regenerated run record does not contain the case; run \`tevu report ${input.runId}\` to regenerate the derived results and report`,
     );
   }
@@ -205,7 +203,7 @@ export async function readAssessmentContext(
   runId: string,
   caseId: string,
   store: ArtifactStore,
-): Promise<TevuResult<AssessmentCaseContext, "ConfigValidationError" | "ArtifactError">> {
+): Promise<TevuResult<AssessmentCaseContext, 'ConfigValidationError' | 'ArtifactError'>> {
   const manifest = await store.readRunManifest(runId);
   if (!manifest.ok) {
     return manifest;
@@ -213,7 +211,7 @@ export async function readAssessmentContext(
   const context = manifest.value.context;
   if (context === undefined) {
     return artifactFailure(
-      "read-run-manifest",
+      'read-run-manifest',
       `run "${runId}" preserves no configuration context; it cannot be assessed`,
     );
   }
@@ -224,18 +222,22 @@ export async function readAssessmentContext(
   const identity = manifest.value.cases.find((candidate) => candidate.caseId === caseId);
   if (identity === undefined) {
     return configValidationFailure([
-      { severity: "error", identifier: caseId, message: `case "${caseId}" is not part of run "${runId}"` },
+      {
+        severity: 'error',
+        identifier: caseId,
+        message: `case "${caseId}" is not part of run "${runId}"`,
+      },
     ]);
   }
   const task = decoded.value.tasks.find((candidate) => candidate.id === identity.taskId);
   if (task === undefined) {
     return artifactFailure(
-      "read-run-manifest",
+      'read-run-manifest',
       `task "${identity.taskId}" is missing from the preserved run configuration`,
     );
   }
   const manualChecks: ManualCheckSummary[] = task.checks
-    .filter((check) => check.evaluator === "manual")
+    .filter((check) => check.evaluator === 'manual')
     .map((check) => ({
       checkId: check.id,
       category: check.category,
@@ -284,7 +286,7 @@ async function rebuildRunDerived(
   const context = manifest.context;
   if (context === undefined) {
     return artifactFailure(
-      "rebuild-report",
+      'rebuild-report',
       `run "${runId}" manifest does not preserve the configuration context required for regeneration`,
     );
   }
@@ -297,7 +299,13 @@ async function rebuildRunDerived(
   const cases: CaseResult[] = [];
   const assessments: AssessmentArtifact[] = [];
   for (const cached of stored.value.cases) {
-    const rebuilt = await rebuildCaseResult(runId, cached.identity.caseId, tasksById, store, agents);
+    const rebuilt = await rebuildCaseResult(
+      runId,
+      cached.identity.caseId,
+      tasksById,
+      store,
+      agents,
+    );
     if (!rebuilt.ok) {
       return rebuilt;
     }
@@ -357,7 +365,7 @@ async function rebuildCaseResult(
   const adapter = agentName === undefined ? undefined : agents.get(agentName);
   if (adapter === undefined) {
     return artifactFailure(
-      "rebuild-report",
+      'rebuild-report',
       `case "${caseId}" names agent "${String(agentName)}", which has no registered adapter`,
     );
   }
@@ -394,7 +402,7 @@ async function rebuildCaseResult(
   const task = tasksById.get(source.identity.taskId);
   if (task === undefined) {
     return artifactFailure(
-      "rebuild-report",
+      'rebuild-report',
       `preserved configuration does not define task "${source.identity.taskId}" for case "${caseId}"`,
     );
   }
@@ -413,9 +421,9 @@ async function rebuildCaseResult(
   const result: CaseResult = {
     ...source,
     outcome:
-      source.lifecycle === "completed"
+      source.lifecycle === 'completed'
         ? reduceRequiredOutcome(task.checks, derivedChecks)
-        : "not-evaluated",
+        : 'not-evaluated',
     checks: derivedChecks,
     metrics: combineCaseMetrics({
       durationMs: source.process?.durationMs ?? null,
@@ -451,7 +459,7 @@ function applyCurrentAssessments(
     return {
       ...check,
       verdict: record.verdict,
-      evidence: `manually assessed by ${record.assessor} at ${record.assessedAt}${record.note.length > 0 ? `: ${record.note}` : ""}`,
+      evidence: `manually assessed by ${record.assessor} at ${record.assessedAt}${record.note.length > 0 ? `: ${record.note}` : ''}`,
     };
   });
 }
@@ -465,9 +473,9 @@ function validateAssessmentInput(
   const findings: ValidationFinding[] = [];
   if (input.assessedAt.trim().length === 0 || Number.isNaN(Date.parse(input.assessedAt))) {
     findings.push({
-      severity: "error",
-      identifier: "assessedAt",
-      message: "assessedAt must be a parseable timestamp supplied by the caller",
+      severity: 'error',
+      identifier: 'assessedAt',
+      message: 'assessedAt must be a parseable timestamp supplied by the caller',
     });
   }
   const manualCheckIds = new Set(manualChecks.map((check) => check.id));
@@ -475,7 +483,7 @@ function validateAssessmentInput(
   for (const decision of input.decisions) {
     if (decided.has(decision.checkId)) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: decision.checkId,
         message: `check "${decision.checkId}" has more than one decision`,
       });
@@ -484,7 +492,7 @@ function validateAssessmentInput(
     decided.add(decision.checkId);
     if (!manualCheckIds.has(decision.checkId)) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: decision.checkId,
         message: `check "${decision.checkId}" is not a manual check of this case`,
       });
@@ -492,29 +500,29 @@ function validateAssessmentInput(
     }
     if (decision.assessor.trim().length === 0) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: decision.checkId,
-        message: "assessor must not be empty",
+        message: 'assessor must not be empty',
       });
     }
-    if (decision.verdict === "failed" && decision.note.trim().length === 0) {
+    if (decision.verdict === 'failed' && decision.note.trim().length === 0) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: decision.checkId,
-        message: "a failed verdict requires a non-empty note",
+        message: 'a failed verdict requires a non-empty note',
       });
     }
     const prior = currentByCheck.get(decision.checkId);
     if (prior !== undefined && !decision.replaceExisting) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: decision.checkId,
         message: `check "${decision.checkId}" is already assessed; replacement must be selected and confirmed`,
       });
     }
     if (prior === undefined && decision.replaceExisting) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: decision.checkId,
         message: `check "${decision.checkId}" has no existing assessment to replace`,
       });
@@ -524,7 +532,7 @@ function validateAssessmentInput(
     const checkId = check.id;
     if (!currentByCheck.has(checkId) && !decided.has(checkId)) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: checkId,
         message: `pending manual check "${checkId}" has no decision; every pending manual check must be assessed`,
       });
@@ -532,9 +540,9 @@ function validateAssessmentInput(
   }
   if (input.decisions.length === 0 && findings.length === 0) {
     findings.push({
-      severity: "error",
+      severity: 'error',
       identifier: input.caseId,
-      message: "every manual check is already assessed and no replacement was selected",
+      message: 'every manual check is already assessed and no replacement was selected',
     });
   }
   return findings;
@@ -603,7 +611,7 @@ async function releaseAndReturn<T extends { ok: false }>(
 
 /** Identifier-only description of a regeneration failure; never secret values. */
 function describeRebuildError(error: Extract<TevuError, { kind: RebuildReportErrorKind }>): string {
-  return error.kind === "ArtifactError"
+  return error.kind === 'ArtifactError'
     ? `artifact operation "${error.operation}" failed: ${error.reason}`
     : `agent "${error.agent}" protocol failure: ${error.reason}`;
 }
@@ -611,20 +619,20 @@ function describeRebuildError(error: Extract<TevuError, { kind: RebuildReportErr
 function artifactFailure(
   operation: string,
   reason: string,
-): { ok: false; error: Extract<TevuError, { kind: "ArtifactError" }> } {
-  return { ok: false, error: { kind: "ArtifactError", operation, reason } };
+): { ok: false; error: Extract<TevuError, { kind: 'ArtifactError' }> } {
+  return { ok: false, error: { kind: 'ArtifactError', operation, reason } };
 }
 
 function configValidationFailure(findings: ValidationFinding[]): {
   ok: false;
-  error: Extract<TevuError, { kind: "ConfigValidationError" }>;
+  error: Extract<TevuError, { kind: 'ConfigValidationError' }>;
 } {
-  return { ok: false, error: { kind: "ConfigValidationError", findings } };
+  return { ok: false, error: { kind: 'ConfigValidationError', findings } };
 }
 
 function cancellationFailure(): {
   ok: false;
-  error: Extract<TevuError, { kind: "CancellationError" }>;
+  error: Extract<TevuError, { kind: 'CancellationError' }>;
 } {
-  return { ok: false, error: { kind: "CancellationError", activeCaseIds: [] } };
+  return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
 }

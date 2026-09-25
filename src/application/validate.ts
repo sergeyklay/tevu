@@ -1,26 +1,26 @@
-import { agentNamesInUse, evaluatorEnvironmentNames, TevuConfigSchema } from "../config/schema.ts";
-import { buildTaskPrompt } from "./task-prompt.ts";
-import { describeSourceCommitInPrompt } from "./source-commit-in-prompt.ts";
+import { agentNamesInUse, evaluatorEnvironmentNames, TevuConfigSchema } from '@/config/schema';
 
-import type { TevuConfig } from "../config/schema.ts";
+import { describeSourceCommitInPrompt } from './source-commit-in-prompt';
+import { buildTaskPrompt } from './task-prompt';
+
+import type { TevuConfig } from '@/config/schema';
 import type {
   AgentCapabilityReport,
-  AgentRegistry,
   SourceValidation,
   TevuError,
   TevuResult,
   ValidationDependencies,
   ValidationFinding,
   ValidationReport,
-} from "../domain/types.ts";
+} from '@/domain/types';
 
 /** Error kinds the validation contract declares. */
 type ValidateConfigErrorKind =
-  | "ConfigValidationError"
-  | "PrerequisiteError"
-  | "SourceMaterializationError"
-  | "IsolationError"
-  | "AgentProtocolError";
+  | 'ConfigValidationError'
+  | 'PrerequisiteError'
+  | 'SourceMaterializationError'
+  | 'IsolationError'
+  | 'AgentProtocolError';
 
 /**
  * Aggregates static and local prerequisite validation for one configuration.
@@ -51,26 +51,30 @@ export async function validateConfig(
     const adapter = agents.get(name);
     if (adapter === undefined) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: `agents.${name}`,
-        message: "no agent adapter is registered under this name",
+        message: 'no agent adapter is registered under this name',
       });
       continue;
     }
     const probe = await adapter.probe();
     if (probe.ok) {
       capabilities[name] = probe.value;
-    } else if (probe.error.kind === "PrerequisiteError") {
+    } else if (probe.error.kind === 'PrerequisiteError') {
       findings.push(prerequisiteFinding(probe.error));
     } else {
-      findings.push({ severity: "error", identifier: `agents.${name}.command`, message: probe.error.reason });
+      findings.push({
+        severity: 'error',
+        identifier: `agents.${name}.command`,
+        message: probe.error.reason,
+      });
     }
   }
 
   return {
     ok: true,
     value: {
-      valid: !findings.some((finding) => finding.severity === "error"),
+      valid: !findings.some((finding) => finding.severity === 'error'),
       findings,
       capabilities,
     },
@@ -89,14 +93,12 @@ function collectSchemaFindings(config: TevuConfig): ValidationFinding[] {
   if (parsed.success) {
     return [];
   }
-  return parsed.error.issues.map(
-    (issue): ValidationFinding => ({
-      severity: "error",
-      identifier:
-        issue.path.length === 0 ? "config" : issue.path.map((segment) => String(segment)).join("."),
-      message: issue.code === "unrecognized_keys" ? "Unknown configuration field" : issue.message,
-    }),
-  );
+  return parsed.error.issues.map((issue): ValidationFinding => ({
+    severity: 'error',
+    identifier:
+      issue.path.length === 0 ? 'config' : issue.path.map((segment) => String(segment)).join('.'),
+    message: issue.code === 'unrecognized_keys' ? 'Unknown configuration field' : issue.message,
+  }));
 }
 
 /** Checks the local platform and the pinned Node.js, Bun, and Git toolchain. */
@@ -125,9 +127,9 @@ function collectEnvironmentFindings(
   for (const name of names) {
     if (!dependencies.prerequisites.hasEnvironmentVariable(name)) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: `environment.${name}`,
-        message: "required environment variable is not set",
+        message: 'required environment variable is not set',
       });
     }
   }
@@ -157,7 +159,7 @@ async function collectSourceFindings(
   );
   // Tasks sharing a repository and commit reuse one probe so a large source
   // tree is scanned once per pinned commit.
-  const validated = new Map<string, TevuResult<SourceValidation, "SourceMaterializationError">>();
+  const validated = new Map<string, TevuResult<SourceValidation, 'SourceMaterializationError'>>();
   for (const task of config.tasks) {
     const repository = repositories.get(task.repo);
     if (repository === undefined) {
@@ -172,18 +174,15 @@ async function collectSourceFindings(
     }
     if (!result.ok) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: `tasks.${task.id}.base_commit`,
         message: result.error.reason,
       });
       continue;
     }
-    const reason = describeSourceCommitInPrompt(
-      buildTaskPrompt(task),
-      result.value.resolvedCommit,
-    );
+    const reason = describeSourceCommitInPrompt(buildTaskPrompt(task), result.value.resolvedCommit);
     if (reason !== undefined) {
-      findings.push({ severity: "error", identifier: `tasks.${task.id}`, message: reason });
+      findings.push({ severity: 'error', identifier: `tasks.${task.id}`, message: reason });
     }
   }
   return findings;
@@ -199,7 +198,7 @@ async function collectOverlayFindings(
   dependencies: ValidationDependencies,
 ): Promise<ValidationFinding[]> {
   const findings: ValidationFinding[] = [];
-  const read = new Map<string, TevuResult<unknown, "CheckStateError">>();
+  const read = new Map<string, TevuResult<unknown, 'CheckStateError'>>();
   for (const task of config.tasks) {
     const directory = task.checks.overlay;
     if (directory === undefined) {
@@ -212,7 +211,7 @@ async function collectOverlayFindings(
     }
     if (!result.ok) {
       findings.push({
-        severity: "error",
+        severity: 'error',
         identifier: `tasks.${task.id}.checks.overlay`,
         message: result.error.reason,
       });
@@ -226,17 +225,15 @@ async function collectArtifactFindings(
   config: TevuConfig,
   dependencies: ValidationDependencies,
 ): Promise<ValidationFinding[]> {
-  const writable = await dependencies.prerequisites.probeWritableDirectory(
-    config.run.output_dir,
-  );
+  const writable = await dependencies.prerequisites.probeWritableDirectory(config.run.output_dir);
   return writable.ok ? [] : [prerequisiteFinding(writable.error)];
 }
 
 function prerequisiteFinding(
-  error: Extract<TevuError, { kind: "PrerequisiteError" }>,
+  error: Extract<TevuError, { kind: 'PrerequisiteError' }>,
 ): ValidationFinding {
   return {
-    severity: "error",
+    severity: 'error',
     identifier: `prerequisites.${error.tool}`,
     message:
       error.actual === undefined

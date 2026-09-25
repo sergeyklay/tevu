@@ -3,8 +3,6 @@ import type {
   AssessmentArtifact,
   CaseIdentity,
   CaseResult,
-  CheckRecord,
-  CheckResult,
   MetricValue,
   ModelRecord,
   ReportResult,
@@ -13,7 +11,7 @@ import type {
   RunManifest,
   RunResult,
   TaskRecord,
-} from "../domain/types.ts";
+} from '@/domain/types';
 
 /**
  * Everything report generation consumes: the versioned run record plus the
@@ -31,12 +29,12 @@ export type ReportInput = {
 };
 
 /** Attempt counts of one task/model pair, derived while building the report. */
-export type PairSummary = {
+type PairSummary = {
   taskId: string;
   modelId: string;
   /** Every planned attempt of this pair, `manifest.execution.repeat.value`. */
   planned: number;
-  outcomes: Record<CaseResult["outcome"], number>;
+  outcomes: Record<CaseResult['outcome'], number>;
   passedOfPlanned: string;
   /** Holds exactly when `outcomes.passed === planned`. */
   allPassed: boolean;
@@ -46,7 +44,7 @@ export type PairSummary = {
 export type NormalizedRunModel = {
   schemaVersion: 1;
   manifest: RunManifest;
-  exitCode: RunResult["exitCode"];
+  exitCode: RunResult['exitCode'];
   findings: RunFinding[];
   capabilities: Readonly<Record<string, AgentCapabilityReport>>;
   repositories: RepositoryRecord[];
@@ -82,13 +80,15 @@ export function compareCaseIds(
   if (identityB !== undefined) {
     return -1;
   }
-  return compareStrings(a ?? "", b ?? "");
+  return compareStrings(a ?? '', b ?? '');
 }
 
 /** Case order: task ID, then model ID (both `compareStrings`), then attempt numerically. */
 function compareCaseIdentities(a: CaseIdentity, b: CaseIdentity): number {
   return (
-    compareStrings(a.taskId, b.taskId) || compareStrings(a.modelId, b.modelId) || a.attempt - b.attempt
+    compareStrings(a.taskId, b.taskId) ||
+    compareStrings(a.modelId, b.modelId) ||
+    a.attempt - b.attempt
   );
 }
 
@@ -102,7 +102,8 @@ export function buildNormalizedRun(input: ReportInput): NormalizedRunModel {
     manifest: input.run.manifest,
     exitCode: input.run.exitCode,
     findings: [...input.run.findings].sort(
-      (a, b) => compareCaseIds(identities, a.caseId, b.caseId) || compareStrings(a.message, b.message),
+      (a, b) =>
+        compareCaseIds(identities, a.caseId, b.caseId) || compareStrings(a.message, b.message),
     ),
     capabilities: input.capabilities,
     repositories: sortById(input.repositories),
@@ -123,7 +124,8 @@ export function buildNormalizedRun(input: ReportInput): NormalizedRunModel {
         ...artifact,
         current: [...artifact.current].sort((a, b) => compareStrings(a.checkId, b.checkId)),
         history: [...artifact.history].sort(
-          (a, b) => compareStrings(a.checkId, b.checkId) || compareStrings(a.replacedAt, b.replacedAt),
+          (a, b) =>
+            compareStrings(a.checkId, b.checkId) || compareStrings(a.replacedAt, b.replacedAt),
         ),
       })),
     pairs: buildPairSummaries(input.run.manifest.cases, input.run.cases),
@@ -167,12 +169,17 @@ function buildPairSummaries(
   return [...planned.values()]
     .sort((a, b) => compareStrings(a.taskId, b.taskId) || compareStrings(a.modelId, b.modelId))
     .map(({ taskId, modelId, count }) => {
-      const outcomes: PairSummary["outcomes"] = { passed: 0, failed: 0, pending: 0, "not-evaluated": 0 };
+      const outcomes: PairSummary['outcomes'] = {
+        passed: 0,
+        failed: 0,
+        pending: 0,
+        'not-evaluated': 0,
+      };
       const pairResults = results.get(pairKey(taskId, modelId)) ?? [];
       for (const caseResult of pairResults) {
         outcomes[caseResult.outcome] += 1;
       }
-      outcomes["not-evaluated"] += count - pairResults.length;
+      outcomes['not-evaluated'] += count - pairResults.length;
       return {
         taskId,
         modelId,
@@ -190,16 +197,16 @@ export function serializeNormalizedRun(model: NormalizedRunModel): string {
 }
 
 /** Renders the fixed sensitive-data and non-adversarial isolation notice. */
-export function renderSensitiveDataNotice(): string {
+function renderSensitiveDataNotice(): string {
   return [
-    "> **Sensitive data:** the tevu configuration file and this artifact directory can contain",
-    "> sensitive private repository, task, Jira, model-output, and evaluator data. They rely on",
-    "> host filesystem access controls.",
-    ">",
-    "> **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,",
-    "> later Git history, host agent state, and benchmark artifacts from normal discovery.",
-    "> It does not claim that a model with shell access cannot probe arbitrary host paths.",
-  ].join("\n");
+    '> **Sensitive data:** the tevu configuration file and this artifact directory can contain',
+    '> sensitive private repository, task, Jira, model-output, and evaluator data. They rely on',
+    '> host filesystem access controls.',
+    '>',
+    '> **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,',
+    '> later Git history, host agent state, and benchmark artifacts from normal discovery.',
+    '> It does not claim that a model with shell access cannot probe arbitrary host paths.',
+  ].join('\n');
 }
 
 /**
@@ -217,39 +224,45 @@ export function buildReport(input: ReportInput): ReportResult {
 }
 
 /** Renders the Markdown report from an already-sorted report model. */
-export function renderMarkdownReport(model: NormalizedRunModel): string {
+function renderMarkdownReport(model: NormalizedRunModel): string {
   const lines: string[] = [];
   const manifest = model.manifest;
   const tools = manifest.tools;
 
-  lines.push(`# tevu run ${manifest.runId}`, "", renderSensitiveDataNotice(), "");
+  lines.push(`# tevu run ${manifest.runId}`, '', renderSensitiveDataNotice(), '');
 
   lines.push(
-    "## Run",
-    "",
+    '## Run',
+    '',
     `- Configuration digest: \`${manifest.configDigest}\``,
     `- Started: ${manifest.startedAt}`,
-    `- Completed: ${manifest.completedAt ?? "not completed"}`,
+    `- Completed: ${manifest.completedAt ?? 'not completed'}`,
     `- Host: ${manifest.host.platform}, Node.js ${manifest.host.nodeVersion}, Bun ${manifest.host.bunVersion}, Git ${tools.gitVersion}`,
     ...renderAgentCapabilityLines(tools.agentVersions, model.capabilities),
     `- Concurrency: ${manifest.execution.concurrency}`,
     `- Case timeout: ${manifest.execution.caseTimeoutMs}ms`,
     `- Repeat: ${manifest.execution.repeat.value} (source: ${manifest.execution.repeat.source})`,
     `- Run exit code: ${model.exitCode}`,
-    "",
+    '',
   );
 
   if (model.findings.length > 0) {
-    lines.push("## Run findings", "");
+    lines.push('## Run findings', '');
     for (const finding of model.findings) {
-      lines.push(`- ${finding.severity}${finding.caseId ? ` (case ${finding.caseId})` : ""}: ${finding.message}`);
+      lines.push(
+        `- ${finding.severity}${finding.caseId ? ` (case ${finding.caseId})` : ''}: ${finding.message}`,
+      );
     }
-    lines.push("");
+    lines.push('');
   }
 
   const tasksById = new Map(model.tasks.map((task) => [task.id, task]));
-  const repositoriesById = new Map(model.repositories.map((repository) => [repository.id, repository]));
-  const assessmentsByCase = new Map(model.assessments.map((artifact) => [artifact.caseId, artifact]));
+  const repositoriesById = new Map(
+    model.repositories.map((repository) => [repository.id, repository]),
+  );
+  const assessmentsByCase = new Map(
+    model.assessments.map((artifact) => [artifact.caseId, artifact]),
+  );
 
   const taskIds = [...new Set(model.pairs.map((pair) => pair.taskId))].sort(compareStrings);
 
@@ -258,16 +271,16 @@ export function renderMarkdownReport(model: NormalizedRunModel): string {
     const taskCases = model.cases.filter((caseResult) => caseResult.identity.taskId === taskId);
     const taskPairs = model.pairs.filter((pair) => pair.taskId === taskId);
 
-    lines.push(`## Task ${taskId}`, "");
+    lines.push(`## Task ${taskId}`, '');
     if (task !== undefined) {
       const repository = repositoriesById.get(task.repositoryId);
       lines.push(
         task.description,
-        "",
-        `- Repository: ${task.repositoryId}${repository ? ` (\`${repository.path}\`)` : ""}`,
+        '',
+        `- Repository: ${task.repositoryId}${repository ? ` (\`${repository.path}\`)` : ''}`,
         `- Source commit: \`${task.startCommit}\``,
         `- Source: ${describeTaskSource(task.source)}`,
-        "",
+        '',
       );
     }
 
@@ -275,16 +288,16 @@ export function renderMarkdownReport(model: NormalizedRunModel): string {
 
     if (taskCases.length > 0) {
       lines.push(
-        "| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |",
-        "|---|---|---|---|---|---|---|---|",
+        '| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |',
+        '|---|---|---|---|---|---|---|---|',
       );
       for (const caseResult of taskCases) {
         const identity = caseResult.identity;
         lines.push(
-          `| ${caseResult.outcome} | ${cell(identity.modelId)} | ${identity.attempt} | ${cell(identity.model)} | ${cell(identity.effort)} | ${caseResult.lifecycle} | ${caseResult.failure ? cell(caseResult.failure.error.kind) : "none"} | ${cell(formatMetricValue(caseResult.metrics.elapsed))} |`,
+          `| ${caseResult.outcome} | ${cell(identity.modelId)} | ${identity.attempt} | ${cell(identity.model)} | ${cell(identity.effort)} | ${caseResult.lifecycle} | ${caseResult.failure ? cell(caseResult.failure.error.kind) : 'none'} | ${cell(formatMetricValue(caseResult.metrics.elapsed))} |`,
         );
       }
-      lines.push("");
+      lines.push('');
 
       for (const caseResult of taskCases) {
         renderCase(lines, caseResult, task, assessmentsByCase.get(caseResult.identity.caseId));
@@ -293,27 +306,29 @@ export function renderMarkdownReport(model: NormalizedRunModel): string {
   }
 
   lines.push(
-    "---",
-    "",
-    "Task outcome, runtime failure, and run exit status are reported independently.",
-    "Command check output is configured acceptance evidence, not an additional model-quality metric.",
-    "No composite score or winner is computed.",
-    "",
+    '---',
+    '',
+    'Task outcome, runtime failure, and run exit status are reported independently.',
+    'Command check output is configured acceptance evidence, not an additional model-quality metric.',
+    'No composite score or winner is computed.',
+    '',
   );
 
-  return lines.join("\n");
+  return lines.join('\n');
 }
 
 /** Renders one version and isolation line per agent in use, in `compareStrings` order. */
 function renderAgentCapabilityLines(
   agentVersions: Readonly<Record<string, string | null>>,
-  capabilities: NormalizedRunModel["capabilities"],
+  capabilities: NormalizedRunModel['capabilities'],
 ): string[] {
   const lines: string[] = [];
   for (const name of Object.keys(agentVersions).sort(compareStrings)) {
-    lines.push(`- Agent "${name}" version (detected provenance only): ${agentVersions[name] ?? "not detected"}`);
     lines.push(
-      `- Agent "${name}" isolation control (deny outside worktree): ${capabilities[name]?.isolation.denyOutsideWorktree ?? "not probed"}`,
+      `- Agent "${name}" version (detected provenance only): ${agentVersions[name] ?? 'not detected'}`,
+    );
+    lines.push(
+      `- Agent "${name}" isolation control (deny outside worktree): ${capabilities[name]?.isolation.denyOutsideWorktree ?? 'not probed'}`,
     );
   }
   return lines;
@@ -321,18 +336,18 @@ function renderAgentCapabilityLines(
 
 /** Renders the `Pair summary:` block for one task's pairs, in `pairs` order. */
 function renderPairSummary(pairs: readonly PairSummary[]): string[] {
-  const lines: string[] = ["Pair summary:", ""];
+  const lines: string[] = ['Pair summary:', ''];
   lines.push(
-    "| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |",
-    "|---|---|---|---|---|---|---|---|",
+    '| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |',
+    '|---|---|---|---|---|---|---|---|',
   );
   for (const pair of pairs) {
     const outcomes = pair.outcomes;
     lines.push(
-      `| ${cell(pair.modelId)} | ${pair.planned} | ${outcomes.passed} | ${outcomes.failed} | ${outcomes.pending} | ${outcomes["not-evaluated"]} | ${pair.passedOfPlanned} | ${pair.allPassed ? "yes" : "no"} |`,
+      `| ${cell(pair.modelId)} | ${pair.planned} | ${outcomes.passed} | ${outcomes.failed} | ${outcomes.pending} | ${outcomes['not-evaluated']} | ${pair.passedOfPlanned} | ${pair.allPassed ? 'yes' : 'no'} |`,
     );
   }
-  lines.push("");
+  lines.push('');
   return lines;
 }
 
@@ -347,7 +362,7 @@ function renderCase(
 
   lines.push(
     `### Case ${identity.caseId}`,
-    "",
+    '',
     `- Model entry: ${identity.modelId} (${identity.model}, effort ${identity.effort})`,
     `- Lifecycle: ${caseResult.lifecycle}`,
     `- Task outcome: ${caseResult.outcome}`,
@@ -358,10 +373,12 @@ function renderCase(
     const ending =
       process.exitCode !== null
         ? `exit code ${process.exitCode}`
-        : `signal ${process.signal ?? "unknown"}`;
-    lines.push(`- Process: ${ending}, ${process.durationMs}ms, termination stage ${process.terminationStage}`);
+        : `signal ${process.signal ?? 'unknown'}`;
+    lines.push(
+      `- Process: ${ending}, ${process.durationMs}ms, termination stage ${process.terminationStage}`,
+    );
   } else {
-    lines.push("- Process: not started");
+    lines.push('- Process: not started');
   }
 
   if (caseResult.failure !== null) {
@@ -369,36 +386,36 @@ function renderCase(
       `- Runtime failure (preserved independently of the task outcome): ${caseResult.failure.error.kind} at ${caseResult.failure.occurredAt}`,
     );
   }
-  lines.push("");
+  lines.push('');
 
   if (caseResult.checks.length > 0) {
     lines.push(
-      "| Verdict | Check | Category | Required | Evaluator | Duration | Evidence |",
-      "|---|---|---|---|---|---|---|",
+      '| Verdict | Check | Category | Required | Evaluator | Duration | Evidence |',
+      '|---|---|---|---|---|---|---|',
     );
     for (const check of caseResult.checks) {
       const definition = definitions.get(check.checkId);
       lines.push(
-        `| ${check.verdict} | ${cell(check.checkId)} | ${check.category} | ${definition ? String(definition.required) : "unknown"} | ${definition?.evaluator ?? "unknown"} | ${check.durationMs === null ? "-" : `${check.durationMs}ms`} | ${evidenceLink(caseResult)} |`,
+        `| ${check.verdict} | ${cell(check.checkId)} | ${check.category} | ${definition ? String(definition.required) : 'unknown'} | ${definition?.evaluator ?? 'unknown'} | ${check.durationMs === null ? '-' : `${check.durationMs}ms`} | ${evidenceLink(caseResult)} |`,
       );
     }
-    lines.push("");
-    const pendingChecks = caseResult.checks.filter((check) => check.verdict === "pending");
+    lines.push('');
+    const pendingChecks = caseResult.checks.filter((check) => check.verdict === 'pending');
     if (pendingChecks.length > 0) {
       lines.push(
-        `Pending manual checks: ${pendingChecks.map((check) => check.checkId).join(", ")}.`,
-        "",
+        `Pending manual checks: ${pendingChecks.map((check) => check.checkId).join(', ')}.`,
+        '',
       );
     }
   }
 
-  lines.push("Metrics:", "");
+  lines.push('Metrics:', '');
   for (const [name, metric] of sortedMetricEntries(caseResult)) {
     lines.push(`- ${name}: ${formatMetricValue(metric)}`);
   }
-  lines.push("");
+  lines.push('');
 
-  lines.push("Artifacts:", "");
+  lines.push('Artifacts:', '');
   const artifacts = caseResult.artifacts;
   lines.push(
     `- Solution patch: ${artifactLink(artifacts.solutionPatch)}`,
@@ -407,17 +424,17 @@ function renderCase(
     `- Session export: ${artifactLink(artifacts.sessionExport)}`,
     `- Check evidence: ${artifactLink(artifacts.checks)}`,
     `- Result: ${artifactLink(artifacts.result)}`,
-    "",
+    '',
   );
 
   if (assessment !== undefined && assessment.current.length > 0) {
-    lines.push(`Assessments (revision ${assessment.revision}):`, "");
+    lines.push(`Assessments (revision ${assessment.revision}):`, '');
     for (const record of assessment.current) {
       lines.push(
-        `- ${record.checkId}: ${record.verdict} by ${cell(record.assessor)} at ${record.assessedAt}${record.note.length > 0 ? ` — ${cell(record.note)}` : ""}`,
+        `- ${record.checkId}: ${record.verdict} by ${cell(record.assessor)} at ${record.assessedAt}${record.note.length > 0 ? ` — ${cell(record.note)}` : ''}`,
       );
     }
-    lines.push("");
+    lines.push('');
   }
 }
 
@@ -428,22 +445,22 @@ function sortedMetricEntries(caseResult: CaseResult): Array<[string, MetricValue
 }
 
 function formatMetricValue(metric: MetricValue): string {
-  if (metric.availability.status === "unavailable") {
+  if (metric.availability.status === 'unavailable') {
     return `unavailable: ${metric.availability.reason}`;
   }
   if (metric.value === null) {
-    return "unavailable: no value recorded";
+    return 'unavailable: no value recorded';
   }
   return `${metric.value} ${metric.unit} (${metric.scope}, source: ${metric.availability.source})`;
 }
 
-function describeTaskSource(source: TaskRecord["source"]): string {
+function describeTaskSource(source: TaskRecord['source']): string {
   switch (source.kind) {
-    case "manual":
-      return `manual — ${source.title}${source.reference ? ` (${source.reference})` : ""}`;
-    case "jira-cloud":
+    case 'manual':
+      return `manual — ${source.title}${source.reference ? ` (${source.reference})` : ''}`;
+    case 'jira-cloud':
       return `Jira snapshot — [${source.issueKey}](${source.issueUrl})`;
-    case "github-issue":
+    case 'github-issue':
       return `GitHub issue snapshot — [${source.issueKey}](${source.issueUrl})`;
   }
 }
@@ -453,12 +470,12 @@ function evidenceLink(caseResult: CaseResult): string {
 }
 
 function artifactLink(path: string | null): string {
-  return path === null ? "missing" : `[${cell(path)}](${path})`;
+  return path === null ? 'missing' : `[${cell(path)}](${path})`;
 }
 
 /** Escapes table-breaking characters in one Markdown table cell or inline value. */
 function cell(text: string): string {
-  return text.replaceAll("|", "\\|").replaceAll("\n", " ");
+  return text.replaceAll('|', '\\|').replaceAll('\n', ' ');
 }
 
 function sortById<T extends { id: string }>(entries: readonly T[]): T[] {
@@ -473,7 +490,7 @@ function sortKeysDeep(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(sortKeysDeep);
   }
-  if (value !== null && typeof value === "object") {
+  if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>;
     return Object.fromEntries(
       Object.keys(record)
