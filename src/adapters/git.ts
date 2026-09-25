@@ -174,6 +174,11 @@ export function createGitWorkspaceAdapter(
       // With a patch base, `GIT_OBJECT_DIRECTORY` reads through its private
       // object directory and the diff target becomes the base's tree, so
       // `before_agent` output the base already holds never appears as added.
+      // `add --all` applies ignore rules to every path missing from the
+      // index, so the index starts from the diff target's tree. The case
+      // repository's configuration is agent-writable, and a sparse checkout
+      // enabled there makes `add --all` skip changed tracked paths without
+      // an error.
       const patchIndexFile = join(workspace.runtimeDirectory, 'patch-index');
       const indexEnvironment = {
         GIT_INDEX_FILE: patchIndexFile,
@@ -182,9 +187,17 @@ export function createGitWorkspaceAdapter(
       const diffTarget = base?.tree ?? workspace.syntheticCommit;
       try {
         await rm(patchIndexFile, { force: true });
-        const staged = await runGit(workspace.worktreeDirectory, ['add', '--all'], {
+        const seeded = await runGit(workspace.worktreeDirectory, ['read-tree', diffTarget], {
           environment: indexEnvironment,
         });
+        if (seeded.exitCode !== 0) {
+          return artifactError('capture-patch', describeGitFailure('read-tree', seeded));
+        }
+        const staged = await runGit(
+          workspace.worktreeDirectory,
+          ['-c', 'core.sparseCheckout=false', 'add', '--all'],
+          { environment: indexEnvironment },
+        );
         if (staged.exitCode !== 0) {
           return artifactError('capture-patch', describeGitFailure('add --all', staged));
         }
@@ -238,7 +251,21 @@ export function createGitWorkspaceAdapter(
       const indexFile = join(baseDirectory, 'index');
       const environment = { GIT_INDEX_FILE: indexFile, GIT_OBJECT_DIRECTORY: objectDirectory };
       try {
-        const staged = await runGit(workspace.worktreeDirectory, ['add', '--all'], { environment });
+        // Seeds and stages as `capturePatch` does, so the base and the
+        // capture judge the worktree by the same rules.
+        const seeded = await runGit(
+          workspace.worktreeDirectory,
+          ['read-tree', workspace.syntheticCommit],
+          { environment },
+        );
+        if (seeded.exitCode !== 0) {
+          return artifactError('snapshot-patch-base', describeGitFailure('read-tree', seeded));
+        }
+        const staged = await runGit(
+          workspace.worktreeDirectory,
+          ['-c', 'core.sparseCheckout=false', 'add', '--all'],
+          { environment },
+        );
         if (staged.exitCode !== 0) {
           return artifactError('snapshot-patch-base', describeGitFailure('add --all', staged));
         }
