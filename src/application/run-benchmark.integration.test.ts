@@ -300,7 +300,6 @@ function buildDependencies(
         value: {
           platform: process.platform === 'darwin' ? 'darwin' : 'linux',
           nodeVersion: process.version,
-          bunVersion: 'n/a',
           gitVersion: 'n/a',
         },
       };

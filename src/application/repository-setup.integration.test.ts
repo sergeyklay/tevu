@@ -359,7 +359,6 @@ function buildHostProbe(): HostProbe {
   return {
     platform: 'linux',
     nodeVersion: process.version,
-    bunVersion: '0.0.0-synthetic',
     gitVersion: '2.45.0-synthetic',
   };
 }

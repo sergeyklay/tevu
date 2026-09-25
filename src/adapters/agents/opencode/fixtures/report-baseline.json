@@ -779,7 +779,6 @@
       }
     },
     "host": {
-      "bunVersion": "1.4.2",
       "nodeVersion": "v24.21.0",
       "platform": "linux"
     },

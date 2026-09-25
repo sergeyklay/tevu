@@ -13,7 +13,7 @@
 - Configuration digest: `sha256-synthetic-digest`
 - Started: 2026-09-23T00:00:00.000Z
 - Completed: not completed
-- Host: linux, Node.js v24.21.0, Bun 1.4.2, Git git version 2.45.0
+- Host: linux, Node.js v24.21.0, Git git version 2.45.0
 - Agent "opencode" version (detected provenance only): 9.9.9-synthetic
 - Agent "opencode" isolation control (deny outside worktree): unavailable
 - Concurrency: 2

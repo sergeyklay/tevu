@@ -1783,7 +1783,6 @@ describe('file-backed artifact store with repeated attempts (AC-13)', () => {
           value: {
             platform: process.platform === 'darwin' ? 'darwin' : 'linux',
             nodeVersion: process.version,
-            bunVersion: 'n/a',
             gitVersion: 'n/a',
           },
         };

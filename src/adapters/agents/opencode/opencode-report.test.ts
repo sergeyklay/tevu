@@ -315,7 +315,7 @@ function buildManifest(
     configDigest: 'sha256-synthetic-digest',
     startedAt: '2026-09-23T00:00:00.000Z',
     completedAt: null,
-    host: { platform: 'linux', nodeVersion: 'v24.21.0', bunVersion: '1.4.2' },
+    host: { platform: 'linux', nodeVersion: 'v24.21.0' },
     tools: {
       gitVersion: 'git version 2.45.0',
       agentVersions: { opencode: capabilities.detectedVersion },
