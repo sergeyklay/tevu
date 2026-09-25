@@ -688,7 +688,7 @@ const CONFIG_HONORING_CASES: Array<{ command: string[] }> = [
 
 const EXECUTE_FAILURE_CASES: Array<{
   name: string;
-  error: Extract<TevuError, { kind: "CancellationError" | "PrerequisiteError" }>;
+  error: Extract<TevuError, { kind: "CancellationError" | "PrerequisiteError" | "CheckStateError" }>;
   code: number;
   stderr: string;
 }> = [
@@ -703,6 +703,16 @@ const EXECUTE_FAILURE_CASES: Array<{
     error: { kind: "PrerequisiteError", tool: "fake-agent", expected: "a fake-agent executable" },
     code: 1,
     stderr: 'error: prerequisite "fake-agent" is not satisfied; expected a fake-agent executable',
+  },
+  {
+    name: "check-state",
+    error: {
+      kind: "CheckStateError",
+      step: "overlay",
+      reason: 'overlay directory "/hidden/checks" does not exist',
+    },
+    code: 1,
+    stderr: 'error: check-state overlay failed: overlay directory "/hidden/checks" does not exist',
   },
 ];
 
@@ -1127,6 +1137,75 @@ describe("tevu CLI", () => {
         'error: prerequisite "git" is not satisfied; expected a git executable',
       );
     });
+
+    it.each([
+      {
+        description: "an empty restore pattern (R1)",
+        identifier: "tasks.0.checks.restore.0",
+        message: "restore pattern must not be empty",
+      },
+      {
+        description: "an overlay inside a configured repository (V2)",
+        identifier: "tasks.write-report.checks.overlay",
+        message: 'overlay must be outside repository "sample-repo" after real-path resolution',
+      },
+    ])(
+      "exits 1 for both validate and run when loadConfig reports $description",
+      async ({ identifier, message }) => {
+        for (const command of [["validate"], ["run"]]) {
+          const operations = createOperations({
+            loadConfig: vi.fn(async () => ({
+              ok: false as const,
+              error: {
+                kind: "ConfigValidationError" as const,
+                findings: [{ severity: "error" as const, identifier, message }],
+              },
+            })),
+          });
+
+          const { code, err } = await runCli(command, { operations });
+
+          expect(code).toBe(1);
+          expect(err).toEqual(["error: the configuration is invalid", `  error ${identifier}: ${message}`]);
+        }
+      },
+    );
+
+    it.each([
+      {
+        description: "a missing overlay directory (V1)",
+        identifier: "tasks.write-report.checks.overlay",
+        message: 'overlay directory "/hidden/checks" does not exist',
+      },
+      {
+        description: "an overlay directory holding a symbolic link (V3)",
+        identifier: "tasks.write-report.checks.overlay",
+        message:
+          'overlay directory "/hidden/checks" must contain only regular files and directories; "link" is a symbolic link',
+      },
+    ])(
+      "exits 1 for both validate and run when validateConfig reports $description",
+      async ({ identifier, message }) => {
+        for (const command of [["validate"], ["run"]]) {
+          const operations = createOperations({
+            validateConfig: vi.fn(async () => ({
+              ok: true as const,
+              value: buildValidationReport({
+                valid: false,
+                findings: [{ severity: "error" as const, identifier, message }],
+                capabilities: {},
+              }),
+            })),
+          });
+
+          const { code, out } = await runCli(command, { operations });
+
+          expect(code).toBe(1);
+          expect(out).toEqual([`error ${identifier}: ${message}`, "Configuration is invalid."]);
+          expect(operations.planBenchmark).not.toHaveBeenCalled();
+        }
+      },
+    );
 
     it.each(CONFIG_HONORING_CASES)("reads $command with the --config path", async ({ command }) => {
       const operations = createOperations();

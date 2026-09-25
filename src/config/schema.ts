@@ -262,6 +262,15 @@ export const ImportedTaskSourceSchema = z.strictObject({
 /** One-time tracker import snapshot stored on a task. */
 export type ImportedTaskSource = z.infer<typeof ImportedTaskSourceSchema>;
 
+/** One restore pattern: non-empty and relative to the repository root, with no leading `/` or `..` segment. */
+export const RestorePatternSchema = z
+  .string()
+  .refine((pattern) => pattern.length > 0, "restore pattern must not be empty")
+  .refine(
+    (pattern) => !pattern.startsWith("/") && !pattern.split("/").includes(".."),
+    "restore pattern must be relative to the repository root, without a leading / or a .. segment",
+  );
+
 const RawCheckShape = z.strictObject({
   id: IdSchema,
   description: z.string(),
@@ -428,6 +437,8 @@ export const TaskDefinitionSchema = z
     source: ImportedTaskSourceSchema.optional(),
     readiness: z.array(nonWhitespaceTextSchema).min(1),
     checks: z.strictObject({
+      restore: z.array(RestorePatternSchema).optional(),
+      overlay: z.string().min(1).optional(),
       acceptance: z.array(CheckDefinitionSchema).min(1),
       done: z.array(CheckDefinitionSchema).min(1),
     }),
@@ -449,7 +460,14 @@ export interface TaskDefinition {
   description: string;
   source?: ImportedTaskSource;
   readiness: string[];
-  checks: { acceptance: CheckDefinition[]; done: CheckDefinition[] };
+  checks: {
+    /** Present only when the file declares it; `[]` declares nothing to restore. */
+    restore?: string[];
+    /** Present only when the file declares it; absolute after `resolveConfig`. */
+    overlay?: string;
+    acceptance: CheckDefinition[];
+    done: CheckDefinition[];
+  };
 }
 
 function resolveCheck(check: PreCheck, checkTimeout: string | undefined): CheckDefinition {
@@ -601,6 +619,8 @@ function materializeTevuConfig(raw: RawTevuConfig): TevuConfig {
       ...(task.source === undefined ? {} : { source: task.source }),
       readiness: task.readiness,
       checks: {
+        ...(task.checks.restore === undefined ? {} : { restore: task.checks.restore }),
+        ...(task.checks.overlay === undefined ? {} : { overlay: task.checks.overlay }),
         acceptance: task.checks.acceptance.map((check) => resolveCheck(check, raw.run.check_timeout)),
         done: task.checks.done.map((check) => resolveCheck(check, raw.run.check_timeout)),
       },

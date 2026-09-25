@@ -60,10 +60,10 @@ Files are stored under the configured artifact directory:
 | `events.jsonl` | Raw agent event records, one JSON value per line; only that case's agent adapter interprets them |
 | `stderr.log` | Process diagnostics, including non-JSON run output |
 | `session.json` | Raw root-session export; only that case's agent adapter interprets it |
-| `solution.patch` | Submitted solution captured before acceptance commands run |
+| `solution.patch` | Submitted solution, captured before restore, overlay, and acceptance commands run |
 | `checks.json` | Check verdicts, timing, and evidence |
 | `assessment.json` | Current manual verdicts, revision, and replacement history |
-| Case `result.json` | Case lifecycle, process result, task outcome, metrics, and evidence paths |
+| Case `result.json` | Case lifecycle, process result, task outcome, metrics, check-state evidence, and evidence paths |
 
 The root `result.json`'s top-level `models` array holds one `{id, model, effort}` entry per configured model entry. Every saved case identity, in `run.json` and both levels of `result.json`, carries `modelId` and `effort` alongside the unchanged `model` string, plus `agent`: the name of the adapter that ran the case.
 
@@ -72,6 +72,20 @@ Isolated replacement environments carry the recipient `agent` or `evaluator`. A 
 Some source files are absent when the corresponding evidence was unavailable; assessments appear after the first assessment. Their absence is recorded rather than treated as a successful measurement.
 
 Reports link to patches, transcripts, and complete evaluator output instead of embedding them. Full task prompts and imported issue descriptions are omitted from Markdown reports.
+
+### Check state
+
+A case whose task declares `checks.restore` or `checks.overlay` records what the check-state setup did to the worktree before checks ran, in the case `result.json`'s `checkState` field. `checkState` is absent for a task that declares neither key.
+
+| Field | Contents |
+| --- | --- |
+| `checkState.restore.restored` | Matched paths whose worktree entry differed from `base_commit` and was reset to it |
+| `checkState.restore.removed` | Every path removed: matched untracked entries, and blockers displaced while restoring or overlaying |
+| `checkState.overlay.files[].path` | One overlay file's path, relative to the overlay directory |
+| `checkState.overlay.files[].sha256` | The SHA-256 of that file's bytes as read at run start |
+| `checkState.overlay.removed` | Every blocking entry the overlay step removed |
+
+A restore or overlay failure ends the case with lifecycle `infrastructure-failed` and a `failure` of kind `CheckStateError` carrying `step` (`restore` or `overlay`) and `reason`. The cause can be worktree state the agent left, such as a read-only directory under a matched path, rather than a defect in the setup itself.
 
 ### Data handling
 
