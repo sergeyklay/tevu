@@ -552,6 +552,9 @@ export type ManagedProcessResult = ManagedProcessCompletion | ManagedProcessLaun
 /** Supervises one literal-argv process; launch failure is evidence, never an exception. */
 export type ManagedProcessRunner = (request: ManagedProcessRequest) => Promise<ManagedProcessResult>;
 
+/** Replaces every configured credential-secret value before a sink; injected by composition. */
+export type Redactor = (text: string) => string;
+
 /** Credential-secret redaction over the current secret values; injected into agent adapters; no method throws. */
 export interface SecretRedactor {
   secretValues(): readonly string[];

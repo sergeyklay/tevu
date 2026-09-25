@@ -18,7 +18,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { readConfigText } from "../config/load.ts";
-import { redactDecodedValue } from "./process.ts";
+import { redactDecodedValue } from "../domain/redaction.ts";
 
 import type {
   AgentEventRecord,
@@ -30,15 +30,13 @@ import type {
   CheckResult,
   ConfigStore,
   PatchArtifact,
+  Redactor,
   ReportResult,
   RunManifest,
   RunResult,
   TevuError,
   TevuResult,
 } from "../domain/types.ts";
-
-/** Replaces every configured credential-secret value before a sink; injected by composition. */
-export type Redactor = (text: string) => string;
 
 /** Construction inputs for the file-backed artifact store. */
 export type ArtifactStoreOptions = {
