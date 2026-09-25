@@ -1,2 +1,2 @@
 [test]
-preload = ["./bun-test-guard.ts"]
+preload = ["./bun.ts"]
