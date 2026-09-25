@@ -709,6 +709,8 @@ function renderTevuError(error: TevuError, redact: (text: string) => string): st
       return ["Cancelled."];
     case "CheckStateError":
       return [`error: check-state ${error.step} failed: ${error.reason}`];
+    case "SetupError":
+      return [`error: setup ${error.phase} command ${JSON.stringify(error.argv)} failed: ${error.reason}`];
   }
 }
 

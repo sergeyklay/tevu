@@ -77,7 +77,8 @@ export type TevuError =
   | { kind: "ArtifactError"; operation: string; reason: string }
   | { kind: "RedactionError"; reason: string }
   | { kind: "CancellationError"; activeCaseIds: string[] }
-  | { kind: "CheckStateError"; step: "restore" | "overlay"; reason: string };
+  | { kind: "CheckStateError"; step: "restore" | "overlay"; reason: string }
+  | { kind: "SetupError"; phase: SetupPhase; argv: string[]; reason: string };
 
 /** Where a run's effective repeat came from: the configuration (set or defaulted) or `tevu run --repeat`. */
 export type RepeatSource = "config" | "cli";
@@ -209,6 +210,8 @@ export type CaseArtifactPathIndex = {
   checks: string;
   assessment: string;
   result: string;
+  setupBeforeAgent: string;
+  setupBeforeChecks: string;
 };
 
 /** Versioned final record of one benchmark case. */
@@ -224,6 +227,8 @@ export type CaseResult = {
   failure: FailureRecord | null;
   /** Present only when the case completed `applyCheckState`; absent for a task that declares neither key. */
   checkState?: CheckStateRecord;
+  /** Present only when at least one setup command started for the case. */
+  setup?: SetupRecord;
   context?: {
     sourceRepositoryPath: string;
     syntheticCommit: string;
@@ -357,6 +362,34 @@ export type PatchArtifact = {
   isEmpty: boolean;
 };
 
+/** A repository setup phase, named by its configuration key. */
+export type SetupPhase = "before_agent" | "before_checks";
+
+/** How one started setup command ended. */
+export type SetupCommandOutcome = "passed" | "failed" | "timed-out" | "launch-failed" | "cancelled";
+
+/** One started setup command. */
+export type SetupCommandRecord = {
+  phase: SetupPhase;
+  argv: string[];
+  /** `null` when the process did not start or ended without an exit code. */
+  exitCode: number | null;
+  /** The process adapter's duration; `null` when the process did not start. */
+  durationMs: number | null;
+  outcome: SetupCommandOutcome;
+};
+
+/** Setup evidence of one case. */
+export type SetupRecord = {
+  /** Run-relative path of each phase's log; `null` when the phase started no command or its log write failed. */
+  logs: { beforeAgent: string | null; beforeChecks: string | null };
+  /** Every started setup command of the case, in execution order. */
+  commands: SetupCommandRecord[];
+};
+
+/** The worktree state `before_agent` left, as a tree in a private object directory outside the case repository. */
+export type PatchBase = { readonly tree: string; readonly objectDirectory: string };
+
 /** What `applyCheckState` does to one worktree; built by the orchestrator from the task and the run's overlay snapshot. */
 export type CheckStateRequest = {
   /** Patterns from `checks.restore`; empty means no restore step. */
@@ -404,6 +437,10 @@ export type OverlayFileRecord = { path: string; sha256: string };
  * Sealed Git source validation, case materialization, patch capture, disposal,
  * and the check-state setup (restore and overlay) that runs between patch
  * capture and acceptance checks.
+ *
+ * Also records the worktree state before `before_agent` runs, through
+ * {@link GitWorkspaceAdapter.snapshotPatchBase}, so a later patch capture can
+ * diff against it instead of the case's synthetic root commit.
  */
 export interface GitWorkspaceAdapter {
   validateSource(
@@ -413,8 +450,12 @@ export interface GitWorkspaceAdapter {
   createIsolatedCase(
     identity: CaseIdentity,
   ): Promise<TevuResult<CaseWorkspace, "SourceMaterializationError" | "IsolationError">>;
+  /** Records the worktree state as the patch base; no commit, ref, index change, or object in the case repository. */
+  snapshotPatchBase(workspace: CaseWorkspace): Promise<TevuResult<PatchBase, "ArtifactError">>;
+  /** Diffs against `base.tree` when given; otherwise against `workspace.syntheticCommit`, exactly as without a base. */
   capturePatch(
     workspace: CaseWorkspace,
+    base?: PatchBase,
   ): Promise<TevuResult<PatchArtifact, "SourceMaterializationError" | "ArtifactError">>;
   /** Reads an overlay directory into a snapshot without writing; fails with the first defect of the overlay validation rules. */
   readOverlay(directory: string): Promise<TevuResult<OverlaySnapshot, "CheckStateError">>;
@@ -502,7 +543,7 @@ export type EvaluatorProcessResult =
     }
   | { launched: false; reason: string };
 
-/** Runs one benchmark-task acceptance command without a shell. */
+/** Runs one benchmark-task acceptance command, or one repository setup command, without a shell. */
 export interface EvaluatorProcessAdapter {
   run(request: EvaluatorProcessRequest): Promise<EvaluatorProcessResult>;
 }
@@ -698,6 +739,8 @@ export interface ArtifactStore {
   ): Promise<TevuResult<void, "ArtifactError">>;
   writePatch(caseId: string, patch: PatchArtifact): Promise<TevuResult<void, "ArtifactError">>;
   writeChecks(caseId: string, checks: CheckResult[]): Promise<TevuResult<void, "ArtifactError">>;
+  /** Redacts the whole text, failing closed, then atomically writes the phase log in the case directory. */
+  writeSetupLog(caseId: string, phase: SetupPhase, text: string): Promise<TevuResult<void, "ArtifactError">>;
   finalizeCase(result: CaseResult): Promise<TevuResult<void, "ArtifactError">>;
   /**
    * Atomically replaces one case's derived result record inside an existing

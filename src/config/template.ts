@@ -44,6 +44,11 @@ trackers:
 repositories:
   - id: app
     path: ../your-app
+    # setup:                        # prepares every case of this repository, without a shell
+    #   before_agent: [[npm, ci]]   # before the agent starts
+    #   before_checks: [[npm, ci]]  # after restore and overlay, before the checks
+    #   timeout: 5m                 # limit for one setup command; required with setup
+    #   env: [NPM_CONFIG_REGISTRY]  # ordinary variables the setup commands receive
 
 # --- Models -----------------------------------------------------------------
 # What the benchmark compares: at least two entries.

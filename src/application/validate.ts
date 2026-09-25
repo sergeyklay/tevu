@@ -1,4 +1,4 @@
-import { agentNamesInUse, checkEnvironmentNames, TevuConfigSchema } from "../config/schema.ts";
+import { agentNamesInUse, evaluatorEnvironmentNames, TevuConfigSchema } from "../config/schema.ts";
 import { buildTaskPrompt } from "./task-prompt.ts";
 import { describeSourceCommitInPrompt } from "./source-commit-in-prompt.ts";
 
@@ -119,7 +119,7 @@ function collectEnvironmentFindings(
       names.add(name);
     }
   }
-  for (const name of checkEnvironmentNames(config)) {
+  for (const name of evaluatorEnvironmentNames(config)) {
     names.add(name);
   }
   for (const name of names) {

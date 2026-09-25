@@ -57,7 +57,9 @@ export function orderTaskChecks(task: Pick<TaskDefinition, "checks">): OrderedCh
 /**
  * Builds one check's process environment: the complete fixed evaluator base
  * from the isolated environment plus only the check's allowlisted ordinary
- * snapshot values. Allowlisted additions never replace fixed or base variables.
+ * snapshot values. Allowlisted additions never replace fixed or base
+ * variables. A repository setup command builds its environment through this
+ * same function, with its own `setup.env` as the allowlist.
  */
 export function buildCheckEnvironment(
   environment: IsolatedEnvironment,

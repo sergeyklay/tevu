@@ -36,6 +36,7 @@ import type {
   RepeatSetting,
   RunManifest,
   RunResult,
+  SetupPhase,
   TevuError,
   TevuResult,
 } from "../domain/types.ts";
@@ -60,6 +61,8 @@ export type CaseArtifactPaths = {
   checks: string;
   assessment: string;
   result: string;
+  setupBeforeAgent: string;
+  setupBeforeChecks: string;
 };
 
 const RUN_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,127}$/;
@@ -81,6 +84,8 @@ const CASE_FILE = {
   checks: "checks.json",
   assessment: "assessment.json",
   result: "result.json",
+  setupBeforeAgent: "setup-before-agent.log",
+  setupBeforeChecks: "setup-before-checks.log",
 } as const;
 
 const RUN_MANIFEST_FILE = "run.json";
@@ -102,6 +107,8 @@ export function caseArtifactPaths(caseId: string): CaseArtifactPaths {
     checks: path.posix.join(base, CASE_FILE.checks),
     assessment: path.posix.join(base, CASE_FILE.assessment),
     result: path.posix.join(base, CASE_FILE.result),
+    setupBeforeAgent: path.posix.join(base, CASE_FILE.setupBeforeAgent),
+    setupBeforeChecks: path.posix.join(base, CASE_FILE.setupBeforeChecks),
   };
 }
 
@@ -383,6 +390,24 @@ class FileArtifactStore implements ArtifactStore {
       path.join(active.value.directory, CASE_FILE.solutionPatch),
       redacted.value,
     );
+  }
+
+  async writeSetupLog(
+    caseId: string,
+    phase: SetupPhase,
+    text: string,
+  ): Promise<TevuResult<void, "ArtifactError">> {
+    const operation = "write-setup-log";
+    const active = this.requireActiveCase(operation, caseId);
+    if (!active.ok) {
+      return active;
+    }
+    const redacted = redactForSink(this.redact, operation, text);
+    if (!redacted.ok) {
+      return redacted;
+    }
+    const fileName = phase === "before_agent" ? CASE_FILE.setupBeforeAgent : CASE_FILE.setupBeforeChecks;
+    return this.writeTextFile(operation, path.join(active.value.directory, fileName), redacted.value);
   }
 
   async writeChecks(
