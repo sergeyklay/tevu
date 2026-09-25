@@ -189,6 +189,10 @@ function buildGit(
 function buildFullGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspaceAdapter {
   return {
     ...buildGit(),
+    snapshotPatchBase: vi.fn(async () => ({
+      ok: false as const,
+      error: { kind: "ArtifactError" as const, operation: "snapshot-patch-base", reason: "not used in these tests" },
+    })),
     createIsolatedCase: vi.fn(async () => ({
       ok: false as const,
       error: { kind: "IsolationError" as const, caseId: "unused", reason: "not used in these tests" },
@@ -946,6 +950,158 @@ describe("TevuConfigSchema", () => {
       const parsed = parseConfigText(yamlWithRepeat(literal));
 
       expect(parsed.ok).toBe(false);
+    });
+  });
+
+  describe("repository setup", () => {
+    function buildSetupRepository(setup: Partial<NonNullable<RepositoryDefinition["setup"]>>): RepositoryDefinition {
+      return buildRepository({
+        setup: { before_agent: [["npm", "ci"]], timeout: "1m", env: [], ...setup },
+      });
+    }
+
+    it("rejects an empty setup block for both R1 and R3", () => {
+      const config = buildConfig({
+        repositories: [buildRepository({ setup: {} as RepositoryDefinition["setup"] })],
+      });
+
+      const issues = expectSchemaRejection(config);
+
+      expect(issues).toContainEqual({
+        path: "repositories.0.setup",
+        message: "setup must declare a command in before_agent, before_checks, or both",
+      });
+      expect(issues).toContainEqual({
+        path: "repositories.0.setup.timeout",
+        message: "timeout is required when setup is declared",
+      });
+    });
+
+    it("rejects a setup block whose phases are both absent or empty (R1)", () => {
+      const config = buildConfig({
+        repositories: [buildSetupRepository({ before_agent: [], before_checks: [] })],
+      });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: "repositories.0.setup",
+        message: "setup must declare a command in before_agent, before_checks, or both",
+      });
+    });
+
+    it.each([
+      { label: "an empty command array", command: [] },
+      { label: "a command with an empty-string executable", command: [""] },
+    ])("rejects $label (R2)", ({ command }) => {
+      const config = buildConfig({
+        repositories: [buildSetupRepository({ before_agent: [command as unknown as [string, ...string[]]] })],
+      });
+
+      expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain(
+        "repositories.0.setup.before_agent.0.0",
+      );
+    });
+
+    it("rejects a setup block with no timeout (R3)", () => {
+      const config = buildConfig({
+        repositories: [
+          buildRepository({
+            setup: { before_agent: [["npm", "ci"]] } as unknown as RepositoryDefinition["setup"],
+          }),
+        ],
+      });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: "repositories.0.setup.timeout",
+        message: "timeout is required when setup is declared",
+      });
+    });
+
+    it("rejects a setup.env name also passed to the agent (R4)", () => {
+      const config = buildConfig({
+        agents: buildAgents({ secrets: ["AGENT_SECRET"] }),
+        repositories: [buildSetupRepository({ env: ["AGENT_SECRET"] })],
+      });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: "repositories.0.setup.env.0",
+        message:
+          'environment variable "AGENT_SECRET" is passed to the agent and cannot also be passed to a setup command',
+      });
+    });
+
+    it.each(["email", "token"] as const)(
+      "rejects a setup.env name that is the Jira %s credential variable",
+      (field) => {
+        const variableName = field === "email" ? "JIRA_EMAIL" : "JIRA_TOKEN";
+        const config = buildConfig({
+          trackers: { jira: { url: "https://jira.example.com", email: "$JIRA_EMAIL", token: "$JIRA_TOKEN" } },
+          repositories: [buildSetupRepository({ env: [variableName] })],
+        });
+
+        expect(expectSchemaRejection(config)).toContainEqual({
+          path: "repositories.0.setup.env.0",
+          message: `Jira credential variable "${variableName}" must not be passed to a setup command`,
+        });
+      },
+    );
+
+    it("rejects a duplicate name within setup.env", () => {
+      const config = buildConfig({
+        repositories: [buildSetupRepository({ env: ["SHARED", "SHARED"] })],
+      });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: "repositories.0.setup.env.1",
+        message: 'duplicate environment variable name "SHARED"',
+      });
+    });
+
+    it("rejects a fixed environment name within setup.env", () => {
+      const config = buildConfig({
+        repositories: [buildSetupRepository({ env: ["PATH"] })],
+      });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: "repositories.0.setup.env.0",
+        message:
+          "PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract and cannot be configured",
+      });
+    });
+
+    it("rejects setup: null", () => {
+      const config = buildConfig({
+        repositories: [
+          buildRepository({ setup: null as unknown as RepositoryDefinition["setup"] }),
+        ],
+      });
+
+      expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain("repositories.0.setup");
+    });
+
+    it("rejects an unknown key inside setup", () => {
+      const config = buildConfig({
+        repositories: [
+          buildRepository({
+            setup: { before_agent: [["npm", "ci"]], timeout: "1m", extra: true } as unknown as RepositoryDefinition["setup"],
+          }),
+        ],
+      });
+
+      expect(TevuConfigSchema.safeParse(config).success).toBe(false);
+    });
+
+    it("materializes before_agent: [] as an absent key when before_checks holds a command", () => {
+      const config = buildConfig({
+        repositories: [buildSetupRepository({ before_agent: [], before_checks: [["npm", "ci"]] })],
+      });
+
+      const accepted = expectSchemaAcceptance(config);
+
+      expect(accepted.repositories[0]?.setup).toEqual({
+        before_checks: [["npm", "ci"]],
+        timeout: "1m",
+        env: [],
+      });
     });
   });
 });
