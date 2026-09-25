@@ -75,6 +75,7 @@ export type TevuError =
       reason: string;
     }
   | { kind: "ArtifactError"; operation: string; reason: string }
+  | { kind: "RedactionError"; reason: string }
   | { kind: "CancellationError"; activeCaseIds: string[] };
 
 /** Identity of one benchmark case: one task executed once by one model entry. */
@@ -555,7 +556,12 @@ export type ManagedProcessRunner = (request: ManagedProcessRequest) => Promise<M
 /** Replaces every configured credential-secret value before a sink; injected by composition. */
 export type Redactor = (text: string) => string;
 
-/** Credential-secret redaction over the current secret values; injected into agent adapters; no method throws. */
+/**
+ * Credential-secret redaction over the current secret values; injected into
+ * agent adapters. `redactText` passes through any exception the injected
+ * redactor throws; `redactValue` never throws. Implementations of
+ * `secretValues` must not throw.
+ */
 export interface SecretRedactor {
   secretValues(): readonly string[];
   redactText(text: string): string;

@@ -661,6 +661,8 @@ function renderTevuError(error: TevuError, redact: (text: string) => string): st
       ];
     case "ArtifactError":
       return [`error: artifact operation "${error.operation}" failed: ${error.reason}`];
+    case "RedactionError":
+      return [`error: redaction failed: ${error.reason}`];
     case "CancellationError":
       return ["Cancelled."];
   }

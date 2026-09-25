@@ -10,6 +10,8 @@ import { basename, join } from "node:path";
 import process from "node:process";
 import { execa } from "execa";
 
+import { describeCause } from "../domain/describe-cause.ts";
+
 import type { RepositoryDefinition, TevuConfig } from "../config/schema.ts";
 import type {
   CaseIdentity,
@@ -189,7 +191,7 @@ export function createGitWorkspaceAdapter(
       } catch (cause) {
         return artifactError(
           "dispose-case-workspace",
-          `retained ${caseDirectory}: ${describeError(cause)}`,
+          `retained ${caseDirectory}: ${describeCause(cause)}`,
         );
       }
     },
@@ -238,7 +240,7 @@ async function sealCase(
   } catch (cause) {
     return isolationError(
       identity.caseId,
-      `case directory cannot be created exclusively: ${describeError(cause)}`,
+      `case directory cannot be created exclusively: ${describeCause(cause)}`,
     );
   }
 
@@ -252,7 +254,7 @@ async function sealCase(
   try {
     await mkdir(runtimeDirectory);
   } catch (cause) {
-    return fail(`runtime directory cannot be created: ${describeError(cause)}`);
+    return fail(`runtime directory cannot be created: ${describeCause(cause)}`);
   }
 
   const init = await runGit(workspacesDirectory, [
@@ -279,7 +281,7 @@ async function sealCase(
   try {
     await writeFile(alternatesFile, `${input.sourceObjectsDirectory}\n`, "utf8");
   } catch (cause) {
-    return fail(`temporary alternates link cannot be written: ${describeError(cause)}`);
+    return fail(`temporary alternates link cannot be written: ${describeCause(cause)}`);
   }
 
   const tree = await runGit(worktreeDirectory, ["rev-parse", `${resolvedCommit}^{tree}`]);
@@ -312,7 +314,7 @@ async function sealCase(
     await rm(alternatesFile, { force: true });
     await rm(join(repositoryDirectory, "logs"), { recursive: true, force: true });
   } catch (cause) {
-    return fail(`sealing cleanup failed: ${describeError(cause)}`);
+    return fail(`sealing cleanup failed: ${describeCause(cause)}`);
   }
 
   const populated = await runGit(worktreeDirectory, ["reset", "--hard", "--quiet"]);
@@ -486,10 +488,6 @@ function describeGitFailure(subcommand: string, outcome: GitCommandOutcome): str
     return `git ${subcommand} could not be started`;
   }
   return `git ${subcommand} exited with code ${outcome.exitCode}`;
-}
-
-function describeError(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 
 function sourceError(

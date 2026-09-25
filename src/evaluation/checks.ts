@@ -1,4 +1,5 @@
 import { durationMs } from "../config/schema.ts";
+import { describeCause } from "../domain/describe-cause.ts";
 
 import type { CheckDefinition, CommandCheck, TaskDefinition } from "../config/schema.ts";
 import type {
@@ -161,7 +162,7 @@ async function runCommandCheck(
   } catch (cause) {
     execution = {
       launched: false,
-      reason: cause instanceof Error ? cause.message : String(cause),
+      reason: describeCause(cause),
     };
   }
 

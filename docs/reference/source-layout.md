@@ -3,7 +3,7 @@
 | Path | Responsibility |
 | --- | --- |
 | `src/config` | YAML loading, the strict configuration schema, the configuration template, configuration document rendering and append, and run-snapshot decoding |
-| `src/domain` | Shared records and dependency contracts |
+| `src/domain` | Shared records, dependency contracts, and helpers that every layer may import |
 | `src/application` | Task creation, task prompt building, validation, orchestration, assessment, and report rebuilding |
 | `src/evaluation` | Checks, agent-independent metric rules, and report rendering |
 | `src/adapters` | Git, issue tracker, process, and artifact I/O |
