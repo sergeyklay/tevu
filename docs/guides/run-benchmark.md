@@ -4,11 +4,11 @@ Compare at least two model settings on a task from your backlog using its local 
 
 ## Prepare the tools
 
-Use Linux or macOS with Node.js 24, Bun, Git, and OpenCode installed. The current agent adapter uses OpenCode's `run` and `export` commands, JSON output, model selection, and effort variants. Compatibility is checked by those capabilities, not a fixed OpenCode version.
+Use Linux or macOS with Node.js 24, Git, and OpenCode installed. The current agent adapter uses OpenCode's `run` and `export` commands, JSON output, model selection, and effort variants. Compatibility is checked by those capabilities, not a fixed OpenCode version.
 
 Choose a model and effort variant supported by your configured provider. Make its credential environment variables available in the terminal that will launch tevu. tevu uses isolated agent state, so credentials stored only in your usual agent login are not copied into benchmark runs.
 
-From the tevu checkout, install dependencies, build, and link the command:
+From the tevu checkout, with Bun installed, install dependencies, build, and link the command:
 
 ```sh
 bun install --frozen-lockfile
@@ -72,7 +72,6 @@ Confirm that required manual checks now have verdicts. Optional checks remain vi
 ## Troubleshooting
 
 - **Missing variable:** export the variable named in the error in the same terminal, then rerun validation.
-- **`prerequisites.bun` finding:** `validate` or `run` means `bun --version` fails in the current directory. Make Bun resolvable there; a version manager that pins Bun only inside the tevu checkout does not apply elsewhere.
 - **Unsupported source tree:** choose a commit without submodules or Git LFS content. See the [source-tree reference](../reference/configuration.md#source-trees).
 - **Missing agent capability:** check that `agents.opencode.command` points to the intended executable and that it supports the required commands and options.
 - **Interactive terminal required:** run `task add` or `assess` with both input and output attached to a terminal.
