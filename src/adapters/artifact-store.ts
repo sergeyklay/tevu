@@ -33,6 +33,7 @@ import type {
   PatchArtifact,
   Redactor,
   ReportResult,
+  RepeatSetting,
   RunManifest,
   RunResult,
   TevuError,
@@ -62,7 +63,7 @@ export type CaseArtifactPaths = {
 };
 
 const RUN_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,127}$/;
-const CASE_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}--[a-z][a-z0-9-]{0,63}$/;
+const CASE_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}--[a-z][a-z0-9-]{0,63}--[1-9][0-9]{0,15}$/;
 
 const TERMINAL_LIFECYCLES = new Set<string>([
   "completed",
@@ -615,6 +616,7 @@ class FileArtifactStore implements ArtifactStore {
       !isRecord(value["identity"]) ||
       value["identity"]["caseId"] !== caseId ||
       !isNonEmptyString(value["identity"]["agent"]) ||
+      !isPositiveSafeInteger(value["identity"]["attempt"]) ||
       !isRecord(value["artifacts"])
     ) {
       return artifactFailure(
@@ -1079,6 +1081,20 @@ async function atomicReplaceFile(filePath: string, content: string, preservedMod
   }
 }
 
+/** Holds when `value` is a whole, non-negative-overflowing number of at least 1. */
+function isPositiveSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 1;
+}
+
+/** Holds for a record whose `value` passes {@link isPositiveSafeInteger} and whose `source` is `"config"` or `"cli"`. */
+function isRepeatSetting(value: unknown): value is RepeatSetting {
+  return (
+    isRecord(value) &&
+    isPositiveSafeInteger(value["value"]) &&
+    (value["source"] === "config" || value["source"] === "cli")
+  );
+}
+
 function describeManifestDefect(manifest: RunManifest): string | null {
   if (manifest.schemaVersion !== 1) {
     return "run manifest schemaVersion must be 1";
@@ -1086,13 +1102,19 @@ function describeManifestDefect(manifest: RunManifest): string | null {
   if (!RUN_ID_PATTERN.test(manifest.runId)) {
     return `run ID "${manifest.runId}" is not a valid identifier`;
   }
+  if (!isRepeatSetting(manifest.execution.repeat)) {
+    return 'run manifest execution.repeat must be a whole number of at least 1 with source "config" or "cli"';
+  }
   const seen = new Set<string>();
   for (const identity of manifest.cases) {
     if (!CASE_ID_PATTERN.test(identity.caseId)) {
       return `case ID "${identity.caseId}" is not a valid identifier`;
     }
-    if (identity.caseId !== `${identity.taskId}--${identity.modelId}`) {
-      return `case ID "${identity.caseId}" does not equal "<task-id>--<model-id>"`;
+    if (!isPositiveSafeInteger(identity.attempt)) {
+      return `case "${identity.caseId}" attempt must be a whole number of at least 1`;
+    }
+    if (identity.caseId !== `${identity.taskId}--${identity.modelId}--${identity.attempt}`) {
+      return `case ID "${identity.caseId}" does not equal "<task-id>--<model-id>--<attempt>"`;
     }
     if (seen.has(identity.caseId)) {
       return `case ID "${identity.caseId}" appears more than once`;
@@ -1109,7 +1131,9 @@ function describeStoredManifestDefect(manifest: unknown, runId: string): string 
     manifest["runId"] !== runId ||
     !Array.isArray(manifest["cases"]) ||
     !isRecord(manifest["tools"]) ||
-    !isRecord(manifest["tools"]["agentVersions"])
+    !isRecord(manifest["tools"]["agentVersions"]) ||
+    !isRecord(manifest["execution"]) ||
+    !isRepeatSetting(manifest["execution"]["repeat"])
   ) {
     return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
   }

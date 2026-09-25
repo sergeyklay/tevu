@@ -1,7 +1,7 @@
 {
   "assessments": [
     {
-      "caseId": "task-1--alpha",
+      "caseId": "task-1--alpha--1",
       "current": [
         {
           "assessedAt": "2026-09-23T01:00:00.000Z",
@@ -27,31 +27,51 @@
     }
   ],
   "capabilities": {
-    "commands": {
-      "export": "available",
-      "run": "available"
-    },
-    "detectedVersion": "9.9.9-synthetic",
-    "executable": "/synthetic/opencode",
-    "isolation": {
-      "denyOutsideWorktree": "unavailable"
-    },
-    "runOptions": {
-      "jsonFormat": "available",
-      "model": "available",
-      "variant": "available"
+    "opencode": {
+      "capabilities": [
+        {
+          "availability": "available",
+          "name": "run command",
+          "required": true
+        },
+        {
+          "availability": "available",
+          "name": "export command",
+          "required": true
+        },
+        {
+          "availability": "available",
+          "name": "run --format json",
+          "required": true
+        },
+        {
+          "availability": "available",
+          "name": "run --model",
+          "required": true
+        },
+        {
+          "availability": "available",
+          "name": "run --variant",
+          "required": true
+        }
+      ],
+      "detectedVersion": "9.9.9-synthetic",
+      "executable": "/synthetic/opencode",
+      "isolation": {
+        "denyOutsideWorktree": "unavailable"
+      }
     }
   },
   "cases": [
     {
       "artifacts": {
-        "assessment": "cases/task-1--alpha/assessment.json",
-        "checks": "cases/task-1--alpha/checks.json",
-        "diagnostics": "cases/task-1--alpha/stderr.log",
-        "events": "cases/task-1--alpha/events.jsonl",
-        "result": "cases/task-1--alpha/result.json",
-        "sessionExport": "cases/task-1--alpha/session.json",
-        "solutionPatch": "cases/task-1--alpha/solution.patch"
+        "assessment": "cases/task-1--alpha--1/assessment.json",
+        "checks": "cases/task-1--alpha--1/checks.json",
+        "diagnostics": "cases/task-1--alpha--1/stderr.log",
+        "events": "cases/task-1--alpha--1/events.jsonl",
+        "result": "cases/task-1--alpha--1/result.json",
+        "sessionExport": "cases/task-1--alpha--1/session.json",
+        "solutionPatch": "cases/task-1--alpha--1/solution.patch"
       },
       "checks": [
         {
@@ -78,7 +98,9 @@
       ],
       "failure": null,
       "identity": {
-        "caseId": "task-1--alpha",
+        "agent": "opencode",
+        "attempt": 1,
+        "caseId": "task-1--alpha--1",
         "effort": "effort-high",
         "model": "vendor/model-alpha-synth",
         "modelId": "alpha",
@@ -210,10 +232,10 @@
     {
       "artifacts": {
         "assessment": null,
-        "checks": "cases/task-1--beta/checks.json",
-        "diagnostics": "cases/task-1--beta/stderr.log",
-        "events": "cases/task-1--beta/events.jsonl",
-        "result": "cases/task-1--beta/result.json",
+        "checks": "cases/task-1--beta--1/checks.json",
+        "diagnostics": "cases/task-1--beta--1/stderr.log",
+        "events": "cases/task-1--beta--1/events.jsonl",
+        "result": "cases/task-1--beta--1/result.json",
         "sessionExport": null,
         "solutionPatch": null
       },
@@ -228,15 +250,18 @@
       ],
       "failure": {
         "error": {
-          "caseId": "task-1--beta",
+          "agent": "opencode",
+          "caseId": "task-1--beta--1",
           "exitCode": 1,
-          "kind": "OpenCodeProcessError",
+          "kind": "AgentProcessError",
           "signal": null
         },
         "occurredAt": "2026-09-23T00:00:00.950Z"
       },
       "identity": {
-        "caseId": "task-1--beta",
+        "agent": "opencode",
+        "attempt": 1,
+        "caseId": "task-1--beta--1",
         "effort": "effort-low",
         "model": "vendor/model-alpha-synth",
         "modelId": "beta",
@@ -371,21 +396,23 @@
         "checks": null,
         "diagnostics": null,
         "events": null,
-        "result": "cases/task-2--alpha/result.json",
+        "result": "cases/task-2--alpha--1/result.json",
         "sessionExport": null,
         "solutionPatch": null
       },
       "checks": [],
       "failure": {
         "error": {
-          "caseId": "task-2--alpha",
+          "caseId": "task-2--alpha--1",
           "kind": "CaseTimeoutError",
           "timeoutMs": 60000
         },
         "occurredAt": "2026-09-23T00:00:42.100Z"
       },
       "identity": {
-        "caseId": "task-2--alpha",
+        "agent": "opencode",
+        "attempt": 1,
+        "caseId": "task-2--alpha--1",
         "effort": "effort-high",
         "model": "vendor/model-gamma-synth",
         "modelId": "gamma",
@@ -526,7 +553,9 @@
   "manifest": {
     "cases": [
       {
-        "caseId": "task-1--alpha",
+        "agent": "opencode",
+        "attempt": 1,
+        "caseId": "task-1--alpha--1",
         "effort": "effort-high",
         "model": "vendor/model-alpha-synth",
         "modelId": "alpha",
@@ -534,7 +563,9 @@
         "taskId": "task-1"
       },
       {
-        "caseId": "task-1--beta",
+        "agent": "opencode",
+        "attempt": 1,
+        "caseId": "task-1--beta--1",
         "effort": "effort-low",
         "model": "vendor/model-alpha-synth",
         "modelId": "beta",
@@ -542,7 +573,9 @@
         "taskId": "task-1"
       },
       {
-        "caseId": "task-2--alpha",
+        "agent": "opencode",
+        "attempt": 1,
+        "caseId": "task-2--alpha--1",
         "effort": "effort-high",
         "model": "vendor/model-alpha-synth",
         "modelId": "alpha",
@@ -554,19 +587,39 @@
     "configDigest": "sha256-synthetic-digest",
     "context": {
       "capabilities": {
-        "commands": {
-          "export": "available",
-          "run": "available"
-        },
-        "detectedVersion": "9.9.9-synthetic",
-        "executable": "/synthetic/opencode",
-        "isolation": {
-          "denyOutsideWorktree": "unavailable"
-        },
-        "runOptions": {
-          "jsonFormat": "available",
-          "model": "available",
-          "variant": "available"
+        "opencode": {
+          "capabilities": [
+            {
+              "availability": "available",
+              "name": "run command",
+              "required": true
+            },
+            {
+              "availability": "available",
+              "name": "export command",
+              "required": true
+            },
+            {
+              "availability": "available",
+              "name": "run --format json",
+              "required": true
+            },
+            {
+              "availability": "available",
+              "name": "run --model",
+              "required": true
+            },
+            {
+              "availability": "available",
+              "name": "run --variant",
+              "required": true
+            }
+          ],
+          "detectedVersion": "9.9.9-synthetic",
+          "executable": "/synthetic/opencode",
+          "isolation": {
+            "denyOutsideWorktree": "unavailable"
+          }
         }
       },
       "config": {
@@ -608,6 +661,7 @@
         "run": {
           "concurrency": 2,
           "output_dir": "/tevu-synthetic/artifacts",
+          "repeat": 1,
           "stop_grace": "1s",
           "timeout": "60s"
         },
@@ -718,7 +772,11 @@
     },
     "execution": {
       "caseTimeoutMs": 60000,
-      "concurrency": 2
+      "concurrency": 2,
+      "repeat": {
+        "source": "config",
+        "value": 1
+      }
     },
     "host": {
       "bunVersion": "1.4.2",
@@ -729,8 +787,10 @@
     "schemaVersion": 1,
     "startedAt": "2026-09-23T00:00:00.000Z",
     "tools": {
-      "gitVersion": "git version 2.45.0",
-      "opencodeVersion": "9.9.9-synthetic"
+      "agentVersions": {
+        "opencode": "9.9.9-synthetic"
+      },
+      "gitVersion": "git version 2.45.0"
     }
   },
   "models": [
@@ -748,6 +808,47 @@
       "effort": "effort-high",
       "id": "gamma",
       "model": "vendor/model-gamma-synth"
+    }
+  ],
+  "pairs": [
+    {
+      "allPassed": true,
+      "modelId": "alpha",
+      "outcomes": {
+        "failed": 0,
+        "not-evaluated": 0,
+        "passed": 1,
+        "pending": 0
+      },
+      "passedOfPlanned": "1/1",
+      "planned": 1,
+      "taskId": "task-1"
+    },
+    {
+      "allPassed": false,
+      "modelId": "beta",
+      "outcomes": {
+        "failed": 1,
+        "not-evaluated": 0,
+        "passed": 0,
+        "pending": 0
+      },
+      "passedOfPlanned": "0/1",
+      "planned": 1,
+      "taskId": "task-1"
+    },
+    {
+      "allPassed": false,
+      "modelId": "alpha",
+      "outcomes": {
+        "failed": 0,
+        "not-evaluated": 1,
+        "passed": 0,
+        "pending": 0
+      },
+      "passedOfPlanned": "0/1",
+      "planned": 1,
+      "taskId": "task-2"
     }
   ],
   "repositories": [

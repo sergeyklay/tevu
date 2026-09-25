@@ -233,12 +233,14 @@ function buildBenchmarkPlan(
         caseId: `case-${model.id}-${task.id}`,
         taskId: task.id,
         modelId: model.id,
+        attempt: 1,
         sourceCommit: "abc123def",
         model: model.model,
         effort: model.effort,
         agent: model.agent,
       })),
     ),
+    repeat: { value: config.run.repeat, source: "config" },
     concurrency: config.run.concurrency,
     caseTimeoutMs: 600_000,
     terminationGraceMs: 5_000,
@@ -252,6 +254,7 @@ function buildCaseIdentity(overrides: Partial<CaseIdentity> = {}): CaseIdentity 
     caseId: "case-c1-task-1",
     taskId: "task-1",
     modelId: "c1",
+    attempt: 1,
     sourceCommit: "abc123def",
     model: "provider/model-a",
     effort: "high",
@@ -334,7 +337,7 @@ function buildRunResult(overrides: Partial<RunResult> = {}): RunResult {
       completedAt: "2026-09-23T10:05:00.000Z",
       host: { platform: "linux", nodeVersion: "24.10.0", bunVersion: "1.2.0" },
       tools: { gitVersion: "2.47.0", agentVersions: { [AGENT_NAME]: "1.18.32" } },
-      execution: { concurrency: 2, caseTimeoutMs: 600000 },
+      execution: { concurrency: 2, caseTimeoutMs: 600000, repeat: { value: 1, source: "config" } },
       cases: [identity],
     },
     cases: [buildCaseResult({ identity })],
@@ -780,7 +783,7 @@ describe("tevu CLI", () => {
       const run = program.commands.find((command) => command.name() === "run");
       const add = program.commands[0]?.commands[0];
 
-      expect(run?.options.map((option) => option.long)).toEqual(["--config", "--dry-run"]);
+      expect(run?.options.map((option) => option.long)).toEqual(["--config", "--dry-run", "--repeat"]);
       expect(run?.options[0]?.defaultValue).toBe("tevu.yaml");
       expect(add?.options.map((option) => option.long)).toEqual(["--config", "--jira", "--github"]);
     });
@@ -898,6 +901,20 @@ describe("tevu CLI", () => {
       const { out } = await runCli(["task", "add", "--help"]);
 
       expect(out.join("")).toContain("--jira");
+    });
+
+    it("documents --repeat in the run help", async () => {
+      const { out } = await runCli(["run", "--help"]);
+
+      const help = out.join("").replace(/\s+/g, " ");
+      expect(help).toContain("--repeat <n>");
+      expect(help).toContain("Attempts per task/model pair for this run; overrides run.repeat");
+    });
+
+    it("shows the assess example with a three-segment case ID ending in the attempt", async () => {
+      const { out } = await runCli(["assess", "--help"]);
+
+      expect(out.join("\n")).toContain("tevu assess 20260923t120000z-a1b2c3 task--model--1");
     });
 
     it("prints help on stderr with exit 1 for a bare invocation", async () => {
@@ -1265,6 +1282,7 @@ describe("tevu CLI", () => {
         "Planned cases (2, execution order):",
         "  case-c1-task-1: task task-1, model entry c1 (provider/model-a, effort high), commit abc123def",
         "  case-c2-task-1: task task-1, model entry c2 (provider/model-b, effort low), commit abc123def",
+        "Manual assessments needed: 2 (one tevu assess per case whose task has manual checks)",
         "Limits: concurrency 2, timeout 600000ms, stop grace 5000ms",
         "Artifact destination: /tmp/artifacts",
         'Agent "fake-agent" capabilities (opencode, detected version: 1.18.32):',
@@ -1290,6 +1308,7 @@ describe("tevu CLI", () => {
       );
       expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
         buildTevuConfig(),
+        undefined,
       );
       expect(operations.configExists).not.toHaveBeenCalled();
       expect(operations.importJiraIssue).not.toHaveBeenCalled();
@@ -1351,6 +1370,136 @@ describe("tevu CLI", () => {
       expect(out).toEqual([]);
       expect(operations.validateConfig).not.toHaveBeenCalled();
       expect(operations.planBenchmark).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("run --repeat", () => {
+    it.each(["0", "00", "abc", "1.5", "-1", "+3", " 3", "1e3", "101", "100000000", ""])(
+      "rejects %j with exit code 1 before any ProgramOperations call (AC-4, verification properties 8, 9)",
+      async (value) => {
+        const operations = createOperations();
+
+        const { code, out, err } = await runCli(["run", "--repeat", value], { operations });
+
+        expect(code).toBe(1);
+        expect(err[0]).toBe(
+          `error: option '--repeat <n>' argument '${value}' is invalid. Expected a whole number from 1 to 100.`,
+        );
+        expect(err[1]).toBe("Usage: tevu run [options]");
+        expect(out).toEqual([]);
+        expect(operations.loadConfig).not.toHaveBeenCalled();
+        expect(operations.validateConfig).not.toHaveBeenCalled();
+        expect(operations.planBenchmark).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      { literal: "3", value: 3 },
+      { literal: "03", value: 3 },
+      { literal: "100", value: 100 },
+    ])("accepts --repeat $literal and passes $value to planBenchmark", async ({ literal, value }) => {
+      const operations = createOperations();
+
+      const { code } = await runCli(["run", "--dry-run", "--repeat", literal], { operations });
+
+      expect(code).toBe(0);
+      expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(buildTevuConfig(), value);
+    });
+
+    it("passes 100 to planBenchmark for tevu run --dry-run --repeat 100 (AC-14)", async () => {
+      const operations = createOperations();
+
+      const { code } = await runCli(["run", "--dry-run", "--repeat", "100"], { operations });
+
+      expect(code).toBe(0);
+      expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(buildTevuConfig(), 100);
+    });
+
+    it.each(["101", "100000000"])(
+      "ends tevu run --repeat %s with exit code 1 before any ProgramOperations call (AC-14)",
+      async (value) => {
+        const operations = createOperations();
+
+        const { code } = await runCli(["run", "--repeat", value], { operations });
+
+        expect(code).toBe(1);
+        expect(operations.planBenchmark).not.toHaveBeenCalled();
+      },
+    );
+
+    it("accepts the --repeat=<n> form", async () => {
+      const operations = createOperations();
+
+      const { code } = await runCli(["run", "--dry-run", "--repeat=5"], { operations });
+
+      expect(code).toBe(0);
+      expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(buildTevuConfig(), 5);
+    });
+
+    it("keeps the last value when --repeat is repeated", async () => {
+      const operations = createOperations();
+
+      const { code } = await runCli(["run", "--dry-run", "--repeat", "2", "--repeat", "7"], { operations });
+
+      expect(code).toBe(0);
+      expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(buildTevuConfig(), 7);
+    });
+
+    it("prints the manual-assessments line after the planned-case list and before Limits, for 2 tasks, 2 model entries, and repeat 3 with one manual-checked task (AC-8)", async () => {
+      const manualTask = buildTaskDefinition({ id: "task-1" });
+      const commandOnlyTask = buildTaskDefinition({
+        id: "task-2",
+        checks: {
+          acceptance: [
+            {
+              id: "acc-2",
+              description: "acceptance command exits zero",
+              run: ["/synthetic/acceptance-probe"],
+              timeout: "5s",
+              exit_codes: [0],
+            },
+          ],
+          done: [
+            {
+              id: "dod-2",
+              description: "done command exits zero",
+              run: ["/synthetic/done-probe"],
+              timeout: "5s",
+              exit_codes: [0],
+            },
+          ],
+        },
+      });
+      const config = buildTevuConfig({ tasks: [manualTask, commandOnlyTask] });
+      const cases = Array.from({ length: 3 }, (_, index) => index + 1).flatMap((attempt) =>
+        config.tasks.flatMap((task) =>
+          config.models.map((model) => ({
+            caseId: `${task.id}--${model.id}--${attempt}`,
+            taskId: task.id,
+            modelId: model.id,
+            attempt,
+            sourceCommit: "abc123def",
+            model: model.model,
+            effort: model.effort,
+            agent: model.agent,
+          })),
+        ),
+      );
+      const operations = createOperations({
+        loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+        planBenchmark: vi.fn(() =>
+          buildBenchmarkPlan(config, { cases, repeat: { value: 3, source: "cli" } }),
+        ),
+      });
+
+      const { out } = await runCli(["run", "--dry-run", "--repeat", "3"], { operations });
+
+      const plannedIndex = out.findIndex((line) => line.startsWith("Planned cases"));
+      const manualIndex = out.indexOf("Manual assessments needed: 6 (one tevu assess per case whose task has manual checks)");
+      const limitsIndex = out.findIndex((line) => line.startsWith("Limits:"));
+      expect(plannedIndex).toBeGreaterThan(-1);
+      expect(manualIndex).toBeGreaterThan(plannedIndex);
+      expect(limitsIndex).toBeGreaterThan(manualIndex);
     });
   });
 

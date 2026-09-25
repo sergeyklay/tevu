@@ -12,7 +12,6 @@ import { createRedactor } from "../../process.ts";
 import { TevuConfigSchema } from "../../../config/schema.ts";
 import { unavailableBenchmarkMetrics } from "../../../domain/types.ts";
 import { combineCaseMetrics } from "../../../evaluation/metrics.ts";
-import { serializeNormalizedRun } from "../../../evaluation/report.ts";
 import { decodeEvent, decodeExport } from "./opencode-protocol.ts";
 import { createOpenCodeAdapter } from "./opencode.ts";
 
@@ -39,24 +38,6 @@ import type {
   RunResult,
 } from "../../../domain/types.ts";
 import type { OpenCodeExport, OpenCodeRunEvent } from "./opencode-protocol.ts";
-import type { NormalizedRunModel } from "../../../evaluation/report.ts";
-
-/**
- * Pre-migration OpenCode capability report shape, as the pinned baseline
- * fixture stores it; retired from production code, so the fixture's own
- * shape is described here only for the byte-identity transform below.
- */
-type PreMigrationOpenCodeCapabilityReport = {
-  executable: string;
-  detectedVersion: string | null;
-  commands: { run: "available" | "unavailable"; export: "available" | "unavailable" };
-  runOptions: {
-    jsonFormat: "available" | "unavailable";
-    model: "available" | "unavailable";
-    variant: "available" | "unavailable";
-  };
-  isolation: { denyOutsideWorktree: "available" | "unavailable" };
-};
 
 const PROVIDER_SECRET = "synthetic-provider-secret-9f2";
 const PROVIDER_ENV_NAME = "TEVU_PROVIDER_KEY";
@@ -191,9 +172,10 @@ function buildSyntheticConfig(): TevuConfig {
 
 function buildCaseIdentity(overrides: Partial<CaseIdentity> = {}): CaseIdentity {
   return {
-    caseId: "task-1--alpha",
+    caseId: "task-1--alpha--1",
     taskId: "task-1",
     modelId: "alpha",
+    attempt: 1,
     sourceCommit: "0123456789abcdef0123456789abcdef01234567",
     model: "vendor/model-alpha-synth",
     effort: "effort-high",
@@ -264,7 +246,7 @@ function buildCaseResult(overrides: Partial<CaseResult> = {}): CaseResult {
     outcome: "passed",
     checks: [],
     metrics: unavailableBenchmarkMetrics("not yet normalized"),
-    artifacts: buildArtifactIndex("task-1--alpha", new Set(["result"])),
+    artifacts: buildArtifactIndex("task-1--alpha--1", new Set(["result"])),
     failure: null,
     ...overrides,
   };
@@ -274,7 +256,7 @@ function buildAssessmentArtifact(overrides: Partial<AssessmentArtifact> = {}): A
   return {
     schemaVersion: 1,
     runId: "20260923t000000z-synthetic",
-    caseId: "task-1--alpha",
+    caseId: "task-1--alpha--1",
     revision: 2,
     current: [
       {
@@ -329,15 +311,20 @@ function buildManifest(
     completedAt: null,
     host: { platform: "linux", nodeVersion: "v24.21.0", bunVersion: "1.4.2" },
     tools: { gitVersion: "git version 2.45.0", agentVersions: { opencode: capabilities.detectedVersion } },
-    execution: { concurrency: config.run.concurrency, caseTimeoutMs: 60_000 },
+    execution: {
+      concurrency: config.run.concurrency,
+      caseTimeoutMs: 60_000,
+      repeat: { value: config.run.repeat, source: "config" },
+    },
     cases: caseIds.map((caseId) => {
-      const [taskId, modelId] = caseId.split("--") as [string, string];
+      const [taskId, modelId, attempt] = caseId.split("--") as [string, string, string];
       const model = config.models.find((entry) => entry.id === modelId);
       const task = config.tasks.find((entry) => entry.id === taskId);
       return buildCaseIdentity({
         caseId,
         taskId,
         modelId,
+        attempt: Number(attempt),
         sourceCommit: task?.base_commit ?? "0123456789abcdef0123456789abcdef01234567",
         model: model?.model ?? "vendor/model-alpha-synth",
         effort: model?.effort ?? "effort-high",
@@ -363,7 +350,7 @@ function buildSyntheticRecords(): SyntheticRecords {
   const config = buildSyntheticConfig();
   const capabilities = buildCapabilityReport();
   const runId = "20260923t000000z-synthetic";
-  const manifest = buildManifest(runId, config, capabilities, ["task-1--alpha", "task-1--beta", "task-2--alpha"]);
+  const manifest = buildManifest(runId, config, capabilities, ["task-1--alpha--1", "task-1--beta--1", "task-2--alpha--1"]);
 
   const parsedExport = structuredClone(readJsonFixture("session-valid.json")) as {
     messages: Array<{ parts: Array<Record<string, unknown>> }>;
@@ -375,7 +362,7 @@ function buildSyntheticRecords(): SyntheticRecords {
     type: "text",
     text: TRANSCRIPT_BODY,
   });
-  const decodedExport = decodeExport(parsedExport, { phase: "case", caseId: "task-1--alpha" });
+  const decodedExport = decodeExport(parsedExport, { phase: "case", caseId: "task-1--alpha--1" });
   if (!decodedExport.ok) {
     throw new Error(`valid export fixture must decode: ${decodedExport.error.reason}`);
   }
@@ -389,7 +376,7 @@ function buildSyntheticRecords(): SyntheticRecords {
   const events = [...decodeFixtureEvents(readTextFixture("events-valid.jsonl")), secretError];
 
   const alphaNormalized = requireOpenCodeAdapter().normalizeMetrics({
-    caseId: "task-1--alpha",
+    caseId: "task-1--alpha--1",
     sessionId: "ses-root-0001",
     sessionExport: decodedExport.value,
     events,
@@ -404,7 +391,7 @@ function buildSyntheticRecords(): SyntheticRecords {
   });
 
   const alpha = buildCaseResult({
-    identity: buildCaseIdentity({ caseId: "task-1--alpha" }),
+    identity: buildCaseIdentity({ caseId: "task-1--alpha--1" }),
     lifecycle: "completed",
     outcome: "pending",
     checks: [
@@ -426,13 +413,13 @@ function buildSyntheticRecords(): SyntheticRecords {
     ],
     metrics: alphaMetrics.metrics,
     artifacts: buildArtifactIndex(
-      "task-1--alpha",
+      "task-1--alpha--1",
       new Set(["events", "diagnostics", "sessionExport", "solutionPatch", "checks", "result"]),
     ),
   });
 
   const beta = buildCaseResult({
-    identity: buildCaseIdentity({ caseId: "task-1--beta", modelId: "beta", effort: "effort-low" }),
+    identity: buildCaseIdentity({ caseId: "task-1--beta--1", modelId: "beta", effort: "effort-low" }),
     lifecycle: "completed",
     outcome: "failed",
     process: buildProcessResult({ exitCode: 1, endedAt: "2026-09-23T00:00:00.900Z", durationMs: 900 }),
@@ -444,16 +431,16 @@ function buildSyntheticRecords(): SyntheticRecords {
       }),
     ],
     metrics: unavailableBenchmarkMetrics("root session export unavailable"),
-    artifacts: buildArtifactIndex("task-1--beta", new Set(["events", "diagnostics", "checks", "result"])),
+    artifacts: buildArtifactIndex("task-1--beta--1", new Set(["events", "diagnostics", "checks", "result"])),
     failure: {
-      error: { kind: "AgentProcessError", agent: "opencode", caseId: "task-1--beta", exitCode: 1, signal: null },
+      error: { kind: "AgentProcessError", agent: "opencode", caseId: "task-1--beta--1", exitCode: 1, signal: null },
       occurredAt: "2026-09-23T00:00:00.950Z",
     },
   });
 
   const gamma = buildCaseResult({
     identity: buildCaseIdentity({
-      caseId: "task-2--alpha",
+      caseId: "task-2--alpha--1",
       taskId: "task-2",
       modelId: "gamma",
       model: "vendor/model-gamma-synth",
@@ -470,9 +457,9 @@ function buildSyntheticRecords(): SyntheticRecords {
     outcome: "not-evaluated",
     checks: [],
     metrics: unavailableBenchmarkMetrics("case timed out; checks were not run"),
-    artifacts: buildArtifactIndex("task-2--alpha", new Set([])),
+    artifacts: buildArtifactIndex("task-2--alpha--1", new Set([])),
     failure: {
-      error: { kind: "CaseTimeoutError", caseId: "task-2--alpha", timeoutMs: 60000 },
+      error: { kind: "CaseTimeoutError", caseId: "task-2--alpha--1", timeoutMs: 60000 },
       occurredAt: "2026-09-23T00:00:42.100Z",
     },
   });
@@ -529,25 +516,25 @@ async function createSyntheticRun(root: string): Promise<{
   }
 
   for (const event of records.events) {
-    await appendOrThrow(store, "task-1--alpha", event);
+    await appendOrThrow(store, "task-1--alpha--1", event);
   }
-  const diagnostic = await store.appendDiagnostic("task-1--alpha", `synthetic diagnostic ${PROVIDER_SECRET}`);
+  const diagnostic = await store.appendDiagnostic("task-1--alpha--1", `synthetic diagnostic ${PROVIDER_SECRET}`);
   if (!diagnostic.ok) {
     throw new Error(`appendDiagnostic failed: ${JSON.stringify(diagnostic.error)}`);
   }
-  const exportWrite = await store.writeSessionExport("task-1--alpha", records.exportRecord as AgentSessionExport);
+  const exportWrite = await store.writeSessionExport("task-1--alpha--1", records.exportRecord as AgentSessionExport);
   if (!exportWrite.ok) {
     throw new Error(`writeSessionExport failed: ${JSON.stringify(exportWrite.error)}`);
   }
-  const patchWrite = await store.writePatch("task-1--alpha", {
-    caseId: "task-1--alpha",
+  const patchWrite = await store.writePatch("task-1--alpha--1", {
+    caseId: "task-1--alpha--1",
     content: `${PATCH_BODY}\n`,
     isEmpty: false,
   });
   if (!patchWrite.ok) {
     throw new Error(`writePatch failed: ${JSON.stringify(patchWrite.error)}`);
   }
-  await writeChecksOrThrow(store, "task-1--alpha", records.caseResults[0].checks);
+  await writeChecksOrThrow(store, "task-1--alpha--1", records.caseResults[0].checks);
 
   const betaError: OpenCodeRunEvent = {
     type: "error",
@@ -569,13 +556,13 @@ async function createSyntheticRun(root: string): Promise<{
       state: { status: "completed" },
     },
   };
-  await appendOrThrow(store, "task-1--beta", betaError);
-  await appendOrThrow(store, "task-1--beta", betaToolUse);
-  const betaDiagnostic = await store.appendDiagnostic("task-1--beta", "synthetic beta diagnostic");
+  await appendOrThrow(store, "task-1--beta--1", betaError);
+  await appendOrThrow(store, "task-1--beta--1", betaToolUse);
+  const betaDiagnostic = await store.appendDiagnostic("task-1--beta--1", "synthetic beta diagnostic");
   if (!betaDiagnostic.ok) {
     throw new Error(`appendDiagnostic failed: ${JSON.stringify(betaDiagnostic.error)}`);
   }
-  await writeChecksOrThrow(store, "task-1--beta", records.caseResults[1].checks);
+  await writeChecksOrThrow(store, "task-1--beta--1", records.caseResults[1].checks);
 
   for (const result of records.caseResults) {
     const finalized = await store.finalizeCase(result);
@@ -617,76 +604,12 @@ async function collectSourceDigests(root: string, runId: string): Promise<string
   const beta = ["events.jsonl", "checks.json"];
   const digests: string[] = [];
   for (const file of alpha) {
-    digests.push(await digestFile(caseFile(root, runId, "task-1--alpha", file)));
+    digests.push(await digestFile(caseFile(root, runId, "task-1--alpha--1", file)));
   }
   for (const file of beta) {
-    digests.push(await digestFile(caseFile(root, runId, "task-1--beta", file)));
+    digests.push(await digestFile(caseFile(root, runId, "task-1--beta--1", file)));
   }
   return digests;
-}
-
-/**
- * Applies the pre-migration-to-current JSON shape transform to a parsed
- * fixture, in place, turning its shape into what today's `rebuildReport`
- * produces for agent "opencode": `tools.agentVersions` replaces
- * `tools.opencodeVersion`, every capabilities report becomes a single-entry
- * `Record<string, AgentCapabilityReport>`, every case identity gains
- * `agent`, and an `OpenCodeProcessError` failure becomes `AgentProcessError`
- * with `agent`.
- */
-function applyPreMigrationJsonTransform(fixture: unknown): NormalizedRunModel {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- transforming an untyped, structurally-known fixture literal
-  const model = fixture as any;
-
-  const oldTools = model.manifest.tools as { gitVersion: string; opencodeVersion: string | null };
-  model.manifest.tools = { gitVersion: oldTools.gitVersion, agentVersions: { opencode: oldTools.opencodeVersion } };
-
-  const toAgentCapabilityReport = (report: PreMigrationOpenCodeCapabilityReport) => ({
-    executable: report.executable,
-    detectedVersion: report.detectedVersion,
-    capabilities: [
-      { name: "run command", required: true, availability: report.commands.run },
-      { name: "export command", required: true, availability: report.commands.export },
-      { name: "run --format json", required: true, availability: report.runOptions.jsonFormat },
-      { name: "run --model", required: true, availability: report.runOptions.model },
-      { name: "run --variant", required: true, availability: report.runOptions.variant },
-    ],
-    isolation: report.isolation,
-  });
-  model.capabilities = { opencode: toAgentCapabilityReport(model.capabilities as PreMigrationOpenCodeCapabilityReport) };
-  model.manifest.context.capabilities = {
-    opencode: toAgentCapabilityReport(model.manifest.context.capabilities as PreMigrationOpenCodeCapabilityReport),
-  };
-
-  for (const identity of model.manifest.cases) {
-    identity.agent = "opencode";
-  }
-  for (const caseResult of model.cases) {
-    caseResult.identity.agent = "opencode";
-    if (caseResult.failure?.error?.kind === "OpenCodeProcessError") {
-      caseResult.failure.error.kind = "AgentProcessError";
-      caseResult.failure.error.agent = "opencode";
-    }
-  }
-  return model as NormalizedRunModel;
-}
-
-/** Applies the four agent-naming replacements `report.md` gained for `<name>` as `opencode`. */
-function applyPreMigrationMarkdownTransform(fixture: string): string {
-  return fixture
-    .replace(
-      "> later Git history, host OpenCode state, and benchmark artifacts from normal discovery.",
-      "> later Git history, host agent state, and benchmark artifacts from normal discovery.",
-    )
-    .replace(
-      /^- OpenCode version \(detected provenance only\): (.+)$/m,
-      '- Agent "opencode" version (detected provenance only): $1',
-    )
-    .replace(
-      /^- Isolation control \(deny outside worktree\): (.+)$/m,
-      '- Agent "opencode" isolation control (deny outside worktree): $1',
-    )
-    .replaceAll("OpenCodeProcessError", "AgentProcessError");
 }
 
 beforeAll(() => {
@@ -697,8 +620,8 @@ afterAll(() => {
   delete process.env[PROVIDER_ENV_NAME];
 });
 
-describe("OpenCode report regeneration matches the pinned pre-migration baseline", () => {
-  it("rebuilds byte-identically to the pinned pre-migration baseline fixtures once the shape transform is applied", async () => {
+describe("OpenCode report regeneration matches the pinned baseline", () => {
+  it("rebuilds byte-identically to the pinned baseline fixtures", async () => {
     const root = await mkdtemp(join(tmpdir(), "tevu-opencode-report-p4-"));
     try {
       const { runId, store } = await createSyntheticRun(root);
@@ -706,11 +629,8 @@ describe("OpenCode report regeneration matches the pinned pre-migration baseline
       expect(rebuilt.ok).toBe(true);
       if (!rebuilt.ok) return;
 
-      const expectedJson = serializeNormalizedRun(applyPreMigrationJsonTransform(readJsonFixture("report-18d5127.json")));
-      expect(rebuilt.value.normalizedJson).toBe(expectedJson);
-
-      const expectedMarkdown = applyPreMigrationMarkdownTransform(readTextFixture("report-18d5127.md"));
-      expect(rebuilt.value.markdown).toBe(expectedMarkdown);
+      expect(rebuilt.value.normalizedJson).toBe(readTextFixture("report-baseline.json"));
+      expect(rebuilt.value.markdown).toBe(readTextFixture("report-baseline.md"));
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -743,7 +663,7 @@ describe("OpenCode report regeneration matches the pinned pre-migration baseline
     const root = await mkdtemp(join(tmpdir(), "tevu-opencode-report-p8-case-"));
     try {
       const { runId, store } = await createSyntheticRun(root);
-      const resultPath = caseFile(root, runId, "task-1--alpha", "result.json");
+      const resultPath = caseFile(root, runId, "task-1--alpha--1", "result.json");
       const before = await readFile(resultPath, "utf8");
       const stored = JSON.parse(before) as { identity: Record<string, unknown> };
       delete stored.identity["agent"];
@@ -782,6 +702,54 @@ describe("OpenCode report regeneration matches the pinned pre-migration baseline
       if (result.ok) return;
       expect(result.error.kind).toBe("ArtifactError");
       expect(await readFile(runJsonPath, "utf8")).toBe(corrupted);
+      expect(existsSync(reportPath)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a run whose manifest is missing execution.repeat, before any write (AC-12)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tevu-opencode-report-p8-repeat-"));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      const runJsonPath = join(root, "artifacts", runId, "run.json");
+      const before = await readFile(runJsonPath, "utf8");
+      const stored = JSON.parse(before) as { manifest: { execution: Record<string, unknown> } };
+      delete stored.manifest.execution["repeat"];
+      await writeFile(runJsonPath, JSON.stringify(stored, null, 2), "utf8");
+      const corrupted = await readFile(runJsonPath, "utf8");
+      const reportPath = join(root, "artifacts", runId, "report.md");
+
+      const result = await rebuildReport(runId, store, AGENTS_REGISTRY);
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("ArtifactError");
+      expect(await readFile(runJsonPath, "utf8")).toBe(corrupted);
+      expect(existsSync(reportPath)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a run whose case result is missing identity.attempt, before any write (AC-12)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tevu-opencode-report-p8-attempt-"));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      const resultPath = caseFile(root, runId, "task-1--alpha--1", "result.json");
+      const before = await readFile(resultPath, "utf8");
+      const stored = JSON.parse(before) as { identity: Record<string, unknown> };
+      delete stored.identity["attempt"];
+      await writeFile(resultPath, JSON.stringify(stored, null, 2), "utf8");
+      const corrupted = await readFile(resultPath, "utf8");
+      const reportPath = join(root, "artifacts", runId, "report.md");
+
+      const result = await rebuildReport(runId, store, AGENTS_REGISTRY);
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("ArtifactError");
+      expect(await readFile(resultPath, "utf8")).toBe(corrupted);
       expect(existsSync(reportPath)).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });

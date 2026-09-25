@@ -31,6 +31,7 @@ version: 1
 run:
   output_dir: ../tevu-runs        # run evidence; must lie outside every repository
   concurrency: 2                  # cases running at once, 1 to 32
+  # repeat: 3                     # attempts per task/model pair, each in its own case; defaults to 1
   timeout: 10m                    # limit for one agent attempt; checks are skipped after it
   stop_grace: 3s                  # time to exit after a graceful stop before a forced kill
   check_timeout: 5m               # default limit for a command check without its own timeout
@@ -126,6 +127,7 @@ tasks:
 | `version` | Must be `1` |
 | `run.output_dir` | Non-empty; run evidence directory, outside and non-overlapping with configured repositories after resolving symlinks |
 | `run.concurrency` | Integer from 1 through 32 |
+| `run.repeat` | Integer from 1 through 100, optional, default `1`; attempts per task/model pair, each an independent case; `tevu run --repeat <n>` overrides it for one run |
 | `run.timeout` | Duration; agent time limit per case; a timed-out case skips its checks |
 | `run.stop_grace` | Duration; delay between graceful and forced process-group termination |
 | `run.check_timeout` | Duration, optional; default time limit for a command check that declares none |

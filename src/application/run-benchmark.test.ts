@@ -164,11 +164,12 @@ function buildTevuConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
   return rekeyToFakeAgent(TevuConfigSchema.parse(config));
 }
 
-function buildCaseIdentity(caseId = "task-1--c1"): CaseIdentity {
+function buildCaseIdentity(caseId = "task-1--c1--1"): CaseIdentity {
   return {
     caseId,
     taskId: "task-1",
     modelId: "c1",
+    attempt: Number(caseId.slice(caseId.lastIndexOf("--") + 2)),
     sourceCommit: COMMIT_A,
     model: "synthetic/model-a",
     effort: "fast",
@@ -278,7 +279,7 @@ function buildCaseResult(overrides: Partial<CaseResult> = {}): CaseResult {
       solutionPatch: null,
       checks: null,
       assessment: null,
-      result: "task-1--c1/result.json",
+      result: "task-1--c1--1/result.json",
     },
     failure: null,
     ...overrides,
@@ -287,7 +288,7 @@ function buildCaseResult(overrides: Partial<CaseResult> = {}): CaseResult {
 
 function buildFailureRecord(overrides: Partial<FailureRecord> = {}): FailureRecord {
   return {
-    error: { kind: "AgentProcessError", agent: AGENT_NAME, caseId: "task-1--c1", exitCode: 3, signal: null },
+    error: { kind: "AgentProcessError", agent: AGENT_NAME, caseId: "task-1--c1--1", exitCode: 3, signal: null },
     occurredAt: CLOCK_BASE,
     ...overrides,
   };
@@ -410,6 +411,7 @@ function createHarness(config: TevuConfig) {
 
   const gitState = {
     validatedCommits: [] as Array<{ repositoryId: string; commit: string }>,
+    createIsolatedCaseCalls: [] as CaseIdentity[],
     unreadableCaseIds: new Set<string>(),
     disposeErrors: new Map<string, Extract<TevuError, { kind: "ArtifactError" }>>(),
     validateSourceError: null as Extract<TevuError, { kind: "SourceMaterializationError" }> | null,
@@ -437,6 +439,7 @@ function createHarness(config: TevuConfig) {
       };
     },
     async createIsolatedCase(identity) {
+      gitState.createIsolatedCaseCalls.push(identity);
       timeline.push(`prepare:${identity.caseId}`);
       if (gitState.createIsolatedCaseError !== null) {
         return { ok: false, error: gitState.createIsolatedCaseError };
@@ -832,7 +835,7 @@ async function runWithFailingExport(
 ): Promise<{ run: RunResult; harness: Harness }> {
   const config = buildTevuConfig({ tasks: [buildTask()] });
   const harness = createHarness(config);
-  harness.agent.exportFailures.set("session-task-1--c1", buildError("task-1--c1"));
+  harness.agent.exportFailures.set("session-task-1--c1--1", buildError("task-1--c1--1"));
   const result = await runBenchmark(planBenchmark(config), harness.dependencies);
   return { run: unwrapOk(result), harness };
 }
@@ -856,7 +859,7 @@ function expectUnavailableMetric(metric: MetricValue, reasonIncludes: string): v
 }
 
 describe("planBenchmark", () => {
-  it("plans the exact task-by-contender matrix in configuration order", () => {
+  it("plans one attempt per pair, in configuration order, with attempt 1 in every case ID, when run.repeat is absent (AC-2)", () => {
     const config = buildTevuConfig({
       tasks: [
         buildTask({ id: "task-1", base_commit: COMMIT_A }),
@@ -867,38 +870,43 @@ describe("planBenchmark", () => {
     const plan = planBenchmark(config);
 
     expect(plan.config).toBe(config);
+    expect(plan.repeat).toEqual({ value: 1, source: "config" });
     expect(plan.cases).toEqual([
       {
-        caseId: "task-1--c1",
+        caseId: "task-1--c1--1",
         taskId: "task-1",
         modelId: "c1",
+        attempt: 1,
         sourceCommit: COMMIT_A,
         model: "synthetic/model-a",
         effort: "fast",
         agent: AGENT_NAME,
       },
       {
-        caseId: "task-1--c2",
+        caseId: "task-1--c2--1",
         taskId: "task-1",
         modelId: "c2",
+        attempt: 1,
         sourceCommit: COMMIT_A,
         model: "synthetic/model-b",
         effort: "deep",
         agent: AGENT_NAME,
       },
       {
-        caseId: "task-2--c1",
+        caseId: "task-2--c1--1",
         taskId: "task-2",
         modelId: "c1",
+        attempt: 1,
         sourceCommit: COMMIT_B,
         model: "synthetic/model-a",
         effort: "fast",
         agent: AGENT_NAME,
       },
       {
-        caseId: "task-2--c2",
+        caseId: "task-2--c2--1",
         taskId: "task-2",
         modelId: "c2",
+        attempt: 1,
         sourceCommit: COMMIT_B,
         model: "synthetic/model-b",
         effort: "deep",
@@ -907,7 +915,7 @@ describe("planBenchmark", () => {
     ]);
   });
 
-  it("builds each CaseIdentity with keys in the order caseId, taskId, modelId, sourceCommit, model, effort, agent", () => {
+  it("builds each CaseIdentity with keys in the order caseId, taskId, modelId, attempt, sourceCommit, model, effort, agent", () => {
     const config = buildTevuConfig({ tasks: [buildTask({ id: "task-1", base_commit: COMMIT_A })] });
 
     const plan = planBenchmark(config);
@@ -916,6 +924,7 @@ describe("planBenchmark", () => {
       "caseId",
       "taskId",
       "modelId",
+      "attempt",
       "sourceCommit",
       "model",
       "effort",
@@ -931,6 +940,54 @@ describe("planBenchmark", () => {
     expect(plan.caseTimeoutMs).toBe(60_000);
     expect(plan.terminationGraceMs).toBe(500);
     expect(plan.artifactsDirectory).toBe("/synthetic/artifacts");
+  });
+
+  it("plans 12 cases ordered attempt-major, then task, then model, for 2 tasks, 2 model entries, and run.repeat: 3 (AC-1)", () => {
+    const config = buildTevuConfig({
+      run: buildRunSettings({ repeat: 3 }),
+      tasks: [
+        buildTask({ id: "task-1", base_commit: COMMIT_A }),
+        buildTask({ id: "task-2", base_commit: COMMIT_B }),
+      ],
+    });
+
+    const plan = planBenchmark(config);
+
+    expect(plan.repeat).toEqual({ value: 3, source: "config" });
+    expect(plan.cases).toHaveLength(12);
+    expect(plan.cases.map((identity) => identity.caseId)).toEqual([
+      "task-1--c1--1",
+      "task-1--c2--1",
+      "task-2--c1--1",
+      "task-2--c2--1",
+      "task-1--c1--2",
+      "task-1--c2--2",
+      "task-2--c1--2",
+      "task-2--c2--2",
+      "task-1--c1--3",
+      "task-1--c2--3",
+      "task-2--c1--3",
+      "task-2--c2--3",
+    ]);
+    expect(plan.cases.map((identity) => identity.attempt)).toEqual([1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]);
+  });
+
+  it("resolves the effective repeat to repeatOverride with source cli, and leaves plan.config.run.repeat at its loaded value (AC-3, verification property 2)", () => {
+    const config = buildTevuConfig({ run: buildRunSettings({ repeat: 3 }) });
+
+    const plan = planBenchmark(config, 2);
+
+    expect(plan.repeat).toEqual({ value: 2, source: "cli" });
+    expect(plan.cases.filter((identity) => identity.taskId === "task-1" && identity.modelId === "c1")).toHaveLength(2);
+    expect(plan.config).toBe(config);
+    expect(plan.config.run.repeat).toBe(3);
+  });
+
+  it("resolves plan.repeat.source to cli whatever repeatOverride's value, and to config when it is absent", () => {
+    const config = buildTevuConfig({ run: buildRunSettings({ repeat: 3 }) });
+
+    expect(planBenchmark(config, 3).repeat).toEqual({ value: 3, source: "cli" });
+    expect(planBenchmark(config).repeat).toEqual({ value: 3, source: "config" });
   });
 });
 
@@ -1066,39 +1123,47 @@ describe("runBenchmark", () => {
       gitVersion: "2.45.0-synthetic",
       agentVersions: { [AGENT_NAME]: "99.0.0-synthetic" },
     });
-    expect(manifest.execution).toEqual({ concurrency: 2, caseTimeoutMs: 60_000 });
+    expect(manifest.execution).toEqual({
+      concurrency: 2,
+      caseTimeoutMs: 60_000,
+      repeat: { value: 1, source: "config" },
+    });
     expect(manifest.cases).toEqual([
       {
-        caseId: "task-1--c1",
+        caseId: "task-1--c1--1",
         taskId: "task-1",
         modelId: "c1",
+        attempt: 1,
         sourceCommit: `pinned-${COMMIT_A}`,
         model: "synthetic/model-a",
         effort: "fast",
         agent: AGENT_NAME,
       },
       {
-        caseId: "task-1--c2",
+        caseId: "task-1--c2--1",
         taskId: "task-1",
         modelId: "c2",
+        attempt: 1,
         sourceCommit: `pinned-${COMMIT_A}`,
         model: "synthetic/model-b",
         effort: "deep",
         agent: AGENT_NAME,
       },
       {
-        caseId: "task-2--c1",
+        caseId: "task-2--c1--1",
         taskId: "task-2",
         modelId: "c1",
+        attempt: 1,
         sourceCommit: `pinned-${COMMIT_A}`,
         model: "synthetic/model-a",
         effort: "fast",
         agent: AGENT_NAME,
       },
       {
-        caseId: "task-2--c2",
+        caseId: "task-2--c2--1",
         taskId: "task-2",
         modelId: "c2",
+        attempt: 1,
         sourceCommit: `pinned-${COMMIT_A}`,
         model: "synthetic/model-b",
         effort: "deep",
@@ -1111,6 +1176,27 @@ describe("runBenchmark", () => {
     );
     expect(harness.artifacts.startedManifests[0]?.completedAt).toBeNull();
     expect(run.cases.every((entry) => entry.identity.sourceCommit === `pinned-${COMMIT_A}`)).toBe(true);
+  });
+
+  it("gives each attempt its own createIsolatedCase call with its own identity, and its own createCaseEnvironments call (AC-5, verification property 4)", async () => {
+    const config = buildTevuConfig({
+      run: buildRunSettings({ repeat: 2 }),
+      tasks: [buildTask({ id: "task-1" })],
+    });
+    const harness = createHarness(config);
+
+    const result = await runBenchmark(planBenchmark(config), harness.dependencies);
+
+    const run = unwrapOk(result);
+    expect(run.exitCode).toBe(0);
+    const pairCalls = harness.git.createIsolatedCaseCalls.filter((identity) => identity.modelId === "c1");
+    expect(pairCalls.map((identity) => identity.caseId)).toEqual(["task-1--c1--1", "task-1--c1--2"]);
+    expect(pairCalls.map((identity) => identity.attempt)).toEqual([1, 2]);
+    const caseIds = harness.git.createIsolatedCaseCalls.map((identity) => identity.caseId);
+    expect(new Set(caseIds).size).toBe(caseIds.length);
+    const environmentCaseIds = harness.environments.created.map((entry) => entry.caseId);
+    expect(new Set(environmentCaseIds).size).toBe(environmentCaseIds.length);
+    expect(environmentCaseIds).toHaveLength(caseIds.length);
   });
 
   it("returns the host probe failure before any write", async () => {
@@ -1276,38 +1362,38 @@ describe("runBenchmark", () => {
       "probe",
       "validateSource:repo-1",
       `startRun:${RUN_ID}`,
-      ...caseTimeline("task-1--c1"),
-      ...caseTimeline("task-1--c2"),
+      ...caseTimeline("task-1--c1--1"),
+      ...caseTimeline("task-1--c2--1"),
       `finalizeRun:${RUN_ID}`,
     ]);
     expect(harness.lifecycleEvents).toEqual([
-      { caseId: "task-1--c1", lifecycle: "queued" },
-      { caseId: "task-1--c2", lifecycle: "queued" },
-      { caseId: "task-1--c1", lifecycle: "preparing" },
-      { caseId: "task-1--c1", lifecycle: "running" },
-      { caseId: "task-1--c1", lifecycle: "evaluating" },
-      { caseId: "task-1--c1", lifecycle: "completed" },
-      { caseId: "task-1--c2", lifecycle: "preparing" },
-      { caseId: "task-1--c2", lifecycle: "running" },
-      { caseId: "task-1--c2", lifecycle: "evaluating" },
-      { caseId: "task-1--c2", lifecycle: "completed" },
+      { caseId: "task-1--c1--1", lifecycle: "queued" },
+      { caseId: "task-1--c2--1", lifecycle: "queued" },
+      { caseId: "task-1--c1--1", lifecycle: "preparing" },
+      { caseId: "task-1--c1--1", lifecycle: "running" },
+      { caseId: "task-1--c1--1", lifecycle: "evaluating" },
+      { caseId: "task-1--c1--1", lifecycle: "completed" },
+      { caseId: "task-1--c2--1", lifecycle: "preparing" },
+      { caseId: "task-1--c2--1", lifecycle: "running" },
+      { caseId: "task-1--c2--1", lifecycle: "evaluating" },
+      { caseId: "task-1--c2--1", lifecycle: "completed" },
     ]);
 
     const runInput = harness.agent.runInputs[0];
     expect(runInput).toBeDefined();
-    expect(runInput?.identity).toEqual({ ...buildCaseIdentity("task-1--c1"), sourceCommit: `pinned-${COMMIT_A}` });
+    expect(runInput?.identity).toEqual({ ...buildCaseIdentity("task-1--c1--1"), sourceCommit: `pinned-${COMMIT_A}` });
     const task = config.tasks[0];
     expect(task).toBeDefined();
     expect(runInput?.prompt).toBe(task === undefined ? undefined : buildTaskPrompt(task));
     expect(runInput?.prompt).not.toContain(`pinned-${COMMIT_A}`);
-    expect(runInput?.worktreeDirectory).toBe("/synthetic/workspaces/task-1--c1/worktree");
+    expect(runInput?.worktreeDirectory).toBe("/synthetic/workspaces/task-1--c1--1/worktree");
     expect(runInput?.environment).toBe(harness.environments.created[0]?.value.agent);
     expect(runInput?.timeoutMs).toBe(60_000);
     expect(runInput?.terminationGraceMs).toBe(500);
     expect(runInput?.cancellation.aborted).toBe(false);
 
     const caseRequests = harness.evaluatorProcesses.requests.filter(
-      (request) => request.cwd === "/synthetic/workspaces/task-1--c1/worktree",
+      (request) => request.cwd === "/synthetic/workspaces/task-1--c1--1/worktree",
     );
     expect(caseRequests.map((request) => request.argv[0])).toEqual([
       "/synthetic/acc-required",
@@ -1315,12 +1401,12 @@ describe("runBenchmark", () => {
     ]);
     const evaluatorRequest = caseRequests[0];
     expect(evaluatorRequest?.argv).toEqual(["/synthetic/acc-required", "--verify"]);
-    expect(evaluatorRequest?.cwd).toBe("/synthetic/workspaces/task-1--c1/worktree");
+    expect(evaluatorRequest?.cwd).toBe("/synthetic/workspaces/task-1--c1--1/worktree");
     expect(evaluatorRequest?.environment).toEqual(harness.environments.created[0]?.value.evaluator.variables);
     expect(evaluatorRequest?.timeoutMs).toBe(5_000);
     expect(evaluatorRequest?.terminationGraceMs).toBe(500);
 
-    const caseResult = caseResultOf(run, "task-1--c1");
+    const caseResult = caseResultOf(run, "task-1--c1--1");
     expect(caseResult.lifecycle).toBe("completed");
     expect(caseResult.outcome).toBe("passed");
     expect(caseResult.failure).toBeNull();
@@ -1328,13 +1414,13 @@ describe("runBenchmark", () => {
     expect(caseResult.checks.map((check) => check.verdict)).toEqual(["passed", "passed"]);
     expect(caseResult.checks[0]?.evidence).toContain("exit code 0");
     expect(caseResult.artifacts).toEqual({
-      events: "task-1--c1/events.jsonl",
+      events: "task-1--c1--1/events.jsonl",
       diagnostics: null,
-      sessionExport: "task-1--c1/session.json",
-      solutionPatch: "task-1--c1/solution.patch",
-      checks: "task-1--c1/checks.json",
+      sessionExport: "task-1--c1--1/session.json",
+      solutionPatch: "task-1--c1--1/solution.patch",
+      checks: "task-1--c1--1/checks.json",
       assessment: null,
-      result: "task-1--c1/result.json",
+      result: "task-1--c1--1/result.json",
     });
     expectAvailableMetric(caseResult.metrics.elapsed, 1_000, "millisecond", "process", "case");
     expectAvailableMetric(caseResult.metrics.inputTokens, 10, "token", "root-session export");
@@ -1347,15 +1433,15 @@ describe("runBenchmark", () => {
     const config = buildTevuConfig();
     const harness = createHarness(config);
     harness.agent.holdNewRuns();
-    const firstStart = harness.agent.waitForCaseStart("task-1--c1");
-    const secondStart = harness.agent.waitForCaseStart("task-1--c2");
+    const firstStart = harness.agent.waitForCaseStart("task-1--c1--1");
+    const secondStart = harness.agent.waitForCaseStart("task-1--c2--1");
 
     const runPromise = runBenchmark(planBenchmark(config), harness.dependencies);
     await Promise.all([firstStart, secondStart]);
 
     expect(harness.agent.activeCount).toBe(2);
     expect(harness.agent.maxActiveCount).toBe(2);
-    expect(harness.agent.startedOrder).toEqual(["task-1--c1", "task-1--c2"]);
+    expect(harness.agent.startedOrder).toEqual(["task-1--c1--1", "task-1--c2--1"]);
 
     harness.agent.releaseHeldRuns();
     const result = await runPromise;
@@ -1379,8 +1465,8 @@ describe("runBenchmark", () => {
     const runPromise = runBenchmark(planBenchmark(config), harness.dependencies);
     await firstCheck;
 
-    expect(harness.timeline.filter((entry) => entry.startsWith("prepare:"))).toEqual(["prepare:task-1--c1"]);
-    expect([...harness.agent.runCalls.keys()]).toEqual(["task-1--c1"]);
+    expect(harness.timeline.filter((entry) => entry.startsWith("prepare:"))).toEqual(["prepare:task-1--c1--1"]);
+    expect([...harness.agent.runCalls.keys()]).toEqual(["task-1--c1--1"]);
 
     harness.evaluatorProcesses.releaseChecks();
     const result = await runPromise;
@@ -1388,8 +1474,8 @@ describe("runBenchmark", () => {
     unwrapOk(result);
     expect(harness.agent.runCalls.size).toBe(2);
     expect(harness.timeline.filter((entry) => entry.startsWith("prepare:"))).toEqual([
-      "prepare:task-1--c1",
-      "prepare:task-1--c2",
+      "prepare:task-1--c1--1",
+      "prepare:task-1--c2--1",
     ]);
   });
 
@@ -1417,29 +1503,29 @@ describe("runBenchmark", () => {
     it("completes evaluation, preserves the runtime failure, and forces exit 2 without retrying", async () => {
       const config = buildTevuConfig({ tasks: [buildTask()] });
       const harness = createHarness(config);
-      harness.agent.scripts.set("task-1--c1", failedRunScript(buildError("task-1--c1")));
+      harness.agent.scripts.set("task-1--c1--1", failedRunScript(buildError("task-1--c1--1")));
 
       const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
       const run = unwrapOk(result);
-      const failedCase = caseResultOf(run, "task-1--c1");
+      const failedCase = caseResultOf(run, "task-1--c1--1");
       expect(failedCase.lifecycle).toBe("completed");
       expect(failedCase.outcome).toBe("passed");
-      expect(failedCase.failure?.error).toEqual(buildError("task-1--c1"));
+      expect(failedCase.failure?.error).toEqual(buildError("task-1--c1--1"));
       expect(failedCase.process?.exitCode).toBe(3);
       expect(failedCase.checks.map((check) => check.verdict)).toEqual(["passed", "passed"]);
-      expect(failedCase.artifacts.sessionExport).toBe("task-1--c1/session.json");
-      expect(failedCase.artifacts.solutionPatch).toBe("task-1--c1/solution.patch");
-      expect(failedCase.artifacts.checks).toBe("task-1--c1/checks.json");
+      expect(failedCase.artifacts.sessionExport).toBe("task-1--c1--1/session.json");
+      expect(failedCase.artifacts.solutionPatch).toBe("task-1--c1--1/solution.patch");
+      expect(failedCase.artifacts.checks).toBe("task-1--c1--1/checks.json");
       expect(failedCase.artifacts.assessment).toBeNull();
       expectAvailableMetric(failedCase.metrics.elapsed, 4_321, "millisecond", "process", "case");
       expectAvailableMetric(failedCase.metrics.inputTokens, 10, "token", "root-session export");
       expect(harness.agent.exportCalls).toHaveLength(2);
-      expect(harness.agent.exportCalls).toContain("session-task-1--c1");
-      expect(harness.agent.runCalls.get("task-1--c1")).toBe(1);
+      expect(harness.agent.exportCalls).toContain("session-task-1--c1--1");
+      expect(harness.agent.runCalls.get("task-1--c1--1")).toBe(1);
       expect(run.exitCode).toBe(2);
 
-      const independentCase = caseResultOf(run, "task-1--c2");
+      const independentCase = caseResultOf(run, "task-1--c2--1");
       expect(independentCase.lifecycle).toBe("completed");
       expect(independentCase.outcome).toBe("passed");
       expect(independentCase.failure).toBeNull();
@@ -1470,21 +1556,21 @@ describe("runBenchmark", () => {
     it("completes eligible checks with truthfully unavailable export metrics and continues independent cases", async () => {
       const { run, harness } = await runWithFailingExport(buildError);
 
-      const failedExportCase = caseResultOf(run, "task-1--c1");
+      const failedExportCase = caseResultOf(run, "task-1--c1--1");
       expect(failedExportCase.lifecycle).toBe("completed");
       expect(failedExportCase.outcome).toBe("passed");
       expect(failedExportCase.process?.exitCode).toBe(0);
       expect(failedExportCase.checks).toHaveLength(2);
       expect(failedExportCase.checks.map((check) => check.verdict)).toEqual(["passed", "passed"]);
       expect(failedExportCase.artifacts.sessionExport).toBeNull();
-      expect(failedExportCase.artifacts.checks).toBe("task-1--c1/checks.json");
+      expect(failedExportCase.artifacts.checks).toBe("task-1--c1--1/checks.json");
       expectAvailableMetric(failedExportCase.metrics.elapsed, 1_000, "millisecond", "process", "case");
       expectAvailableMetric(failedExportCase.metrics.toolCalls, 1, "count", "run events");
       expectUnavailableMetric(failedExportCase.metrics.inputTokens, "export failed");
       expectUnavailableMetric(failedExportCase.metrics.turns, "export failed");
-      expect(harness.agent.exportCalls).toContain("session-task-1--c1");
+      expect(harness.agent.exportCalls).toContain("session-task-1--c1--1");
 
-      const independentCase = caseResultOf(run, "task-1--c2");
+      const independentCase = caseResultOf(run, "task-1--c2--1");
       expect(independentCase.lifecycle).toBe("completed");
       expect(independentCase.outcome).toBe("passed");
       expectAvailableMetric(independentCase.metrics.inputTokens, 10, "token", "root-session export");
@@ -1493,8 +1579,8 @@ describe("runBenchmark", () => {
     it("preserves the failing export as the case runtime failure", async () => {
       const { run } = await runWithFailingExport(buildError);
 
-      const failedExportCase = caseResultOf(run, "task-1--c1");
-      expect(failedExportCase.failure?.error).toEqual(buildError("task-1--c1"));
+      const failedExportCase = caseResultOf(run, "task-1--c1--1");
+      expect(failedExportCase.failure?.error).toEqual(buildError("task-1--c1--1"));
     });
 
     it("forces run exit 2 despite the passed acceptance outcome", async () => {
@@ -1507,11 +1593,11 @@ describe("runBenchmark", () => {
   it("marks an unreadable workspace as process-failed and skips export, patch, and checks", async () => {
     const config = buildTevuConfig({ tasks: [buildTask()] });
     const harness = createHarness(config);
-    harness.git.unreadableCaseIds.add("task-1--c1");
+    harness.git.unreadableCaseIds.add("task-1--c1--1");
     harness.agent.scripts.set(
-      "task-1--c1",
+      "task-1--c1--1",
       failedRunScript(
-        { kind: "AgentProcessError", agent: AGENT_NAME, caseId: "task-1--c1", exitCode: 3, signal: null },
+        { kind: "AgentProcessError", agent: AGENT_NAME, caseId: "task-1--c1--1", exitCode: 3, signal: null },
         { withErrorEvent: true },
       ),
     );
@@ -1519,13 +1605,13 @@ describe("runBenchmark", () => {
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
     const run = unwrapOk(result);
-    const failedCase = caseResultOf(run, "task-1--c1");
+    const failedCase = caseResultOf(run, "task-1--c1--1");
     expect(failedCase.lifecycle).toBe("process-failed");
     expect(failedCase.outcome).toBe("not-evaluated");
     expect(failedCase.checks).toEqual([]);
     expect(failedCase.failure?.error.kind).toBe("AgentProcessError");
     expect(failedCase.process?.exitCode).toBe(3);
-    expect(failedCase.artifacts.events).toBe("task-1--c1/events.jsonl");
+    expect(failedCase.artifacts.events).toBe("task-1--c1--1/events.jsonl");
     expect(failedCase.artifacts.sessionExport).toBeNull();
     expect(failedCase.artifacts.solutionPatch).toBeNull();
     expect(failedCase.artifacts.checks).toBeNull();
@@ -1533,15 +1619,15 @@ describe("runBenchmark", () => {
     expectAvailableMetric(failedCase.metrics.apiErrors, 1, "count", "run events");
     expectAvailableMetric(failedCase.metrics.toolCalls, 1, "count", "run events");
     expectUnavailableMetric(failedCase.metrics.inputTokens, "unreadable");
-    expect(harness.agent.exportCalls).not.toContain("session-task-1--c1");
-    expect(harness.agent.runCalls.get("task-1--c1")).toBe(1);
-    expect(harness.timeline).not.toContain(`patch:task-1--c1`);
+    expect(harness.agent.exportCalls).not.toContain("session-task-1--c1--1");
+    expect(harness.agent.runCalls.get("task-1--c1--1")).toBe(1);
+    expect(harness.timeline).not.toContain(`patch:task-1--c1--1`);
     expect(
-      harness.evaluatorProcesses.requests.every((request) => request.cwd !== "/synthetic/workspaces/task-1--c1/worktree"),
+      harness.evaluatorProcesses.requests.every((request) => request.cwd !== "/synthetic/workspaces/task-1--c1--1/worktree"),
     ).toBe(true);
     expect(run.exitCode).toBe(2);
 
-    const independentCase = caseResultOf(run, "task-1--c2");
+    const independentCase = caseResultOf(run, "task-1--c2--1");
     expect(independentCase.lifecycle).toBe("completed");
     expect(independentCase.outcome).toBe("passed");
   });
@@ -1549,30 +1635,30 @@ describe("runBenchmark", () => {
   it("times out, skips all checks, attempts the patch, and falls back to event metrics", async () => {
     const config = buildTevuConfig({ tasks: [buildTask()] });
     const harness = createHarness(config);
-    harness.agent.scripts.set("task-1--c1", timedOutRunScript());
+    harness.agent.scripts.set("task-1--c1--1", timedOutRunScript());
 
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
     const run = unwrapOk(result);
-    const timedOutCase = caseResultOf(run, "task-1--c1");
+    const timedOutCase = caseResultOf(run, "task-1--c1--1");
     expect(timedOutCase.lifecycle).toBe("timed-out");
     expect(timedOutCase.outcome).toBe("not-evaluated");
     expect(timedOutCase.checks).toEqual([]);
     expect(timedOutCase.failure?.error.kind).toBe("CaseTimeoutError");
     expect(timedOutCase.process?.terminationStage).toBe("forced");
     expect(timedOutCase.artifacts.sessionExport).toBeNull();
-    expect(timedOutCase.artifacts.solutionPatch).toBe("task-1--c1/solution.patch");
+    expect(timedOutCase.artifacts.solutionPatch).toBe("task-1--c1--1/solution.patch");
     expect(timedOutCase.artifacts.checks).toBeNull();
     expectAvailableMetric(timedOutCase.metrics.elapsed, 4_321, "millisecond", "process", "case");
     expectAvailableMetric(timedOutCase.metrics.apiErrors, 1, "count", "run events");
     expectAvailableMetric(timedOutCase.metrics.toolCalls, 1, "count", "run events");
     expectUnavailableMetric(timedOutCase.metrics.inputTokens, "timed out");
-    expect(harness.agent.exportCalls).not.toContain("session-task-1--c1");
-    expect(harness.agent.runCalls.get("task-1--c1")).toBe(1);
-    expect(harness.timeline).not.toContain(`exportSession:session-task-1--c1`);
+    expect(harness.agent.exportCalls).not.toContain("session-task-1--c1--1");
+    expect(harness.agent.runCalls.get("task-1--c1--1")).toBe(1);
+    expect(harness.timeline).not.toContain(`exportSession:session-task-1--c1--1`);
     expect(
       harness.evaluatorProcesses.requests.every(
-        (request) => request.cwd !== "/synthetic/workspaces/task-1--c1/worktree",
+        (request) => request.cwd !== "/synthetic/workspaces/task-1--c1--1/worktree",
       ),
     ).toBe(true);
     expect(run.exitCode).toBe(2);
@@ -1581,7 +1667,7 @@ describe("runBenchmark", () => {
   it("stops scheduling queued cases after an artifact failure and reports every planned case", async () => {
     const config = buildTevuConfig({ run: buildRunSettings({ concurrency: 1 }), tasks: [buildTask()] });
     const harness = createHarness(config);
-    harness.artifacts.failOnce.set("appendEvent:task-1--c1", {
+    harness.artifacts.failOnce.set("appendEvent:task-1--c1--1", {
       kind: "ArtifactError",
       operation: "append-event",
       reason: "synthetic disk full",
@@ -1590,24 +1676,24 @@ describe("runBenchmark", () => {
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
     const run = unwrapOk(result);
-    const failedCase = caseResultOf(run, "task-1--c1");
+    const failedCase = caseResultOf(run, "task-1--c1--1");
     expect(failedCase.lifecycle).toBe("infrastructure-failed");
     expect(failedCase.outcome).toBe("not-evaluated");
     expect(failedCase.failure?.error.kind).toBe("ArtifactError");
     expect(failedCase.artifacts.sessionExport).toBeNull();
-    expect(harness.agent.exportCalls).not.toContain("session-task-1--c1");
-    expect(harness.agent.runCalls.get("task-1--c1")).toBe(1);
-    expect(harness.agent.runCalls.has("task-1--c2")).toBe(false);
+    expect(harness.agent.exportCalls).not.toContain("session-task-1--c1--1");
+    expect(harness.agent.runCalls.get("task-1--c1--1")).toBe(1);
+    expect(harness.agent.runCalls.has("task-1--c2--1")).toBe(false);
 
-    expect(run.cases.map((entry) => entry.identity.caseId)).toEqual(["task-1--c1"]);
+    expect(run.cases.map((entry) => entry.identity.caseId)).toEqual(["task-1--c1--1"]);
     expect(run.findings).toEqual([
       {
         severity: "error",
-        caseId: "task-1--c2",
+        caseId: "task-1--c2--1",
         message: "case was not started because an artifact failure stopped scheduling",
       },
     ]);
-    for (const plannedCaseId of ["task-1--c1", "task-1--c2"]) {
+    for (const plannedCaseId of ["task-1--c1--1", "task-1--c2--1"]) {
       const covered =
         run.cases.some((entry) => entry.identity.caseId === plannedCaseId) ||
         run.findings.some((finding) => finding.caseId === plannedCaseId);
@@ -1622,11 +1708,11 @@ describe("runBenchmark", () => {
       tasks: [buildTask()],
     });
     const harness = createHarness(config);
-    harness.agent.scripts.set("task-1--c1", async (input) => {
+    harness.agent.scripts.set("task-1--c1--1", async (input) => {
       await waitForSignal(input.cancellation);
-      return { ok: false, error: { kind: "CancellationError", activeCaseIds: ["task-1--c1"] } };
+      return { ok: false, error: { kind: "CancellationError", activeCaseIds: ["task-1--c1--1"] } };
     });
-    const caseStart = harness.agent.waitForCaseStart("task-1--c1");
+    const caseStart = harness.agent.waitForCaseStart("task-1--c1--1");
 
     const runPromise = runBenchmark(planBenchmark(config), harness.dependencies);
     await caseStart;
@@ -1634,40 +1720,40 @@ describe("runBenchmark", () => {
     const result = await runPromise;
 
     const run = unwrapOk(result);
-    const cancelledCase = caseResultOf(run, "task-1--c1");
+    const cancelledCase = caseResultOf(run, "task-1--c1--1");
     expect(cancelledCase.lifecycle).toBe("cancelled");
     expect(cancelledCase.outcome).toBe("not-evaluated");
     expect(cancelledCase.failure?.error.kind).toBe("CancellationError");
     expect(cancelledCase.artifacts.sessionExport).toBeNull();
-    expect(harness.agent.exportCalls).not.toContain("session-task-1--c1");
-    expect(harness.agent.runCalls.has("task-1--c2")).toBe(false);
+    expect(harness.agent.exportCalls).not.toContain("session-task-1--c1--1");
+    expect(harness.agent.runCalls.has("task-1--c2--1")).toBe(false);
     expect(run.findings).toEqual([
       {
         severity: "warning",
-        caseId: "task-1--c2",
+        caseId: "task-1--c2--1",
         message: "case was still queued when the run was cancelled and was not started",
       },
     ]);
     expect(run.exitCode).toBe(130);
     expect(harness.artifacts.finalizedRuns).toHaveLength(1);
-    expect(harness.lifecycleEvents).toContainEqual({ caseId: "task-1--c1", lifecycle: "cancelled" });
+    expect(harness.lifecycleEvents).toContainEqual({ caseId: "task-1--c1--1", lifecycle: "cancelled" });
   });
 
   it("finishes the case as cancelled with the evaluator request carrying the case signal when cancelled during evaluation", async () => {
     const { run, harness } = await runCancelledDuringEvaluation();
 
-    const cancelledCase = caseResultOf(run, "task-1--c1");
+    const cancelledCase = caseResultOf(run, "task-1--c1--1");
     expect(cancelledCase.lifecycle).toBe("cancelled");
     expect(cancelledCase.outcome).toBe("not-evaluated");
-    expect(cancelledCase.artifacts.sessionExport).toBe("task-1--c1/session.json");
-    expect(cancelledCase.artifacts.solutionPatch).toBe("task-1--c1/solution.patch");
-    expect(cancelledCase.artifacts.checks).toBe("task-1--c1/checks.json");
+    expect(cancelledCase.artifacts.sessionExport).toBe("task-1--c1--1/session.json");
+    expect(cancelledCase.artifacts.solutionPatch).toBe("task-1--c1--1/solution.patch");
+    expect(cancelledCase.artifacts.checks).toBe("task-1--c1--1/checks.json");
     expect(harness.evaluatorProcesses.requests[0]?.cancellation).toBeDefined();
-    expect(harness.agent.runCalls.has("task-1--c2")).toBe(false);
+    expect(harness.agent.runCalls.has("task-1--c2--1")).toBe(false);
     expect(run.findings).toEqual([
       {
         severity: "warning",
-        caseId: "task-1--c2",
+        caseId: "task-1--c2--1",
         message: "case was still queued when the run was cancelled and was not started",
       },
     ]);
@@ -1684,7 +1770,7 @@ describe("runBenchmark", () => {
   it("skips remaining checks when the run is cancelled during evaluation", async () => {
     const { run } = await runCancelledDuringEvaluation();
 
-    const cancelledCase = caseResultOf(run, "task-1--c1");
+    const cancelledCase = caseResultOf(run, "task-1--c1--1");
     expect(cancelledCase.checks).toHaveLength(1);
     expect(cancelledCase.checks[0]).toMatchObject({ checkId: "acc-required", verdict: "passed" });
   });
@@ -1710,7 +1796,7 @@ describe("runBenchmark", () => {
     const harness = createHarness(config);
     harness.git.createIsolatedCaseError = {
       kind: "IsolationError",
-      caseId: "task-1--c1",
+      caseId: "task-1--c1--1",
       reason: "synthetic isolation failure",
     };
 
@@ -1734,7 +1820,7 @@ describe("runBenchmark", () => {
   it("records a cleanup warning with the retained path when disposal fails", async () => {
     const config = buildTevuConfig({ tasks: [buildTask()] });
     const harness = createHarness(config);
-    harness.git.disposeErrors.set("task-1--c1", {
+    harness.git.disposeErrors.set("task-1--c1--1", {
       kind: "ArtifactError",
       operation: "dispose-case-workspace",
       reason: "synthetic disposal failure",
@@ -1743,14 +1829,14 @@ describe("runBenchmark", () => {
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
     const run = unwrapOk(result);
-    const disposedCase = caseResultOf(run, "task-1--c1");
+    const disposedCase = caseResultOf(run, "task-1--c1--1");
     expect(disposedCase.lifecycle).toBe("completed");
     expect(disposedCase.outcome).toBe("passed");
     expect(run.findings).toEqual([
       {
         severity: "warning",
-        caseId: "task-1--c1",
-        message: expect.stringContaining("/synthetic/workspaces/task-1--c1/worktree"),
+        caseId: "task-1--c1--1",
+        message: expect.stringContaining("/synthetic/workspaces/task-1--c1--1/worktree"),
       },
     ]);
     expect(run.findings[0]?.message).toContain("cleanup failed");
@@ -1760,7 +1846,7 @@ describe("runBenchmark", () => {
   it("stops scheduling and retains the workspace when case persistence fails", async () => {
     const config = buildTevuConfig({ run: buildRunSettings({ concurrency: 1 }), tasks: [buildTask()] });
     const harness = createHarness(config);
-    harness.artifacts.failOnce.set("finalizeCase:task-1--c1", {
+    harness.artifacts.failOnce.set("finalizeCase:task-1--c1--1", {
       kind: "ArtifactError",
       operation: "finalize-case",
       reason: "synthetic persistence failure",
@@ -1769,19 +1855,19 @@ describe("runBenchmark", () => {
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
     const run = unwrapOk(result);
-    const persistedCase = caseResultOf(run, "task-1--c1");
+    const persistedCase = caseResultOf(run, "task-1--c1--1");
     expect(persistedCase.lifecycle).toBe("completed");
-    expect(harness.timeline).not.toContain("dispose:task-1--c1");
-    expect(harness.agent.runCalls.has("task-1--c2")).toBe(false);
+    expect(harness.timeline).not.toContain("dispose:task-1--c1--1");
+    expect(harness.agent.runCalls.has("task-1--c2--1")).toBe(false);
     expect(run.findings).toEqual([
       {
         severity: "error",
-        caseId: "task-1--c1",
-        message: expect.stringContaining("/synthetic/workspaces/task-1--c1/worktree"),
+        caseId: "task-1--c1--1",
+        message: expect.stringContaining("/synthetic/workspaces/task-1--c1--1/worktree"),
       },
       {
         severity: "error",
-        caseId: "task-1--c2",
+        caseId: "task-1--c2--1",
         message: "case was not started because an artifact failure stopped scheduling",
       },
     ]);
@@ -1826,7 +1912,7 @@ describe("runBenchmark", () => {
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
     const run = unwrapOk(result);
-    const caseResult = caseResultOf(run, "task-1--c1");
+    const caseResult = caseResultOf(run, "task-1--c1--1");
     expect(caseResult.lifecycle).toBe("completed");
     expect(caseResult.outcome).toBe(expectedOutcome);
     expect(caseResult.failure).toBeNull();
@@ -1893,12 +1979,12 @@ describe("runBenchmark check-state orchestration", () => {
     const result = await runBenchmark(planBenchmark(config), harness.dependencies);
 
     const run = unwrapOk(result);
-    const failedCase = caseResultOf(run, "task-1--c1");
+    const failedCase = caseResultOf(run, "task-1--c1--1");
     expect(failedCase.lifecycle).toBe("infrastructure-failed");
     expect(failedCase.outcome).toBe("not-evaluated");
     expect(failedCase.checks).toEqual([]);
     expect(failedCase.artifacts.checks).toBeNull();
-    expect(failedCase.artifacts.solutionPatch).toBe("task-1--c1/solution.patch");
+    expect(failedCase.artifacts.solutionPatch).toBe("task-1--c1--1/solution.patch");
     expect(failedCase.failure?.error).toEqual(failure);
     expect(harness.timeline.filter((entry) => entry.startsWith("check:"))).toEqual([]);
     expect(run.exitCode).toBe(1);
@@ -1928,7 +2014,7 @@ describe("runBenchmark check-state orchestration", () => {
 
     const run = unwrapOk(result);
     expect(harness.git.applyCheckStateCalls).toEqual([]);
-    expect(Object.hasOwn(caseResultOf(run, "task-1--c1"), "checkState")).toBe(false);
+    expect(Object.hasOwn(caseResultOf(run, "task-1--c1--1"), "checkState")).toBe(false);
   });
 
   it("returns the readOverlay failure unchanged before the run starts, any case is prepared, or any agent runs", async () => {
@@ -1963,7 +2049,7 @@ function buildRunManifest(overrides: Partial<RunManifest> = {}): RunManifest {
     completedAt: null,
     host: { platform: "linux", nodeVersion: "v24.0.0-synthetic", bunVersion: "1.2.3-synthetic" },
     tools: { gitVersion: "2.45.0-synthetic", agentVersions: {} },
-    execution: { concurrency: 1, caseTimeoutMs: 1_000 },
+    execution: { concurrency: 1, caseTimeoutMs: 1_000, repeat: { value: 1, source: "config" } },
     cases: [],
     ...overrides,
   };

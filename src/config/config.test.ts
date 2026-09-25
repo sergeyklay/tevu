@@ -11,7 +11,7 @@ import { validateConfig } from "../application/validate.ts";
 import { createConfigStore } from "../adapters/artifact-store.ts";
 import { createGitWorkspaceAdapter } from "../adapters/git.ts";
 import { renderConfigDocument } from "./document.ts";
-import { canonicalConfigSerialization, loadConfig } from "./load.ts";
+import { canonicalConfigSerialization, loadConfig, parseConfigText } from "./load.ts";
 import { AGENT_NAMES, agentNamesInUse, agentSettingsSchema, TevuConfigSchema } from "./schema.ts";
 
 import type { TaskDependencies, TaskWizardInput } from "../application/create-task.ts";
@@ -873,6 +873,81 @@ describe("TevuConfigSchema", () => {
       });
     },
   );
+
+  describe("run.repeat", () => {
+    it("defaults to 1 when omitted", () => {
+      const config = expectSchemaAcceptance(buildConfig());
+
+      expect(config.run.repeat).toBe(1);
+    });
+
+    it.each([3, 3.0, 100])("accepts %s", (value) => {
+      const config = buildConfig({ run: buildRunSettings({ repeat: value }) });
+
+      expect(TevuConfigSchema.safeParse(config).success).toBe(true);
+    });
+
+    it.each([
+      { value: 0, message: "Too small: expected number to be >=1" },
+      { value: -1, message: "Too small: expected number to be >=1" },
+      { value: 1.5, message: "Invalid input: expected int, received number" },
+      { value: 101, message: "Too big: expected number to be <=100" },
+    ])("rejects $value with the message $message", ({ value, message }) => {
+      const config = buildConfig({ run: buildRunSettings({ repeat: value }) });
+
+      expect(expectSchemaRejection(config)).toContainEqual({ path: "run.repeat", message });
+    });
+
+    it("rejects the string \"3\"", () => {
+      const config = buildConfig({ run: buildRunSettings({ repeat: "3" as unknown as number }) });
+
+      expect(TevuConfigSchema.safeParse(config).success).toBe(false);
+    });
+
+    it("rejects null", () => {
+      const config = buildConfig({ run: buildRunSettings({ repeat: null as unknown as number }) });
+
+      expect(TevuConfigSchema.safeParse(config).success).toBe(false);
+    });
+
+    it("passes at the MAX_REPEAT bound of 100 and rejects 101 over it (AC-14)", () => {
+      expect(
+        TevuConfigSchema.safeParse(buildConfig({ run: buildRunSettings({ repeat: 100 }) })).success,
+      ).toBe(true);
+      expect(
+        expectSchemaRejection(buildConfig({ run: buildRunSettings({ repeat: 101 }) })),
+      ).toContainEqual({ path: "run.repeat", message: "Too big: expected number to be <=100" });
+    });
+  });
+
+  describe("run.repeat as a YAML scalar", () => {
+    function yamlWithRepeat(repeatLiteral: string): string {
+      const base = configYaml({ outputDirectory: "./runs", repositoryPath: "./repo", command: "opencode" });
+      return base.replace("  concurrency: 2\n", `  concurrency: 2\n  repeat: ${repeatLiteral}\n`);
+    }
+
+    it.each(["3", "03", "3.0", "+3"])("accepts the YAML scalar %s, resolving to 3", (literal) => {
+      const parsed = parseConfigText(yamlWithRepeat(literal));
+
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.value.run.repeat).toBe(3);
+    });
+
+    it("accepts the YAML scalar 1e2, resolving to 100", () => {
+      const parsed = parseConfigText(yamlWithRepeat("1e2"));
+
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.value.run.repeat).toBe(100);
+    });
+
+    it.each(["1e3", '"3"', "null"])("rejects the YAML scalar %s", (literal) => {
+      const parsed = parseConfigText(yamlWithRepeat(literal));
+
+      expect(parsed.ok).toBe(false);
+    });
+  });
 });
 
 describe("loadConfig", () => {

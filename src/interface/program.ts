@@ -7,9 +7,9 @@
  * or storage logic and imports no concrete adapter.
  */
 
-import { Command, CommanderError, Option } from "commander";
+import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
 
-import { agentNamesInUse } from "../config/schema.ts";
+import { agentNamesInUse, MAX_REPEAT, RepeatSchema } from "../config/schema.ts";
 import { CONFIG_TEMPLATE } from "../config/template.ts";
 import { runAssessmentWizard, runTaskWizard } from "./task-wizard.ts";
 
@@ -90,7 +90,7 @@ export type ProgramOperations = {
       | "AgentProtocolError"
     >
   >;
-  planBenchmark(config: TevuConfig): BenchmarkPlan;
+  planBenchmark(config: TevuConfig, repeatOverride?: number): BenchmarkPlan;
   executeBenchmark(
     plan: BenchmarkPlan,
     hooks: BenchmarkExecutionHooks,
@@ -140,7 +140,7 @@ export type ProgramDependencies = {
 
 type ConfigOptionValues = { config: string };
 type TaskAddOptionValues = ConfigOptionValues & { jira?: string; github?: string };
-type RunOptionValues = ConfigOptionValues & { dryRun?: boolean };
+type RunOptionValues = ConfigOptionValues & { dryRun?: boolean; repeat?: number };
 
 type ExitBox = { code: number };
 
@@ -177,9 +177,25 @@ const HELP_EXAMPLES: Record<string, [string, string][]> = {
     ["Preview the execution plan", "tevu run --dry-run"],
     ["Run the configured benchmark", "tevu run"],
   ],
-  assess: [["Assess a case from a saved run", "tevu assess 20260923t120000z-a1b2c3 task--model"]],
+  assess: [["Assess a case from a saved run", "tevu assess 20260923t120000z-a1b2c3 task--model--1"]],
   report: [["Regenerate a saved run's report", "tevu report 20260923t120000z-a1b2c3"]],
 };
+
+const REPEAT_ARGUMENT_PATTERN = /^[0-9]+$/;
+
+/**
+ * Parses `--repeat`'s argument: a whole number `RepeatSchema` accepts.
+ *
+ * @throws {InvalidArgumentError} When `value` does not match `^[0-9]+$` or
+ * `RepeatSchema` rejects its numeric value.
+ */
+function parseRepeatOption(value: string): number {
+  const parsed = REPEAT_ARGUMENT_PATTERN.test(value) ? RepeatSchema.safeParse(Number(value)) : null;
+  if (parsed === null || !parsed.success) {
+    throw new InvalidArgumentError(`Expected a whole number from 1 to ${MAX_REPEAT}.`);
+  }
+  return parsed.data;
+}
 
 /**
  * Creates the complete `tevu` command tree for help inspection and parsing.
@@ -241,6 +257,12 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
     .description("Run the benchmark")
     .option("--config <path>", "Configuration file path", DEFAULT_CONFIG_PATH)
     .option("--dry-run", "Show the execution plan without running tasks")
+    .addOption(
+      new Option(
+        "--repeat <n>",
+        "Attempts per task/model pair for this run; overrides run.repeat",
+      ).argParser(parseRepeatOption),
+    )
     .action(async (options: RunOptionValues) => {
       exit.code = await runBenchmarkCommand(dependencies, options);
     });
@@ -465,7 +487,7 @@ async function runBenchmarkCommand(
     out("Configuration is invalid.");
     return EXIT_FAILURE;
   }
-  const plan = operations.planBenchmark(loaded.value);
+  const plan = operations.planBenchmark(loaded.value, options.repeat);
   if (options.dryRun === true) {
     printDryRun(out, plan, validation.value.capabilities);
     return EXIT_COMPLETED;
@@ -585,6 +607,7 @@ function printDryRun(
       `  ${identity.caseId}: task ${identity.taskId}, model entry ${identity.modelId} (${identity.model}, effort ${identity.effort}), commit ${identity.sourceCommit}`,
     );
   }
+  out(`Manual assessments needed: ${countManualAssessments(plan)} (one tevu assess per case whose task has manual checks)`);
   out(
     `Limits: concurrency ${plan.concurrency}, timeout ${plan.caseTimeoutMs}ms, stop grace ${plan.terminationGraceMs}ms`,
   );
@@ -592,6 +615,24 @@ function printDryRun(
   for (const name of agentNamesInUse(plan.config)) {
     printCapabilities(out, name, capabilities[name] ?? null);
   }
+}
+
+/** Counts `plan.cases` entries whose task declares at least one manual check in `checks.acceptance` or `checks.done`. */
+function countManualAssessments(plan: BenchmarkPlan): number {
+  const tasksById = new Map(plan.config.tasks.map((task) => [task.id, task]));
+  let count = 0;
+  for (const identity of plan.cases) {
+    const task = tasksById.get(identity.taskId);
+    if (task !== undefined && taskHasManualCheck(task)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/** Holds when a task declares at least one check with `manual: true`, required or optional. */
+function taskHasManualCheck(task: TaskDefinition): boolean {
+  return [...task.checks.acceptance, ...task.checks.done].some((check) => "manual" in check);
 }
 
 function printCapabilities(out: LineWriter, name: string, report: AgentCapabilityReport | null): void {
