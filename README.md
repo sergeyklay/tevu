@@ -22,7 +22,7 @@ tevu runs that comparison on tasks from your own task tracker.
 
 **Coding agents:** OpenCode.
 
-## Try It
+## Install
 
 From a checkout, with Node.js 24 and Bun installed:
 
