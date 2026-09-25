@@ -63,7 +63,7 @@ const PROVIDER_ENV_NAME = "TEVU_PROVIDER_KEY";
 const TRANSCRIPT_BODY = "TEVU-TRANSCRIPT-BODY model output text";
 const PATCH_BODY = "TEVU-PATCH-BODY diff --git a/src/welcome.ts b/src/welcome.ts";
 
-const FIXTURE_DIRECTORY = new URL("./opencode-protocol.fixtures/", import.meta.url);
+const FIXTURE_DIRECTORY = new URL("./fixtures/", import.meta.url);
 
 /**
  * A registry holding the real OpenCode adapter under "opencode", matching the
