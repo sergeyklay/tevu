@@ -227,7 +227,6 @@ export async function runBenchmark(
     host: {
       platform: host.value.platform,
       nodeVersion: host.value.nodeVersion,
-      bunVersion: host.value.bunVersion,
     },
     tools: { gitVersion: host.value.gitVersion, agentVersions },
     execution: {

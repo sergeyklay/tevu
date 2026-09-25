@@ -387,11 +387,7 @@ export function createPrerequisiteAdapter(): PrerequisiteAdapter {
       if (platform !== 'linux' && platform !== 'darwin') {
         return prerequisiteError('platform', 'linux or darwin', platform);
       }
-      const bunVersion = await probeToolVersion('bun');
-      if (!bunVersion.ok) {
-        return bunVersion;
-      }
-      const gitVersion = await probeToolVersion('git');
+      const gitVersion = await probeGitVersion();
       if (!gitVersion.ok) {
         return gitVersion;
       }
@@ -400,7 +396,6 @@ export function createPrerequisiteAdapter(): PrerequisiteAdapter {
         value: {
           platform,
           nodeVersion: process.version,
-          bunVersion: bunVersion.value,
           gitVersion: gitVersion.value,
         },
       };
@@ -661,13 +656,11 @@ async function nearestExistingAncestor(target: string): Promise<string> {
   }
 }
 
-async function probeToolVersion(
-  tool: 'bun' | 'git',
-): Promise<TevuResult<string, 'PrerequisiteError'>> {
+async function probeGitVersion(): Promise<TevuResult<string, 'PrerequisiteError'>> {
   // Version probes are local prerequisite checks, not case processes, so they
   // inherit the parent environment: version-manager shims (asdf, mise) need
   // HOME and friends to resolve the pinned tool. No value is persisted.
-  const result = await execa(tool, ['--version'], {
+  const result = await execa('git', ['--version'], {
     stdin: 'ignore',
     reject: false,
     timeout: PROBE_TIMEOUT_MS,
@@ -675,8 +668,8 @@ async function probeToolVersion(
   const stdout = typeof result.stdout === 'string' ? result.stdout.trim() : '';
   if (result.failed || result.exitCode !== 0 || stdout.length === 0) {
     return prerequisiteError(
-      tool,
-      `${tool} --version succeeds on the parent PATH`,
+      'git',
+      'git --version succeeds on the parent PATH',
       describeSpawnFailure(result),
     );
   }

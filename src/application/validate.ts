@@ -101,7 +101,7 @@ function collectSchemaFindings(config: TevuConfig): ValidationFinding[] {
   }));
 }
 
-/** Checks the local platform and the pinned Node.js, Bun, and Git toolchain. */
+/** Checks the local platform and that `git --version` succeeds on the parent PATH. */
 async function collectHostFindings(
   dependencies: ValidationDependencies,
 ): Promise<ValidationFinding[]> {

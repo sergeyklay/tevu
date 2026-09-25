@@ -274,7 +274,6 @@ function buildPrerequisites(overrides: Partial<PrerequisiteAdapter> = {}): Prere
       value: {
         platform: 'linux' as const,
         nodeVersion: '24.21.0',
-        bunVersion: '1.4.2',
         gitVersion: '2.45.0',
       },
     })),

@@ -338,7 +338,7 @@ function buildRunResult(overrides: Partial<RunResult> = {}): RunResult {
       configDigest: 'fixture-digest',
       startedAt: '2026-09-23T10:00:00.000Z',
       completedAt: '2026-09-23T10:05:00.000Z',
-      host: { platform: 'linux', nodeVersion: '24.10.0', bunVersion: '1.2.0' },
+      host: { platform: 'linux', nodeVersion: '24.10.0' },
       tools: { gitVersion: '2.47.0', agentVersions: { [AGENT_NAME]: '1.18.32' } },
       execution: { concurrency: 2, caseTimeoutMs: 600000, repeat: { value: 1, source: 'config' } },
       cases: [identity],

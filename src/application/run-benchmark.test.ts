@@ -220,7 +220,6 @@ function buildHostProbe(): HostProbe {
   return {
     platform: 'linux',
     nodeVersion: 'v24.0.0-synthetic',
-    bunVersion: '1.2.3-synthetic',
     gitVersion: '2.45.0-synthetic',
   };
 }
@@ -1179,7 +1178,6 @@ describe('runBenchmark', () => {
     expect(manifest.host).toEqual({
       platform: 'linux',
       nodeVersion: 'v24.0.0-synthetic',
-      bunVersion: '1.2.3-synthetic',
     });
     expect(manifest.tools).toEqual({
       gitVersion: '2.45.0-synthetic',
@@ -2256,7 +2254,7 @@ function buildRunManifest(overrides: Partial<RunManifest> = {}): RunManifest {
     configDigest: 'digest-stub-synthetic',
     startedAt: CLOCK_BASE,
     completedAt: null,
-    host: { platform: 'linux', nodeVersion: 'v24.0.0-synthetic', bunVersion: '1.2.3-synthetic' },
+    host: { platform: 'linux', nodeVersion: 'v24.0.0-synthetic' },
     tools: { gitVersion: '2.45.0-synthetic', agentVersions: {} },
     execution: { concurrency: 1, caseTimeoutMs: 1_000, repeat: { value: 1, source: 'config' } },
     cases: [],
