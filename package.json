@@ -3,16 +3,19 @@
   "description": "Task Evaluation & Verification Utility for AI coding agents",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "private": true,
   "type": "module",
   "bin": {
     "tevu": "dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build": "rm -rf dist && esbuild src/index.ts --bundle --format=esm --platform=node --target=node24 --packages=external --outfile=dist/index.js && chmod +x dist/index.js",
+    "build": "rm -rf dist && esbuild src/index.ts --bundle --format=esm --platform=node --target=node24 --packages=external --outfile=dist/index.js",
+    "prepack": "bun run build",
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
