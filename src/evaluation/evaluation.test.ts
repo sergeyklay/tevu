@@ -147,6 +147,7 @@ const AGENTS_REGISTRY: AgentRegistry = new Map<string, AgentAdapter>([
         const reason = input.exportUnavailableReason ?? 'root session export unavailable';
         return { ok: true, value: buildEventFallbackMetrics(reason, input.events) };
       },
+      callModel: () => Promise.reject(new Error('unused in report regeneration')),
     },
   ],
 ]);

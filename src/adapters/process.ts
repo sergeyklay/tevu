@@ -9,6 +9,7 @@
 
 import { Buffer } from 'node:buffer';
 import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { execa } from 'execa';
@@ -30,6 +31,7 @@ import type {
   ManagedProcessLaunchFailure,
   ManagedProcessRequest,
   ManagedProcessResult,
+  ModelCallEnvironment,
   ParentEnvironmentSnapshot,
   PrerequisiteAdapter,
   RedactedCapture,
@@ -384,6 +386,49 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
         };
       }
     },
+    async createModelCallEnvironment(
+      snapshot: ParentEnvironmentSnapshot,
+      agentVariables: { secrets: readonly string[]; env: readonly string[] },
+    ): Promise<TevuResult<ModelCallEnvironment, 'ArtifactError'>> {
+      let root: string;
+      try {
+        root = await mkdtemp(join(tmpdir(), 'tevu-call-'));
+      } catch (cause) {
+        return artifactError('create-model-call-directory', describeCause(cause));
+      }
+      try {
+        const workingDirectory = join(root, 'work');
+        await mkdir(workingDirectory);
+        const base = await createEnvironmentBase(join(root, 'agent'), snapshot.path);
+        const variables: Record<string, string> = { ...base.variables };
+        for (const name of [...agentVariables.secrets, ...agentVariables.env]) {
+          const value = snapshot.agentValues[name];
+          if (value !== undefined) {
+            variables[name] = value;
+          }
+        }
+        return {
+          ok: true,
+          value: {
+            rootDirectory: root,
+            workingDirectory,
+            homeDirectory: base.homeDirectory,
+            variables,
+            async dispose(): Promise<TevuResult<void, 'ArtifactError'>> {
+              try {
+                await rm(root, { recursive: true, force: true });
+                return { ok: true, value: undefined };
+              } catch (cause) {
+                return artifactError('remove-model-call-directory', describeCause(cause));
+              }
+            },
+          },
+        };
+      } catch (cause) {
+        await rm(root, { recursive: true, force: true }).catch(() => undefined);
+        return artifactError('create-model-call-directory', describeCause(cause));
+      }
+    },
   };
 }
 
@@ -582,6 +627,47 @@ function snapshotParentEnvironment(
   };
 }
 
+/** One private home, XDG, and temporary directory layout with its fixed replacement variables. */
+type EnvironmentBase = {
+  homeDirectory: string;
+  temporaryDirectory: string;
+  variables: Record<string, string>;
+};
+
+/**
+ * Creates one private home, XDG, and temporary directory layout under
+ * `baseDirectory`, and its fixed replacement variables (`PATH`, `HOME`,
+ * `XDG_*`, `TMPDIR`, `LANG`, `LC_ALL`, `CI`). Shared by the per-case agent and
+ * evaluator environments and by one model call's agent environment, so a
+ * later change to this layout reaches every caller.
+ */
+async function createEnvironmentBase(
+  baseDirectory: string,
+  path: string,
+): Promise<EnvironmentBase> {
+  const homeDirectory = join(baseDirectory, 'home');
+  const temporaryDirectory = join(baseDirectory, 'tmp');
+  const xdgDirectories = {
+    XDG_CONFIG_HOME: join(homeDirectory, '.config'),
+    XDG_DATA_HOME: join(homeDirectory, '.local', 'share'),
+    XDG_CACHE_HOME: join(homeDirectory, '.cache'),
+    XDG_STATE_HOME: join(homeDirectory, '.local', 'state'),
+  };
+  for (const directory of [temporaryDirectory, ...Object.values(xdgDirectories)]) {
+    await mkdir(directory, { recursive: true });
+  }
+  const variables: Record<string, string> = {
+    PATH: path,
+    HOME: homeDirectory,
+    ...xdgDirectories,
+    TMPDIR: temporaryDirectory,
+    LANG: FIXED_LOCALE,
+    LC_ALL: FIXED_LOCALE,
+    CI: '1',
+  };
+  return { homeDirectory, temporaryDirectory, variables };
+}
+
 type EnvironmentAddition = {
   name: string;
   classification: 'secret' | 'ordinary';
@@ -599,27 +685,8 @@ type IsolatedEnvironmentInput = {
 async function buildIsolatedEnvironment(
   input: IsolatedEnvironmentInput,
 ): Promise<IsolatedEnvironment> {
-  const homeDirectory = join(input.baseDirectory, 'home');
-  const temporaryDirectory = join(input.baseDirectory, 'tmp');
-  const xdgDirectories = {
-    XDG_CONFIG_HOME: join(homeDirectory, '.config'),
-    XDG_DATA_HOME: join(homeDirectory, '.local', 'share'),
-    XDG_CACHE_HOME: join(homeDirectory, '.cache'),
-    XDG_STATE_HOME: join(homeDirectory, '.local', 'state'),
-  };
-  for (const directory of [temporaryDirectory, ...Object.values(xdgDirectories)]) {
-    await mkdir(directory, { recursive: true });
-  }
-
-  const variables: Record<string, string> = {
-    PATH: input.path,
-    HOME: homeDirectory,
-    ...xdgDirectories,
-    TMPDIR: temporaryDirectory,
-    LANG: FIXED_LOCALE,
-    LC_ALL: FIXED_LOCALE,
-    CI: '1',
-  };
+  const base = await createEnvironmentBase(input.baseDirectory, input.path);
+  const variables: Record<string, string> = { ...base.variables };
   const variableManifest: EnvironmentVariableRecord[] = Object.keys(variables).map((name) => ({
     name,
     classification: 'fixed',
@@ -640,8 +707,8 @@ async function buildIsolatedEnvironment(
   return {
     caseId: input.caseId,
     recipient: input.recipient,
-    homeDirectory,
-    temporaryDirectory,
+    homeDirectory: base.homeDirectory,
+    temporaryDirectory: base.temporaryDirectory,
     variables,
     variableManifest,
   };
@@ -693,6 +760,13 @@ function prerequisiteError(
   error: { kind: 'PrerequisiteError'; tool: string; expected: string; actual: string };
 } {
   return { ok: false, error: { kind: 'PrerequisiteError', tool, expected, actual } };
+}
+
+function artifactError(
+  operation: string,
+  reason: string,
+): { ok: false; error: { kind: 'ArtifactError'; operation: string; reason: string } } {
+  return { ok: false, error: { kind: 'ArtifactError', operation, reason } };
 }
 
 function missingVariableError(name: string): {

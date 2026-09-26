@@ -289,6 +289,9 @@ function buildFakeAgentAdapter(
     normalizeMetrics() {
       return { ok: true, value: unavailableAgentMetrics('integration test: metrics not measured') };
     },
+    async callModel() {
+      return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
+    },
   };
 }
 

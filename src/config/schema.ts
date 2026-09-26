@@ -10,6 +10,8 @@ import { z } from 'zod';
 import type {
   CheckDefinition,
   ModelDefinition,
+  ModelRole,
+  ModelRoleName,
   RepositorySetup,
   SetupCommand,
   TaskDefinition,
@@ -289,16 +291,39 @@ const RepositoryDefinitionSchema = z.strictObject({
 /** File-shape repository entry; identical to `RepositoryDefinition`. */
 export type RepositoryInput = z.input<typeof RepositoryDefinitionSchema>;
 
+/** `provider/model` grammar shared by a model entry and a model role. */
+const ModelIdentifierSchema = z.templateLiteral([z.string().min(1), '/', z.string().min(1)]);
+
 /** One benchmark model entry, before its `agent` default is resolved against the configured agents. */
 const ModelDefinitionSchema = z.strictObject({
   id: IdSchema,
-  model: z.templateLiteral([z.string().min(1), '/', z.string().min(1)]),
+  model: ModelIdentifierSchema,
   effort: z.string().min(1),
   agent: z.string().min(1).optional(),
 });
 
 /** File-shape model entry; `agent` defaults to the sole configured agent. */
 export type ModelDefinitionInput = z.input<typeof ModelDefinitionSchema>;
+
+/** One declared model role, before its `agent` default is resolved against the configured agents. */
+const ModelRoleSchema = z.strictObject({
+  model: ModelIdentifierSchema,
+  effort: z.string().min(1),
+  agent: z.string().min(1).optional(),
+});
+
+/** File-shape model role; `agent` defaults to the sole configured agent. */
+export type ModelRoleInput = z.input<typeof ModelRoleSchema>;
+
+/**
+ * The `roles` shape keyed exactly by {@link ModelRoleName}'s members; the
+ * `satisfies` check fails `bun run typecheck` if a role key and `ModelRoleName`
+ * ever drift apart.
+ */
+const ROLES_SHAPE = {
+  criteria: ModelRoleSchema.optional(),
+  grader: ModelRoleSchema.optional(),
+} satisfies Record<ModelRoleName, unknown>;
 
 /** One-time tracker import snapshot; later tracker changes never alter the task. */
 const ImportedTaskSourceSchema = z.strictObject({
@@ -498,6 +523,11 @@ function resolveCheck(check: PreCheck, checkTimeout: string | undefined): CheckD
   };
 }
 
+/** Resolves one declared model role's `agent` default, exactly as `models[].agent` is resolved. */
+function materializeModelRole(role: ModelRoleInput, firstAgentKey: string): ModelRole {
+  return { model: role.model, effort: role.effort, agent: role.agent ?? firstAgentKey };
+}
+
 function checkUniqueIds(
   entries: readonly { id: string }[],
   ctx: z.RefinementCtx,
@@ -523,6 +553,7 @@ const RawTevuConfigShape = z.strictObject({
   trackers: z.strictObject({ jira: JiraTrackerSettingsSchema.optional() }).optional(),
   repositories: z.array(RepositoryDefinitionSchema).min(1),
   models: z.array(ModelDefinitionSchema).min(2),
+  roles: z.strictObject(ROLES_SHAPE).optional(),
   tasks: z.array(TaskDefinitionSchema).min(1),
 });
 
@@ -539,6 +570,17 @@ function refineTevuConfig(raw: RawTevuConfig, ctx: z.RefinementCtx): void {
       ctx.addIssue({
         code: 'custom',
         path: ['models', index, 'agent'],
+        message: `agent must name a configured agent: ${agentKeys.join(', ')}`,
+      });
+    }
+  });
+
+  (Object.keys(ROLES_SHAPE) as ModelRoleName[]).forEach((roleName) => {
+    const role = raw.roles?.[roleName];
+    if (role?.agent !== undefined && !agentKeys.includes(role.agent)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['roles', roleName, 'agent'],
         message: `agent must name a configured agent: ${agentKeys.join(', ')}`,
       });
     }
@@ -654,6 +696,19 @@ function materializeTevuConfig(raw: RawTevuConfig): TevuConfig {
     agent: model.agent ?? firstAgentKey,
   }));
 
+  const rolesInput = raw.roles;
+  const roles: Partial<Record<ModelRoleName, ModelRole>> | undefined =
+    rolesInput === undefined
+      ? undefined
+      : {
+          ...(rolesInput.criteria === undefined
+            ? {}
+            : { criteria: materializeModelRole(rolesInput.criteria, firstAgentKey) }),
+          ...(rolesInput.grader === undefined
+            ? {}
+            : { grader: materializeModelRole(rolesInput.grader, firstAgentKey) }),
+        };
+
   const tasks: TaskDefinition[] = raw.tasks.map((task: RawTask) => {
     const repo = task.repo ?? soleRepositoryId;
     if (repo === undefined) {
@@ -687,6 +742,7 @@ function materializeTevuConfig(raw: RawTevuConfig): TevuConfig {
     ...(raw.trackers === undefined ? {} : { trackers: raw.trackers }),
     repositories: raw.repositories,
     models,
+    ...(roles === undefined ? {} : { roles }),
     tasks,
   };
 }

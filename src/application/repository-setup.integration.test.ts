@@ -265,6 +265,9 @@ function buildDirectEditAgent(): AgentAdapter {
     normalizeMetrics() {
       return { ok: true, value: buildAgentMetricsStub() };
     },
+    async callModel() {
+      return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
+    },
   };
 }
 
