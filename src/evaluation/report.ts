@@ -241,6 +241,7 @@ function renderMarkdownReport(model: NormalizedRunModel): string {
     ...renderAgentCapabilityLines(tools.agentVersions, model.capabilities),
     `- Concurrency: ${manifest.execution.concurrency}`,
     `- Case timeout: ${manifest.execution.caseTimeoutMs}ms`,
+    ...renderTaskCaseTimeoutLine(manifest.cases, manifest.execution.caseTimeoutMs),
     `- Repeat: ${manifest.execution.repeat.value} (source: ${manifest.execution.repeat.source})`,
     `- Run exit code: ${model.exitCode}`,
     '',
@@ -332,6 +333,36 @@ function renderAgentCapabilityLines(
     );
   }
   return lines;
+}
+
+/**
+ * Renders the "Tasks with their own case timeout" line, listing every
+ * distinct `(taskId, timeoutMs)` pair whose `timeoutMs` differs from the
+ * default, sorted by task ID then by `timeoutMs` ascending. Returns no line
+ * when every case ran under the default, so regenerating from unchanged
+ * artifacts stays independent of `manifest.cases`'s iteration order.
+ */
+function renderTaskCaseTimeoutLine(
+  cases: readonly CaseIdentity[],
+  defaultCaseTimeoutMs: number,
+): string[] {
+  const entries = new Map<string, { taskId: string; timeoutMs: number }>();
+  for (const identity of cases) {
+    if (identity.timeoutMs !== defaultCaseTimeoutMs) {
+      entries.set(`${identity.taskId}\u0000${identity.timeoutMs}`, {
+        taskId: identity.taskId,
+        timeoutMs: identity.timeoutMs,
+      });
+    }
+  }
+  if (entries.size === 0) {
+    return [];
+  }
+  const sorted = [...entries.values()].sort(
+    (a, b) => compareStrings(a.taskId, b.taskId) || a.timeoutMs - b.timeoutMs,
+  );
+  const rendered = sorted.map((entry) => `${entry.taskId} ${entry.timeoutMs}ms`).join(', ');
+  return [`- Tasks with their own case timeout: ${rendered}`];
 }
 
 /** Renders the `Pair summary:` block for one task's pairs, in `pairs` order. */

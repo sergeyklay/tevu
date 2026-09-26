@@ -663,6 +663,40 @@ describe('TevuConfigSchema', () => {
     expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain(`tasks.0.${field}`);
   });
 
+  it('accepts a task timeout and materializes it verbatim', () => {
+    const config = buildConfig({ tasks: [buildTaskDefinition({ timeout: '20m' })] });
+
+    const accepted = expectSchemaAcceptance(config);
+
+    expect(accepted.tasks[0]?.timeout).toBe('20m');
+  });
+
+  it('materializes a task with no timeout property when the file declares none', () => {
+    const config = buildConfig({ tasks: [buildTaskDefinition()] });
+
+    const accepted = expectSchemaAcceptance(config);
+
+    expect('timeout' in (accepted.tasks[0] ?? {})).toBe(false);
+  });
+
+  it.each([
+    { value: 20, message: 'Invalid input: expected string, received number' },
+    {
+      value: '20',
+      message: 'must be a positive whole number followed by ms, s, m, or h, for example 30s or 10m',
+    },
+    {
+      value: 'abc',
+      message: 'must be a positive whole number followed by ms, s, m, or h, for example 30s or 10m',
+    },
+  ])('rejects a task timeout of $value at tasks.0.timeout', ({ value, message }) => {
+    const config = buildConfig({
+      tasks: [{ ...buildTaskDefinition(), timeout: value } as unknown as TaskInput],
+    });
+
+    expect(expectSchemaRejection(config)).toContainEqual({ path: 'tasks.0.timeout', message });
+  });
+
   it('rejects a model without a namespace separator', () => {
     const config = {
       ...buildConfig(),

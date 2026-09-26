@@ -94,6 +94,10 @@ type RunBenchmarkErrorKind =
  * source `"config"`. `config` is returned unmodified: `plan.config.run.repeat`
  * always keeps the configured value, even when `repeatOverride` overrides it
  * for this plan.
+ *
+ * Each case's `timeoutMs` is its task's `timeout` when declared, otherwise
+ * `defaultCaseTimeoutMs`; every case of one task shares the same value,
+ * regardless of model entry, attempt, or `repeatOverride`.
  */
 export function planBenchmark(
   config: TevuConfig,
@@ -104,9 +108,12 @@ export function planBenchmark(
     repeatOverride === undefined
       ? { value: config.run.repeat, source: 'config' }
       : { value: repeatOverride, source: 'cli' };
+  const defaultCaseTimeoutMs = durationMs(config.run.timeout);
   const cases: CaseIdentity[] = [];
   for (let attempt = 1; attempt <= repeat.value; attempt += 1) {
     for (const task of config.tasks) {
+      const caseTimeoutMs =
+        task.timeout === undefined ? defaultCaseTimeoutMs : durationMs(task.timeout);
       for (const model of config.models) {
         cases.push({
           caseId: `${task.id}--${model.id}--${attempt}`,
@@ -117,6 +124,7 @@ export function planBenchmark(
           model: model.model,
           effort: model.effort,
           agent: model.agent,
+          timeoutMs: caseTimeoutMs,
         });
       }
     }
@@ -127,7 +135,7 @@ export function planBenchmark(
     cases,
     repeat,
     concurrency: config.run.concurrency,
-    caseTimeoutMs: durationMs(config.run.timeout),
+    defaultCaseTimeoutMs,
     terminationGraceMs: durationMs(config.run.stop_grace),
     artifactsDirectory: config.run.output_dir,
   };
@@ -243,7 +251,7 @@ export async function runBenchmark(
     tools: { gitVersion: host.value.gitVersion, agentVersions },
     execution: {
       concurrency: plan.concurrency,
-      caseTimeoutMs: plan.caseTimeoutMs,
+      caseTimeoutMs: plan.defaultCaseTimeoutMs,
       repeat: plan.repeat,
     },
     cases: pinned.value.map((entry) => entry.identity),
@@ -556,7 +564,7 @@ async function runActiveCase(run: RunContext, active: ActiveCase): Promise<void>
     prompt: buildTaskPrompt(active.task),
     worktreeDirectory: active.workspace.worktreeDirectory,
     environment: requireCaseAgentEnvironment(active.environments),
-    timeoutMs: run.plan.caseTimeoutMs,
+    timeoutMs: active.identity.timeoutMs,
     terminationGraceMs: run.plan.terminationGraceMs,
     cancellation: active.abort.signal,
     onEvent: async (event) => {

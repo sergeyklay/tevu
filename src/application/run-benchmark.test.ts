@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
 
-import { TevuConfigSchema } from '@/config/schema';
+import { durationMs, TevuConfigSchema } from '@/config/schema';
 import { unavailableBenchmarkMetrics } from '@/domain/types';
 
 import { planBenchmark, reduceRunExitCode, runBenchmark } from './run-benchmark';
@@ -186,6 +186,7 @@ function buildCaseIdentity(caseId = 'task-1--c1--1'): CaseIdentity {
     model: 'synthetic/model-a',
     effort: 'fast',
     agent: AGENT_NAME,
+    timeoutMs: 60_000,
   };
 }
 
@@ -365,7 +366,11 @@ function timedOutRunScript(): RunScript {
     input.onProcess?.(value);
     return {
       ok: false,
-      error: { kind: 'CaseTimeoutError', caseId: input.identity.caseId, timeoutMs: 60_000 },
+      error: {
+        kind: 'CaseTimeoutError',
+        caseId: input.identity.caseId,
+        timeoutMs: input.timeoutMs,
+      },
     };
   };
 }
@@ -932,6 +937,7 @@ describe('planBenchmark', () => {
         model: 'synthetic/model-a',
         effort: 'fast',
         agent: AGENT_NAME,
+        timeoutMs: 60_000,
       },
       {
         caseId: 'task-1--c2--1',
@@ -942,6 +948,7 @@ describe('planBenchmark', () => {
         model: 'synthetic/model-b',
         effort: 'deep',
         agent: AGENT_NAME,
+        timeoutMs: 60_000,
       },
       {
         caseId: 'task-2--c1--1',
@@ -952,6 +959,7 @@ describe('planBenchmark', () => {
         model: 'synthetic/model-a',
         effort: 'fast',
         agent: AGENT_NAME,
+        timeoutMs: 60_000,
       },
       {
         caseId: 'task-2--c2--1',
@@ -962,11 +970,12 @@ describe('planBenchmark', () => {
         model: 'synthetic/model-b',
         effort: 'deep',
         agent: AGENT_NAME,
+        timeoutMs: 60_000,
       },
     ]);
   });
 
-  it('builds each CaseIdentity with keys in the order caseId, taskId, modelId, attempt, sourceCommit, model, effort, agent', () => {
+  it('builds each CaseIdentity with keys in the order caseId, taskId, modelId, attempt, sourceCommit, model, effort, agent, timeoutMs', () => {
     const config = buildTevuConfig({ tasks: [buildTask({ id: 'task-1', base_commit: COMMIT_A })] });
 
     const plan = planBenchmark(config, CONFIG_PATH);
@@ -980,6 +989,7 @@ describe('planBenchmark', () => {
       'model',
       'effort',
       'agent',
+      'timeoutMs',
     ]);
   });
 
@@ -988,7 +998,7 @@ describe('planBenchmark', () => {
     const plan = planBenchmark(config, CONFIG_PATH);
 
     expect(plan.concurrency).toBe(2);
-    expect(plan.caseTimeoutMs).toBe(60_000);
+    expect(plan.defaultCaseTimeoutMs).toBe(60_000);
     expect(plan.terminationGraceMs).toBe(500);
     expect(plan.artifactsDirectory).toBe('/synthetic/artifacts');
   });
@@ -1043,6 +1053,25 @@ describe('planBenchmark', () => {
 
     expect(planBenchmark(config, CONFIG_PATH, 3).repeat).toEqual({ value: 3, source: 'cli' });
     expect(planBenchmark(config, CONFIG_PATH).repeat).toEqual({ value: 3, source: 'config' });
+  });
+
+  it("resolves every case's timeoutMs from its own task, leaving other tasks under run.timeout (AC-2)", () => {
+    const config = buildTevuConfig({
+      run: buildRunSettings({ repeat: 2 }),
+      tasks: [buildTask({ id: 'task-1', timeout: '20m' }), buildTask({ id: 'task-2' })],
+    });
+
+    const plan = planBenchmark(config, CONFIG_PATH);
+
+    expect(plan.cases).toHaveLength(8);
+    const task1Cases = plan.cases.filter((identity) => identity.taskId === 'task-1');
+    const task2Cases = plan.cases.filter((identity) => identity.taskId === 'task-2');
+    const defaultTimeoutMs = durationMs(config.run.timeout);
+    expect(task1Cases.map((identity) => identity.timeoutMs)).toEqual(Array(4).fill(1_200_000));
+    expect(task2Cases.map((identity) => identity.timeoutMs)).toEqual(
+      Array(4).fill(defaultTimeoutMs),
+    );
+    expect(plan.defaultCaseTimeoutMs).toBe(durationMs(config.run.timeout));
   });
 });
 
@@ -1204,6 +1233,7 @@ describe('runBenchmark', () => {
         model: 'synthetic/model-a',
         effort: 'fast',
         agent: AGENT_NAME,
+        timeoutMs: 60_000,
       },
       {
         caseId: 'task-1--c2--1',
@@ -1214,6 +1244,7 @@ describe('runBenchmark', () => {
         model: 'synthetic/model-b',
         effort: 'deep',
         agent: AGENT_NAME,
+        timeoutMs: 60_000,
       },
       {
         caseId: 'task-2--c1--1',
@@ -1224,6 +1255,7 @@ describe('runBenchmark', () => {
         model: 'synthetic/model-a',
         effort: 'fast',
         agent: AGENT_NAME,
+        timeoutMs: 60_000,
       },
       {
         caseId: 'task-2--c2--1',
@@ -1234,6 +1266,7 @@ describe('runBenchmark', () => {
         model: 'synthetic/model-b',
         effort: 'deep',
         agent: AGENT_NAME,
+        timeoutMs: 60_000,
       },
     ]);
     expect(manifest.context?.config).toBe(config);
@@ -1796,6 +1829,32 @@ describe('runBenchmark', () => {
       ),
     ).toBe(true);
     expect(run.exitCode).toBe(2);
+  });
+
+  it('passes each case its own task timeout, distinct from run.timeout, to the agent and to CaseTimeoutError (AC-3)', async () => {
+    const config = buildTevuConfig({
+      run: buildRunSettings({ repeat: 2 }),
+      tasks: [buildTask({ id: 'task-1', timeout: '20m' }), buildTask({ id: 'task-2' })],
+    });
+    const harness = createHarness(config);
+    harness.agent.scripts.set('task-1--c1--1', timedOutRunScript());
+    const plan = planBenchmark(config, CONFIG_PATH);
+
+    const result = await runBenchmark(plan, harness.dependencies);
+
+    const run = unwrapOk(result);
+    const identitiesByCaseId = new Map(plan.cases.map((identity) => [identity.caseId, identity]));
+    expect(harness.agent.runInputs.length).toBeGreaterThan(0);
+    for (const input of harness.agent.runInputs) {
+      expect(input.timeoutMs).toBe(identitiesByCaseId.get(input.identity.caseId)?.timeoutMs);
+    }
+    const timedOutCase = caseResultOf(run, 'task-1--c1--1');
+    expect(timedOutCase.failure?.error).toEqual({
+      kind: 'CaseTimeoutError',
+      caseId: 'task-1--c1--1',
+      timeoutMs: 1_200_000,
+    });
+    expect(durationMs(config.run.timeout)).not.toBe(1_200_000);
   });
 
   it('stops scheduling queued cases after an artifact failure and reports every planned case', async () => {

@@ -67,6 +67,7 @@ tasks:
     title: Export the current view as CSV
     repo: app                     # may be omitted while there is one repository
     base_commit: "0123456789abcdef0123456789abcdef01234567"   # a commit from before the fix
+    # timeout: 20m                # overrides run.timeout for this task
 
     # Sent to the agent, together with the check descriptions below.
     prompt: Add a CSV export button to the table view.

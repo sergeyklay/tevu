@@ -722,6 +722,7 @@ class FileArtifactStore implements ArtifactStore {
       value['identity']['caseId'] !== caseId ||
       !isNonEmptyString(value['identity']['agent']) ||
       !isPositiveSafeInteger(value['identity']['attempt']) ||
+      !isPositiveSafeInteger(value['identity']['timeoutMs']) ||
       !isRecord(value['artifacts'])
     ) {
       return artifactFailure(
@@ -1235,6 +1236,9 @@ function describeManifestDefect(manifest: RunManifest): string | null {
     if (!isPositiveSafeInteger(identity.attempt)) {
       return `case "${identity.caseId}" attempt must be a whole number of at least 1`;
     }
+    if (!isPositiveSafeInteger(identity.timeoutMs)) {
+      return `case "${identity.caseId}" timeoutMs must be a whole number of at least 1`;
+    }
     if (identity.caseId !== `${identity.taskId}--${identity.modelId}--${identity.attempt}`) {
       return `case ID "${identity.caseId}" does not equal "<task-id>--<model-id>--<attempt>"`;
     }
@@ -1256,7 +1260,10 @@ function describeStoredManifestDefect(manifest: unknown, runId: string): string 
     !isRecord(manifest['tools']['agentVersions']) ||
     !isRecord(manifest['execution']) ||
     !isRepeatSetting(manifest['execution']['repeat']) ||
-    !isNonEmptyString(manifest['configPath'])
+    !isNonEmptyString(manifest['configPath']) ||
+    !manifest['cases'].every(
+      (entry) => isRecord(entry) && isPositiveSafeInteger(entry['timeoutMs']),
+    )
   ) {
     return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
   }
