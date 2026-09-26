@@ -81,6 +81,7 @@ tasks:
     title: Export the current view as CSV
     repo: app                     # may be omitted while there is one repository
     base_commit: "0123456789abcdef0123456789abcdef01234567"   # a commit from before the fix
+    # timeout: 20m                # overrides run.timeout for this task
 
     # Sent to the agent, together with the check descriptions below.
     prompt: Add a CSV export button to the table view.
@@ -133,7 +134,7 @@ tasks:
 | `run.output_dir` | Non-empty; run evidence directory, outside and non-overlapping with configured repositories after resolving symlinks |
 | `run.concurrency` | Integer from 1 through 32 |
 | `run.repeat` | Integer from 1 through 100, optional, default `1`; attempts per task/model pair, each an independent case; `tevu run --repeat <n>` overrides it for one run |
-| `run.timeout` | Duration; agent time limit per case; a timed-out case skips its checks and `setup.before_checks` |
+| `run.timeout` | Duration; default agent time limit per case; a task's `timeout` replaces it for every case of that task; a timed-out case skips its checks and `setup.before_checks` |
 | `run.stop_grace` | Duration; delay between graceful and forced process-group termination |
 | `run.check_timeout` | Duration, optional; default time limit for a command check that declares none |
 | `agents.opencode.command` | Non-empty executable name or path; no agent-version constraint is accepted |
@@ -168,6 +169,7 @@ The duration bound keeps a configured value inside what a Node.js timer can sche
 | `title` | Non-whitespace; shown in the report, never sent to the agent |
 | `repo` | An ID from `repositories`; defaults to the sole repository when exactly one is configured |
 | `base_commit` | A commit resolvable in that repository; `tevu task add` records the resolved commit |
+| `timeout` | Duration, optional; agent time limit of every case of this task, for every model entry and attempt; replaces `run.timeout`, which applies when the key is absent |
 | `prompt` | Non-whitespace instructions sent to every model |
 | `description` | Non-whitespace task description, sent to every model |
 | `source` | Absent for a task written by hand; otherwise a saved Jira or GitHub import snapshot |

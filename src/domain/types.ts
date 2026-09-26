@@ -101,6 +101,8 @@ export type CaseIdentity = {
   model: string;
   effort: string;
   agent: string;
+  /** Case timeout in milliseconds: the task's `timeout` when declared, otherwise `run.timeout`; one value for every case of a task. */
+  timeoutMs: number;
 };
 
 /** Settings shared by every benchmark case. */
@@ -191,6 +193,8 @@ export interface TaskDefinition {
   title: string;
   repo: string;
   base_commit: string;
+  /** Present only when the file declares it: the agent time limit of every case of this task, replacing `run.timeout`. */
+  timeout?: string;
   prompt: string;
   description: string;
   source?: ImportedTaskSource;
@@ -268,7 +272,12 @@ export type RunManifest = {
     nodeVersion: string;
   };
   tools: { gitVersion: string; agentVersions: Record<string, string | null> };
-  execution: { concurrency: number; caseTimeoutMs: number; repeat: RepeatSetting };
+  execution: {
+    concurrency: number;
+    /** Default case timeout: `run.timeout` in milliseconds; each case's own value is `CaseIdentity.timeoutMs`. */
+    caseTimeoutMs: number;
+    repeat: RepeatSetting;
+  };
   cases: CaseIdentity[];
   context?: {
     /** Decode through `decodeRunConfig`; never read directly as a `TevuConfig`. */
@@ -973,7 +982,8 @@ export type BenchmarkPlan = {
   cases: CaseIdentity[];
   repeat: RepeatSetting;
   concurrency: number;
-  caseTimeoutMs: number;
+  /** `config.run.timeout` in milliseconds; `runBenchmark` records it as `RunManifest.execution.caseTimeoutMs`. */
+  defaultCaseTimeoutMs: number;
   terminationGraceMs: number;
   artifactsDirectory: string;
 };

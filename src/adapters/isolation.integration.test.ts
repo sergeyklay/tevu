@@ -239,6 +239,7 @@ function buildIdentity(caseId: string, sourceCommit: string): CaseIdentity {
     model: 'synthetic/model-a',
     effort: 'fast',
     agent: 'opencode',
+    timeoutMs: 60_000,
   };
 }
 

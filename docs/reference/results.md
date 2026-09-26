@@ -85,6 +85,8 @@ Files are stored under the configured artifact directory:
 
 The root `result.json`'s top-level `models` array holds one `{id, model, effort}` entry per configured model entry. Every saved case identity, in `run.json` and both levels of `result.json`, carries `modelId`, `effort`, and `attempt` (the attempt number this case represents, 1 through the effective repeat) alongside the unchanged `model` string, plus `agent`: the name of the adapter that ran the case.
 
+Every saved case identity also carries `timeoutMs`: the agent time limit the case ran under, in milliseconds. It is the task's `timeout` when the task declares one and `run.timeout` otherwise, so every case of one task carries the same value. `execution.caseTimeoutMs` in `run.json` holds `run.timeout` in milliseconds.
+
 Isolated replacement environments carry the recipient `agent` or `evaluator`. A process or protocol failure from a case's adapter is recorded with kind `AgentProcessError` or `AgentProtocolError`, each carrying that case's `agent` name.
 
 Some source files are absent when the corresponding evidence was unavailable; assessments appear after the first assessment. Their absence is recorded rather than treated as a successful measurement.
@@ -128,7 +130,7 @@ Configured credential-secret values are redacted before persistent or terminal o
 
 `tevu report <run-id>` recomputes normalized results and Markdown from saved evidence and current assessments, resolving each case's metrics through the adapter registered under that case's `agent`. It does not start another model session or contact Git or an issue tracker. Unchanged source artifacts produce identical regenerated JSON and Markdown.
 
-`tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. A run whose snapshot predates that layout, or whose case results or manifest predate the current agent fields (missing `identity.agent` or `tools.agentVersions`), the current repeat fields (missing `identity.attempt` or `execution.repeat`), or a non-empty string `configPath`, is refused before either command writes anything.
+`tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. A run whose snapshot predates that layout, or whose case results or manifest predate the current agent fields (missing `identity.agent` or `tools.agentVersions`), the current repeat fields (missing `identity.attempt` or `execution.repeat`), the current case timeout field (missing `timeoutMs` in a case identity), or a non-empty string `configPath`, is refused before either command writes anything.
 
 Replacing an assessment retains the old verdict in history. Only current verdicts affect the outcome. Artifacts remain until the operator deletes the run directory; there is no automatic retention or upload.
 

@@ -189,6 +189,7 @@ function buildCaseIdentity(overrides: Partial<CaseIdentity> = {}): CaseIdentity 
     model: 'vendor/model-alpha-synth',
     effort: 'effort-high',
     agent: 'opencode',
+    timeoutMs: 60_000,
     ...overrides,
   };
 }
@@ -822,6 +823,56 @@ describe('OpenCode report regeneration matches the pinned baseline', () => {
       if (result.ok) return;
       expect(result.error.kind).toBe('ArtifactError');
       expect(await readFile(resultPath, 'utf8')).toBe(corrupted);
+      expect(existsSync(reportPath)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a run whose case result is missing identity.timeoutMs, before any write', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-p8-timeoutms-case-'));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      const resultPath = caseFile(root, runId, 'task-1--alpha--1', 'result.json');
+      const before = await readFile(resultPath, 'utf8');
+      const stored = JSON.parse(before) as { identity: Record<string, unknown> };
+      delete stored.identity['timeoutMs'];
+      await writeFile(resultPath, JSON.stringify(stored, null, 2), 'utf8');
+      const corrupted = await readFile(resultPath, 'utf8');
+      const reportPath = join(root, 'artifacts', runId, 'report.md');
+
+      const result = await rebuildReport(runId, store, AGENTS_REGISTRY);
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe('ArtifactError');
+      expect(await readFile(resultPath, 'utf8')).toBe(corrupted);
+      expect(existsSync(reportPath)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a run whose manifest case is missing timeoutMs, before any write', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-p8-timeoutms-manifest-'));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      const runJsonPath = join(root, 'artifacts', runId, 'run.json');
+      const before = await readFile(runJsonPath, 'utf8');
+      const stored = JSON.parse(before) as {
+        manifest: { cases: Array<Record<string, unknown>> };
+      };
+      delete stored.manifest.cases[0]?.['timeoutMs'];
+      await writeFile(runJsonPath, JSON.stringify(stored, null, 2), 'utf8');
+      const corrupted = await readFile(runJsonPath, 'utf8');
+      const reportPath = join(root, 'artifacts', runId, 'report.md');
+
+      const result = await rebuildReport(runId, store, AGENTS_REGISTRY);
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe('ArtifactError');
+      expect(await readFile(runJsonPath, 'utf8')).toBe(corrupted);
       expect(existsSync(reportPath)).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });

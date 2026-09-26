@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createArtifactStore } from '@/adapters/artifact-store';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
 import { createEnvironmentAdapter, createEvaluatorProcessAdapter } from '@/adapters/process';
-import { TevuConfigSchema } from '@/config/schema';
+import { durationMs, TevuConfigSchema } from '@/config/schema';
 import { unavailableMetric } from '@/domain/types';
 
 import { planBenchmark, runBenchmark } from './run-benchmark';
@@ -117,6 +117,7 @@ function buildConfig(options: {
   commit: string;
   overlayDirectory: string;
   outputDirectory: string;
+  taskTimeout?: string;
 }): TevuConfig {
   const input: TevuConfigInput = {
     version: 1,
@@ -138,6 +139,7 @@ function buildConfig(options: {
         title: 'Guard task',
         repo: 'repo-1',
         base_commit: options.commit,
+        ...(options.taskTimeout === undefined ? {} : { timeout: options.taskTimeout }),
         description: 'synthetic task description',
         prompt: 'synthetic task prompt',
         readiness: ['synthetic ready item'],
@@ -446,3 +448,40 @@ describe.each([
     });
   },
 );
+
+describe('runBenchmark records the task timeout in saved artifacts (AC-4)', () => {
+  it("writes every manifest and case identity's timeoutMs as the task's own limit, distinct from the default in execution.caseTimeoutMs", async () => {
+    const repository = await createSyntheticRepository(testDirectory);
+    const overlayDirectory = await createOverlayDirectory(testDirectory);
+    const config = buildConfig({
+      repositoryPath: repository.path,
+      commit: repository.commit,
+      overlayDirectory,
+      outputDirectory: join(testDirectory, 'artifacts'),
+      taskTimeout: '20m',
+    });
+    const capture: FakeAgentCapture = { prompt: '', overlayFilePresentDuringRun: true };
+    const agent = buildFakeAgentAdapter(capture, overlayDirectory);
+    const dependencies = buildDependencies(config, agent, testDirectory);
+
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+
+    const run = unwrapOk(result);
+    expect(run.manifest.execution.caseTimeoutMs).toBe(durationMs('30s'));
+    expect(run.manifest.cases.every((identity) => identity.timeoutMs === 1_200_000)).toBe(true);
+    expect(run.cases.every((caseResult) => caseResult.identity.timeoutMs === 1_200_000)).toBe(true);
+
+    const storedManifest = unwrapOk(
+      await dependencies.artifacts.readRunManifest(run.manifest.runId),
+    );
+    expect(storedManifest.execution.caseTimeoutMs).toBe(durationMs('30s'));
+    expect(storedManifest.cases.every((identity) => identity.timeoutMs === 1_200_000)).toBe(true);
+
+    for (const caseResult of run.cases) {
+      const storedCase = unwrapOk(
+        await dependencies.artifacts.readCaseResult(run.manifest.runId, caseResult.identity.caseId),
+      );
+      expect(storedCase.identity.timeoutMs).toBe(1_200_000);
+    }
+  });
+});

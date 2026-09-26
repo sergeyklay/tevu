@@ -685,14 +685,14 @@ function printDryRun(
   out(`Planned cases (${plan.cases.length}, execution order):`);
   for (const identity of plan.cases) {
     out(
-      `  ${identity.caseId}: task ${identity.taskId}, model entry ${identity.modelId} (${identity.model}, effort ${identity.effort}), commit ${identity.sourceCommit}`,
+      `  ${identity.caseId}: task ${identity.taskId}, model entry ${identity.modelId} (${identity.model}, effort ${identity.effort}), commit ${identity.sourceCommit}, timeout ${identity.timeoutMs}ms`,
     );
   }
   out(
     `Manual assessments needed: ${countManualAssessments(plan)} (one tevu assess per case whose task has manual checks)`,
   );
   out(
-    `Limits: concurrency ${plan.concurrency}, timeout ${plan.caseTimeoutMs}ms, stop grace ${plan.terminationGraceMs}ms`,
+    `Limits: concurrency ${plan.concurrency}, timeout ${plan.defaultCaseTimeoutMs}ms, stop grace ${plan.terminationGraceMs}ms`,
   );
   out(`Artifact destination: ${plan.artifactsDirectory}`);
   for (const name of agentNamesInUse(plan.config)) {

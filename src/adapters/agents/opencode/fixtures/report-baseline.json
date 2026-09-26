@@ -105,7 +105,8 @@
         "model": "vendor/model-alpha-synth",
         "modelId": "alpha",
         "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
-        "taskId": "task-1"
+        "taskId": "task-1",
+        "timeoutMs": 60000
       },
       "lifecycle": "completed",
       "metrics": {
@@ -266,7 +267,8 @@
         "model": "vendor/model-alpha-synth",
         "modelId": "beta",
         "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
-        "taskId": "task-1"
+        "taskId": "task-1",
+        "timeoutMs": 60000
       },
       "lifecycle": "completed",
       "metrics": {
@@ -417,7 +419,8 @@
         "model": "vendor/model-gamma-synth",
         "modelId": "gamma",
         "sourceCommit": "fedcba9876543210fedcba9876543210fedcba98",
-        "taskId": "task-2"
+        "taskId": "task-2",
+        "timeoutMs": 60000
       },
       "lifecycle": "timed-out",
       "metrics": {
@@ -560,7 +563,8 @@
         "model": "vendor/model-alpha-synth",
         "modelId": "alpha",
         "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
-        "taskId": "task-1"
+        "taskId": "task-1",
+        "timeoutMs": 60000
       },
       {
         "agent": "opencode",
@@ -570,7 +574,8 @@
         "model": "vendor/model-alpha-synth",
         "modelId": "beta",
         "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
-        "taskId": "task-1"
+        "taskId": "task-1",
+        "timeoutMs": 60000
       },
       {
         "agent": "opencode",
@@ -580,7 +585,8 @@
         "model": "vendor/model-alpha-synth",
         "modelId": "alpha",
         "sourceCommit": "fedcba9876543210fedcba9876543210fedcba98",
-        "taskId": "task-2"
+        "taskId": "task-2",
+        "timeoutMs": 60000
       }
     ],
     "completedAt": null,

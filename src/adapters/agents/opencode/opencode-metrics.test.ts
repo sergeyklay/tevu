@@ -825,6 +825,7 @@ const IDENTITY = {
   model: 'vendor/model-alpha-synth',
   effort: 'effort-high',
   agent: 'opencode',
+  timeoutMs: 60_000,
 };
 
 describe('OpenCode adapter over a synthetic executable', () => {
