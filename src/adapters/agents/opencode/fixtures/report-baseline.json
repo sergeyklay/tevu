@@ -585,6 +585,7 @@
     ],
     "completedAt": null,
     "configDigest": "sha256-synthetic-digest",
+    "configPath": "/synthetic/tevu.yaml",
     "context": {
       "capabilities": {
         "opencode": {

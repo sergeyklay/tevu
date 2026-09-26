@@ -226,6 +226,7 @@ function buildBenchmarkPlan(
 ): BenchmarkPlan {
   return {
     config,
+    configPath: 'tevu.yaml',
     cases: config.models.flatMap((model) =>
       config.tasks.map((task) => ({
         caseId: `case-${model.id}-${task.id}`,
@@ -331,6 +332,7 @@ function buildRunResult(overrides: Partial<RunResult> = {}): RunResult {
       schemaVersion: 1,
       runId: 'run-1',
       configDigest: 'fixture-digest',
+      configPath: 'tevu.yaml',
       startedAt: '2026-09-23T10:00:00.000Z',
       completedAt: '2026-09-23T10:05:00.000Z',
       host: { platform: 'linux', nodeVersion: '24.10.0' },
@@ -410,6 +412,12 @@ function configReadError(
   return { kind: 'ConfigReadError', path, requestedPath, cause };
 }
 
+function configNotFoundError(
+  searchedPaths: [string] | [string, string],
+): Extract<TevuError, { kind: 'ConfigNotFoundError' }> {
+  return { kind: 'ConfigNotFoundError', searchedPaths };
+}
+
 function prerequisiteError(
   tool: string,
   expected: string,
@@ -429,6 +437,7 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
     configExists: vi.fn(async () => true),
     loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
     requireConfigDirectory: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    locateConfig: vi.fn(async () => ({ ok: true as const, value: 'tevu.yaml' })),
     importJiraIssue: vi.fn(async () => ({ ok: true as const, value: buildJiraIssueSnapshot() })),
     importGitHubIssue: vi.fn(async () => ({ ok: true as const, value: buildJiraIssueSnapshot() })),
     createTask: vi.fn(async () => ({
@@ -591,7 +600,7 @@ const BOOTSTRAP_PROMPTS = [
   'Add a ordinary variable for the agent?',
   'Configure Jira Cloud issue import?',
   'Repository ID',
-  'Local path of repository "alpha"',
+  'Local path of repository "alpha" (relative to the configuration file)',
   'Add another repository?',
   'Model entry ID',
   'Model for "c1" (provider/model)',
@@ -792,7 +801,7 @@ describe('tevu CLI', () => {
       expect(program.commands[0]?.commands.map((command) => command.name())).toEqual(['add']);
     });
 
-    it('defaults --config to tevu.yaml and registers the per-command options', () => {
+    it('registers --config with no default and the per-command options', () => {
       const program = createProgram(createDependencies());
       const run = program.commands.find((command) => command.name() === 'run');
       const add = program.commands[0]?.commands[0];
@@ -802,9 +811,31 @@ describe('tevu CLI', () => {
         '--dry-run',
         '--repeat',
       ]);
-      expect(run?.options[0]?.defaultValue).toBe('tevu.yaml');
+      expect(run?.options[0]?.defaultValue).toBeUndefined();
       expect(add?.options.map((option) => option.long)).toEqual(['--config', '--jira', '--github']);
     });
+
+    it.each(['task add', 'validate', 'run', 'assess', 'report'])(
+      'gives every --config option the search description with no default text (V12, AC-10)',
+      (commandName) => {
+        const program = createProgram(createDependencies());
+        const [group, sub] = commandName.split(' ');
+        const command =
+          sub === undefined
+            ? program.commands.find((entry) => entry.name() === group)
+            : program.commands
+                .find((entry) => entry.name() === group)
+                ?.commands.find((entry) => entry.name() === sub);
+        const option = command?.options.find((entry) => entry.long === '--config');
+
+        expect(option?.description).toBe(
+          'Configuration file path; without it, tevu searches ./tevu.yaml, then ' +
+            '$XDG_CONFIG_HOME/tevu/tevu.yaml (or $HOME/.config/tevu/tevu.yaml when ' +
+            'XDG_CONFIG_HOME is not an absolute path)',
+        );
+        expect(option?.description).not.toContain('(default:');
+      },
+    );
 
     it('requires both run-id and case-id arguments on assess', () => {
       const program = createProgram(createDependencies());
@@ -828,6 +859,7 @@ describe('tevu CLI', () => {
 
   describe('config example', () => {
     function expectNoOperationCalled(operations: ProgramOperations): void {
+      expect(operations.locateConfig).not.toHaveBeenCalled();
       expect(operations.configExists).not.toHaveBeenCalled();
       expect(operations.loadConfig).not.toHaveBeenCalled();
       expect(operations.importJiraIssue).not.toHaveBeenCalled();
@@ -886,6 +918,7 @@ describe('tevu CLI', () => {
         expect(help).not.toMatch(/opencode|Sensitive data:|Isolation boundary:/i);
         expect(help).toMatch(/-h, --help\s+Show help\n/);
         expect(help).not.toMatch(/\.\s*$/m);
+        expect(help).not.toContain('(default:');
         expect(err).toEqual([]);
       },
     );
@@ -943,6 +976,12 @@ describe('tevu CLI', () => {
       const { out } = await runCli(['assess', '--help']);
 
       expect(out.join('\n')).toContain('tevu assess 20260923t120000z-a1b2c3 task--model--1');
+    });
+
+    it('labels the first validate example "Check the configuration tevu finds" (V12)', async () => {
+      const { out } = await runCli(['validate', '--help']);
+
+      expect(out.join('\n')).toContain('# Check the configuration tevu finds');
     });
 
     it('prints help on stderr with exit 1 for a bare invocation', async () => {
@@ -1053,7 +1092,11 @@ describe('tevu CLI', () => {
       const { code, out, err } = await runCli(['validate'], { operations });
 
       expect(code).toBe(0);
-      expect(out).toEqual(['warning task-1: description is thin', 'Configuration is valid.']);
+      expect(out).toEqual([
+        'Configuration: tevu.yaml',
+        'warning task-1: description is thin',
+        'Configuration is valid.',
+      ]);
       expect(err).toEqual([]);
       expect(vi.mocked(operations.loadConfig)).toHaveBeenCalledExactlyOnceWith('tevu.yaml');
       expect(vi.mocked(operations.validateConfig)).toHaveBeenCalledExactlyOnceWith(
@@ -1080,7 +1123,11 @@ describe('tevu CLI', () => {
       const { code, out } = await runCli(['validate'], { operations });
 
       expect(code).toBe(1);
-      expect(out).toEqual(['error fake-agent: missing', 'Configuration is invalid.']);
+      expect(out).toEqual([
+        'Configuration: tevu.yaml',
+        'error fake-agent: missing',
+        'Configuration is invalid.',
+      ]);
       expect(operations.planBenchmark).not.toHaveBeenCalled();
     });
 
@@ -1097,10 +1144,33 @@ describe('tevu CLI', () => {
       expect(code).toBe(1);
       expect(err).toEqual([
         'error: configuration file not found: /work/tevu.yaml',
+        '  create one interactively: tevu task add --config tevu.yaml',
+        '  or start from the template: tevu config example > tevu.yaml',
+      ]);
+      expect(out).toEqual([]);
+      expect(operations.validateConfig).not.toHaveBeenCalled();
+    });
+
+    it('maps a search-exhausted configuration failure to exit 1 with both searched paths and calls nothing else (V7)', async () => {
+      const operations = createOperations({
+        locateConfig: vi.fn(async () => ({
+          ok: false as const,
+          error: configNotFoundError(['/work/tevu.yaml', '/home/u/.config/tevu/tevu.yaml']),
+        })),
+      });
+
+      const { code, out, err } = await runCli(['validate'], { operations });
+
+      expect(code).toBe(1);
+      expect(err).toEqual([
+        'error: configuration file not found',
+        '  searched: /work/tevu.yaml',
+        '  searched: /home/u/.config/tevu/tevu.yaml',
         '  create one interactively: tevu task add',
         '  or start from the template: tevu config example > tevu.yaml',
       ]);
       expect(out).toEqual([]);
+      expect(operations.loadConfig).not.toHaveBeenCalled();
       expect(operations.validateConfig).not.toHaveBeenCalled();
     });
 
@@ -1138,9 +1208,9 @@ describe('tevu CLI', () => {
 
     it.each([
       {
-        description: 'the default configuration path',
+        description: 'the explicit path tevu.yaml',
         requestedPath: 'tevu.yaml',
-        taskAddHint: '  create one interactively: tevu task add',
+        taskAddHint: '  create one interactively: tevu task add --config tevu.yaml',
         templateHint: '  or start from the template: tevu config example > tevu.yaml',
       },
       {
@@ -1258,7 +1328,11 @@ describe('tevu CLI', () => {
           const { code, out } = await runCli(command, { operations });
 
           expect(code).toBe(1);
-          expect(out).toEqual([`error ${identifier}: ${message}`, 'Configuration is invalid.']);
+          expect(out).toEqual([
+            'Configuration: tevu.yaml',
+            `error ${identifier}: ${message}`,
+            'Configuration is invalid.',
+          ]);
           expect(operations.planBenchmark).not.toHaveBeenCalled();
         }
       },
@@ -1326,6 +1400,7 @@ describe('tevu CLI', () => {
 
       expect(code).toBe(0);
       expect(out).toEqual([
+        'Configuration: tevu.yaml',
         'Dry run: no artifact, workspace, Jira call, or agent model session is created.',
         'Planned cases (2, execution order):',
         '  case-c1-task-1: task task-1, model entry c1 (provider/model-a, effort high), commit abc123def',
@@ -1356,6 +1431,7 @@ describe('tevu CLI', () => {
       );
       expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
         buildTevuConfig(),
+        'tevu.yaml',
         undefined,
       );
       expect(operations.configExists).not.toHaveBeenCalled();
@@ -1394,7 +1470,11 @@ describe('tevu CLI', () => {
       const { code, out } = await runCli(['run'], { operations });
 
       expect(code).toBe(1);
-      expect(out).toEqual(['error fake-agent: unavailable', 'Configuration is invalid.']);
+      expect(out).toEqual([
+        'Configuration: tevu.yaml',
+        'error fake-agent: unavailable',
+        'Configuration is invalid.',
+      ]);
       expect(operations.planBenchmark).not.toHaveBeenCalled();
       expectNoWrites(operations);
     });
@@ -1412,10 +1492,34 @@ describe('tevu CLI', () => {
       expect(code).toBe(1);
       expect(err).toEqual([
         'error: configuration file not found: /work/tevu.yaml',
+        '  create one interactively: tevu task add --config tevu.yaml',
+        '  or start from the template: tevu config example > tevu.yaml',
+      ]);
+      expect(out).toEqual([]);
+      expect(operations.validateConfig).not.toHaveBeenCalled();
+      expect(operations.planBenchmark).not.toHaveBeenCalled();
+    });
+
+    it('maps a search-exhausted configuration failure to exit 1 with both searched paths and calls nothing else (V7)', async () => {
+      const operations = createOperations({
+        locateConfig: vi.fn(async () => ({
+          ok: false as const,
+          error: configNotFoundError(['/work/tevu.yaml', '/home/u/.config/tevu/tevu.yaml']),
+        })),
+      });
+
+      const { code, out, err } = await runCli(['run', '--dry-run'], { operations });
+
+      expect(code).toBe(1);
+      expect(err).toEqual([
+        'error: configuration file not found',
+        '  searched: /work/tevu.yaml',
+        '  searched: /home/u/.config/tevu/tevu.yaml',
         '  create one interactively: tevu task add',
         '  or start from the template: tevu config example > tevu.yaml',
       ]);
       expect(out).toEqual([]);
+      expect(operations.loadConfig).not.toHaveBeenCalled();
       expect(operations.validateConfig).not.toHaveBeenCalled();
       expect(operations.planBenchmark).not.toHaveBeenCalled();
     });
@@ -1455,6 +1559,7 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
           buildTevuConfig(),
+          'tevu.yaml',
           value,
         );
       },
@@ -1468,6 +1573,7 @@ describe('tevu CLI', () => {
       expect(code).toBe(0);
       expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
         buildTevuConfig(),
+        'tevu.yaml',
         100,
       );
     });
@@ -1492,6 +1598,7 @@ describe('tevu CLI', () => {
       expect(code).toBe(0);
       expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
         buildTevuConfig(),
+        'tevu.yaml',
         5,
       );
     });
@@ -1506,6 +1613,7 @@ describe('tevu CLI', () => {
       expect(code).toBe(0);
       expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
         buildTevuConfig(),
+        'tevu.yaml',
         7,
       );
     });
@@ -1597,6 +1705,7 @@ describe('tevu CLI', () => {
 
       expect(code).toBe(0);
       expect(out).toEqual([
+        'Configuration: tevu.yaml',
         'Run run-1 started.',
         'case-c1-task-1: lifecycle completed, outcome passed',
         'warning [case-c1-task-1]: diagnostics truncated',
@@ -1611,6 +1720,22 @@ describe('tevu CLI', () => {
       );
       expect(operations.importJiraIssue).not.toHaveBeenCalled();
       expect(operations.importGitHubIssue).not.toHaveBeenCalled();
+    });
+
+    it('passes the same absolute path to planBenchmark that it prints in the Configuration line (AC-3)', async () => {
+      const foundPath = '/home/u/.config/tevu/tevu.yaml';
+      const operations = createOperations({
+        locateConfig: vi.fn(async () => ({ ok: true as const, value: foundPath })),
+      });
+
+      const { out } = await runCli(['run'], { operations });
+
+      expect(out[0]).toBe(`Configuration: ${foundPath}`);
+      expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
+        buildTevuConfig(),
+        foundPath,
+        undefined,
+      );
     });
 
     it('wires the shared cancellation and run-id hook and withholds lifecycle progress on non-TTY output', async () => {
@@ -1849,7 +1974,7 @@ describe('tevu CLI', () => {
       const { code, out } = await runCli(['task', 'add'], { operations });
 
       expect(code).toBe(0);
-      expect(out).toEqual(['Task "task-2" added to tevu.yaml.']);
+      expect(out).toEqual(['Configuration: tevu.yaml', 'Task "task-2" added to tevu.yaml.']);
       expect(clack.state.rejections).toEqual([
         {
           kind: 'text',
@@ -1898,7 +2023,7 @@ describe('tevu CLI', () => {
       const { code, out } = await runCli(['task', 'add'], { operations });
 
       expect(code).toBe(0);
-      expect(out).toEqual(['Task "task-2" added to tevu.yaml.']);
+      expect(out).toEqual(['Configuration: tevu.yaml', 'Task "task-2" added to tevu.yaml.']);
       expect(vi.mocked(operations.configExists)).toHaveBeenCalledExactlyOnceWith('tevu.yaml');
       expect(vi.mocked(operations.loadConfig)).toHaveBeenCalledOnce();
       expect(operations.importJiraIssue).not.toHaveBeenCalled();
@@ -1919,6 +2044,87 @@ describe('tevu CLI', () => {
           },
         },
       });
+    });
+
+    it('appends to a found search candidate and prints it as both the Configuration line and the added-to target (AC-2)', async () => {
+      const foundPath = '/home/u/.config/tevu/tevu.yaml';
+      const operations = createOperations({
+        locateConfig: vi.fn(async () => ({ ok: true as const, value: foundPath })),
+      });
+      scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+      const { code, out } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(0);
+      expect(out).toEqual([`Configuration: ${foundPath}`, `Task "task-2" added to ${foundPath}.`]);
+      expect(vi.mocked(operations.configExists)).toHaveBeenCalledExactlyOnceWith(foundPath);
+      expect(vi.mocked(operations.loadConfig)).toHaveBeenCalledExactlyOnceWith(foundPath);
+    });
+
+    it('creates the current-directory file named by searchedPaths[0] when the search reports ConfigNotFoundError (AC-2)', async () => {
+      const operations = createOperations({
+        configExists: vi.fn(async () => false),
+        locateConfig: vi.fn(async () => ({
+          ok: false as const,
+          error: configNotFoundError(['/work/tevu.yaml', '/home/u/.config/tevu/tevu.yaml']),
+        })),
+      });
+      scriptAnswers(
+        '/tmp/bench-artifacts',
+        '4',
+        '10m',
+        '5s',
+        '',
+        'opencode',
+        false,
+        false,
+        false,
+        'alpha',
+        '../repos/alpha',
+        false,
+        'c1',
+        'provider/model-a',
+        'high',
+        'c2',
+        'provider/model-b',
+        'low',
+        false,
+        ...taskInterviewAnswers('alpha'),
+        true,
+      );
+
+      const { code, out } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(0);
+      expect(out).toEqual([
+        'Configuration: /work/tevu.yaml',
+        'Task "task-2" added to /work/tevu.yaml.',
+      ]);
+      expect(vi.mocked(operations.configExists)).toHaveBeenCalledExactlyOnceWith('/work/tevu.yaml');
+      expect(vi.mocked(operations.requireConfigDirectory)).toHaveBeenCalledExactlyOnceWith(
+        '/work/tevu.yaml',
+      );
+      expect(operations.loadConfig).not.toHaveBeenCalled();
+    });
+
+    it("exits 1 before the wizard's first question and before configExists or requireConfigDirectory when the search reports a ConfigReadError", async () => {
+      const operations = createOperations({
+        locateConfig: vi.fn(async () => ({
+          ok: false as const,
+          error: configReadError('permission-denied', '/work/tevu.yaml', 'tevu.yaml'),
+        })),
+      });
+
+      const { code, err } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(1);
+      expect(err).toEqual([
+        'error: cannot read configuration file /work/tevu.yaml: permission denied',
+      ]);
+      expect(clack.state.prompts).toEqual([]);
+      expect(operations.configExists).not.toHaveBeenCalled();
+      expect(operations.requireConfigDirectory).not.toHaveBeenCalled();
+      expectNoWrites(operations);
     });
 
     it('imports a Jira issue exactly once and travels the snapshot inside the wizard input', async () => {
@@ -1954,7 +2160,7 @@ describe('tevu CLI', () => {
       const { code, out } = await runCli(['task', 'add', '--jira', 'TEVU-42'], { operations });
 
       expect(code).toBe(0);
-      expect(out).toEqual(['Task "task-2" added to tevu.yaml.']);
+      expect(out).toEqual(['Configuration: tevu.yaml', 'Task "task-2" added to tevu.yaml.']);
       expect(vi.mocked(operations.importJiraIssue)).toHaveBeenCalledExactlyOnceWith(
         jiraSettings,
         'TEVU-42',
@@ -2010,7 +2216,7 @@ describe('tevu CLI', () => {
       });
 
       expect(code).toBe(0);
-      expect(out).toEqual(['Task "task-2" added to tevu.yaml.']);
+      expect(out).toEqual(['Configuration: tevu.yaml', 'Task "task-2" added to tevu.yaml.']);
       expect(vi.mocked(operations.importGitHubIssue)).toHaveBeenCalledExactlyOnceWith(
         'octo/repo#42',
       );
@@ -2210,6 +2416,7 @@ describe('tevu CLI', () => {
 
       expect(code).toBe(0);
       expect(out).toEqual([
+        'Configuration: tevu.yaml',
         'Assessment recorded for case case-1; derived task outcome: passed.',
         'Report: /tmp/artifacts/run-1/report.md',
       ]);
@@ -2378,10 +2585,34 @@ describe('tevu CLI', () => {
       expect(code).toBe(1);
       expect(err).toEqual([
         'error: configuration file not found: /work/tevu.yaml',
+        '  create one interactively: tevu task add --config tevu.yaml',
+        '  or start from the template: tevu config example > tevu.yaml',
+      ]);
+      expect(out).toEqual([]);
+      expect(operations.readAssessmentContext).not.toHaveBeenCalled();
+      expectNoWrites(operations);
+    });
+
+    it('maps a search-exhausted configuration failure to exit 1 with both searched paths and calls nothing else (V7)', async () => {
+      const operations = createOperations({
+        locateConfig: vi.fn(async () => ({
+          ok: false as const,
+          error: configNotFoundError(['/work/tevu.yaml', '/home/u/.config/tevu/tevu.yaml']),
+        })),
+      });
+
+      const { code, out, err } = await runCli(['assess', 'run-1', 'case-1'], { operations });
+
+      expect(code).toBe(1);
+      expect(err).toEqual([
+        'error: configuration file not found',
+        '  searched: /work/tevu.yaml',
+        '  searched: /home/u/.config/tevu/tevu.yaml',
         '  create one interactively: tevu task add',
         '  or start from the template: tevu config example > tevu.yaml',
       ]);
       expect(out).toEqual([]);
+      expect(operations.loadConfig).not.toHaveBeenCalled();
       expect(operations.readAssessmentContext).not.toHaveBeenCalled();
       expectNoWrites(operations);
     });
@@ -2418,7 +2649,10 @@ describe('tevu CLI', () => {
       const { code, out, err } = await runCli(['report', 'run-1'], { operations });
 
       expect(code).toBe(0);
-      expect(out).toEqual(['Report regenerated: /tmp/artifacts/run-1/report.md']);
+      expect(out).toEqual([
+        'Configuration: tevu.yaml',
+        'Report regenerated: /tmp/artifacts/run-1/report.md',
+      ]);
       expect(err).toEqual([]);
       expect(vi.mocked(operations.rebuildRunReport)).toHaveBeenCalledExactlyOnceWith(
         loadedConfig,
@@ -2446,7 +2680,7 @@ describe('tevu CLI', () => {
 
       expect(code).toBe(1);
       expect(err[0]).toBe('error: artifact operation "rebuild-report" failed: missing result.json');
-      expect(out).toEqual([]);
+      expect(out).toEqual(['Configuration: tevu.yaml']);
     });
 
     it('maps a not-found configuration load failure to exit 1', async () => {
@@ -2462,10 +2696,33 @@ describe('tevu CLI', () => {
       expect(code).toBe(1);
       expect(err).toEqual([
         'error: configuration file not found: /work/tevu.yaml',
+        '  create one interactively: tevu task add --config tevu.yaml',
+        '  or start from the template: tevu config example > tevu.yaml',
+      ]);
+      expect(out).toEqual([]);
+      expect(operations.rebuildRunReport).not.toHaveBeenCalled();
+    });
+
+    it('maps a search-exhausted configuration failure to exit 1 with both searched paths and calls nothing else (V7)', async () => {
+      const operations = createOperations({
+        locateConfig: vi.fn(async () => ({
+          ok: false as const,
+          error: configNotFoundError(['/work/tevu.yaml', '/home/u/.config/tevu/tevu.yaml']),
+        })),
+      });
+
+      const { code, out, err } = await runCli(['report', 'run-1'], { operations });
+
+      expect(code).toBe(1);
+      expect(err).toEqual([
+        'error: configuration file not found',
+        '  searched: /work/tevu.yaml',
+        '  searched: /home/u/.config/tevu/tevu.yaml',
         '  create one interactively: tevu task add',
         '  or start from the template: tevu config example > tevu.yaml',
       ]);
       expect(out).toEqual([]);
+      expect(operations.loadConfig).not.toHaveBeenCalled();
       expect(operations.rebuildRunReport).not.toHaveBeenCalled();
     });
   });
@@ -2532,7 +2789,10 @@ describe('tevu CLI', () => {
         redact: (text) => text.replaceAll('hunter2', '[redacted]'),
       });
 
-      expect(out).toEqual(['Report regenerated: /tmp/[redacted]/run-1/report.md']);
+      expect(out).toEqual([
+        'Configuration: tevu.yaml',
+        'Report regenerated: /tmp/[redacted]/run-1/report.md',
+      ]);
       expect(out.join('')).not.toContain('hunter2');
     });
   });

@@ -70,7 +70,7 @@ Files are stored under the configured artifact directory:
 
 | File | Contents |
 | --- | --- |
-| `run.json` | Run identity, configuration snapshot, tool information (`tools.agentVersions`, one detected version per agent in use), per-agent capability reports, `execution.repeat` (`value`, the effective repeat; `source`, `config` or `cli`), case records, and findings |
+| `run.json` | Run identity, configuration snapshot, `configPath` (the absolute path of the configuration file the run read), tool information (`tools.agentVersions`, one detected version per agent in use), per-agent capability reports, `execution.repeat` (`value`, the effective repeat; `source`, `config` or `cli`), case records, and findings |
 | Root `result.json` | Normalized report data, including `pairs`, one pair summary per task/model entry pair |
 | `report.md` | Human-readable comparison with links to evidence |
 | `events.jsonl` | Raw agent event records, one JSON value per line; only that case's agent adapter interprets them |
@@ -128,7 +128,7 @@ Configured credential-secret values are redacted before persistent or terminal o
 
 `tevu report <run-id>` recomputes normalized results and Markdown from saved evidence and current assessments, resolving each case's metrics through the adapter registered under that case's `agent`. It does not start another model session or contact Git or an issue tracker. Unchanged source artifacts produce identical regenerated JSON and Markdown.
 
-`tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. A run whose snapshot predates that layout, or whose case results or manifest predate the current agent fields (missing `identity.agent` or `tools.agentVersions`) or the current repeat fields (missing `identity.attempt` or `execution.repeat`), is refused before either command writes anything.
+`tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. A run whose snapshot predates that layout, or whose case results or manifest predate the current agent fields (missing `identity.agent` or `tools.agentVersions`), the current repeat fields (missing `identity.attempt` or `execution.repeat`), or a non-empty string `configPath`, is refused before either command writes anything.
 
 Replacing an assessment retains the old verdict in history. Only current verdicts affect the outcome. Artifacts remain until the operator deletes the run directory; there is no automatic retention or upload.
 

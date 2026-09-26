@@ -35,6 +35,7 @@ import { createTask } from '@/application/create-task';
 import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
 import { validateConfig } from '@/application/validate';
 import { canonicalConfigSerialization, loadConfig } from '@/config/load';
+import { locateConfig } from '@/config/locate';
 import { referencedVariableName } from '@/config/schema';
 import { runProgram } from '@/interface/program';
 
@@ -122,6 +123,16 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
     configExists: (configPath) => configStore.exists(configPath),
     loadConfig: loadConfigAndRegisterSecrets,
     requireConfigDirectory: (configPath) => configStore.requireDirectory(configPath),
+    locateConfig: (requestedPath) =>
+      locateConfig(
+        requestedPath,
+        {
+          cwd: process.cwd(),
+          home: process.env['HOME'],
+          xdgConfigHome: process.env['XDG_CONFIG_HOME'],
+        },
+        configStore,
+      ),
     importJiraIssue: (settings, issueKey) => {
       const jiraSettings: JiraCloudSettings = {
         baseUrl: settings.url,

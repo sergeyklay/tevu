@@ -33,6 +33,7 @@ import type {
 } from '@/domain/types';
 
 const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
+const CONFIG_PATH = '/synthetic/tevu.yaml';
 
 const MODEL_EDIT_BASE = 'base content for model edit\n';
 const MODEL_EDIT_APPEND = 'model change\n';
@@ -417,7 +418,7 @@ describe('repository setup orchestration end to end (AC-1, P7)', () => {
       cancellation: new AbortController().signal,
     };
 
-    const run = unwrapOk(await runBenchmark(planBenchmark(config), dependencies));
+    const run = unwrapOk(await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies));
 
     const caseId = 'task-1--c1--1';
     const caseResult = run.cases.find((entry) => entry.identity.caseId === caseId);

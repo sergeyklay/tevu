@@ -34,6 +34,7 @@ import type {
 } from '@/domain/types';
 
 const FAKE_AGENT_NAME = 'fake-agent';
+const CONFIG_PATH = '/synthetic/tevu.yaml';
 const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 
 const BASE_GUARD_CONTENT = 'base-guard-content\n';
@@ -383,7 +384,7 @@ describe('runBenchmark tamper-proof check-state (AC-1, P11)', () => {
     const agent = buildFakeAgentAdapter(capture, overlayDirectory);
     const dependencies = buildDependencies(config, agent, testDirectory);
 
-    const result = await runBenchmark(planBenchmark(config), dependencies);
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
 
     const run = unwrapOk(result);
     const caseResult = caseResultOf(run, 'guard-task--m1--1');
@@ -431,7 +432,7 @@ describe.each([
       const agent = buildFakeAgentAdapter(capture, overlayDirectory, mutateOverlay);
       const dependencies = buildDependencies(config, agent, testDirectory);
 
-      const result = await runBenchmark(planBenchmark(config), dependencies);
+      const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
 
       const run = unwrapOk(result);
       const caseResult = caseResultOf(run, 'guard-task--m1--1');

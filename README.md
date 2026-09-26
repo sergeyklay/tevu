@@ -36,6 +36,8 @@ tevu --help
 
 `~/.local/bin` must be on `PATH`; any directory on `PATH` works. The link points into the checkout, which must stay in place.
 
+Without `--config`, tevu reads `tevu.yaml` from the current directory, or otherwise the configuration file in the user configuration directory; see the [CLI reference](docs/reference/cli.md) for the search order.
+
 [Create your first comparison](docs/guides/run-benchmark.md). Runs locally on Linux and macOS.
 
 ## How It Works

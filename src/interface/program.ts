@@ -60,6 +60,10 @@ export type ProgramOperations = {
   configExists(configPath: string): Promise<boolean>;
   loadConfig(configPath: string): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>>;
   requireConfigDirectory(configPath: string): Promise<TevuResult<void, 'PrerequisiteError'>>;
+  /** Locates the configuration file per the `--config` search; see `@/config/locate`. */
+  locateConfig(
+    requestedPath: string | undefined,
+  ): Promise<TevuResult<string, 'ConfigReadError' | 'ConfigNotFoundError'>>;
   importJiraIssue(
     settings: JiraTrackerSettings,
     issueKey: string,
@@ -93,7 +97,7 @@ export type ProgramOperations = {
       | 'AgentProtocolError'
     >
   >;
-  planBenchmark(config: TevuConfig, repeatOverride?: number): BenchmarkPlan;
+  planBenchmark(config: TevuConfig, configPath: string, repeatOverride?: number): BenchmarkPlan;
   executeBenchmark(
     plan: BenchmarkPlan,
     hooks: BenchmarkExecutionHooks,
@@ -141,7 +145,7 @@ export type ProgramDependencies = {
   cancellation: AbortSignal;
 };
 
-type ConfigOptionValues = { config: string };
+type ConfigOptionValues = { config?: string };
 type TaskAddOptionValues = ConfigOptionValues & { jira?: string; github?: string };
 type RunOptionValues = ConfigOptionValues & { dryRun?: boolean; repeat?: number };
 
@@ -149,11 +153,14 @@ type ExitBox = { code: number };
 
 type LineWriter = (line: string) => void;
 
-const DEFAULT_CONFIG_PATH = 'tevu.yaml';
-
 const EXIT_COMPLETED = 0;
 const EXIT_FAILURE = 1;
 const EXIT_CANCELLED = 130;
+
+const CONFIG_OPTION_DESCRIPTION =
+  'Configuration file path; without it, tevu searches ./tevu.yaml, then ' +
+  '$XDG_CONFIG_HOME/tevu/tevu.yaml (or $HOME/.config/tevu/tevu.yaml when ' +
+  'XDG_CONFIG_HOME is not an absolute path)';
 
 const HELP_EXAMPLES: Record<string, [string, string][]> = {
   tevu: [
@@ -173,7 +180,7 @@ const HELP_EXAMPLES: Record<string, [string, string][]> = {
     ['Import a task from GitHub', 'tevu task add --github OWNER/REPO#123'],
   ],
   validate: [
-    ['Check the default configuration', 'tevu validate'],
+    ['Check the configuration tevu finds', 'tevu validate'],
     ['Check a specific configuration', 'tevu validate --config benchmarks.yaml'],
   ],
   run: [
@@ -242,7 +249,7 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
   task
     .command('add')
     .description('Add a benchmark task')
-    .option('--config <path>', 'Configuration file path', DEFAULT_CONFIG_PATH)
+    .option('--config <path>', CONFIG_OPTION_DESCRIPTION)
     .option('--jira <issue-key>', 'Import a task from a Jira issue')
     .addOption(
       new Option('--github <reference>', 'Import a task from a GitHub issue').conflicts('jira'),
@@ -254,7 +261,7 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
   program
     .command('validate')
     .description('Check configuration and prerequisites')
-    .option('--config <path>', 'Configuration file path', DEFAULT_CONFIG_PATH)
+    .option('--config <path>', CONFIG_OPTION_DESCRIPTION)
     .action(async (options: ConfigOptionValues) => {
       exit.code = await runValidate(dependencies, options);
     });
@@ -262,7 +269,7 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
   program
     .command('run')
     .description('Run the benchmark')
-    .option('--config <path>', 'Configuration file path', DEFAULT_CONFIG_PATH)
+    .option('--config <path>', CONFIG_OPTION_DESCRIPTION)
     .option('--dry-run', 'Show the execution plan without running tasks')
     .addOption(
       new Option(
@@ -279,7 +286,7 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
     .description('Record manual check results')
     .argument('<run-id>', 'Run to assess')
     .argument('<case-id>', 'Case to assess')
-    .option('--config <path>', 'Configuration file path', DEFAULT_CONFIG_PATH)
+    .option('--config <path>', CONFIG_OPTION_DESCRIPTION)
     .action(async (runId: string, caseId: string, options: ConfigOptionValues) => {
       exit.code = await runAssess(dependencies, runId, caseId, options);
     });
@@ -288,7 +295,7 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
     .command('report')
     .description('Regenerate a report from a saved run')
     .argument('<run-id>', 'Run to report on')
-    .option('--config <path>', 'Configuration file path', DEFAULT_CONFIG_PATH)
+    .option('--config <path>', CONFIG_OPTION_DESCRIPTION)
     .action(async (runId: string, options: ConfigOptionValues) => {
       exit.code = await runReport(dependencies, runId, options);
     });
@@ -427,15 +434,55 @@ function runConfigExample(dependencies: ProgramDependencies): number {
   return EXIT_COMPLETED;
 }
 
+/**
+ * Locates and loads the configuration for `validate`, `run`, `assess`, and
+ * `report`, printing the `Configuration:` line once the search has resolved
+ * an absolute path and the load result is not a read failure.
+ */
+async function loadCommandConfig(
+  dependencies: ProgramDependencies,
+  requestedPath: string | undefined,
+  out: LineWriter,
+): Promise<
+  TevuResult<
+    { config: TevuConfig; configPath: string },
+    LoadConfigErrorKind | 'ConfigNotFoundError'
+  >
+> {
+  const operations = dependencies.operations;
+  const located = await operations.locateConfig(requestedPath);
+  if (!located.ok) {
+    return located;
+  }
+  const loaded = await operations.loadConfig(requestedPath ?? located.value);
+  if (loaded.ok || loaded.error.kind !== 'ConfigReadError') {
+    out(`Configuration: ${located.value}`);
+  }
+  if (!loaded.ok) {
+    return loaded;
+  }
+  return { ok: true, value: { config: loaded.value, configPath: located.value } };
+}
+
 async function runTaskAdd(
   dependencies: ProgramDependencies,
   options: TaskAddOptionValues,
 ): Promise<number> {
   const { out, err } = createLineWriters(dependencies);
   const operations = dependencies.operations;
+  const located = await operations.locateConfig(options.config);
+  let absolutePath: string;
+  if (located.ok) {
+    absolutePath = located.value;
+  } else if (located.error.kind === 'ConfigNotFoundError') {
+    absolutePath = located.error.searchedPaths[0];
+  } else {
+    return reportFailure(err, located.error, dependencies.redact);
+  }
+  const loaderPath = options.config ?? absolutePath;
   const wizard = await runTaskWizard(
     {
-      configPath: options.config,
+      configPath: loaderPath,
       jiraIssueKey: options.jira,
       githubIssueReference: options.github,
     },
@@ -444,15 +491,20 @@ async function runTaskAdd(
       readConfig: async (): Promise<
         TevuResult<TevuConfig | null, LoadConfigErrorKind | 'PrerequisiteError'>
       > => {
-        const exists = await operations.configExists(options.config);
+        const exists = await operations.configExists(loaderPath);
         if (!exists) {
-          const directory = await operations.requireConfigDirectory(options.config);
+          const directory = await operations.requireConfigDirectory(loaderPath);
           if (!directory.ok) {
             return directory;
           }
+          out(`Configuration: ${absolutePath}`);
           return { ok: true, value: null };
         }
-        return operations.loadConfig(options.config);
+        const loaded = await operations.loadConfig(loaderPath);
+        if (loaded.ok || loaded.error.kind !== 'ConfigReadError') {
+          out(`Configuration: ${absolutePath}`);
+        }
+        return loaded;
       },
       importJiraIssue: operations.importJiraIssue,
       importGitHubIssue: operations.importGitHubIssue,
@@ -467,7 +519,7 @@ async function runTaskAdd(
   if (!created.ok) {
     return reportFailure(err, created.error, dependencies.redact);
   }
-  out(`Task "${created.value.id}" added to ${options.config}.`);
+  out(`Task "${created.value.id}" added to ${loaderPath}.`);
   return EXIT_COMPLETED;
 }
 
@@ -476,11 +528,11 @@ async function runValidate(
   options: ConfigOptionValues,
 ): Promise<number> {
   const { out, err } = createLineWriters(dependencies);
-  const loaded = await dependencies.operations.loadConfig(options.config);
+  const loaded = await loadCommandConfig(dependencies, options.config, out);
   if (!loaded.ok) {
     return reportFailure(err, loaded.error, dependencies.redact);
   }
-  const report = await dependencies.operations.validateConfig(loaded.value);
+  const report = await dependencies.operations.validateConfig(loaded.value.config);
   if (!report.ok) {
     return reportFailure(err, report.error, dependencies.redact);
   }
@@ -495,11 +547,11 @@ async function runBenchmarkCommand(
 ): Promise<number> {
   const { out, err } = createLineWriters(dependencies);
   const operations = dependencies.operations;
-  const loaded = await operations.loadConfig(options.config);
+  const loaded = await loadCommandConfig(dependencies, options.config, out);
   if (!loaded.ok) {
     return reportFailure(err, loaded.error, dependencies.redact);
   }
-  const validation = await operations.validateConfig(loaded.value);
+  const validation = await operations.validateConfig(loaded.value.config);
   if (!validation.ok) {
     return reportFailure(err, validation.error, dependencies.redact);
   }
@@ -508,7 +560,11 @@ async function runBenchmarkCommand(
     out('Configuration is invalid.');
     return EXIT_FAILURE;
   }
-  const plan = operations.planBenchmark(loaded.value, options.repeat);
+  const plan = operations.planBenchmark(
+    loaded.value.config,
+    loaded.value.configPath,
+    options.repeat,
+  );
   if (options.dryRun === true) {
     printDryRun(out, plan, validation.value.capabilities);
     return EXIT_COMPLETED;
@@ -553,7 +609,7 @@ async function runBenchmarkCommand(
     );
     return EXIT_CANCELLED;
   }
-  const rebuilt = await operations.rebuildRunReport(loaded.value, runId);
+  const rebuilt = await operations.rebuildRunReport(loaded.value.config, runId);
   if (!rebuilt.ok) {
     for (const line of renderTevuError(rebuilt.error, dependencies.redact)) {
       err(line);
@@ -573,11 +629,11 @@ async function runAssess(
 ): Promise<number> {
   const { out, err } = createLineWriters(dependencies);
   const operations = dependencies.operations;
-  const loaded = await operations.loadConfig(options.config);
+  const loaded = await loadCommandConfig(dependencies, options.config, out);
   if (!loaded.ok) {
     return reportFailure(err, loaded.error, dependencies.redact);
   }
-  const config = loaded.value;
+  const config = loaded.value.config;
   const wizard = await runAssessmentWizard(
     { runId, caseId },
     {
@@ -608,15 +664,15 @@ async function runReport(
   options: ConfigOptionValues,
 ): Promise<number> {
   const { out, err } = createLineWriters(dependencies);
-  const loaded = await dependencies.operations.loadConfig(options.config);
+  const loaded = await loadCommandConfig(dependencies, options.config, out);
   if (!loaded.ok) {
     return reportFailure(err, loaded.error, dependencies.redact);
   }
-  const rebuilt = await dependencies.operations.rebuildRunReport(loaded.value, runId);
+  const rebuilt = await dependencies.operations.rebuildRunReport(loaded.value.config, runId);
   if (!rebuilt.ok) {
     return reportFailure(err, rebuilt.error, dependencies.redact);
   }
-  out(`Report regenerated: ${loaded.value.run.output_dir}/${runId}/report.md`);
+  out(`Report regenerated: ${loaded.value.config.run.output_dir}/${runId}/report.md`);
   return EXIT_COMPLETED;
 }
 
@@ -711,6 +767,13 @@ function renderTevuError(error: TevuError, redact: (text: string) => string): st
       return ['error: the configuration is invalid', ...renderFindingLines(error.findings)];
     case 'ConfigReadError':
       return renderConfigReadError(error, redact);
+    case 'ConfigNotFoundError':
+      return [
+        'error: configuration file not found',
+        ...error.searchedPaths.map((searchedPath) => `  searched: ${searchedPath}`),
+        '  create one interactively: tevu task add',
+        '  or start from the template: tevu config example > tevu.yaml',
+      ];
     case 'PrerequisiteError':
       return [
         `error: prerequisite "${error.tool}" is not satisfied; expected ${error.expected}${error.actual === undefined ? '' : `, actual ${error.actual}`}`,
@@ -772,13 +835,9 @@ function renderConfigReadError(
     return [firstLine];
   }
   const word = shellWord(redact(error.requestedPath));
-  const taskAddCommand =
-    error.requestedPath === DEFAULT_CONFIG_PATH
-      ? 'tevu task add'
-      : `tevu task add --config ${word}`;
   return [
     firstLine,
-    `  create one interactively: ${taskAddCommand}`,
+    `  create one interactively: tevu task add --config ${word}`,
     `  or start from the template: tevu config example > ${word}`,
   ];
 }

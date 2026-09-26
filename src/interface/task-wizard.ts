@@ -430,7 +430,7 @@ async function interviewRepositoryEntry(
     validate: validateId(usedIds),
   });
   const path = await askText(io, {
-    message: `Local path of repository "${id}"`,
+    message: `Local path of repository "${id}" (relative to the configuration file)`,
     validate: validateNonWhitespace,
   });
   return { id, path };
