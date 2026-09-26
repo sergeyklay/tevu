@@ -76,7 +76,7 @@ function readerRequest(stdinText: string | undefined) {
 }
 
 describe('runManagedProcess stdin', () => {
-  it('V-2: delivers the 200,000-byte fidelity payload to the child unchanged', async () => {
+  it('delivers the 200,000-byte fidelity payload to the child unchanged', async () => {
     const result = await runManagedProcess(readerRequest(FIDELITY_PAYLOAD));
 
     expect(result.launched).toBe(true);
@@ -85,7 +85,7 @@ describe('runManagedProcess stdin', () => {
     expect(result.stdout.text).toBe(`200000 ${FIDELITY_PAYLOAD_SHA256}`);
   });
 
-  it('V-4: gives the child closed, empty stdin when stdinText is absent', async () => {
+  it('gives the child closed, empty stdin when stdinText is absent', async () => {
     const result = await runManagedProcess(readerRequest(undefined));
 
     expect(result.launched).toBe(true);
@@ -94,7 +94,7 @@ describe('runManagedProcess stdin', () => {
     expect(result.stdout.text).toBe(`0 ${EMPTY_STDIN_SHA256}`);
   });
 
-  it('V-6: ignores EPIPE on an exit-before-read child and preserves its exit status', async () => {
+  it('ignores EPIPE on an exit-before-read child and preserves its exit status', async () => {
     const result = await runManagedProcess({
       argv: [process.execPath, '-e', 'process.exit(3);'],
       cwd: process.cwd(),
@@ -114,7 +114,7 @@ describe('runManagedProcess stdin', () => {
     });
   });
 
-  it('V-7: a pending write delays neither timeout nor its grace escalation', async () => {
+  it('a pending write delays neither timeout nor its grace escalation', async () => {
     const result = await runManagedProcess({
       argv: [process.execPath, '-e', 'setInterval(() => {}, 1000);'],
       cwd: process.cwd(),

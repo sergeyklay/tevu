@@ -639,7 +639,8 @@ export type ManagedProcessRequest = {
   /**
    * Text the process reads on stdin, UTF-8 encoded and followed by
    * end-of-file; delivered unredacted and never copied into the result.
-   * When absent, stdin is `/dev/null`.
+   * Text the process leaves unread is discarded without an error. When
+   * absent, stdin is `/dev/null`.
    */
   stdinText?: string;
 };

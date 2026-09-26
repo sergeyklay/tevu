@@ -1042,7 +1042,7 @@ describe('OpenCode adapter over a synthetic executable', () => {
     expect(diagnostics).toEqual(['this stdout line is not JSON at all']);
   });
 
-  it('V-8: a protocol failure still outranks a nonzero exit', async () => {
+  it('a protocol failure still outranks a nonzero exit', async () => {
     const worktree = join(tempRoot, 'worktree-nonjson-nonzero-exit');
     await mkdir(worktree, { recursive: true });
     const adapter = createOpenCodeAdapter(
@@ -1069,7 +1069,7 @@ describe('OpenCode adapter over a synthetic executable', () => {
     expect(outcome.error.reason).toBe('run output contains malformed JSON event framing');
   });
 
-  it('V-8: a signal-only death without a session resolves as a process error', async () => {
+  it('a signal-only death without a session resolves as a process error', async () => {
     const worktree = join(tempRoot, 'worktree-self-kill');
     await mkdir(worktree, { recursive: true });
     const adapter = createOpenCodeAdapter(
@@ -1174,7 +1174,7 @@ describe('OpenCode adapter over a synthetic executable', () => {
     expect(onProcessResult?.process.exitCode).toBe(7);
   });
 
-  it('V-5: an OpenCode build that ignores stdin resolves AgentProcessError with its stderr line as a diagnostic', async () => {
+  it('an OpenCode build that ignores stdin resolves AgentProcessError with its stderr line as a diagnostic', async () => {
     const worktree = join(tempRoot, 'worktree-ignores-stdin');
     await mkdir(worktree, { recursive: true });
     const diagnostics: string[] = [];
@@ -1388,7 +1388,7 @@ function buildBareEnvironment(): IsolatedEnvironment {
 }
 
 describe('OpenCode adapter run request over an injected fake process', () => {
-  it('V-1: carries the prompt as stdinText and puts no prompt text in argv', async () => {
+  it('carries the prompt as stdinText and puts no prompt text in argv', async () => {
     const events = [{ type: 'error', timestamp: 1, sessionID: SYNTHETIC_SESSION, error: 'boom' }];
     const stdout = events.map((event) => JSON.stringify(event)).join('\n') + '\n';
     const requests: ManagedProcessRequest[] = [];

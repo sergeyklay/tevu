@@ -146,7 +146,10 @@ export function createSecretRedactor(
  * or cancellation the whole group receives SIGTERM, then SIGKILL after
  * `terminationGraceMs`; surviving grandchildren are force-terminated after the
  * supervised process settles. When `request.stdinText` is set, the child's
- * stdin carries that text and is otherwise `/dev/null`.
+ * stdin carries that text and is closed after it; otherwise stdin is
+ * `/dev/null`. A child that exits before reading all of the text is reported
+ * by its exit status, not as a write failure, and a pending write delays
+ * neither timeout nor cancellation.
  */
 export async function runManagedProcess(
   request: ManagedProcessRequest,
@@ -165,6 +168,7 @@ export async function runManagedProcess(
       cwd: request.cwd,
       env: request.environment,
       extendEnv: false,
+      // `input` needs a piped stdin: combining it with 'ignore' throws at spawn.
       ...(request.stdinText === undefined
         ? { stdin: 'ignore' }
         : { stdin: 'pipe', input: request.stdinText }),
