@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createArtifactStore } from '@/adapters/artifact-store';
 import { createRedactor } from '@/adapters/process';
-import { rebuildReport } from '@/application/assess';
+import { assessCase, rebuildReport } from '@/application/assess';
 import { TevuConfigSchema } from '@/config/schema';
 import { unavailableBenchmarkMetrics } from '@/domain/types';
 import { combineCaseMetrics } from '@/evaluation/metrics';
@@ -39,6 +39,7 @@ const PROVIDER_SECRET = 'synthetic-provider-secret-9f2';
 const PROVIDER_ENV_NAME = 'TEVU_PROVIDER_KEY';
 const TRANSCRIPT_BODY = 'TEVU-TRANSCRIPT-BODY model output text';
 const PATCH_BODY = 'TEVU-PATCH-BODY diff --git a/src/welcome.ts b/src/welcome.ts';
+const CONFIG_PATH = '/synthetic/tevu.yaml';
 
 const FIXTURE_DIRECTORY = new URL('./fixtures/', import.meta.url);
 
@@ -309,6 +310,7 @@ function buildManifest(
     schemaVersion: 1,
     runId,
     configDigest: 'sha256-synthetic-digest',
+    configPath: CONFIG_PATH,
     startedAt: '2026-09-23T00:00:00.000Z',
     completedAt: null,
     host: { platform: 'linux', nodeVersion: 'v24.21.0' },
@@ -704,6 +706,31 @@ describe('OpenCode report regeneration matches the pinned baseline', () => {
     }
   });
 
+  it('writes byte-identical run.json and root result.json across two rebuilds, with the regenerated configPath equal to the stored one (V9)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-p9-'));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      const runJsonPath = join(root, 'artifacts', runId, 'run.json');
+      const resultJsonPath = join(root, 'artifacts', runId, 'result.json');
+
+      const first = await rebuildReport(runId, store, AGENTS_REGISTRY);
+      expect(first.ok).toBe(true);
+      const runJsonAfterFirst = await readFile(runJsonPath, 'utf8');
+      const resultJsonAfterFirst = await readFile(resultJsonPath, 'utf8');
+      const second = await rebuildReport(runId, store, AGENTS_REGISTRY);
+      expect(second.ok).toBe(true);
+      const runJsonAfterSecond = await readFile(runJsonPath, 'utf8');
+      const resultJsonAfterSecond = await readFile(resultJsonPath, 'utf8');
+
+      expect(runJsonAfterSecond).toBe(runJsonAfterFirst);
+      expect(resultJsonAfterSecond).toBe(resultJsonAfterFirst);
+      const storedManifest = JSON.parse(runJsonAfterFirst) as { manifest: { configPath: string } };
+      expect(storedManifest.manifest.configPath).toBe(CONFIG_PATH);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a run whose case result is missing identity.agent, before any write', async () => {
     const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-p8-case-'));
     try {
@@ -800,4 +827,61 @@ describe('OpenCode report regeneration matches the pinned baseline', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it.each([
+    {
+      label: 'missing',
+      mutate: (manifest: Record<string, unknown>) => delete manifest['configPath'],
+    },
+    {
+      label: 'an empty string',
+      mutate: (manifest: Record<string, unknown>) => {
+        manifest['configPath'] = '';
+      },
+    },
+  ])(
+    'refuses a run whose manifest has $label configPath, before any write for both report and assess (V10)',
+    async ({ mutate }) => {
+      const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-p10-'));
+      try {
+        const { runId, store } = await createSyntheticRun(root);
+        const runJsonPath = join(root, 'artifacts', runId, 'run.json');
+        const before = await readFile(runJsonPath, 'utf8');
+        const stored = JSON.parse(before) as { manifest: Record<string, unknown> };
+        mutate(stored.manifest);
+        await writeFile(runJsonPath, JSON.stringify(stored, null, 2), 'utf8');
+        const corrupted = await readFile(runJsonPath, 'utf8');
+        const reportPath = join(root, 'artifacts', runId, 'report.md');
+
+        const reported = await rebuildReport(runId, store, AGENTS_REGISTRY);
+        const assessed = await assessCase(
+          {
+            runId,
+            caseId: 'task-1--alpha--1',
+            decisions: [
+              {
+                checkId: 'man-optional-polish',
+                verdict: 'passed',
+                assessor: 'curator',
+                note: 'unreachable: the manifest read fails first',
+                replaceExisting: false,
+              },
+            ],
+            assessedAt: '2026-09-23T02:00:00.000Z',
+          },
+          store,
+          AGENTS_REGISTRY,
+        );
+
+        expect(reported.ok).toBe(false);
+        if (!reported.ok) expect(reported.error.kind).toBe('ArtifactError');
+        expect(assessed.ok).toBe(false);
+        if (!assessed.ok) expect(assessed.error.kind).toBe('ArtifactError');
+        expect(await readFile(runJsonPath, 'utf8')).toBe(corrupted);
+        expect(existsSync(reportPath)).toBe(false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

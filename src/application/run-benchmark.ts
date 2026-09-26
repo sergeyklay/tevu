@@ -95,7 +95,11 @@ type RunBenchmarkErrorKind =
  * always keeps the configured value, even when `repeatOverride` overrides it
  * for this plan.
  */
-export function planBenchmark(config: TevuConfig, repeatOverride?: number): BenchmarkPlan {
+export function planBenchmark(
+  config: TevuConfig,
+  configPath: string,
+  repeatOverride?: number,
+): BenchmarkPlan {
   const repeat: RepeatSetting =
     repeatOverride === undefined
       ? { value: config.run.repeat, source: 'config' }
@@ -119,6 +123,7 @@ export function planBenchmark(config: TevuConfig, repeatOverride?: number): Benc
   }
   return {
     config,
+    configPath,
     cases,
     repeat,
     concurrency: config.run.concurrency,
@@ -228,6 +233,7 @@ export async function runBenchmark(
     schemaVersion: 1,
     runId: dependencies.generateRunId(startedAt),
     configDigest: dependencies.configDigest(plan.config),
+    configPath: plan.configPath,
     startedAt: startedAt.toISOString(),
     completedAt: null,
     host: {

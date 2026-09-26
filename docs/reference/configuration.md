@@ -1,6 +1,6 @@
 # Configuration reference
 
-tevu reads UTF-8 YAML with `version: 1`. Unknown fields are rejected at every level. `--config` selects the file; its default is `tevu.yaml`.
+tevu reads UTF-8 YAML with `version: 1`. Unknown fields are rejected at every level. `--config` selects the file explicitly; without it, tevu reads `./tevu.yaml`, or the user configuration file under `$XDG_CONFIG_HOME/tevu` or `$HOME/.config/tevu`. See the [CLI reference](cli.md) for the complete search order.
 
 ## Example
 
@@ -144,7 +144,7 @@ tasks:
 | `models` | At least two `{id, model, effort, agent}` entries |
 | `tasks` | At least one task |
 
-Paths resolve relative to the configuration file. Bare executable names are found through `PATH`. IDs start with a lowercase letter, contain lowercase letters, digits, or hyphens, and have at most 64 characters. IDs are unique within their collection.
+Paths resolve relative to the configuration file. Resolution uses the directory of the path tevu read, without following symbolic links; tevu does not expand `~`. When the configuration lives in the user configuration directory rather than the current directory, use absolute paths for `run.output_dir`, `repositories[].path`, `checks.overlay`, and a path-form `agents.opencode.command`, since a relative value there resolves against the user configuration directory, not the directory tevu ran from. Bare executable names are found through `PATH`. IDs start with a lowercase letter, contain lowercase letters, digits, or hyphens, and have at most 64 characters. IDs are unique within their collection.
 
 A block keyed by an adapter kind (`agents.opencode`, `trackers.jira`) holds that adapter's settings only, so a new agent or tracker adds a block and changes nothing else. `opencode` is the only configured agent today, so `models[].agent` defaults to it; a configuration with more than one agent must set `agent` explicitly to a configured agent key.
 

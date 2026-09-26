@@ -1255,7 +1255,8 @@ function describeStoredManifestDefect(manifest: unknown, runId: string): string 
     !isRecord(manifest['tools']) ||
     !isRecord(manifest['tools']['agentVersions']) ||
     !isRecord(manifest['execution']) ||
-    !isRepeatSetting(manifest['execution']['repeat'])
+    !isRepeatSetting(manifest['execution']['repeat']) ||
+    !isNonEmptyString(manifest['configPath'])
   ) {
     return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
   }

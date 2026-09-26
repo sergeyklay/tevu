@@ -18,7 +18,7 @@ ln -sf "$PWD/dist/index.js" ~/.local/bin/tevu
 tevu --help
 ```
 
-`tevu` runs with the `node` on `PATH`, which must be Node.js 24 in every directory where `tevu` is used. The link points into the checkout, which must stay in place. After updating the checkout, rerun `bun install --frozen-lockfile` and `bun run build`. If the shell cannot find `tevu`, add `~/.local/bin` to `PATH` or link into another directory on `PATH`. Run the remaining commands in this guide from the directory that holds, or will hold, `tevu.yaml`.
+`tevu` runs with the `node` on `PATH`, which must be Node.js 24 in every directory where `tevu` is used. The link points into the checkout, which must stay in place. After updating the checkout, rerun `bun install --frozen-lockfile` and `bun run build`. If the shell cannot find `tevu`, add `~/.local/bin` to `PATH` or link into another directory on `PATH`. Run the remaining commands in this guide from the directory that holds, or will hold, `tevu.yaml`, or from any directory once the configuration lives in the user configuration file; see the [configuration reference](../reference/configuration.md#top-level-fields) for why the user file favors absolute paths.
 
 ## Define a task
 
@@ -45,7 +45,7 @@ tevu validate
 tevu run --dry-run
 ```
 
-Validation should print `Configuration is valid.` The preview lists every task/model pair, the starting commits, execution limits, and the output directory. Neither command starts a model session.
+Validation first prints `Configuration: <path>`, the absolute path of the file tevu found, then `Configuration is valid.` The preview lists every task/model pair, the starting commits, execution limits, and the output directory. Neither command starts a model session.
 
 ## Run and review
 

@@ -35,9 +35,15 @@ export type TevuError =
       kind: 'ConfigReadError';
       /** Absolute path the loader probed: `path.resolve(requestedPath)`. */
       path: string;
-      /** Configuration path exactly as the command received it; the not-found hints embed it. */
+      /** Path handed to the loader: `--config` exactly as given, or an absolute search candidate; the not-found hints embed it. */
       requestedPath: string;
       cause: ConfigReadCause;
+    }
+  | {
+      kind: 'ConfigNotFoundError';
+      /** Absolute paths the search read, in search order; the first is the current-directory file, which `task add` creates. */
+      searchedPaths:
+        [currentDirectoryFile: string] | [currentDirectoryFile: string, userFile: string];
     }
   | { kind: 'PrerequisiteError'; tool: string; expected: string; actual?: string }
   | { kind: 'SourceMaterializationError'; taskId: string; reason: string }
@@ -253,6 +259,8 @@ export type RunManifest = {
   schemaVersion: 1;
   runId: string;
   configDigest: string;
+  /** Absolute path of the configuration file the run read; provenance only, never opened by `report` or `assess`. */
+  configPath: string;
   startedAt: string;
   completedAt: string | null;
   host: {
@@ -960,6 +968,8 @@ export type ValidationReport = {
 /** Deterministic attempt-major execution plan derived purely from configuration. */
 export type BenchmarkPlan = {
   config: TevuConfig;
+  /** Absolute path of the file `config` was loaded from; `runBenchmark` copies it into `RunManifest.configPath`. */
+  configPath: string;
   cases: CaseIdentity[];
   repeat: RepeatSetting;
   concurrency: number;

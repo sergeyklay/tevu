@@ -98,6 +98,7 @@ const SOURCE_SCRIPT = '#!/bin/sh\necho synthetic\n';
 const SYMLINK_TARGET = '../src/welcome.txt';
 
 const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
+const CONFIG_PATH = '/synthetic/tevu.yaml';
 
 const ENVIRONMENT_PROBE_SCRIPT =
   'process.stdout.write(JSON.stringify({ home: process.env.HOME, provider: process.env.TEVU_IT_PROVIDER_KEY, secret: process.env.TEVU_IT_SECRET_VALUE, ordinary: process.env.TEVU_IT_ORDINARY, hostSentinel: process.env.TEVU_IT_HOST_ONLY, keys: Object.keys(process.env).sort() }));';
@@ -2006,7 +2007,7 @@ describe('file-backed artifact store with repeated attempts (AC-13)', () => {
       cancellation: new AbortController().signal,
     };
 
-    const result = await runBenchmark(planBenchmark(config), dependencies);
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
