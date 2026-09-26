@@ -636,6 +636,12 @@ export type ManagedProcessRequest = {
    * raw stream. Defaults to "text".
    */
   stdoutRedaction?: 'text' | 'structured';
+  /**
+   * Text the process reads on stdin, UTF-8 encoded and followed by
+   * end-of-file; delivered unredacted and never copied into the result.
+   * When absent, stdin is `/dev/null`.
+   */
+  stdinText?: string;
 };
 
 /**

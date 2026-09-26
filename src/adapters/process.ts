@@ -145,7 +145,8 @@ export function createSecretRedactor(
  * redaction before the optional callbacks and the bounded captures. On timeout
  * or cancellation the whole group receives SIGTERM, then SIGKILL after
  * `terminationGraceMs`; surviving grandchildren are force-terminated after the
- * supervised process settles.
+ * supervised process settles. When `request.stdinText` is set, the child's
+ * stdin carries that text and is otherwise `/dev/null`.
  */
 export async function runManagedProcess(
   request: ManagedProcessRequest,
@@ -164,7 +165,9 @@ export async function runManagedProcess(
       cwd: request.cwd,
       env: request.environment,
       extendEnv: false,
-      stdin: 'ignore',
+      ...(request.stdinText === undefined
+        ? { stdin: 'ignore' }
+        : { stdin: 'pipe', input: request.stdinText }),
       stdout: 'pipe',
       stderr: 'pipe',
       buffer: false,

@@ -193,8 +193,8 @@ async function runCase(
       input.identity.model,
       '--variant',
       input.identity.effort,
-      input.prompt,
     ],
+    stdinText: input.prompt,
     cwd: input.worktreeDirectory,
     environment: input.environment.variables,
     timeoutMs: input.timeoutMs,
@@ -243,13 +243,6 @@ async function runCase(
   if (protocolFailure !== null) {
     return { ok: false, error: protocolFailure };
   }
-  if (sessionId === null) {
-    return agentProtocolError(
-      settings.agent,
-      context,
-      'run output did not identify a root session',
-    );
-  }
   if (outcome.exitCode !== 0) {
     return {
       ok: false,
@@ -261,6 +254,13 @@ async function runCase(
         signal: outcome.signal,
       },
     };
+  }
+  if (sessionId === null) {
+    return agentProtocolError(
+      settings.agent,
+      context,
+      'run output did not identify a root session',
+    );
   }
   return { ok: true, value: runResult };
 }
