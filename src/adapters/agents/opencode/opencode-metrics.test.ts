@@ -15,6 +15,7 @@ import type { OpenCodeExport, OpenCodePart } from './opencode-protocol';
 import type {
   AgentRunResult,
   IsolatedEnvironment,
+  ManagedProcessRequest,
   ManagedProcessResult,
   ManagedProcessRunner,
   SecretRedactor,
@@ -684,6 +685,11 @@ if (args[0] === "run") {
     emit({ type: "error", timestamp: 1, sessionID: session, error: { message: "prefix " + process.env["TEVU_SYNTH_SECRET"] + " suffix" } });
   } else if (mode === "secret-number") {
     emit({ type: "error", timestamp: 45, sessionID: session, error: { message: "synthetic" } });
+  } else if (mode === "ignores-stdin") {
+    process.stderr.write("Error: You must provide a message or a command\\n");
+    process.exit(1);
+  } else if (mode === "self-kill") {
+    process.kill(process.pid, "SIGKILL");
   } else {
     emit({ type: "step_start", timestamp: 1, sessionID: session, part: { id: "prt-s1", sessionID: session, messageID: "msg-s1", type: "step-start" } });
     emit({ type: "tool_use", timestamp: 2, sessionID: session, part: { id: "prt-s2", sessionID: session, messageID: "msg-s1", type: "tool", callID: "call-1", tool: "bash", state: { status: "completed" } } });
@@ -958,7 +964,6 @@ describe('OpenCode adapter over a synthetic executable', () => {
       'vendor/model-alpha-synth',
       '--variant',
       'effort-high',
-      'synthetic benchmark prompt',
     ]);
     expect(recorded.cwd).toBe(worktree);
     expect(recorded.env['TEVU_PARENT_SENTINEL']).toBeUndefined();
@@ -1037,6 +1042,65 @@ describe('OpenCode adapter over a synthetic executable', () => {
     expect(diagnostics).toEqual(['this stdout line is not JSON at all']);
   });
 
+  it('a protocol failure still outranks a nonzero exit', async () => {
+    const worktree = join(tempRoot, 'worktree-nonjson-nonzero-exit');
+    await mkdir(worktree, { recursive: true });
+    const adapter = createOpenCodeAdapter(
+      { agent: 'opencode', executable: syntheticExecutable },
+      buildDependencies(),
+    );
+
+    const outcome = await adapter.run({
+      identity: IDENTITY,
+      prompt: 'synthetic benchmark prompt',
+      worktreeDirectory: worktree,
+      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: 'nonjson', TEVU_SYNTH_EXIT: '7' }),
+      timeoutMs: 10000,
+      terminationGraceMs: 250,
+      cancellation: new AbortController().signal,
+      onEvent: async () => ({ ok: true, value: undefined }),
+      onDiagnostic: async () => ({ ok: true, value: undefined }),
+    });
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.error.kind !== 'AgentProtocolError') {
+      throw new Error(`expected a protocol failure, got ${JSON.stringify(outcome)}`);
+    }
+    expect(outcome.error.reason).toBe('run output contains malformed JSON event framing');
+  });
+
+  it('a signal-only death without a session resolves as a process error', async () => {
+    const worktree = join(tempRoot, 'worktree-self-kill');
+    await mkdir(worktree, { recursive: true });
+    const adapter = createOpenCodeAdapter(
+      { agent: 'opencode', executable: syntheticExecutable },
+      buildDependencies(),
+    );
+
+    const outcome = await adapter.run({
+      identity: IDENTITY,
+      prompt: 'synthetic benchmark prompt',
+      worktreeDirectory: worktree,
+      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: 'self-kill' }),
+      timeoutMs: 10000,
+      terminationGraceMs: 250,
+      cancellation: new AbortController().signal,
+      onEvent: async () => ({ ok: true, value: undefined }),
+      onDiagnostic: async () => ({ ok: true, value: undefined }),
+    });
+
+    expect(outcome).toEqual({
+      ok: false,
+      error: {
+        kind: 'AgentProcessError',
+        agent: 'opencode',
+        caseId: CASE_ID,
+        exitCode: null,
+        signal: 'SIGKILL',
+      },
+    });
+  });
+
   it('fails with the decoded event identity error and delivers no record', async () => {
     const worktree = join(tempRoot, 'worktree-malformed');
     await mkdir(worktree, { recursive: true });
@@ -1108,6 +1172,45 @@ describe('OpenCode adapter over a synthetic executable', () => {
     expect(onProcessResult).toBeDefined();
     expect(onProcessResult?.sessionId).toBe(SYNTHETIC_SESSION);
     expect(onProcessResult?.process.exitCode).toBe(7);
+  });
+
+  it('an OpenCode build that ignores stdin resolves AgentProcessError with its stderr line as a diagnostic', async () => {
+    const worktree = join(tempRoot, 'worktree-ignores-stdin');
+    await mkdir(worktree, { recursive: true });
+    const diagnostics: string[] = [];
+    const adapter = createOpenCodeAdapter(
+      { agent: 'opencode', executable: syntheticExecutable },
+      buildDependencies(),
+    );
+
+    const outcome = await adapter.run({
+      identity: IDENTITY,
+      prompt: 'synthetic benchmark prompt',
+      worktreeDirectory: worktree,
+      environment: syntheticEnvironment({ TEVU_SYNTH_MODE: 'ignores-stdin' }),
+      timeoutMs: 10000,
+      terminationGraceMs: 250,
+      cancellation: new AbortController().signal,
+      onEvent: async () => ({ ok: true, value: undefined }),
+      onDiagnostic: async (line) => {
+        diagnostics.push(line);
+        return { ok: true, value: undefined };
+      },
+    });
+
+    expect(outcome).toEqual({
+      ok: false,
+      error: {
+        kind: 'AgentProcessError',
+        agent: 'opencode',
+        caseId: CASE_ID,
+        exitCode: 1,
+        signal: null,
+      },
+    });
+    expect(
+      diagnostics.some((line) => line.includes('You must provide a message or a command')),
+    ).toBe(true);
   });
 
   it('exports the requested root session with additive fields retained, decodable by normalizeMetrics', async () => {
@@ -1244,9 +1347,17 @@ describe('OpenCode adapter over a synthetic executable', () => {
   });
 });
 
-/** A fake `ManagedProcessRunner` that hands one fixed stdout payload to `onStdout` and reports a clean exit. */
-function buildFakeRunner(stdout: string): ManagedProcessRunner {
+/**
+ * A fake `ManagedProcessRunner` that hands one fixed stdout payload to
+ * `onStdout`, reports a clean exit, and records every request it receives
+ * into `requests` so a test can inspect what the adapter built.
+ */
+function buildFakeRunner(
+  stdout: string,
+  requests: ManagedProcessRequest[] = [],
+): ManagedProcessRunner {
   return async (request) => {
+    requests.push(request);
     request.onStdout?.(stdout);
     const completion: ManagedProcessResult = {
       launched: true,
@@ -1275,6 +1386,45 @@ function buildBareEnvironment(): IsolatedEnvironment {
     variableManifest: [],
   };
 }
+
+describe('OpenCode adapter run request over an injected fake process', () => {
+  it('carries the prompt as stdinText and puts no prompt text in argv', async () => {
+    const events = [{ type: 'error', timestamp: 1, sessionID: SYNTHETIC_SESSION, error: 'boom' }];
+    const stdout = events.map((event) => JSON.stringify(event)).join('\n') + '\n';
+    const requests: ManagedProcessRequest[] = [];
+    const adapter = createOpenCodeAdapter(
+      { agent: 'opencode', executable: 'fake-opencode' },
+      buildDependencies({ runProcess: buildFakeRunner(stdout, requests) }),
+    );
+
+    await adapter.run({
+      identity: IDENTITY,
+      prompt: 'synthetic benchmark prompt',
+      worktreeDirectory: '/synthetic/worktree',
+      environment: buildBareEnvironment(),
+      timeoutMs: 10000,
+      terminationGraceMs: 250,
+      cancellation: new AbortController().signal,
+      onEvent: async () => ({ ok: true, value: undefined }),
+      onDiagnostic: async () => ({ ok: true, value: undefined }),
+    });
+
+    expect(requests).toHaveLength(1);
+    const request = requests[0];
+    expect(request.argv).toEqual([
+      'fake-opencode',
+      'run',
+      '--format',
+      'json',
+      '--model',
+      'vendor/model-alpha-synth',
+      '--variant',
+      'effort-high',
+    ]);
+    expect(request.argv.join(' ')).not.toContain('synthetic benchmark prompt');
+    expect(request.stdinText).toBe('synthetic benchmark prompt');
+  });
+});
 
 describe('OpenCode adapter delivery stopping over an injected fake process', () => {
   it('stops delivering further records after a failed onEvent delivery and reports no protocol failure', async () => {
