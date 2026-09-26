@@ -143,11 +143,12 @@ tasks:
 | `trackers.jira` | Optional Jira Cloud connection settings |
 | `repositories` | At least one `{id, path}` entry, each optionally carrying `setup` |
 | `models` | At least two `{id, model, effort, agent}` entries |
+| `roles` | Optional; the `criteria` and `grader` model roles used by future commands, covered under [Model roles](#model-roles) |
 | `tasks` | At least one task |
 
 Paths resolve relative to the configuration file. Resolution uses the directory of the path tevu read, without following symbolic links; tevu does not expand `~`. When the configuration lives in the user configuration directory rather than the current directory, use absolute paths for `run.output_dir`, `repositories[].path`, `checks.overlay`, and a path-form `agents.opencode.command`, since a relative value there resolves against the user configuration directory, not the directory tevu ran from. Bare executable names are found through `PATH`. IDs start with a lowercase letter, contain lowercase letters, digits, or hyphens, and have at most 64 characters. IDs are unique within their collection.
 
-A block keyed by an adapter kind (`agents.opencode`, `trackers.jira`) holds that adapter's settings only, so a new agent or tracker adds a block and changes nothing else. `opencode` is the only configured agent today, so `models[].agent` defaults to it; a configuration with more than one agent must set `agent` explicitly to a configured agent key.
+A block keyed by an adapter kind (`agents.opencode`, `trackers.jira`) holds that adapter's settings only, so a new agent or tracker adds a block and changes nothing else. `opencode` is the only configured agent today, so `models[].agent` and `roles.<role>.agent` both default to it; a configuration with more than one agent must set `agent` explicitly to a configured agent key.
 
 A model entry is one model/effort combination. `model` uses `provider/model` syntax and `effort` is non-empty. `effort` reaches OpenCode verbatim as its `--variant` argument, so it must name a reasoning-effort variant that the agent supports, either a built-in one or one defined in an `opencode.json` tracked at the task's `base_commit`. Different model entries may share the same `model`. The provider determines which model identifiers and efforts are supported.
 
@@ -277,6 +278,38 @@ A check's `env` names ordinary variables available to that command only. A name 
 No other parent variables are inherited. Sequential checks and setup commands reuse these directories. Evaluator home, state, and temporary directories are separate from the agent's directories.
 
 Agent processes receive the same fixed variable names with their own per-case home, state, and temporary directories, plus the variables declared in `agents.opencode.secrets` and `agents.opencode.env`. Host agent sessions, global configuration, caches, and login stores are not copied.
+
+A model call's agent process receives the same treatment: the case agent variables of its agent block's `secrets` and `env`, with its own home, state, and temporary directories, and an empty Git repository as its working directory, all removed after the call. See [Model roles](#model-roles).
+
+## Model roles
+
+`roles` declares the models used by commands outside the benchmark itself: `criteria` drafts acceptance criteria and a Definition of Done, and `grader` grades a case's solution against its criteria. Each names an agent, a model, and an effort the same way a `models` entry does.
+
+```yaml
+roles:
+  criteria:                                # drafts acceptance criteria and a Definition of Done
+    model: anthropic/your-drafting-model
+    effort: high                           # a variant the agent provides without a repository
+    agent: opencode                        # optional; defaults to the configured agent
+  grader:                                  # grades a case's solution against its criteria
+    model: openai/your-grader-model
+    effort: medium
+```
+
+| Field | Required | Default | Allowed values |
+| --- | --- | --- | --- |
+| `roles` | No | Absent: no model role declared | A mapping whose keys are `criteria`, `grader`, or both; `{}` declares neither; any other key, or `null`, is rejected |
+| `roles.criteria` | No | Absent | A model role mapping (the three fields below) |
+| `roles.grader` | No | Absent | A model role mapping |
+| `roles.<role>.model` | Yes | None | `provider/model`, the same grammar as `models[].model` |
+| `roles.<role>.effort` | Yes | None | Non-empty string, passed verbatim as OpenCode's `--variant`, naming a variant the agent provides without a repository: built-in or provider-defined, never one defined only in a repository's `opencode.json` |
+| `roles.<role>.agent` | No | `opencode` | A key of `agents` |
+
+The two roles are configured and used independently: each is required only by the command that reads it, and a configuration declaring neither is valid. They stay separate settings rather than one shared model because a model grading or drafting for its own family tends to favor it. The same model may serve a model role and a model entry; tevu does not forbid using one model for both.
+
+A model role's provider credential belongs in its agent block's `secrets`, not in the role itself; every case agent of that block receives the same credential, so a role on a provider no model entry uses exposes its credential to every benchmarked case agent of that agent. Neither the loader nor `tevu validate` checks a role's credential or effort against its provider: a missing credential fails the call at run time, and an unknown effort runs at the model's default effort.
+
+`tevu validate` probes each distinct agent a model entry or a model role names, once per agent, the same way it probes a model entry's agent: variable presence and the agent capabilities the call needs, without starting a model session. See the [isolation explanation](../concepts/isolation.md#model-calls-get-no-task-repository) for how a model call's environment differs from a case agent's.
 
 ## Jira Cloud
 

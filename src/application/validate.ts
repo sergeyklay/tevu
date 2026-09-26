@@ -48,7 +48,15 @@ export async function validateConfig(
   ];
 
   const capabilities: Record<string, AgentCapabilityReport> = {};
-  for (const name of agentNamesInUse(config)) {
+  const probeNames = agentNamesInUse(config);
+  const probeNamesSeen = new Set(probeNames);
+  for (const role of Object.values(config.roles ?? {})) {
+    if (!probeNamesSeen.has(role.agent)) {
+      probeNamesSeen.add(role.agent);
+      probeNames.push(role.agent);
+    }
+  }
+  for (const name of probeNames) {
     const adapter = agents.get(name);
     if (adapter === undefined) {
       findings.push({

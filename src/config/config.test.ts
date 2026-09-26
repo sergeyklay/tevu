@@ -13,11 +13,13 @@ import { validateConfig } from '@/application/validate';
 import { renderConfigDocument } from './document';
 import { canonicalConfigSerialization, loadConfig, parseConfigText } from './load';
 import { AGENT_NAMES, agentNamesInUse, agentSettingsSchema, TevuConfigSchema } from './schema';
+import { CONFIG_TEMPLATE } from './template';
 
 import type {
   AgentName,
   CheckInput,
   ModelDefinitionInput,
+  ModelRoleInput,
   TaskInput,
   TevuConfigInput,
 } from './schema';
@@ -90,6 +92,10 @@ function buildRepository(overrides: Partial<RepositoryDefinition> = {}): Reposit
 
 function buildModel(overrides: Partial<ModelDefinitionInput> = {}): ModelDefinitionInput {
   return { id: 'alpha', model: 'openai/gpt-5', effort: 'high', ...overrides };
+}
+
+function buildModelRole(overrides: Partial<ModelRoleInput> = {}): ModelRoleInput {
+  return { model: 'openai/grader-model', effort: 'high', ...overrides };
 }
 
 function buildManualCheck(overrides: Partial<CheckInput> = {}): CheckInput {
@@ -238,6 +244,14 @@ function buildFullGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspac
       },
     })),
     dispose: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    initializeEmptyRepository: vi.fn(async () => ({
+      ok: false as const,
+      error: {
+        kind: 'ArtifactError' as const,
+        operation: 'initialize-repository',
+        reason: 'not used in these tests',
+      },
+    })),
     ...overrides,
   };
 }
@@ -311,6 +325,10 @@ function buildFakeAgentAdapter(overrides: Partial<AgentAdapter> = {}): AgentAdap
         reason: 'not used in these tests',
       },
     })),
+    callModel: vi.fn(async () => ({
+      ok: false as const,
+      error: { kind: 'CancellationError' as const, activeCaseIds: [] },
+    })),
     ...overrides,
   };
 }
@@ -331,6 +349,14 @@ function buildEnvironments(overrides: Partial<EnvironmentAdapter> = {}): Environ
       error: {
         kind: 'IsolationError' as const,
         caseId: 'unused',
+        reason: 'not used in these tests',
+      },
+    })),
+    createModelCallEnvironment: vi.fn(async () => ({
+      ok: false as const,
+      error: {
+        kind: 'ArtifactError' as const,
+        operation: 'create-model-call-directory',
         reason: 'not used in these tests',
       },
     })),
@@ -825,6 +851,77 @@ describe('TevuConfigSchema', () => {
     expect(expectSchemaRejection(config)).toContainEqual({
       path: 'models.0.agent',
       message: 'agent must name a configured agent: opencode',
+    });
+  });
+
+  describe('roles', () => {
+    it('parses CONFIG_TEMPLATE with roles absent', () => {
+      const parsed = expectOk(parseConfigText(CONFIG_TEMPLATE));
+
+      expect(parsed.roles).toBeUndefined();
+    });
+
+    it('materializes roles as absent when the file declares none', () => {
+      const accepted = expectSchemaAcceptance(buildConfig());
+
+      expect(accepted.roles).toBeUndefined();
+    });
+
+    it('accepts roles: {} and materializes it as {}', () => {
+      const accepted = expectSchemaAcceptance(buildConfig({ roles: {} }));
+
+      expect(accepted.roles).toEqual({});
+    });
+
+    it('reports an unknown field inside roles.grader as an unknown configuration field', () => {
+      const text =
+        configYaml({ outputDirectory: './runs', repositoryPath: './repo', command: 'opencode' }) +
+        'roles:\n  grader:\n    model: openai/grader-model\n    effort: high\n    extra: nope\n';
+
+      const parsed = expectFailure(parseConfigText(text), 'ConfigValidationError');
+
+      expect(parsed.findings).toContainEqual({
+        severity: 'error',
+        identifier: 'roles.grader',
+        message: 'Unknown configuration field',
+      });
+    });
+
+    it('rejects a role agent that does not name a configured agent', () => {
+      const config = buildConfig({ roles: { grader: buildModelRole({ agent: 'claude' }) } });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: 'roles.grader.agent',
+        message: 'agent must name a configured agent: opencode',
+      });
+    });
+
+    it('re-parses a materialized configuration with both model roles to a deeply equal value', () => {
+      const config = buildConfig({
+        roles: {
+          criteria: buildModelRole({ model: 'anthropic/criteria-model', effort: 'medium' }),
+          grader: buildModelRole(),
+        },
+      });
+
+      const parsedOnce = expectSchemaAcceptance(config);
+      const parsedTwice = expectSchemaAcceptance(parsedOnce);
+
+      expect(parsedTwice).toEqual(parsedOnce);
+    });
+
+    it("defaults a model role's agent to the sole configured agent", () => {
+      const config = buildConfig({ roles: { grader: buildModelRole() } });
+
+      expect(expectSchemaAcceptance(config).roles?.grader?.agent).toBe('opencode');
+    });
+
+    it('accepts a model role with the same model and effort as a model entry', () => {
+      const config = buildConfig({
+        roles: { grader: buildModelRole({ model: 'openai/gpt-5', effort: 'high' }) },
+      });
+
+      expect(TevuConfigSchema.safeParse(config).success).toBe(true);
     });
   });
 
@@ -2489,6 +2586,59 @@ describe('validateConfig', () => {
         message: 'agent prompt contains resolved base commit abcdef0',
       },
     ]);
+  });
+
+  describe('with declared model roles', () => {
+    it('probes the single configured agent once even when both model roles declare it', async () => {
+      const probe = vi.fn(async () => ({
+        ok: true as const,
+        value: buildAgentCapabilityReport('opencode'),
+      }));
+      const dependencies = buildValidationDependencies({
+        agents: new Map([['opencode', buildFakeAgentAdapter({ probe })]]),
+      });
+      const config = expectSchemaAcceptance(
+        buildConfig({ roles: { criteria: buildModelRole(), grader: buildModelRole() } }),
+      );
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(report.capabilities).toEqual({ opencode: buildAgentCapabilityReport('opencode') });
+    });
+
+    it('yields the same findings for a probe failure whether or not model roles are declared', async () => {
+      const buildFailingDependencies = (): ValidationDependencies =>
+        buildValidationDependencies({
+          agents: new Map([
+            [
+              'opencode',
+              buildFakeAgentAdapter({
+                probe: vi.fn(async () => ({
+                  ok: false as const,
+                  error: {
+                    kind: 'PrerequisiteError' as const,
+                    tool: 'opencode',
+                    expected: 'configured executable "opencode" starts',
+                    actual: 'ENOENT',
+                  },
+                })),
+              }),
+            ],
+          ]),
+        });
+      const withoutRoles = expectSchemaAcceptance(buildConfig());
+      const withRoles = expectSchemaAcceptance(
+        buildConfig({ roles: { criteria: buildModelRole(), grader: buildModelRole() } }),
+      );
+
+      const reportWithoutRoles = expectOk(
+        await validateConfig(withoutRoles, buildFailingDependencies()),
+      );
+      const reportWithRoles = expectOk(await validateConfig(withRoles, buildFailingDependencies()));
+
+      expect(reportWithRoles.findings).toEqual(reportWithoutRoles.findings);
+    });
   });
 });
 

@@ -526,6 +526,16 @@ function createHarness(config: TevuConfig) {
         },
       };
     },
+    async initializeEmptyRepository() {
+      return {
+        ok: false,
+        error: {
+          kind: 'ArtifactError',
+          operation: 'initialize-repository',
+          reason: 'not used in these tests',
+        },
+      };
+    },
   };
 
   let heldRuns: PromiseWithResolvers<void> | null = null;
@@ -587,6 +597,9 @@ function createHarness(config: TevuConfig) {
       }
       const reason = input.exportUnavailableReason ?? 'root session export unavailable';
       return { ok: true, value: buildEventFallbackMetrics(reason, input.events) };
+    },
+    async callModel() {
+      return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
     },
   };
   const agents: AgentRegistry = new Map([[AGENT_NAME, fakeAdapter]]);
@@ -758,6 +771,16 @@ function createHarness(config: TevuConfig) {
       };
       environmentState.created.push({ caseId: workspace.caseId, value });
       return { ok: true, value };
+    },
+    async createModelCallEnvironment() {
+      return {
+        ok: false,
+        error: {
+          kind: 'ArtifactError',
+          operation: 'create-model-call-directory',
+          reason: 'not used in these tests',
+        },
+      };
     },
   };
 

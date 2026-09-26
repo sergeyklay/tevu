@@ -1,5 +1,8 @@
-/** Error context for protocol failures: capability probing or one planned case. */
-export type ProtocolContext = { phase: 'probe' } | { phase: 'case'; caseId: string };
+import type { ModelRoleName } from '@/domain/types';
+
+/** Error context for protocol failures: capability probing, one planned case, or one model call. */
+export type ProtocolContext =
+  { phase: 'probe' } | { phase: 'case'; caseId: string } | { phase: 'call'; role: ModelRoleName };
 
 /**
  * Result of one decode step, kept local rather than expressed through the

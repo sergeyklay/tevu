@@ -119,7 +119,7 @@ function sumMetric(sum: ComponentSum, unit: MetricValue['unit']): MetricValue {
     : unavailableMetric(unit, sum.malformed);
 }
 
-function normalizeFromExport(sessionExport: OpenCodeExport): AgentMetrics {
+export function normalizeFromExport(sessionExport: OpenCodeExport): AgentMetrics {
   const sums = {
     inputTokens: emptySum(),
     outputTokens: emptySum(),

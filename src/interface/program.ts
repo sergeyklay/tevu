@@ -792,7 +792,11 @@ function renderTevuError(error: TevuError, redact: (text: string) => string): st
       ];
     case 'AgentProtocolError':
       return [
-        `error: agent "${error.agent}" protocol failure (${error.context.phase === 'probe' ? 'probe' : `case ${error.context.caseId}`}): ${error.reason}`,
+        `error: agent "${error.agent}" protocol failure (${describeProtocolPhase(error.context)}): ${error.reason}`,
+      ];
+    case 'ModelCallError':
+      return [
+        `error: model call for role "${error.role}" through agent "${error.agent}" failed: ${error.reason}`,
       ];
     case 'CaseTimeoutError':
       return [`error: case "${error.caseId}" exceeded its ${error.timeoutMs}ms timeout`];
@@ -816,6 +820,19 @@ function renderTevuError(error: TevuError, redact: (text: string) => string): st
       return [
         `error: setup ${error.phase} command ${JSON.stringify(error.argv)} failed: ${error.reason}`,
       ];
+  }
+}
+
+function describeProtocolPhase(
+  context: Extract<TevuError, { kind: 'AgentProtocolError' }>['context'],
+): string {
+  switch (context.phase) {
+    case 'probe':
+      return 'probe';
+    case 'case':
+      return `case ${context.caseId}`;
+    case 'call':
+      return `model call for role ${context.role}`;
   }
 }
 

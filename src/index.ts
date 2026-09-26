@@ -304,6 +304,8 @@ function wrapEnvironmentAdapter(
     },
     createCaseEnvironments: (workspace, snapshot, names, agent) =>
       adapter.createCaseEnvironments(workspace, snapshot, names, agent),
+    createModelCallEnvironment: (snapshot, agentVariables) =>
+      adapter.createModelCallEnvironment(snapshot, agentVariables),
   };
 }
 

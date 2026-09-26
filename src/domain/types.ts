@@ -66,8 +66,18 @@ export type TevuError =
   | {
       kind: 'AgentProtocolError';
       agent: string;
-      context: { phase: 'probe' } | { phase: 'case'; caseId: string };
+      context:
+        | { phase: 'probe' }
+        | { phase: 'case'; caseId: string }
+        | { phase: 'call'; role: ModelRoleName };
       line?: number;
+      reason: string;
+    }
+  | {
+      kind: 'ModelCallError';
+      role: ModelRoleName;
+      agent: string;
+      cause: 'launch-failed' | 'failed' | 'timed-out';
       reason: string;
     }
   | { kind: 'CaseTimeoutError'; caseId: string; timeoutMs: number }
@@ -155,6 +165,12 @@ export interface ModelDefinition {
   agent: string;
 }
 
+/** A model role a configuration may declare under `roles`. */
+export type ModelRoleName = 'criteria' | 'grader';
+
+/** One resolved model role: a model entry without `id`, with `agent` materialized. */
+export type ModelRole = Omit<ModelDefinition, 'id'>;
+
 /** One-time tracker import snapshot stored on a task. */
 type ImportedTaskSource = {
   kind: 'jira' | 'github';
@@ -217,6 +233,8 @@ export interface TevuConfig {
   trackers?: { jira?: JiraTrackerSettings };
   repositories: RepositoryDefinition[];
   models: ModelDefinition[];
+  /** Present only when the file declares `roles`; each key only when declared. */
+  roles?: Partial<Record<ModelRoleName, ModelRole>>;
   tasks: TaskDefinition[];
 }
 
@@ -592,6 +610,8 @@ export interface GitWorkspaceAdapter {
   ): Promise<TevuResult<CheckStateRecord, 'CheckStateError'>>;
   dispose(workspace: CaseWorkspace): Promise<TevuResult<void, 'ArtifactError'>>;
   isReadable?(workspace: CaseWorkspace): Promise<boolean>;
+  /** Runs `git init` in an existing empty directory; creates no commit, remote, or configuration. */
+  initializeEmptyRepository(directory: string): Promise<TevuResult<void, 'ArtifactError'>>;
 }
 
 /** Name, classification, and recipient of one passed variable; values are never recorded. */
@@ -635,6 +655,18 @@ export type CaseEnvironments = {
   evaluator: IsolatedEnvironment;
 };
 
+/** Paths and replacement variables of one model call; removed by `dispose`. */
+export interface ModelCallEnvironment {
+  rootDirectory: string;
+  /** `<root>/work`, empty when created; the agent's working directory once `initializeEmptyRepository` makes it a Git top level. */
+  workingDirectory: string;
+  /** `<root>/agent/home`; the value of HOME and the `export` working directory. */
+  homeDirectory: string;
+  variables: Record<string, string>;
+  /** Removes `rootDirectory` recursively; succeeds when it no longer exists. */
+  dispose(): Promise<TevuResult<void, 'ArtifactError'>>;
+}
+
 /** Builds the run-level parent snapshot and per-case isolated replacement environments. */
 export interface EnvironmentAdapter {
   snapshotParent(
@@ -646,6 +678,10 @@ export interface EnvironmentAdapter {
     names: EnvironmentVariableNames,
     agent: string,
   ): Promise<TevuResult<CaseEnvironments, 'IsolationError'>>;
+  createModelCallEnvironment(
+    snapshot: ParentEnvironmentSnapshot,
+    agentVariables: { secrets: readonly string[]; env: readonly string[] },
+  ): Promise<TevuResult<ModelCallEnvironment, 'ArtifactError'>>;
 }
 
 /** Redacted, bounded process output capture with its true total size. */
@@ -710,6 +746,25 @@ export type AgentCapabilityReport = {
 /** Model metrics an agent derives from its records; evaluation adds `elapsed`. */
 export type AgentMetrics = Omit<BenchmarkMetrics, 'elapsed'>;
 
+export type ModelCallInput = {
+  role: ModelRoleName;
+  model: `${string}/${string}`;
+  effort: string;
+  prompt: string;
+  environment: ModelCallEnvironment;
+  /** Limit for the `run` process: a whole number from 1 through 2147483647. */
+  timeoutMs: number;
+  terminationGraceMs: number;
+  cancellation: AbortSignal;
+};
+
+export type ModelCallResult = {
+  /** Reply text, redacted. */
+  text: string;
+  /** Agent-reported metrics; an unreported metric is unavailable, never zero. */
+  metrics: AgentMetrics;
+};
+
 export type AgentRunInput = {
   identity: CaseIdentity;
   prompt: string;
@@ -753,6 +808,11 @@ export interface AgentAdapter {
     environment: IsolatedEnvironment,
   ): Promise<TevuResult<AgentSessionExport, 'AgentProcessError' | 'AgentProtocolError'>>;
   normalizeMetrics(input: AgentMetricsInput): TevuResult<AgentMetrics, 'AgentProtocolError'>;
+  callModel(
+    input: ModelCallInput,
+  ): Promise<
+    TevuResult<ModelCallResult, 'ModelCallError' | 'AgentProtocolError' | 'CancellationError'>
+  >;
 }
 
 /** Adapters keyed by agent name; built only in `src/index.ts`. */
@@ -1002,6 +1062,28 @@ export type RunDependencies = {
   redact: (text: string) => string;
   cancellation: AbortSignal;
   onLifecycle?: (caseId: string, lifecycle: CaseLifecycle) => void;
+};
+
+/** Request for one one-shot model call through a configured model role. */
+export type ModelRoleCallRequest = {
+  config: TevuConfig;
+  role: ModelRoleName;
+  prompt: string;
+  timeoutMs: number;
+  cancellation: AbortSignal;
+};
+
+/** Result of one model-role call. */
+export type ModelRoleCallResult = ModelCallResult & {
+  /** The call directory left behind because removing it failed; null when removed. */
+  retainedDirectory: string | null;
+};
+
+/** Effects injected into the model-call use case. */
+export type ModelCallDependencies = {
+  agents: AgentRegistry;
+  environments: EnvironmentAdapter;
+  git: Pick<GitWorkspaceAdapter, 'initializeEmptyRepository'>;
 };
 
 /** One manual verdict decision captured for a pending or replaced manual check. */

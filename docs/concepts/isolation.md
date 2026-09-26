@@ -24,6 +24,12 @@ Hidden checks are context isolation, not a sandbox. tevu keeps a configured over
 
 The distinction matters when interpreting a result. tevu controls the starting context and records evidence; it does not establish that untrusted code was contained. The report keeps that limitation visible alongside the comparison.
 
+## Model calls get no task repository
+
+A one-shot model call, such as drafting acceptance criteria or grading a case's solution, reuses the same agent adapter and the same private environment shape as a case agent: its own home, state, and temporary directories, and the case agent variables of its agent block. It differs in what it does not get. A model call's working directory is an empty Git repository, not a case's sealed worktree: no configured repository, commit, or task prompt reaches it, and, being a Git top level itself, it stops OpenCode's upward search for `AGENTS.md` and other tracked instructions, `opencode.json` and `.opencode` configuration and plugins, and `.claude/skills` or `.agents/skills`, the same way a case's sealed repository stops that search at its own worktree. A model call gets no evaluator environment, since it runs no check, and its directory is removed as soon as the call ends.
+
+This isolation is context isolation, not a sandbox, for the same reason case isolation is not one: see [Context isolation is not a sandbox](#context-isolation-is-not-a-sandbox).
+
 ## Evidence outlives the workspace
 
 Temporary workspaces are useful while models and checks are running. Saved evidence has a different purpose: it lets an operator inspect a solution, assess a manual criterion, or rebuild a report without starting another model run.

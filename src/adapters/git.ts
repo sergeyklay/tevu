@@ -116,6 +116,7 @@ export function createGitWorkspaceAdapter(
     validateSource,
     readOverlay,
     applyCheckState,
+    initializeEmptyRepository,
 
     async createIsolatedCase(
       identity: CaseIdentity,
@@ -287,6 +288,21 @@ export function createGitWorkspaceAdapter(
       return outcome.exitCode === 0;
     },
   };
+}
+
+/**
+ * Makes an existing empty directory the top level of a fresh Git repository:
+ * no commit, remote, or configuration beyond {@link baseGitEnvironment}'s
+ * defaults.
+ */
+async function initializeEmptyRepository(
+  directory: string,
+): Promise<TevuResult<void, 'ArtifactError'>> {
+  const outcome = await runGit(directory, ['init', '--quiet']);
+  if (outcome.exitCode !== 0) {
+    return artifactError('initialize-repository', describeGitFailure('init', outcome));
+  }
+  return { ok: true, value: undefined };
 }
 
 type SealCaseInput = {

@@ -1920,6 +1920,9 @@ function buildTrivialAgentAdapter(): AgentAdapter {
         },
       };
     },
+    async callModel() {
+      return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
+    },
   };
 }
 
