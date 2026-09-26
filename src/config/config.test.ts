@@ -18,9 +18,7 @@ import type {
   AgentName,
   CheckInput,
   ModelDefinitionInput,
-  RepositoryDefinition,
   TaskInput,
-  TevuConfig,
   TevuConfigInput,
 } from './schema';
 import type { TaskDependencies, TaskWizardInput } from '@/application/create-task';
@@ -31,6 +29,8 @@ import type {
   EnvironmentAdapter,
   GitWorkspaceAdapter,
   PrerequisiteAdapter,
+  RepositoryDefinition,
+  TevuConfig,
   TevuError,
   TevuResult,
   ValidationDependencies,
@@ -1339,6 +1339,7 @@ describe('TevuConfigSchema', () => {
 
 describe('loadConfig', () => {
   let tempDirectory: string;
+  const configStore = createConfigStore({ redact: (text) => text });
 
   beforeEach(async () => {
     tempDirectory = await fs.mkdtemp(join(tmpdir(), 'tevu-config-'));
@@ -1363,7 +1364,7 @@ describe('loadConfig', () => {
       }),
     );
 
-    const config = expectOk(await loadConfig(configPath));
+    const config = expectOk(await loadConfig(configPath, configStore));
 
     expect(config.run.output_dir).toBe(join(tempDirectory, 'runs'));
     expect(config.repositories[0]?.path).toBe(join(tempDirectory, 'repo'));
@@ -1377,7 +1378,7 @@ describe('loadConfig', () => {
       configYaml({ outputDirectory: './runs', repositoryPath: './repo', command: 'opencode' }),
     );
 
-    const config = expectOk(await loadConfig(configPath));
+    const config = expectOk(await loadConfig(configPath, configStore));
 
     expect(config.agents.opencode.command).toBe('opencode');
   });
@@ -1404,7 +1405,7 @@ describe('loadConfig', () => {
   ])('reports not-found for $description', async ({ buildPath }) => {
     const requestedPath = await buildPath(tempDirectory);
 
-    const error = expectFailure(await loadConfig(requestedPath), 'ConfigReadError');
+    const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
 
     expect(error).toEqual({
       kind: 'ConfigReadError',
@@ -1420,7 +1421,7 @@ describe('loadConfig', () => {
   ])('reports not-a-file for $description', async ({ buildPath }) => {
     const requestedPath = await buildPath(tempDirectory);
 
-    const error = expectFailure(await loadConfig(requestedPath), 'ConfigReadError');
+    const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
 
     expect(error).toEqual({
       kind: 'ConfigReadError',
@@ -1436,7 +1437,7 @@ describe('loadConfig', () => {
     await fs.chmod(requestedPath, 0o000);
 
     try {
-      const error = expectFailure(await loadConfig(requestedPath), 'ConfigReadError');
+      const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
 
       expect(error).toEqual({
         kind: 'ConfigReadError',
@@ -1459,7 +1460,10 @@ describe('loadConfig', () => {
       await fs.chmod(lockedDirectory, 0o000);
 
       try {
-        const error = expectFailure(await loadConfig(requestedPath), 'ConfigReadError');
+        const error = expectFailure(
+          await loadConfig(requestedPath, configStore),
+          'ConfigReadError',
+        );
 
         expect(error).toEqual({
           kind: 'ConfigReadError',
@@ -1478,7 +1482,7 @@ describe('loadConfig', () => {
     await fs.symlink('loop-a', join(tempDirectory, 'loop-b'));
     const requestedPath = join(tempDirectory, 'loop-a');
 
-    const error = expectFailure(await loadConfig(requestedPath), 'ConfigReadError');
+    const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
 
     expect(error).toEqual({
       kind: 'ConfigReadError',
@@ -1494,7 +1498,7 @@ describe('loadConfig', () => {
       Object.assign(new Error('blocked'), { code: 'EPERM' }),
     );
 
-    const error = expectFailure(await loadConfig(requestedPath), 'ConfigReadError');
+    const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
 
     expect(error).toEqual({
       kind: 'ConfigReadError',
@@ -1510,7 +1514,7 @@ describe('loadConfig', () => {
       Object.assign(new Error('is a directory'), { code: 'EISDIR' }),
     );
 
-    const error = expectFailure(await loadConfig(requestedPath), 'ConfigReadError');
+    const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
 
     expect(error).toEqual({
       kind: 'ConfigReadError',
@@ -1524,7 +1528,7 @@ describe('loadConfig', () => {
     const requestedPath = join(tempDirectory, 'tevu.yaml');
     vi.mocked(fs.stat).mockRejectedValueOnce('boom');
 
-    const error = expectFailure(await loadConfig(requestedPath), 'ConfigReadError');
+    const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
 
     expect(error).toEqual({
       kind: 'ConfigReadError',
@@ -1537,7 +1541,7 @@ describe('loadConfig', () => {
   it('reports a ConfigParseError with a line identifier for malformed YAML', async () => {
     const configPath = await writeConfigFile('version: 1\nbroken: [1, 2');
 
-    const error = expectFailure(await loadConfig(configPath), 'ConfigParseError');
+    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigParseError');
 
     expect(error.findings.length).toBeGreaterThan(0);
     expect(error.findings[0]?.severity).toBe('error');
@@ -1548,7 +1552,7 @@ describe('loadConfig', () => {
   it('reports ConfigParseError when YAML aliases cannot be resolved', async () => {
     const configPath = await writeConfigFile('m:\n  <<: *missing\n');
 
-    const error = expectFailure(await loadConfig(configPath), 'ConfigParseError');
+    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigParseError');
 
     expect(error.findings).toEqual([
       { severity: 'error', identifier: 'config', message: 'Cannot resolve YAML aliases' },
@@ -1558,7 +1562,7 @@ describe('loadConfig', () => {
   it('reports field identifiers for schema violations', async () => {
     const configPath = await writeConfigFile('version: 2\n');
 
-    const error = expectFailure(await loadConfig(configPath), 'ConfigValidationError');
+    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
 
     const identifiers = error.findings.map((finding) => finding.identifier);
     expect(identifiers).toContain('version');
@@ -1571,7 +1575,7 @@ describe('loadConfig', () => {
       `${configYaml({ outputDirectory: './runs', repositoryPath: './repo', command: 'opencode' })}\nunknownSection: {}\n`,
     );
 
-    const error = expectFailure(await loadConfig(configPath), 'ConfigValidationError');
+    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
 
     expect(error.findings).toContainEqual({
       severity: 'error',
@@ -1590,7 +1594,7 @@ describe('loadConfig', () => {
       }),
     );
 
-    const error = expectFailure(await loadConfig(configPath), 'ConfigValidationError');
+    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
 
     expect(error.findings).toEqual([
       {
@@ -1608,7 +1612,7 @@ describe('loadConfig', () => {
       configYaml({ outputDirectory: './runs', repositoryPath: './runs/repo', command: 'opencode' }),
     );
 
-    const error = expectFailure(await loadConfig(configPath), 'ConfigValidationError');
+    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
 
     expect(error.findings).toEqual([
       {
@@ -1627,7 +1631,7 @@ describe('loadConfig', () => {
       configYaml({ outputDirectory: './runs-link', repositoryPath: './repo', command: 'opencode' }),
     );
 
-    const error = expectFailure(await loadConfig(configPath), 'ConfigValidationError');
+    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
 
     expect(error.findings).toEqual([
       {
@@ -1796,7 +1800,7 @@ describe('ConfigStore.readText and loadConfig ConfigReadError parity', () => {
     const configStore = createConfigStore({ redact: (text) => text });
 
     const fromStore = await configStore.readText(requestedPath);
-    const fromLoad = await loadConfig(requestedPath);
+    const fromLoad = await loadConfig(requestedPath, configStore);
 
     expect(fromStore.ok).toBe(false);
     expect(fromLoad.ok).toBe(false);
@@ -2456,6 +2460,7 @@ describe('validateConfig', () => {
 
 describe('check-state configuration rules (P13, AC-3)', () => {
   let tempDirectory: string;
+  const configStore = createConfigStore({ redact: (text) => text });
 
   beforeEach(async () => {
     tempDirectory = await fs.mkdtemp(join(tmpdir(), 'tevu-config-check-state-'));
@@ -2481,7 +2486,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(await loadConfig(configPath), 'ConfigValidationError');
+    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
 
     expect(error.findings).toContainEqual({
       severity: 'error',
@@ -2500,7 +2505,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(await loadConfig(configPath), 'ConfigValidationError');
+    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
 
     expect(error.findings).toContainEqual({
       severity: 'error',
@@ -2520,7 +2525,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(await loadConfig(configPath), 'ConfigValidationError');
+    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
 
     expect(error.findings).toContainEqual({
       severity: 'error',
@@ -2540,7 +2545,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(await loadConfig(configPath), 'ConfigValidationError');
+    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
 
     expect(error.findings).toEqual([
       {
@@ -2563,7 +2568,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(await loadConfig(configPath), 'ConfigValidationError');
+    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
 
     expect(error.findings).toEqual([
       {
@@ -2586,7 +2591,6 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
     const git = createGitWorkspaceAdapter({
-      config,
       workspacesDirectory: join(tempDirectory, 'workspaces'),
     });
     const dependencies = buildValidationDependencies({ git });
@@ -2615,7 +2619,6 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
     const git = createGitWorkspaceAdapter({
-      config,
       workspacesDirectory: join(tempDirectory, 'workspaces'),
     });
     const dependencies = buildValidationDependencies({ git });
@@ -2643,7 +2646,6 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
     const git = createGitWorkspaceAdapter({
-      config,
       workspacesDirectory: join(tempDirectory, 'workspaces'),
     });
     const dependencies = buildValidationDependencies({ git });

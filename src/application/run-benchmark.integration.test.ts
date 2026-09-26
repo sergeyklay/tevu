@@ -16,7 +16,7 @@ import { unavailableMetric } from '@/domain/types';
 
 import { planBenchmark, runBenchmark } from './run-benchmark';
 
-import type { TevuConfig, TevuConfigInput } from '@/config/schema';
+import type { TevuConfigInput } from '@/config/schema';
 import type {
   AgentAdapter,
   AgentMetrics,
@@ -28,6 +28,7 @@ import type {
   ProcessResult,
   RunDependencies,
   RunResult,
+  TevuConfig,
   TevuError,
   TevuResult,
 } from '@/domain/types';
@@ -311,10 +312,7 @@ function buildDependencies(
   };
   const clock: Clock = { now: () => new Date('2026-01-01T00:00:00.000Z') };
   return {
-    git: createGitWorkspaceAdapter({
-      config,
-      workspacesDirectory: join(testDirectory, 'workspaces'),
-    }),
+    git: createGitWorkspaceAdapter({ workspacesDirectory: join(testDirectory, 'workspaces') }),
     agents: new Map([[FAKE_AGENT_NAME, agent]]),
     artifacts: createArtifactStore({
       artifactsDirectory: config.run.output_dir,

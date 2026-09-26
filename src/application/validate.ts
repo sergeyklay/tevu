@@ -1,12 +1,13 @@
 import { agentNamesInUse, evaluatorEnvironmentNames, TevuConfigSchema } from '@/config/schema';
 
+import { buildEnvironmentVariableNames } from './environment-variable-names';
 import { describeSourceCommitInPrompt } from './source-commit-in-prompt';
 import { buildTaskPrompt } from './task-prompt';
 
-import type { TevuConfig } from '@/config/schema';
 import type {
   AgentCapabilityReport,
   SourceValidation,
+  TevuConfig,
   TevuError,
   TevuResult,
   ValidationDependencies,
@@ -137,7 +138,9 @@ function collectEnvironmentFindings(
   // by name above; it runs only for its non-empty parent PATH check and the
   // snapshot values stay in memory, so nothing is retained or exposed.
   if (findings.length === 0) {
-    const snapshot = dependencies.environments.snapshotParent(config);
+    const snapshot = dependencies.environments.snapshotParent(
+      buildEnvironmentVariableNames(config),
+    );
     if (!snapshot.ok) {
       findings.push(prerequisiteFinding(snapshot.error));
     }

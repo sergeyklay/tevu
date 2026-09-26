@@ -13,6 +13,7 @@ import {
   createRedactor,
 } from '@/adapters/process';
 import { assessCase, rebuildReport } from '@/application/assess';
+import { buildEnvironmentVariableNames } from '@/application/environment-variable-names';
 import { renderConfigDocument } from '@/config/document';
 import { loadConfig } from '@/config/load';
 import { decodeRunConfig } from '@/config/run-snapshot';
@@ -30,15 +31,7 @@ import { buildNormalizedRun, buildReport, serializeNormalizedRun } from './repor
 
 import type { CheckEvaluationInput, OrderedCheck } from './checks';
 import type { ReportInput } from './report';
-import type {
-  CheckInput,
-  CommandCheck,
-  ModelDefinitionInput,
-  RepositoryDefinition,
-  TaskInput,
-  TevuConfig,
-  TevuConfigInput,
-} from '@/config/schema';
+import type { CheckInput, ModelDefinitionInput, TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentAdapter,
   AgentCapabilityReport,
@@ -53,14 +46,17 @@ import type {
   CaseResult,
   CheckRecord,
   CheckResult,
+  CommandCheck,
   EvaluatorProcessAdapter,
   EvaluatorProcessRequest,
   EvaluatorProcessResult,
   ProcessResult,
+  RepositoryDefinition,
   RunFinding,
   RunManifest,
   RunResult,
   TaskRecord,
+  TevuConfig,
   TevuResult,
 } from '@/domain/types';
 
@@ -1155,7 +1151,8 @@ describe('evaluateChecks', () => {
     try {
       const environments = createEnvironmentAdapter();
       const config = rekeyToFakeAgent(buildSyntheticConfig());
-      const snapshot = environments.snapshotParent(config);
+      const environmentNames = buildEnvironmentVariableNames(config);
+      const snapshot = environments.snapshotParent(environmentNames);
       expect(snapshot.ok).toBe(true);
       if (!snapshot.ok) return;
       const worktreeDirectory = join(root, 'worktree');
@@ -1174,7 +1171,7 @@ describe('evaluateChecks', () => {
       const created = await environments.createCaseEnvironments(
         workspace,
         snapshot.value,
-        config,
+        environmentNames,
         AGENT_NAME,
       );
       expect(created.ok).toBe(true);
@@ -2812,7 +2809,7 @@ describe('credential-secret redaction at serialization boundaries', () => {
 
       const replaced = await configStore.replaceText(configPath, rendered.value);
       expect(replaced.ok).toBe(true);
-      const loaded = await loadConfig(configPath);
+      const loaded = await loadConfig(configPath, configStore);
       expect(loaded.ok).toBe(true);
       if (!loaded.ok) return;
       expect(loaded.value.run.stop_grace).toBe('1s');
@@ -2840,7 +2837,7 @@ describe('credential-secret redaction at serialization boundaries', () => {
 
       const replaced = await configStore.replaceText(configPath, rendered.value);
       expect(replaced.ok).toBe(true);
-      const loaded = await loadConfig(configPath);
+      const loaded = await loadConfig(configPath, configStore);
       expect(loaded.ok).toBe(true);
       if (!loaded.ok) return;
       expect(loaded.value.run.stop_grace).toBe('1s');

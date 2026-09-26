@@ -28,7 +28,6 @@ import { execa } from 'execa';
 
 import { describeCause } from '@/domain/describe-cause';
 
-import type { RepositoryDefinition, TevuConfig } from '@/config/schema';
 import type {
   CaseIdentity,
   CaseWorkspace,
@@ -41,6 +40,7 @@ import type {
   OverlaySnapshot,
   PatchArtifact,
   PatchBase,
+  RepositoryDefinition,
   RestoreRecord,
   SourceValidation,
   TevuResult,
@@ -49,8 +49,6 @@ import type { Stats } from 'node:fs';
 
 /** Construction inputs for the sealed Git workspace adapter. */
 export type GitWorkspaceAdapterOptions = {
-  /** Validated configuration supplying repository paths and task references. */
-  config: TevuConfig;
   /** Root directory receiving one private subdirectory per case. */
   workspacesDirectory: string;
 };
@@ -112,7 +110,7 @@ async function validateSource(
 export function createGitWorkspaceAdapter(
   options: GitWorkspaceAdapterOptions,
 ): GitWorkspaceAdapter {
-  const { config, workspacesDirectory } = options;
+  const { workspacesDirectory } = options;
 
   return {
     validateSource,
@@ -121,21 +119,8 @@ export function createGitWorkspaceAdapter(
 
     async createIsolatedCase(
       identity: CaseIdentity,
+      repository: RepositoryDefinition,
     ): Promise<TevuResult<CaseWorkspace, 'SourceMaterializationError' | 'IsolationError'>> {
-      const task = config.tasks.find((candidate) => candidate.id === identity.taskId);
-      if (task === undefined) {
-        return sourceError(
-          identity.taskId,
-          `task "${identity.taskId}" is not defined in the configuration`,
-        );
-      }
-      const repository = config.repositories.find((candidate) => candidate.id === task.repo);
-      if (repository === undefined) {
-        return sourceError(
-          identity.taskId,
-          `repository "${task.repo}" is not defined in the configuration`,
-        );
-      }
       const resolvedCommit = await resolveCommit(repository.path, identity.sourceCommit);
       if (resolvedCommit === null) {
         return sourceError(

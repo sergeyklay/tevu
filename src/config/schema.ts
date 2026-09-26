@@ -1,11 +1,20 @@
 /**
  * Authoritative strict schema for tevu configuration version 1: snake_case
  * keys grouped by concern, unit-carrying durations, `$VARIABLE` references,
- * and adapter-keyed blocks. `TevuConfigSchema` is the single runtime
- * validation and TypeScript type source; unknown keys fail at every level.
+ * and adapter-keyed blocks. `TevuConfigSchema` validates the configuration
+ * file and produces the domain `TevuConfig`; unknown keys fail at every level.
  */
 
 import { z } from 'zod';
+
+import type {
+  CheckDefinition,
+  ModelDefinition,
+  RepositorySetup,
+  SetupCommand,
+  TaskDefinition,
+  TevuConfig,
+} from '@/domain/types';
 
 /** ID grammar shared by every configuration collection. */
 const ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
@@ -133,9 +142,6 @@ const RunSettingsSchema = z.strictObject({
   check_timeout: DurationSchema.optional(),
 });
 
-/** Parsed run settings, all defaults materialized except the genuinely optional `check_timeout`. */
-type RunSettings = z.infer<typeof RunSettingsSchema>;
-
 function checkNoFixedNames(
   names: readonly string[],
   ctx: z.RefinementCtx,
@@ -189,9 +195,6 @@ export function agentSettingsSchema(agentName: string) {
     });
 }
 
-/** Parsed agent block settings; `secrets` and `env` default to `[]`. */
-type AgentSettings = z.infer<ReturnType<typeof agentSettingsSchema>>;
-
 const AGENTS_SHAPE = { opencode: agentSettingsSchema('opencode') };
 
 /** Agent name: a key of the `agents` block. */
@@ -220,13 +223,7 @@ const JiraTrackerSettingsSchema = z.strictObject({
   token: VariableReferenceSchema,
 });
 
-/** Parsed Jira Cloud connection settings. */
-export type JiraTrackerSettings = z.infer<typeof JiraTrackerSettingsSchema>;
-
-/** One repository setup command: executable and literal arguments, no shell; the shape of a check's `run`. */
-export type SetupCommand = [string, ...string[]];
-
-/** Field-level materialized schema mirroring {@link SetupCommand}; the same shape as {@link CommandCheck}'s `run` field. */
+/** Field-level materialized schema mirroring `SetupCommand`; the same shape as `CommandCheck`'s `run` field. */
 const SetupCommandSchema = z.tuple([z.string().min(1)], z.string());
 
 const RawRepositorySetupShape = z.strictObject({
@@ -260,14 +257,6 @@ function refineRepositorySetup(value: RawRepositorySetup, ctx: z.RefinementCtx):
   checkUniqueStrings(value.env, ctx, ['env'], 'duplicate environment variable name');
 }
 
-/** A repository's setup block; a phase key is present only when its list holds at least one command. */
-export interface RepositorySetup {
-  before_agent?: SetupCommand[];
-  before_checks?: SetupCommand[];
-  timeout: string;
-  env: string[];
-}
-
 /**
  * Validates and normalizes one repository's `setup` block: at least one
  * phase holds a command, `timeout` is present, and `env` carries no fixed or
@@ -297,10 +286,7 @@ const RepositoryDefinitionSchema = z.strictObject({
   setup: RepositorySetupSchema.optional(),
 });
 
-/** One configured source repository. */
-export type RepositoryDefinition = z.infer<typeof RepositoryDefinitionSchema>;
-
-/** File-shape repository entry; identical to {@link RepositoryDefinition}. */
+/** File-shape repository entry; identical to `RepositoryDefinition`. */
 export type RepositoryInput = z.input<typeof RepositoryDefinitionSchema>;
 
 /** One benchmark model entry, before its `agent` default is resolved against the configured agents. */
@@ -314,14 +300,6 @@ const ModelDefinitionSchema = z.strictObject({
 /** File-shape model entry; `agent` defaults to the sole configured agent. */
 export type ModelDefinitionInput = z.input<typeof ModelDefinitionSchema>;
 
-/** One resolved benchmark model entry: what the benchmark compares. */
-interface ModelDefinition {
-  id: string;
-  model: `${string}/${string}`;
-  effort: string;
-  agent: string;
-}
-
 /** One-time tracker import snapshot; later tracker changes never alter the task. */
 const ImportedTaskSourceSchema = z.strictObject({
   kind: z.enum(['jira', 'github']),
@@ -331,9 +309,6 @@ const ImportedTaskSourceSchema = z.strictObject({
   title: z.string(),
   body: z.string(),
 });
-
-/** One-time tracker import snapshot stored on a task. */
-type ImportedTaskSource = z.infer<typeof ImportedTaskSourceSchema>;
 
 /** One restore pattern: non-empty and relative to the repository root, with no leading `/` or `..` segment. */
 const RestorePatternSchema = z
@@ -389,29 +364,7 @@ function refineCheckDiscrimination(check: RawCheck, ctx: z.RefinementCtx): void 
   }
 }
 
-/** A command check's resolved shape: literal argv, no shell, and every default materialized. */
-export interface CommandCheck {
-  id: string;
-  description: string;
-  run: [string, ...string[]];
-  timeout: string;
-  exit_codes: number[];
-  env: string[];
-  required: boolean;
-}
-
-/** A manual check's resolved shape: assessed by a human through `tevu assess`. */
-interface ManualCheck {
-  id: string;
-  description: string;
-  manual: true;
-  required: boolean;
-}
-
-/** One acceptance or done check: a command check or a manual check. */
-export type CheckDefinition = CommandCheck | ManualCheck;
-
-/** A resolved manual check; identical to {@link ManualCheck}. */
+/** A resolved manual check; identical to `ManualCheck`. */
 type PreManualCheck = { id: string; description: string; manual: true; required: boolean };
 
 /** A command check whose `timeout` default is not yet resolved against `run.check_timeout`. */
@@ -522,26 +475,6 @@ type RawTask = z.infer<typeof TaskDefinitionSchema>;
 
 /** File-shape task entry; `repo` is optional and a command check's `timeout` may be absent. */
 export type TaskInput = z.input<typeof TaskDefinitionSchema>;
-
-/** One resolved acceptance-driven benchmark task pinned to a repository commit. */
-export interface TaskDefinition {
-  id: string;
-  title: string;
-  repo: string;
-  base_commit: string;
-  prompt: string;
-  description: string;
-  source?: ImportedTaskSource;
-  readiness: string[];
-  checks: {
-    /** Present only when the file declares it; `[]` declares nothing to restore. */
-    restore?: string[];
-    /** Present only when the file declares it; absolute after `resolveConfig`. */
-    overlay?: string;
-    acceptance: CheckDefinition[];
-    done: CheckDefinition[];
-  };
-}
 
 function resolveCheck(check: PreCheck, checkTimeout: string | undefined): CheckDefinition {
   if (!('run' in check)) {
@@ -754,17 +687,6 @@ function materializeTevuConfig(raw: RawTevuConfig): TevuConfig {
     models,
     tasks,
   };
-}
-
-/** One resolved tevu configuration: every default materialized, ready for its consumers. */
-export interface TevuConfig {
-  version: 1;
-  run: RunSettings;
-  agents: Record<string, AgentSettings>;
-  trackers?: { jira?: JiraTrackerSettings };
-  repositories: RepositoryDefinition[];
-  models: ModelDefinition[];
-  tasks: TaskDefinition[];
 }
 
 /**

@@ -4,12 +4,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { runSetupPhase } from './repository-setup';
 
 import type { SetupPhaseInput } from './repository-setup';
-import type { SetupCommand } from '@/config/schema';
 import type {
   EvaluatorProcessAdapter,
   EvaluatorProcessRequest,
   EvaluatorProcessResult,
   RedactedCapture,
+  SetupCommand,
 } from '@/domain/types';
 
 const EMPTY_CAPTURE: RedactedCapture = { text: '', totalBytes: 0, truncated: false };

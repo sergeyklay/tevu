@@ -21,6 +21,7 @@ import process from 'node:process';
 import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { buildEnvironmentVariableNames } from '@/application/environment-variable-names';
 import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
 import { TevuConfigSchema } from '@/config/schema';
 import { buildCheckEnvironment } from '@/evaluation/checks';
@@ -35,7 +36,7 @@ import {
   runManagedProcess,
 } from './process';
 
-import type { TaskInput, TevuConfig, TevuConfigInput } from '@/config/schema';
+import type { TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentAdapter,
   AgentRunInput,
@@ -49,6 +50,7 @@ import type {
   ManagedProcessResult,
   PrerequisiteAdapter,
   RunDependencies,
+  TevuConfig,
   TevuError,
   TevuResult,
 } from '@/domain/types';
@@ -259,11 +261,8 @@ async function createSyntheticRepository(): Promise<{ path: string; commit: stri
   return { path, commit };
 }
 
-function createGitAdapter(repositoryPath: string, sourceCommit: string): GitWorkspaceAdapter {
-  return createGitWorkspaceAdapter({
-    config: buildConfig(repositoryPath, sourceCommit),
-    workspacesDirectory: join(testDirectory, 'workspaces'),
-  });
+function createGitAdapter(): GitWorkspaceAdapter {
+  return createGitWorkspaceAdapter({ workspacesDirectory: join(testDirectory, 'workspaces') });
 }
 
 async function sealCaseFromSyntheticRepository(caseId: string): Promise<{
@@ -272,8 +271,11 @@ async function sealCaseFromSyntheticRepository(caseId: string): Promise<{
   workspace: CaseWorkspace;
 }> {
   const repository = await createSyntheticRepository();
-  const adapter = createGitAdapter(repository.path, repository.commit);
-  const sealed = await adapter.createIsolatedCase(buildIdentity(caseId, repository.commit));
+  const adapter = createGitAdapter();
+  const sealed = await adapter.createIsolatedCase(buildIdentity(caseId, repository.commit), {
+    id: 'repo-1',
+    path: repository.path,
+  });
   return { repository, adapter, workspace: unwrapOk(sealed) };
 }
 
@@ -445,14 +447,20 @@ describe('sealed Git case materialization', () => {
   it('separates sibling cases with disjoint directories, object storage, and branches', async () => {
     const repository = await createSyntheticRepository();
     const adapter = createGitWorkspaceAdapter({
-      config: buildConfig(repository.path, repository.commit),
       workspacesDirectory: join(testDirectory, 'workspaces'),
     });
+    const repositoryDefinition = { id: 'repo-1', path: repository.path };
     const first = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+      await adapter.createIsolatedCase(
+        buildIdentity('task-1--c1', repository.commit),
+        repositoryDefinition,
+      ),
     );
     const second = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity('task-1--c2', repository.commit)),
+      await adapter.createIsolatedCase(
+        buildIdentity('task-1--c2', repository.commit),
+        repositoryDefinition,
+      ),
     );
 
     expect(first.repositoryDirectory).not.toBe(second.repositoryDirectory);
@@ -474,7 +482,6 @@ describe('sealed Git case materialization', () => {
   it('leaves the source repository state unchanged across materialization and disposal', async () => {
     const repository = await createSyntheticRepository();
     const adapter = createGitWorkspaceAdapter({
-      config: buildConfig(repository.path, repository.commit),
       workspacesDirectory: join(testDirectory, 'workspaces'),
     });
     const headBefore = await runGit(repository.path, ['rev-parse', 'HEAD']);
@@ -482,7 +489,13 @@ describe('sealed Git case materialization', () => {
     const refsBefore = await runGit(repository.path, ['for-each-ref']);
     const objectsBefore = await runGit(repository.path, ['count-objects', '-v']);
 
-    const sealed = await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit));
+    const sealed = await adapter.createIsolatedCase(
+      buildIdentity('task-1--c1', repository.commit),
+      {
+        id: 'repo-1',
+        path: repository.path,
+      },
+    );
     await adapter.dispose(unwrapOk(sealed));
 
     const headAfter = await runGit(repository.path, ['rev-parse', 'HEAD']);
@@ -501,7 +514,6 @@ describe('sealed Git case materialization', () => {
   it('validates a pinned commit and rejects references that are not exactly one commit', async () => {
     const repository = await createSyntheticRepository();
     const adapter = createGitWorkspaceAdapter({
-      config: buildConfig(repository.path, repository.commit),
       workspacesDirectory: join(testDirectory, 'workspaces'),
     });
 
@@ -586,7 +598,7 @@ describe('unsupported source rejection', () => {
     const commit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
     const before = await sourceFingerprint(repositoryPath);
 
-    const rejected = await createGitAdapter(repositoryPath, commit).validateSource(
+    const rejected = await createGitAdapter().validateSource(
       { id: 'repo-1', path: repositoryPath },
       commit,
     );
@@ -621,7 +633,7 @@ describe('unsupported source rejection', () => {
     const commit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
     const before = await sourceFingerprint(repositoryPath);
 
-    const rejected = await createGitAdapter(repositoryPath, commit).validateSource(
+    const rejected = await createGitAdapter().validateSource(
       { id: 'repo-1', path: repositoryPath },
       commit,
     );
@@ -655,7 +667,7 @@ describe('unsupported source rejection', () => {
     const commit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
     const before = await sourceFingerprint(repositoryPath);
 
-    const rejected = await createGitAdapter(repositoryPath, commit).validateSource(
+    const rejected = await createGitAdapter().validateSource(
       { id: 'repo-1', path: repositoryPath },
       commit,
     );
@@ -857,9 +869,12 @@ async function appendLine(path: string, line: string): Promise<void> {
 describe('tracked paths an ignore rule matches (D1)', () => {
   it('case a: an untouched ignored tracked path yields an empty patch with no patch base', async () => {
     const repository = await createIgnoredTrackedPathSource();
-    const adapter = createGitAdapter(repository.path, repository.commit);
+    const adapter = createGitAdapter();
     const workspace = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit), {
+        id: 'repo-1',
+        path: repository.path,
+      }),
     );
     await assertTrackedAndIgnored(workspace, 'tracked.txt');
 
@@ -871,9 +886,12 @@ describe('tracked paths an ignore rule matches (D1)', () => {
 
   it('case b: an appended line to an ignored tracked path enters the patch alongside a new unignored path and without a new ignored path', async () => {
     const repository = await createIgnoredTrackedPathSource();
-    const adapter = createGitAdapter(repository.path, repository.commit);
+    const adapter = createGitAdapter();
     const workspace = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit), {
+        id: 'repo-1',
+        path: repository.path,
+      }),
     );
     await assertTrackedAndIgnored(workspace, 'tracked.txt');
 
@@ -894,9 +912,12 @@ describe('tracked paths an ignore rule matches (D1)', () => {
 
   it('case c: an untouched ignored tracked path yields an empty patch with a patch base', async () => {
     const repository = await createIgnoredTrackedPathSource();
-    const adapter = createGitAdapter(repository.path, repository.commit);
+    const adapter = createGitAdapter();
     const workspace = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit), {
+        id: 'repo-1',
+        path: repository.path,
+      }),
     );
     await assertTrackedAndIgnored(workspace, 'tracked.txt');
     const base = unwrapOk(await adapter.snapshotPatchBase(workspace));
@@ -909,9 +930,12 @@ describe('tracked paths an ignore rule matches (D1)', () => {
 
   it('case d: an appended line to an ignored tracked path enters the patch with a patch base', async () => {
     const repository = await createIgnoredTrackedPathSource();
-    const adapter = createGitAdapter(repository.path, repository.commit);
+    const adapter = createGitAdapter();
     const workspace = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit), {
+        id: 'repo-1',
+        path: repository.path,
+      }),
     );
     await assertTrackedAndIgnored(workspace, 'tracked.txt');
     const base = unwrapOk(await adapter.snapshotPatchBase(workspace));
@@ -929,9 +953,12 @@ describe('tracked paths an ignore rule matches (D1)', () => {
 
   it('case e: a before_agent-enabled sparse checkout does not hide a change to a path outside its definition from the base or the capture', async () => {
     const repository = await createIgnoredTrackedPathSource();
-    const adapter = createGitAdapter(repository.path, repository.commit);
+    const adapter = createGitAdapter();
     const workspace = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit), {
+        id: 'repo-1',
+        path: repository.path,
+      }),
     );
     await assertTrackedAndIgnored(workspace, 'tracked.txt');
     await runGit(workspace.worktreeDirectory, ['config', 'core.sparseCheckout', 'true']);
@@ -957,15 +984,16 @@ describe('tracked paths an ignore rule matches (D1)', () => {
 describe('isolated case environments', () => {
   it('builds separate replacement environments with private homes and no host state', async () => {
     const config = buildConfig('/synthetic/source', 'f'.repeat(40));
+    const environmentNames = buildEnvironmentVariableNames(config);
     const adapter = createEnvironmentAdapter();
-    const snapshot = adapter.snapshotParent(config);
+    const snapshot = adapter.snapshotParent(environmentNames);
     const workspace = buildFabricatedWorkspace('task-1--c1');
     await mkdir(workspace.runtimeDirectory, { recursive: true });
 
     const environments = await adapter.createCaseEnvironments(
       workspace,
       unwrapOk(snapshot),
-      config,
+      environmentNames,
       'opencode',
     );
     const { evaluator } = unwrapOk(environments);
@@ -1029,8 +1057,9 @@ describe('isolated case environments', () => {
 
   it('keeps the parent snapshot immutable and passes only allowlisted ordinary values to evaluator checks', async () => {
     const config = buildConfig('/synthetic/source', 'f'.repeat(40));
+    const environmentNames = buildEnvironmentVariableNames(config);
     const adapter = createEnvironmentAdapter();
-    const snapshot = adapter.snapshotParent(config);
+    const snapshot = adapter.snapshotParent(environmentNames);
     const snapshotValue = unwrapOk(snapshot);
     const snapshotClone = JSON.parse(JSON.stringify(snapshotValue)) as typeof snapshotValue;
 
@@ -1040,10 +1069,20 @@ describe('isolated case environments', () => {
       await mkdir(workspace.runtimeDirectory, { recursive: true });
     }
     const firstEnvironments = unwrapOk(
-      await adapter.createCaseEnvironments(firstWorkspace, snapshotValue, config, 'opencode'),
+      await adapter.createCaseEnvironments(
+        firstWorkspace,
+        snapshotValue,
+        environmentNames,
+        'opencode',
+      ),
     );
     const secondEnvironments = unwrapOk(
-      await adapter.createCaseEnvironments(secondWorkspace, snapshotValue, config, 'opencode'),
+      await adapter.createCaseEnvironments(
+        secondWorkspace,
+        snapshotValue,
+        environmentNames,
+        'opencode',
+      ),
     );
     const firstAgent = requireAgentEnvironment(firstEnvironments);
     const secondAgent = requireAgentEnvironment(secondEnvironments);
@@ -1079,12 +1118,13 @@ describe('isolated case environments', () => {
 
   it('runs a real process whose environment is exactly the isolated replacement set', async () => {
     const config = buildConfig('/synthetic/source', 'f'.repeat(40));
+    const environmentNames = buildEnvironmentVariableNames(config);
     const adapter = createEnvironmentAdapter();
-    const snapshotValue = unwrapOk(adapter.snapshotParent(config));
+    const snapshotValue = unwrapOk(adapter.snapshotParent(environmentNames));
     const workspace = buildFabricatedWorkspace('task-1--c1');
     await mkdir(workspace.runtimeDirectory, { recursive: true });
     const environments = unwrapOk(
-      await adapter.createCaseEnvironments(workspace, snapshotValue, config, 'opencode'),
+      await adapter.createCaseEnvironments(workspace, snapshotValue, environmentNames, 'opencode'),
     );
     const agent = requireAgentEnvironment(environments);
 
@@ -1169,7 +1209,8 @@ describe('credential-secret redaction', () => {
 
   it('redacts secrets at the managed stderr sink before capture', async () => {
     const config = buildConfig('/synthetic/source', 'f'.repeat(40));
-    const snapshotValue = unwrapOk(createEnvironmentAdapter().snapshotParent(config));
+    const environmentNames = buildEnvironmentVariableNames(config);
+    const snapshotValue = unwrapOk(createEnvironmentAdapter().snapshotParent(environmentNames));
 
     const outcome = expectLaunched(
       await runManagedProcess({
@@ -1353,9 +1394,12 @@ async function createCheckStateSourceRepository(): Promise<{ path: string; commi
 describe('check-state restore step (P1, P2, P3, P4, P7)', () => {
   it('resets committed and uncommitted modifications, a deletion, an executable-bit change, and a symlink entry to the base tree, removes matched untracked and gitignored files, and leaves unmatched files and the case repository untouched', async () => {
     const repository = await createCheckStateSourceRepository();
-    const adapter = createGitAdapter(repository.path, repository.commit);
+    const adapter = createGitAdapter();
     const workspace = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit), {
+        id: 'repo-1',
+        path: repository.path,
+      }),
     );
 
     await writeFile(
@@ -1452,9 +1496,9 @@ describe('check-state restore step (P1, P2, P3, P4, P7)', () => {
     await runGit(path, ['add', '-A']);
     await runGit(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'smudge base commit']);
     const commit = (await runGit(path, ['rev-parse', 'HEAD'])).stdout.trim();
-    const adapter = createGitAdapter(path, commit);
+    const adapter = createGitAdapter();
     const workspace = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity('task-1--c1', commit)),
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', commit), { id: 'repo-1', path }),
     );
 
     await runGit(workspace.worktreeDirectory, [
@@ -1493,9 +1537,12 @@ describe('check-state restore step (P1, P2, P3, P4, P7)', () => {
     await runGit(path2, ['add', '-A']);
     await runGit(path2, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'nested base commit']);
     const commit = (await runGit(path2, ['rev-parse', 'HEAD'])).stdout.trim();
-    const adapter = createGitAdapter(path2, commit);
+    const adapter = createGitAdapter();
     const workspace = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity('task-1--c1', commit)),
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', commit), {
+        id: 'repo-1',
+        path: path2,
+      }),
     );
 
     const outsideDirectory = join(testDirectory, 'outside-nested');
@@ -1522,9 +1569,12 @@ describe('check-state restore step (P1, P2, P3, P4, P7)', () => {
 
   it("fails with 'worktree root is not a directory' and leaves the target directory untouched when the worktree root is a symbolic link (P3)", async () => {
     const repository = await createCheckStateSourceRepository();
-    const adapter = createGitAdapter(repository.path, repository.commit);
+    const adapter = createGitAdapter();
     const workspace = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit)),
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', repository.commit), {
+        id: 'repo-1',
+        path: repository.path,
+      }),
     );
     const outsideRoot = join(testDirectory, 'outside-root');
     await mkdir(outsideRoot, { recursive: true });
@@ -1557,9 +1607,9 @@ describe('check-state restore step (P1, P2, P3, P4, P7)', () => {
     await runGit(path, ['add', '-A']);
     await runGit(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'blocker base commit']);
     const commit = (await runGit(path, ['rev-parse', 'HEAD'])).stdout.trim();
-    const adapter = createGitAdapter(path, commit);
+    const adapter = createGitAdapter();
     const workspace = unwrapOk(
-      await adapter.createIsolatedCase(buildIdentity('task-1--c1', commit)),
+      await adapter.createIsolatedCase(buildIdentity('task-1--c1', commit), { id: 'repo-1', path }),
     );
 
     await rm(join(workspace.worktreeDirectory, 'tests/blocked.txt'));
@@ -1609,7 +1659,7 @@ describe('check-state overlay step (P5, P7)', () => {
     await mkdir(join(workspace.worktreeDirectory, 'blocked-by-dir.txt'), { recursive: true });
     await writeFile(join(workspace.worktreeDirectory, 'blocked-by-dir.txt/inner.txt'), 'inner\n');
 
-    const adapter = createGitAdapter('/synthetic/unused-source', 'f'.repeat(40));
+    const adapter = createGitAdapter();
     const snapshot = unwrapOk(await adapter.readOverlay(overlayDirectory));
     const applied = unwrapOk(
       await adapter.applyCheckState(workspace, { restore: [], overlay: snapshot }),
@@ -1659,7 +1709,7 @@ describe('check-state overlay step (P5, P7)', () => {
 });
 
 describe('readOverlay (P6)', () => {
-  const adapter = createGitAdapter('/synthetic/unused-source', 'f'.repeat(40));
+  const adapter = createGitAdapter();
 
   it('reports a missing overlay directory', async () => {
     const directory = join(testDirectory, 'does-not-exist');
@@ -1940,10 +1990,7 @@ describe('file-backed artifact store with repeated attempts (AC-13)', () => {
     };
     const clock: Clock = { now: () => new Date('2026-01-01T00:00:00.000Z') };
     const dependencies: RunDependencies = {
-      git: createGitWorkspaceAdapter({
-        config,
-        workspacesDirectory: join(testDirectory, 'workspaces'),
-      }),
+      git: createGitWorkspaceAdapter({ workspacesDirectory: join(testDirectory, 'workspaces') }),
       agents: new Map([['opencode', buildTrivialAgentAdapter()]]),
       artifacts: createArtifactStore({
         artifactsDirectory: config.run.output_dir,
