@@ -7,7 +7,7 @@ import { unavailableBenchmarkMetrics } from '@/domain/types';
 import { planBenchmark, reduceRunExitCode, runBenchmark } from './run-benchmark';
 import { buildTaskPrompt } from './task-prompt';
 
-import type { CheckInput, TaskInput, TevuConfig, TevuConfigInput } from '@/config/schema';
+import type { CheckInput, TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentAdapter,
   AgentCapabilityReport,
@@ -38,10 +38,12 @@ import type {
   PrerequisiteAdapter,
   ProcessResult,
   RedactedCapture,
+  RepositoryDefinition,
   RunDependencies,
   RunFinding,
   RunManifest,
   RunResult,
+  TevuConfig,
   TevuError,
   TevuResult,
 } from '@/domain/types';
@@ -428,6 +430,7 @@ function createHarness(config: TevuConfig) {
   const gitState = {
     validatedCommits: [] as Array<{ repositoryId: string; commit: string }>,
     createIsolatedCaseCalls: [] as CaseIdentity[],
+    createIsolatedCaseRepositories: [] as RepositoryDefinition[],
     unreadableCaseIds: new Set<string>(),
     disposeErrors: new Map<string, Extract<TevuError, { kind: 'ArtifactError' }>>(),
     validateSourceError: null as Extract<TevuError, { kind: 'SourceMaterializationError' }> | null,
@@ -459,8 +462,9 @@ function createHarness(config: TevuConfig) {
         },
       };
     },
-    async createIsolatedCase(identity) {
+    async createIsolatedCase(identity, repository) {
       gitState.createIsolatedCaseCalls.push(identity);
+      gitState.createIsolatedCaseRepositories.push(repository);
       timeline.push(`prepare:${identity.caseId}`);
       if (gitState.createIsolatedCaseError !== null) {
         return { ok: false, error: gitState.createIsolatedCaseError };
@@ -1265,6 +1269,25 @@ describe('runBenchmark', () => {
     const environmentCaseIds = harness.environments.created.map((entry) => entry.caseId);
     expect(new Set(environmentCaseIds).size).toBe(environmentCaseIds.length);
     expect(environmentCaseIds).toHaveLength(caseIds.length);
+  });
+
+  it("passes the case's own task repository to createIsolatedCase, not the first configured repository", async () => {
+    const config = buildTevuConfig({
+      repositories: [
+        { id: 'repo-1', path: '/synthetic/source-repo-1' },
+        { id: 'repo-2', path: '/synthetic/source-repo-2' },
+      ],
+      tasks: [buildTask({ id: 'task-1', repo: 'repo-2', base_commit: COMMIT_B })],
+    });
+    const harness = createHarness(config);
+
+    const result = await runBenchmark(planBenchmark(config), harness.dependencies);
+
+    unwrapOk(result);
+    expect(harness.git.createIsolatedCaseRepositories.map((repository) => repository.id)).toEqual([
+      'repo-2',
+      'repo-2',
+    ]);
   });
 
   it('returns the host probe failure before any write', async () => {

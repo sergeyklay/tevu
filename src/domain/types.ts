@@ -1,12 +1,11 @@
 /**
- * Shared domain contracts for tevu: results, typed errors, run and case
- * records, the agent-independent adapter port, and adapter interfaces.
+ * Shared domain contracts for tevu: the configuration model, results, typed
+ * errors, run and case records, the agent-independent adapter port, and
+ * adapter interfaces.
  *
  * This module must stay free of boundary dependencies: no Commander.js, Clack,
  * Execa, Git commands, Jira transport code, or Node.js process globals.
  */
-
-import type { RepositoryDefinition, TevuConfig } from '@/config/schema';
 
 /** Result of a fallible module contract; errors never cross boundaries as thrown exceptions. */
 export type TevuResult<T, K extends TevuError['kind']> =
@@ -97,6 +96,119 @@ export type CaseIdentity = {
   effort: string;
   agent: string;
 };
+
+/** Settings shared by every benchmark case. */
+type RunSettings = {
+  output_dir: string;
+  concurrency: number;
+  repeat: number;
+  timeout: string;
+  stop_grace: string;
+  check_timeout?: string;
+};
+
+/** Parsed agent block settings; `secrets` and `env` default to `[]`. */
+type AgentSettings = {
+  command: string;
+  secrets: string[];
+  env: string[];
+};
+
+/** Parsed Jira Cloud connection settings. */
+export type JiraTrackerSettings = {
+  url: string;
+  email: string;
+  token: string;
+};
+
+/** One repository setup command: executable and literal arguments, no shell; the shape of a check's `run`. */
+export type SetupCommand = [string, ...string[]];
+
+/** A repository's setup block; a phase key is present only when its list holds at least one command. */
+export interface RepositorySetup {
+  before_agent?: SetupCommand[];
+  before_checks?: SetupCommand[];
+  timeout: string;
+  env: string[];
+}
+
+/** One configured source repository. */
+export type RepositoryDefinition = {
+  id: string;
+  path: string;
+  setup?: RepositorySetup;
+};
+
+/** One resolved benchmark model entry: what the benchmark compares. */
+export interface ModelDefinition {
+  id: string;
+  model: `${string}/${string}`;
+  effort: string;
+  agent: string;
+}
+
+/** One-time tracker import snapshot stored on a task. */
+type ImportedTaskSource = {
+  kind: 'jira' | 'github';
+  key: string;
+  url: string;
+  imported_at: string;
+  title: string;
+  body: string;
+};
+
+/** A command check's resolved shape: literal argv, no shell, and every default materialized. */
+export interface CommandCheck {
+  id: string;
+  description: string;
+  run: [string, ...string[]];
+  timeout: string;
+  exit_codes: number[];
+  env: string[];
+  required: boolean;
+}
+
+/** A manual check's resolved shape: assessed by a human through `tevu assess`. */
+interface ManualCheck {
+  id: string;
+  description: string;
+  manual: true;
+  required: boolean;
+}
+
+/** One acceptance or done check: a command check or a manual check. */
+export type CheckDefinition = CommandCheck | ManualCheck;
+
+/** One resolved acceptance-driven benchmark task pinned to a repository commit. */
+export interface TaskDefinition {
+  id: string;
+  title: string;
+  repo: string;
+  base_commit: string;
+  prompt: string;
+  description: string;
+  source?: ImportedTaskSource;
+  readiness: string[];
+  checks: {
+    /** Present only when the file declares it; `[]` declares nothing to restore. */
+    restore?: string[];
+    /** Present only when the file declares it; absolute after `resolveConfig`. */
+    overlay?: string;
+    acceptance: CheckDefinition[];
+    done: CheckDefinition[];
+  };
+}
+
+/** One resolved tevu configuration: every default materialized, ready for its consumers. */
+export interface TevuConfig {
+  version: 1;
+  run: RunSettings;
+  agents: Record<string, AgentSettings>;
+  trackers?: { jira?: JiraTrackerSettings };
+  repositories: RepositoryDefinition[];
+  models: ModelDefinition[];
+  tasks: TaskDefinition[];
+}
 
 /**
  * Run-scoped projection of a task's stored configuration, read back through
@@ -445,6 +557,7 @@ export interface GitWorkspaceAdapter {
   ): Promise<TevuResult<SourceValidation, 'SourceMaterializationError'>>;
   createIsolatedCase(
     identity: CaseIdentity,
+    repository: RepositoryDefinition,
   ): Promise<TevuResult<CaseWorkspace, 'SourceMaterializationError' | 'IsolationError'>>;
   /** Records the worktree state as the patch base; no commit, ref, index change, or object in the case repository. */
   snapshotPatchBase(workspace: CaseWorkspace): Promise<TevuResult<PatchBase, 'ArtifactError'>>;
@@ -489,6 +602,16 @@ export type ParentEnvironmentSnapshot = {
   secretValues: string[];
 };
 
+/** Which environment variable names reach each recipient; never carries values. */
+export type EnvironmentVariableNames = {
+  /** One entry per `agents.<name>` block in configuration key order; each list in configuration order. */
+  agents: Readonly<Record<string, { secrets: readonly string[]; env: readonly string[] }>>;
+  /** Exactly `evaluatorEnvironmentNames(config)`, in its order. */
+  ordinaryEvaluator: readonly string[];
+  /** The variable `trackers.jira.token` references; the key is absent without a Jira tracker. */
+  jiraTokenVariable?: string;
+};
+
 /** Agent and evaluator replacement environments for one case. */
 export type CaseEnvironments = {
   agent: IsolatedEnvironment;
@@ -497,11 +620,13 @@ export type CaseEnvironments = {
 
 /** Builds the run-level parent snapshot and per-case isolated replacement environments. */
 export interface EnvironmentAdapter {
-  snapshotParent(config: TevuConfig): TevuResult<ParentEnvironmentSnapshot, 'PrerequisiteError'>;
+  snapshotParent(
+    names: EnvironmentVariableNames,
+  ): TevuResult<ParentEnvironmentSnapshot, 'PrerequisiteError'>;
   createCaseEnvironments(
     workspace: CaseWorkspace,
     snapshot: ParentEnvironmentSnapshot,
-    config: TevuConfig,
+    names: EnvironmentVariableNames,
     agent: string,
   ): Promise<TevuResult<CaseEnvironments, 'IsolationError'>>;
 }

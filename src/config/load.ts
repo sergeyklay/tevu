@@ -4,44 +4,13 @@ import { parseDocument } from 'yaml';
 
 import { TevuConfigSchema } from './schema';
 
-import type { TevuConfig } from './schema';
 import type {
-  ConfigReadCause,
+  ConfigStore,
   LoadConfigErrorKind,
+  TevuConfig,
   TevuResult,
   ValidationFinding,
 } from '@/domain/types';
-
-/**
- * Reads the UTF-8 configuration text at the given path.
- *
- * Establishes the path names a regular file through `stat` before ever
- * opening it, so a directory, FIFO, or permission failure is classified
- * consistently for every caller (`loadConfig` and `ConfigStore.readText`
- * share this helper so their `ConfigReadError` values agree by construction).
- */
-export async function readConfigText(
-  configPath: string,
-): Promise<TevuResult<string, 'ConfigReadError'>> {
-  const absoluteConfigPath = path.resolve(configPath);
-
-  let stats: Awaited<ReturnType<typeof fs.stat>>;
-  try {
-    stats = await fs.stat(absoluteConfigPath);
-  } catch (cause) {
-    return configReadFailure(absoluteConfigPath, configPath, classify(cause));
-  }
-  if (!stats.isFile()) {
-    return configReadFailure(absoluteConfigPath, configPath, 'not-a-file');
-  }
-
-  try {
-    const text = await fs.readFile(absoluteConfigPath, 'utf8');
-    return { ok: true, value: text };
-  } catch (cause) {
-    return configReadFailure(absoluteConfigPath, configPath, classify(cause));
-  }
-}
 
 /**
  * Parses and validates one configuration document's text against the
@@ -155,16 +124,18 @@ export async function resolveConfig(
 /**
  * Loads and validates the UTF-8 YAML configuration at the given path.
  *
- * Reads the text, parses and validates it against the strict authoritative
- * schema, then resolves relative paths against the configuration file
- * directory and enforces real-path separation between the run output
- * directory and every configured repository. Performs no Git, agent,
- * Jira, wizard, or artifact mutation work.
+ * Reads the text through `configStore.readText`, so the result agrees with
+ * `readText` by construction, then parses and validates it against the strict
+ * authoritative schema, then resolves relative paths against the
+ * configuration file directory and enforces real-path separation between the
+ * run output directory and every configured repository. Performs no Git,
+ * agent, Jira, wizard, or artifact mutation work.
  */
 export async function loadConfig(
   configPath: string,
+  configStore: Pick<ConfigStore, 'readText'>,
 ): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>> {
-  const text = await readConfigText(configPath);
+  const text = await configStore.readText(configPath);
   if (!text.ok) {
     return text;
   }
@@ -301,49 +272,4 @@ function issuePathIdentifier(issuePath: ReadonlyArray<PropertyKey>): string {
       typeof segment === 'symbol' ? String(segment.description ?? 'symbol') : String(segment),
     )
     .join('.');
-}
-
-function configReadFailure(
-  absolutePath: string,
-  requestedPath: string,
-  cause: ConfigReadCause,
-): TevuResult<never, 'ConfigReadError'> {
-  return {
-    ok: false,
-    error: { kind: 'ConfigReadError', path: absolutePath, requestedPath, cause },
-  };
-}
-
-/**
- * Classifies a `stat`/`readFile` failure by its system error code.
- *
- * Duplicated from the adapter layer's own `systemErrorCode`, which `config`
- * may not import under the project's dependency direction.
- */
-function classify(cause: unknown): ConfigReadCause {
-  const code = systemErrorCode(cause);
-  switch (code) {
-    case 'ENOENT':
-    case 'ENOTDIR':
-      return 'not-found';
-    case 'EACCES':
-    case 'EPERM':
-      return 'permission-denied';
-    case 'EISDIR':
-      return 'not-a-file';
-    default:
-      return 'unreadable';
-  }
-}
-
-function systemErrorCode(cause: unknown): string | null {
-  if (
-    typeof cause === 'object' &&
-    cause !== null &&
-    'code' in cause &&
-    typeof (cause as { code: unknown }).code === 'string'
-  ) {
-    return (cause as { code: string }).code;
-  }
-  return null;
 }

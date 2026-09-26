@@ -18,15 +18,7 @@ import type {
   ProgramOperations,
 } from './program';
 import type { AssessmentCaseContext, ManualCheckSummary } from '@/application/assess';
-import type {
-  CheckInput,
-  JiraTrackerSettings,
-  ModelDefinitionInput,
-  TaskDefinition,
-  TaskInput,
-  TevuConfig,
-  TevuConfigInput,
-} from '@/config/schema';
+import type { CheckInput, ModelDefinitionInput, TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentCapabilityReport,
   AssessmentRecord,
@@ -36,9 +28,12 @@ import type {
   CaseResult,
   ConfigReadCause,
   IssueSnapshot,
+  JiraTrackerSettings,
   ReportResult,
   RunFinding,
   RunResult,
+  TaskDefinition,
+  TevuConfig,
   TevuError,
   ValidationFinding,
   ValidationReport,

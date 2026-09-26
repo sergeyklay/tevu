@@ -16,7 +16,6 @@ import { runAssessmentWizard, runTaskWizard } from './task-wizard';
 
 import type { AssessmentCaseContext } from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
-import type { JiraTrackerSettings, TaskDefinition, TevuConfig } from '@/config/schema';
 import type {
   AgentCapabilityReport,
   AssessmentInput,
@@ -24,9 +23,12 @@ import type {
   CaseLifecycle,
   CaseResult,
   IssueSnapshot,
+  JiraTrackerSettings,
   LoadConfigErrorKind,
   ReportResult,
   RunResult,
+  TaskDefinition,
+  TevuConfig,
   TevuError,
   TevuResult,
   ValidationFinding,

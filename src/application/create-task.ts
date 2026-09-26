@@ -4,17 +4,13 @@ import { appendToConfigText, renderConfigDocument } from '@/config/document';
 import { parseConfigText, resolveConfig, resolveConfigPath } from '@/config/load';
 import { referencedVariableName } from '@/config/schema';
 
-import type {
-  RepositoryDefinition,
-  RepositoryInput,
-  TaskDefinition,
-  TaskInput,
-  TevuConfig,
-  TevuConfigInput,
-} from '@/config/schema';
+import type { RepositoryInput, TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   ConfigStore,
   GitWorkspaceAdapter,
+  RepositoryDefinition,
+  TaskDefinition,
+  TevuConfig,
   TevuResult,
   ValidationFinding,
 } from '@/domain/types';

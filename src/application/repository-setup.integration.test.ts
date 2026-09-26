@@ -13,7 +13,7 @@ import { unavailableMetric } from '@/domain/types';
 
 import { planBenchmark, runBenchmark } from './run-benchmark';
 
-import type { TevuConfig, TevuConfigInput } from '@/config/schema';
+import type { TevuConfigInput } from '@/config/schema';
 import type {
   AgentAdapter,
   AgentCapabilityReport,
@@ -27,6 +27,7 @@ import type {
   HostProbe,
   PrerequisiteAdapter,
   RunDependencies,
+  TevuConfig,
   TevuError,
   TevuResult,
 } from '@/domain/types';
@@ -395,7 +396,6 @@ describe('repository setup orchestration end to end (AC-1, P7)', () => {
 
     const config = buildConfig(repository.path, repository.commit, overlayDirectory);
     const git = createGitWorkspaceAdapter({
-      config,
       workspacesDirectory: join(testDirectory, 'workspaces'),
     });
     const environments = createEnvironmentAdapter();

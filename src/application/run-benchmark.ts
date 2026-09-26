@@ -19,12 +19,12 @@ import {
 import { combineCaseMetrics } from '@/evaluation/metrics';
 import { compareCaseIds } from '@/evaluation/report';
 
+import { buildEnvironmentVariableNames } from './environment-variable-names';
 import { runSetupPhase } from './repository-setup';
 import { describeSourceCommitInPrompt } from './source-commit-in-prompt';
 import { buildTaskPrompt } from './task-prompt';
 
 import type { SetupPhaseOutcome } from './repository-setup';
-import type { RepositorySetup, TaskDefinition, TevuConfig } from '@/config/schema';
 import type {
   AgentCapabilityReport,
   AgentEventRecord,
@@ -41,17 +41,22 @@ import type {
   CheckResult,
   CheckStateRecord,
   CheckStateRequest,
+  EnvironmentVariableNames,
   GitWorkspaceAdapter,
   OverlaySnapshot,
   ParentEnvironmentSnapshot,
   PatchBase,
   RepeatSetting,
+  RepositoryDefinition,
+  RepositorySetup,
   RunDependencies,
   RunFinding,
   RunManifest,
   RunResult,
   SetupCommandRecord,
   SetupPhase,
+  TaskDefinition,
+  TevuConfig,
   TevuError,
   TevuResult,
 } from '@/domain/types';
@@ -179,7 +184,8 @@ export async function runBenchmark(
   if (!host.ok) {
     return host;
   }
-  const snapshot = dependencies.environments.snapshotParent(plan.config);
+  const environmentNames = buildEnvironmentVariableNames(plan.config);
+  const snapshot = dependencies.environments.snapshotParent(environmentNames);
   if (!snapshot.ok) {
     return snapshot;
   }
@@ -247,6 +253,7 @@ export async function runBenchmark(
     dependencies,
     agents,
     snapshot: snapshot.value,
+    environmentNames,
     findings: [],
     results: new Map(),
     activeAborts: new Map(),
@@ -300,8 +307,8 @@ type PlannedCase = {
   task: TaskDefinition;
   /** The run's snapshot of `task.checks.overlay`; `null` before `pinOverlays` runs or when the task declares none. */
   overlay: OverlaySnapshot | null;
-  /** The matched repository's `setup` block, or `null` when it declares none. */
-  setup: RepositorySetup | null;
+  /** The repository `resolvePlannedCases` matched to the case's task by `task.repo`. */
+  repository: RepositoryDefinition;
 };
 
 /** Mutable state shared by every scheduled case of one run. */
@@ -310,6 +317,7 @@ type RunContext = {
   dependencies: RunDependencies;
   agents: AgentRegistry;
   snapshot: ParentEnvironmentSnapshot;
+  environmentNames: EnvironmentVariableNames;
   findings: RunFinding[];
   results: Map<string, CaseResult>;
   activeAborts: Map<string, AbortController>;
@@ -393,7 +401,7 @@ async function resolvePlannedCases(
       identity: { ...identity, sourceCommit: commit },
       task,
       overlay: null,
-      setup: repository.setup ?? null,
+      repository,
     });
   }
   return { ok: true, value: planned };
@@ -469,7 +477,7 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
   }
 
   emitLifecycle(run, caseId, 'preparing');
-  const workspace = await run.dependencies.git.createIsolatedCase(entry.identity);
+  const workspace = await run.dependencies.git.createIsolatedCase(entry.identity, entry.repository);
   if (!workspace.ok) {
     await persistAndCleanup(run, preparationFailureResult(run, entry, workspace.error), null);
     return;
@@ -477,7 +485,7 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
   const environments = await run.dependencies.environments.createCaseEnvironments(
     workspace.value,
     run.snapshot,
-    run.plan.config,
+    run.environmentNames,
     entry.identity.agent,
   );
   if (!environments.ok) {
@@ -506,7 +514,7 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
     checksWritten: false,
     overlay: entry.overlay,
     checkState: null,
-    setup: entry.setup,
+    setup: entry.repository.setup ?? null,
     setupCommands: [],
     setupLogs: { beforeAgent: null, beforeChecks: null },
     patchBase: null,

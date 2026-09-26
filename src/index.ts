@@ -39,7 +39,6 @@ import { referencedVariableName } from '@/config/schema';
 import { runProgram } from '@/interface/program';
 
 import type { JiraCloudSettings } from '@/adapters/trackers/jira-cloud';
-import type { TevuConfig } from '@/config/schema';
 import type {
   AgentRegistry,
   ArtifactStore,
@@ -47,6 +46,7 @@ import type {
   EnvironmentAdapter,
   GitWorkspaceAdapter,
   LoadConfigErrorKind,
+  TevuConfig,
   TevuResult,
 } from '@/domain/types';
 import type { ProgramDependencies, ProgramIo, ProgramOperations } from '@/interface/program';
@@ -86,15 +86,15 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
   const loadConfigAndRegisterSecrets = async (
     configPath: string,
   ): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>> => {
-    const loaded = await loadConfig(configPath);
+    const loaded = await loadConfig(configPath, configStore);
     if (loaded.ok) {
       registerConfigSecrets(registry, loaded.value);
     }
     return loaded;
   };
 
-  const gitFor = (config: TevuConfig): GitWorkspaceAdapter =>
-    createGitWorkspaceAdapter({ config, workspacesDirectory: createWorkspacesRoot() });
+  const createGit = (): GitWorkspaceAdapter =>
+    createGitWorkspaceAdapter({ workspacesDirectory: createWorkspacesRoot() });
 
   const secrets = createSecretRedactor(registry.read, registry.redact);
 
@@ -161,7 +161,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       }),
     validateConfig: (config) =>
       validateConfig(config, {
-        git: gitFor(config),
+        git: createGit(),
         agents: agentsFor(config),
         environments,
         prerequisites,
@@ -174,7 +174,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       );
       try {
         return await runBenchmark(plan, {
-          git: gitFor(plan.config),
+          git: createGit(),
           agents: agentsFor(plan.config),
           artifacts: createArtifactStore({
             artifactsDirectory: plan.artifactsDirectory,
@@ -284,15 +284,15 @@ function wrapEnvironmentAdapter(
   registry: SecretRegistry,
 ): EnvironmentAdapter {
   return {
-    snapshotParent(config) {
-      const snapshot = adapter.snapshotParent(config);
+    snapshotParent(names) {
+      const snapshot = adapter.snapshotParent(names);
       if (snapshot.ok) {
         registry.add(snapshot.value.secretValues);
       }
       return snapshot;
     },
-    createCaseEnvironments: (workspace, snapshot, config, agent) =>
-      adapter.createCaseEnvironments(workspace, snapshot, config, agent),
+    createCaseEnvironments: (workspace, snapshot, names, agent) =>
+      adapter.createCaseEnvironments(workspace, snapshot, names, agent),
   };
 }
 

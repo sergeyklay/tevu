@@ -17,7 +17,6 @@ import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { readConfigText } from '@/config/load';
 import { describeCause } from '@/domain/describe-cause';
 import { redactDecodedValue } from '@/domain/redaction';
 
@@ -29,6 +28,7 @@ import type {
   AssessmentLock,
   CaseResult,
   CheckResult,
+  ConfigReadCause,
   ConfigStore,
   PatchArtifact,
   Redactor,
@@ -117,7 +117,7 @@ export function createArtifactStore(options: ArtifactStoreOptions): ArtifactStor
   return new FileArtifactStore(options);
 }
 
-/** Creates the file-backed `ConfigStore`; reads go through `loadConfig`, writes are atomic. */
+/** Creates the file-backed `ConfigStore`; `readText` reads the file directly, writes are atomic. */
 export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
   return {
     async exists(configPath: string): Promise<boolean> {
@@ -186,6 +186,62 @@ export function createConfigStore(options: ConfigStoreOptions): ConfigStore {
       return okVoid();
     },
   };
+}
+
+/**
+ * Reads the UTF-8 configuration text at the given path.
+ *
+ * Establishes the path names a regular file through `stat` before ever
+ * opening it, so a directory, FIFO, or permission failure is classified
+ * consistently for every caller of `ConfigStore.readText`.
+ */
+async function readConfigText(configPath: string): Promise<TevuResult<string, 'ConfigReadError'>> {
+  const absoluteConfigPath = path.resolve(configPath);
+
+  let stats: Awaited<ReturnType<typeof fs.stat>>;
+  try {
+    stats = await fs.stat(absoluteConfigPath);
+  } catch (cause) {
+    return configReadFailure(absoluteConfigPath, configPath, classify(cause));
+  }
+  if (!stats.isFile()) {
+    return configReadFailure(absoluteConfigPath, configPath, 'not-a-file');
+  }
+
+  try {
+    const text = await fs.readFile(absoluteConfigPath, 'utf8');
+    return { ok: true, value: text };
+  } catch (cause) {
+    return configReadFailure(absoluteConfigPath, configPath, classify(cause));
+  }
+}
+
+function configReadFailure(
+  absolutePath: string,
+  requestedPath: string,
+  cause: ConfigReadCause,
+): TevuResult<never, 'ConfigReadError'> {
+  return {
+    ok: false,
+    error: { kind: 'ConfigReadError', path: absolutePath, requestedPath, cause },
+  };
+}
+
+/** Classifies a `stat`/`readFile` failure by its system error code. */
+function classify(cause: unknown): ConfigReadCause {
+  const code = systemErrorCode(cause);
+  switch (code) {
+    case 'ENOENT':
+    case 'ENOTDIR':
+      return 'not-found';
+    case 'EACCES':
+    case 'EPERM':
+      return 'permission-denied';
+    case 'EISDIR':
+      return 'not-a-file';
+    default:
+      return 'unreadable';
+  }
 }
 
 /**

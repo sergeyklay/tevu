@@ -11,7 +11,7 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 ## Gotchas
 
 - **Imports that leave the file's directory use `@/…`, which maps to `src/…`; same-directory imports stay `./x`. No specifier carries a `.ts` or `.js` extension.** The alias comes from `paths` in `tsconfig.json`, which `tsc`, esbuild, Vitest (`resolve.tsconfigPaths`), typescript-eslint, and knip all read; a new tool that resolves `src` imports needs the same.
-- **Dependencies point one way: `domain` <- `config` <- `application` <- `interface`.** `adapters` implement contracts declared in `domain` and import nothing else from `src`. `src/index.ts` is the only module that wires concrete adapters. The code currently violates this in several places; those imports are debt to remove, not precedent to follow.
+- **Dependencies point one way: `domain` <- `config` <- `application` <- `interface`.** `adapters` implement contracts declared in `domain` and import nothing else from `src`. `src/index.ts` is the only module that wires concrete adapters.
 - **Errors cross module boundaries as `TevuResult`, never as thrown exceptions.**
 - **Pure modules read time only through the injected clock**, never `Date.now()` or `new Date()`.
 - **`tevu report` must reproduce byte-identical JSON and Markdown from unchanged artifacts.** Derived output may not depend on wall-clock time, randomness, or unordered iteration.

@@ -5,7 +5,8 @@ import { TevuConfigSchema } from '@/config/schema';
 
 import { buildTaskPrompt } from './task-prompt';
 
-import type { ModelDefinitionInput, TaskDefinition, TaskInput } from '@/config/schema';
+import type { ModelDefinitionInput, TaskInput } from '@/config/schema';
+import type { TaskDefinition } from '@/domain/types';
 
 function buildTask(overrides: Partial<TaskInput> = {}): TaskInput {
   return {

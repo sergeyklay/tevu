@@ -9,11 +9,11 @@
 
 import { describeCause } from '@/domain/describe-cause';
 
-import type { SetupCommand } from '@/config/schema';
 import type {
   EvaluatorProcessAdapter,
   EvaluatorProcessResult,
   RedactedCapture,
+  SetupCommand,
   SetupCommandRecord,
   SetupPhase,
   TevuError,

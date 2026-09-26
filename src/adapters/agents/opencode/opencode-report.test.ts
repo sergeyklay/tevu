@@ -17,13 +17,7 @@ import { createOpenCodeAdapter } from './opencode';
 import { decodeEvent, decodeExport } from './opencode-protocol';
 
 import type { OpenCodeExport, OpenCodeRunEvent } from './opencode-protocol';
-import type {
-  ModelDefinitionInput,
-  RepositoryDefinition,
-  TaskInput,
-  TevuConfig,
-  TevuConfigInput,
-} from '@/config/schema';
+import type { ModelDefinitionInput, TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentCapabilityReport,
   AgentEventRecord,
@@ -34,9 +28,11 @@ import type {
   CaseResult,
   CheckResult,
   ProcessResult,
+  RepositoryDefinition,
   RunFinding,
   RunManifest,
   RunResult,
+  TevuConfig,
 } from '@/domain/types';
 
 const PROVIDER_SECRET = 'synthetic-provider-secret-9f2';

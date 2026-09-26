@@ -22,12 +22,9 @@ import type { AssessmentCaseContext, ManualCheckSummary } from '@/application/as
 import type { TaskWizardInput } from '@/application/create-task';
 import type {
   CheckInput,
-  JiraTrackerSettings,
   ModelDefinitionInput,
-  RepositoryDefinition,
   RepositoryInput,
   TaskInput,
-  TevuConfig,
   TevuConfigInput,
 } from '@/config/schema';
 import type {
@@ -35,7 +32,10 @@ import type {
   AssessmentInput,
   AssessmentRecord,
   IssueSnapshot,
+  JiraTrackerSettings,
   LoadConfigErrorKind,
+  RepositoryDefinition,
+  TevuConfig,
   TevuResult,
   ValidationFinding,
 } from '@/domain/types';

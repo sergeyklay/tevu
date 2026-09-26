@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { createConfigStore } from '@/adapters/artifact-store';
+
 import { loadConfig, parseConfigText } from './load';
 import { TevuConfigSchema } from './schema';
 import { CONFIG_TEMPLATE } from './template';
@@ -90,7 +92,7 @@ describe('CONFIG_TEMPLATE', () => {
     it('is accepted as written', async () => {
       const configPath = await writeConfigFile(CONFIG_TEMPLATE);
 
-      const result = await loadConfig(configPath);
+      const result = await loadConfig(configPath, createConfigStore({ redact: (text) => text }));
 
       expect(result.ok).toBe(true);
     });
@@ -98,7 +100,7 @@ describe('CONFIG_TEMPLATE', () => {
     it('is accepted with every optional field enabled', async () => {
       const configPath = await writeConfigFile(uncomment(CONFIG_TEMPLATE));
 
-      const result = await loadConfig(configPath);
+      const result = await loadConfig(configPath, createConfigStore({ redact: (text) => text }));
 
       expect(result.ok).toBe(true);
       if (!result.ok) {

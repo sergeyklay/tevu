@@ -1,10 +1,11 @@
 import { durationMs } from '@/config/schema';
 import { describeCause } from '@/domain/describe-cause';
 
-import type { CheckDefinition, CommandCheck, TaskDefinition } from '@/config/schema';
 import type {
   CaseWorkspace,
+  CheckDefinition,
   CheckResult,
+  CommandCheck,
   EvaluatorProcessAdapter,
   EvaluatorProcessRequest,
   EvaluatorProcessResult,
@@ -12,6 +13,7 @@ import type {
   ParentEnvironmentSnapshot,
   RedactedCapture,
   Redactor,
+  TaskDefinition,
   TevuResult,
 } from '@/domain/types';
 

@@ -13,15 +13,14 @@ import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { execa } from 'execa';
 
-import { evaluatorEnvironmentNames, referencedVariableName } from '@/config/schema';
 import { describeCause } from '@/domain/describe-cause';
 import { redactDecodedValue } from '@/domain/redaction';
 
-import type { TevuConfig } from '@/config/schema';
 import type {
   CaseEnvironments,
   CaseWorkspace,
   EnvironmentAdapter,
+  EnvironmentVariableNames,
   EnvironmentVariableRecord,
   EvaluatorProcessAdapter,
   EvaluatorProcessRequest,
@@ -318,16 +317,18 @@ export function createEvaluatorProcessAdapter(
  */
 export function createEnvironmentAdapter(): EnvironmentAdapter {
   return {
-    snapshotParent(config: TevuConfig): TevuResult<ParentEnvironmentSnapshot, 'PrerequisiteError'> {
-      return snapshotParentEnvironment(config);
+    snapshotParent(
+      names: EnvironmentVariableNames,
+    ): TevuResult<ParentEnvironmentSnapshot, 'PrerequisiteError'> {
+      return snapshotParentEnvironment(names);
     },
     async createCaseEnvironments(
       workspace: CaseWorkspace,
       snapshot: ParentEnvironmentSnapshot,
-      config: TevuConfig,
+      names: EnvironmentVariableNames,
       agent: string,
     ): Promise<TevuResult<CaseEnvironments, 'IsolationError'>> {
-      const agentSettings = config.agents[agent];
+      const agentSettings = names.agents[agent];
       if (agentSettings === undefined) {
         return {
           ok: false,
@@ -366,7 +367,7 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
           // Ordinary evaluator values are added per check by the evaluation
           // module from its declared allowlist, so only their names enter the
           // manifest here and no value enters the fixed base.
-          additions: evaluatorEnvironmentNames(config).map((name) => ({
+          additions: names.ordinaryEvaluator.map((name) => ({
             name,
             classification: 'ordinary' as const,
           })),
@@ -527,7 +528,7 @@ function describeSpawnFailure(result: {
 }
 
 function snapshotParentEnvironment(
-  config: TevuConfig,
+  names: EnvironmentVariableNames,
 ): TevuResult<ParentEnvironmentSnapshot, 'PrerequisiteError'> {
   const path = process.env.PATH;
   if (path === undefined || path.length === 0) {
@@ -536,8 +537,8 @@ function snapshotParentEnvironment(
 
   const agentValues: Record<string, string> = {};
   const secretValues: string[] = [];
-  for (const settings of Object.values(config.agents)) {
-    for (const name of settings.secrets) {
+  for (const entry of Object.values(names.agents)) {
+    for (const name of entry.secrets) {
       const value = process.env[name];
       if (value === undefined) {
         return missingVariableError(name);
@@ -545,7 +546,7 @@ function snapshotParentEnvironment(
       agentValues[name] = value;
       secretValues.push(value);
     }
-    for (const name of settings.env) {
+    for (const name of entry.env) {
       const value = process.env[name];
       if (value === undefined) {
         return missingVariableError(name);
@@ -555,7 +556,7 @@ function snapshotParentEnvironment(
   }
 
   const ordinaryEvaluatorValues: Record<string, string> = {};
-  for (const name of evaluatorEnvironmentNames(config)) {
+  for (const name of names.ordinaryEvaluator) {
     const value = process.env[name];
     if (value === undefined) {
       return missingVariableError(name);
@@ -563,9 +564,8 @@ function snapshotParentEnvironment(
     ordinaryEvaluatorValues[name] = value;
   }
 
-  const jira = config.trackers?.jira;
-  if (jira !== undefined) {
-    const token = process.env[referencedVariableName(jira.token)];
+  if (names.jiraTokenVariable !== undefined) {
+    const token = process.env[names.jiraTokenVariable];
     if (token !== undefined) {
       secretValues.push(token);
     }
