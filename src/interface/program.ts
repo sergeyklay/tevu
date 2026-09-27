@@ -17,6 +17,10 @@ import { runAssessmentWizard, runTaskWizard } from './task-wizard';
 import type { AssessmentCaseContext } from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
 import type {
+  ReferenceSolutionRequest,
+  ResolvedReferenceSolution,
+} from '@/application/reference-solution';
+import type {
   AgentCapabilityReport,
   AssessmentInput,
   BenchmarkPlan,
@@ -71,6 +75,11 @@ export type ProgramOperations = {
   importGitHubIssue(
     reference: string,
   ): Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>>;
+  resolveReference(
+    request: ReferenceSolutionRequest,
+  ): Promise<
+    TevuResult<ResolvedReferenceSolution, 'ReferenceResolutionError' | 'CancellationError'>
+  >;
   createTask(
     input: TaskWizardInput,
   ): Promise<
@@ -508,6 +517,8 @@ async function runTaskAdd(
       },
       importJiraIssue: operations.importJiraIssue,
       importGitHubIssue: operations.importGitHubIssue,
+      resolveReference: (repository, identifier) =>
+        operations.resolveReference({ configPath: loaderPath, repository, identifier }),
       now: dependencies.now,
       redact: dependencies.redact,
     },
@@ -820,6 +831,8 @@ function renderTevuError(error: TevuError, redact: (text: string) => string): st
       return [
         `error: setup ${error.phase} command ${JSON.stringify(error.argv)} failed: ${error.reason}`,
       ];
+    case 'ReferenceResolutionError':
+      return [`error: reference solution cannot be resolved: ${error.reason}`];
   }
 }
 

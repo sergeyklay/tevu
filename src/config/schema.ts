@@ -7,6 +7,8 @@
 
 import { z } from 'zod';
 
+import { parseGitHubReference } from '@/domain/github-reference';
+
 import type {
   CheckDefinition,
   ModelDefinition,
@@ -335,6 +337,71 @@ const ImportedTaskSourceSchema = z.strictObject({
   body: z.string(),
 });
 
+/** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
+const CommitHashSchema = z
+  .string()
+  .regex(
+    /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/,
+    'must be a full commit hash: 40 or 64 lowercase hexadecimal characters',
+  );
+
+/** Whether `identifier` reads as a pull-request reference: the short form, or a URL with path `pull`. */
+function readsAsPullRequest(identifier: string): boolean {
+  const parsed = parseGitHubReference(identifier);
+  return parsed !== null && (parsed.path === undefined || parsed.path === 'pull');
+}
+
+const TaskReferenceUnionSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('pull-request'),
+    identifier: z
+      .string()
+      .refine(
+        readsAsPullRequest,
+        'must be OWNER/REPO#NUMBER or https://HOST/OWNER/REPO/pull/NUMBER, without user info or a port',
+      ),
+    commits: z.array(CommitHashSchema).min(1),
+    merge_commit: CommitHashSchema.optional(),
+  }),
+  z.strictObject({
+    kind: z.literal('commit'),
+    identifier: nonWhitespaceTextSchema,
+    commits: z.tuple([CommitHashSchema]),
+  }),
+]);
+
+/** Rejects a pull-request reference whose commits repeat a hash or whose merge commit repeats one of them. */
+function refineTaskReference(
+  reference: z.infer<typeof TaskReferenceUnionSchema>,
+  ctx: z.RefinementCtx,
+): void {
+  if (reference.kind !== 'pull-request') {
+    return;
+  }
+  const firstSeenAt = new Map<string, number>();
+  reference.commits.forEach((hash, index) => {
+    if (firstSeenAt.has(hash)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['commits', index],
+        message: `duplicate reference commit "${hash}"`,
+      });
+    } else {
+      firstSeenAt.set(hash, index);
+    }
+  });
+  if (reference.merge_commit !== undefined && reference.commits.includes(reference.merge_commit)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['merge_commit'],
+      message: 'merge commit repeats a pull request commit',
+    });
+  }
+}
+
+/** Reference solution recorded once by `tevu task add`; later tracker changes never alter it. */
+const TaskReferenceSchema = TaskReferenceUnionSchema.superRefine(refineTaskReference);
+
 /** One restore pattern: non-empty and relative to the repository root, with no leading `/` or `..` segment. */
 const RestorePatternSchema = z
   .string()
@@ -487,6 +554,7 @@ const TaskDefinitionSchema = z
     prompt: nonWhitespaceTextSchema,
     description: nonWhitespaceTextSchema,
     source: ImportedTaskSourceSchema.optional(),
+    reference: TaskReferenceSchema.optional(),
     readiness: z.array(nonWhitespaceTextSchema).min(1),
     checks: z.strictObject({
       restore: z.array(RestorePatternSchema).optional(),
@@ -723,6 +791,7 @@ function materializeTevuConfig(raw: RawTevuConfig): TevuConfig {
       prompt: task.prompt,
       description: task.description,
       ...(task.source === undefined ? {} : { source: task.source }),
+      ...(task.reference === undefined ? {} : { reference: task.reference }),
       readiness: task.readiness,
       checks: {
         ...(task.checks.restore === undefined ? {} : { restore: task.checks.restore }),

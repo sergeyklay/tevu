@@ -37,11 +37,14 @@ export type TaskWizardInput = {
 /** Effects injected into the task-creation use case. */
 export type TaskDependencies = {
   configStore: ConfigStore;
-  git: Pick<GitWorkspaceAdapter, 'validateSource'>;
+  git: Pick<GitWorkspaceAdapter, 'validateSource' | 'resolveCommit'>;
   registerSecrets: (variableNames: readonly string[]) => void;
   redact: (text: string) => string;
   cancellation?: AbortSignal;
 };
+
+/** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
+const FULL_COMMIT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /**
  * Configuration read from disk, or built fresh from bootstrap answers, before
@@ -94,18 +97,19 @@ export async function createTask(
     ...repository,
     path: resolveConfigPath(configDirectory, repository.path),
   };
-  const sourceValidation = await dependencies.git.validateSource(
+  const resolvedBase = await resolveTaskBaseCommit(
+    input.task,
     resolvedRepository,
-    input.task.base_commit,
+    dependencies.git,
   );
-  if (!sourceValidation.ok) {
-    return { ok: false, error: { ...sourceValidation.error, taskId: input.task.id } };
+  if (!resolvedBase.ok) {
+    return { ok: false, error: { ...resolvedBase.error, taskId: input.task.id } };
   }
 
   const renderedTask: TaskInput = {
     ...input.task,
     repo: repository.id,
-    base_commit: sourceValidation.value.resolvedCommit,
+    base_commit: resolvedBase.value,
   };
 
   const rendering = { redact: dependencies.redact };
@@ -195,6 +199,27 @@ async function loadBaseDocument(
     ]);
   }
   return { ok: true, value: { text: null, base: input.bootstrap } };
+}
+
+/**
+ * Pins `task.base_commit` through `validateSource`, except when the task
+ * carries a pull-request reference and the base is a full-hash commit the
+ * repository does not hold yet: owner decision 2 lets that base be saved
+ * unchanged, since it only has to exist locally before a run.
+ */
+async function resolveTaskBaseCommit(
+  task: TaskInput,
+  repository: RepositoryDefinition,
+  git: Pick<GitWorkspaceAdapter, 'validateSource' | 'resolveCommit'>,
+): Promise<TevuResult<string, 'SourceMaterializationError'>> {
+  if (task.reference?.kind === 'pull-request' && FULL_COMMIT_HASH_PATTERN.test(task.base_commit)) {
+    const lookup = await git.resolveCommit(repository, task.base_commit);
+    if (lookup.kind === 'not-found') {
+      return { ok: true, value: task.base_commit };
+    }
+  }
+  const validated = await git.validateSource(repository, task.base_commit);
+  return validated.ok ? { ok: true, value: validated.value.resolvedCommit } : validated;
 }
 
 function collectBaseSecretNames(base: BaseDocument['base']): string[] {

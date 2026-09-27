@@ -543,6 +543,95 @@ describe('sealed Git case materialization', () => {
     }
   });
 
+  it('names the path when the repository path is not a Git repository', async () => {
+    const adapter = createGitAdapter();
+    const notARepository = join(testDirectory, 'not-a-repository');
+    await mkdir(notARepository, { recursive: true });
+
+    const validated = await adapter.validateSource(
+      { id: 'repo-1', path: notARepository },
+      'f'.repeat(40),
+    );
+
+    expect(validated).toEqual({
+      ok: false,
+      error: {
+        kind: 'SourceMaterializationError',
+        taskId: 'repo-1',
+        reason: `repository "repo-1": "${notARepository}" is not a Git repository`,
+      },
+    });
+  });
+
+  it('names the path when the commit is not readable in a real repository', async () => {
+    const repository = await createSyntheticRepository();
+    const adapter = createGitAdapter();
+
+    const validated = await adapter.validateSource(
+      { id: 'repo-1', path: repository.path },
+      'f'.repeat(40),
+    );
+
+    expect(validated).toEqual({
+      ok: false,
+      error: {
+        kind: 'SourceMaterializationError',
+        taskId: 'repo-1',
+        reason: `repository "repo-1": "${'f'.repeat(40)}" is not readable as exactly one commit in "${repository.path}"`,
+      },
+    });
+  });
+
+  it('resolveCommit reports found, not-found, and no-repository against a real repository', async () => {
+    const repository = await createSyntheticRepository();
+    const adapter = createGitAdapter();
+    const notARepository = join(testDirectory, 'not-a-repository-for-resolve-commit');
+    await mkdir(notARepository, { recursive: true });
+
+    const found = await adapter.resolveCommit(
+      { id: 'repo-1', path: repository.path },
+      repository.commit,
+    );
+    const notFound = await adapter.resolveCommit(
+      { id: 'repo-1', path: repository.path },
+      'f'.repeat(40),
+    );
+    const noRepository = await adapter.resolveCommit(
+      { id: 'repo-1', path: notARepository },
+      'f'.repeat(40),
+    );
+
+    expect(found).toEqual({ kind: 'found', commit: repository.commit });
+    expect(notFound).toEqual({ kind: 'not-found' });
+    expect(noRepository).toEqual({ kind: 'no-repository' });
+  });
+
+  it('isAncestor reports true, false, and null for an ancestor pair, a non-ancestor pair, and an object this repository never received', async () => {
+    const repository = await createSyntheticRepository();
+    const adapter = createGitAdapter();
+    await runGit(repository.path, [
+      ...GIT_IDENTITY_FLAGS,
+      'commit',
+      '--allow-empty',
+      '-m',
+      'child commit',
+    ]);
+    const child = (await runGit(repository.path, ['rev-parse', 'HEAD'])).stdout.trim();
+    const definition = { id: 'repo-1', path: repository.path };
+
+    const isAncestorResult = await adapter.isAncestor(definition, repository.commit, child);
+    const isNotAncestorResult = await adapter.isAncestor(definition, child, repository.commit);
+    const cannotCompareResult = await adapter.isAncestor(
+      definition,
+      'f'.repeat(40),
+      repository.commit,
+    );
+
+    expect(isAncestorResult).toBe(true);
+    expect(isNotAncestorResult).toBe(false);
+    expect(cannotCompareResult).toBeNull();
+  });
+
   it('reports workspace readability and disposes the case directory', async () => {
     const { adapter, workspace } = await sealCaseFromSyntheticRepository('task-1--c1');
     const readableBefore = await adapter.isReadable?.(workspace);

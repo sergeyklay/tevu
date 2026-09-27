@@ -1,8 +1,11 @@
 /**
- * Detects whether an agent prompt names its resolved source commit, so a
- * curator-authored prompt cannot leak the pinned commit that the sealed
- * repository itself withholds.
+ * Detects whether an agent prompt names its resolved source commit, a
+ * resolved reference commit, or a pull-request reference, so a
+ * curator-authored prompt cannot leak the pinned commit or the accepted
+ * solution that the sealed repository itself withholds.
  */
+
+import type { ParsedGitHubReference } from '@/domain/github-reference';
 
 /**
  * Reports whether `prompt` contains the resolved source commit.
@@ -20,6 +23,46 @@ export function describeSourceCommitInPrompt(
   const prefix = sourceCommit.slice(0, 7);
   if (prompt.toLowerCase().includes(prefix.toLowerCase())) {
     return `agent prompt contains resolved base commit ${prefix}`;
+  }
+  return undefined;
+}
+
+/**
+ * Reports whether `prompt` contains a resolved reference commit.
+ *
+ * Shares {@link describeSourceCommitInPrompt}'s 7-character, case-insensitive
+ * substring comparison, so a reference commit cannot leak through the prompt
+ * any more than the base commit can.
+ */
+export function describeReferenceCommitInPrompt(
+  prompt: string,
+  referenceCommit: string,
+): string | undefined {
+  const prefix = referenceCommit.slice(0, 7);
+  if (prompt.toLowerCase().includes(prefix.toLowerCase())) {
+    return `agent prompt contains resolved reference commit ${prefix}`;
+  }
+  return undefined;
+}
+
+/**
+ * Reports whether `prompt` contains a pull request's key or URL form.
+ *
+ * Builds `<owner>/<repo>#<number>` and the scheme-less URL form
+ * `<host>/<owner>/<repo>/pull/<number>` from the parts a pull-request
+ * reference's identifier parses to, and compares each against `prompt` as a
+ * case-insensitive plain substring, with no character-boundary conditions.
+ */
+export function describePullRequestInPrompt(
+  prompt: string,
+  pullRequest: ParsedGitHubReference,
+): string | undefined {
+  const { host, owner, repo, number } = pullRequest;
+  const key = `${owner}/${repo}#${number}`;
+  const url = `${host}/${owner}/${repo}/pull/${number}`;
+  const lowerPrompt = prompt.toLowerCase();
+  if (lowerPrompt.includes(key.toLowerCase()) || lowerPrompt.includes(url.toLowerCase())) {
+    return `agent prompt contains pull request ${key}`;
   }
   return undefined;
 }

@@ -169,11 +169,12 @@ The duration bound keeps a configured value inside what a Node.js timer can sche
 | `id` | Unique task ID |
 | `title` | Non-whitespace; shown in the report, never sent to the agent |
 | `repo` | An ID from `repositories`; defaults to the sole repository when exactly one is configured |
-| `base_commit` | A commit resolvable in that repository; `tevu task add` records the resolved commit |
+| `base_commit` | A commit resolvable in that repository; `tevu task add` records the resolved commit. For a pull-request reference, `tevu task add` can save a commit the repository does not hold yet; `tevu validate` and `tevu run` require it locally |
 | `timeout` | Duration, optional; agent time limit of every case of this task, for every model entry and attempt; replaces `run.timeout`, which applies when the key is absent |
 | `prompt` | Non-whitespace instructions sent to every model |
 | `description` | Non-whitespace task description, sent to every model |
 | `source` | Absent for a task written by hand; otherwise a saved Jira or GitHub import snapshot |
+| `reference` | Optional; absent means no reference solution. `tevu task add` records it once; covered under [Reference solution](#reference-solution) |
 | `readiness` | At least one non-whitespace prerequisite you confirmed; never sent to the agent |
 | `checks.restore` | Optional list of git `:(glob)` pathspec patterns reset to `base_commit` before checks run; absent or `[]` restores nothing |
 | `checks.overlay` | Optional path to a hidden check-file directory copied onto the worktree root before checks run; resolves relative to the configuration file |
@@ -183,6 +184,56 @@ The duration bound keeps a configured value inside what a Node.js timer can sche
 `tevu validate` and `tevu run` reject a task when the prompt tevu sends to the agent contains the first 7 characters of the resolved `base_commit`, in any letter case. This prompt is built from `prompt`, `description`, and the `checks.acceptance` and `checks.done` descriptions.
 
 A task written by hand has no `source` block. An imported source has `kind` (`jira` or `github`), `key`, `url`, `imported_at`, `title`, and `body`. `tevu task add --jira` or `--github` fills this block once from a one-time import; later changes in the tracker never update the task.
+
+### Reference solution
+
+A task may record `reference`: a GitHub pull request or a commit `tevu task add` resolved from the operator's answer to the reference-solution question, and the proposed base commit it derived from that resolution. It is provenance for later use, read once when the task is added; the operator can override the proposed base, and nothing later refreshes the block.
+
+```yaml
+reference:
+  kind: pull-request            # pull-request or commit
+  identifier: octo/app#128      # the operator's answer, trimmed
+  commits:                      # every pull request commit, in GitHub's order
+    - "<hash>"
+    - "<hash>"
+  merge_commit: "<hash>"        # merged pull request only, when it is not in commits
+```
+
+| Field | Contract |
+| --- | --- |
+| `reference.kind` | `pull-request` or `commit` |
+| `reference.identifier` | The answer as given, trimmed: non-whitespace text for `commit`; for `pull-request`, `OWNER/REPO#NUMBER` or a pull request URL, without user info or a port |
+| `reference.commits` | Distinct full lowercase commit hashes. `commit`: exactly one, the commit. `pull-request`: at least one, every commit GitHub lists for the pull request, in GitHub's order |
+| `reference.merge_commit` | `pull-request` only, optional: the merge commit of a merged pull request when it is not already in `commits` |
+
+For a commit reference, `tevu task add` proposes the commit's first parent as the base commit; for a merge commit, that is its mainline-side parent.
+
+For a pull request, the proposed base depends on which commits GitHub lists as having no parent inside the pull request itself (its "first commits") and on the pull request's state and mergeability:
+
+| Pull request | Proposed base | Note |
+| --- | --- | --- |
+| Merged | The first commits' shared parent | The target branch already holds the solution |
+| Open or closed, target branch deleted | The first commits' shared parent | Warned: "Target deleted" |
+| Open or closed, conflicting | The first commits' shared parent | Warned: "Conflict" |
+| Open or closed, mergeability unknown | The tip of the target branch | Warned: "Mergeability unknown" |
+| Open, mergeable | The tip of the target branch | |
+| Closed, mergeable | The tip of the target branch | Warned: "Closed", since GitHub does not recheck a closed pull request against a moving target |
+
+When the first commits do not share exactly one parent, for example because the pull request merged another branch or force-pushed over an unrelated history, no base is proposed; the reference is still recorded, and the operator enters a base as without one. A target tip the operator accepts is saved as `base_commit` even when the local repository does not hold it yet; `tevu validate` and `tevu run` require it before they run.
+
+`tevu validate` rejects a base commit that equals a recorded reference commit, descends from a recorded pull-request commit, or does not precede a recorded merge commit or a commit reference's commit, counting only commits available locally; an unmerged pull request's target tip passes unless it equals or descends from a recorded pull-request commit available locally. Comparison uses hashes and ancestry only, never content, so a base holding the solution under another hash still passes: a rebase merge's other copies, a cherry-pick, or an equivalent squash on another branch. Because comparison is by hash, a commit reference must hold the whole solution in the one commit it names.
+
+When a reference commit is not available in the local repository, `tevu validate` warns once per task, `reference commits not available in repository "<repo id>": <n> of <total>; the base commit was not compared with them`. An unavailable merge commit also draws a warning of its own, `merge commit <hash> is not available in repository "<repo id>"; the base commit was not checked to precede it`, since a clone holding only the target branch never has the original commits a squash or rebase merge folded together; expect this pair of warnings after such a merge. A commit reference's single unavailable commit draws only the first warning. Neither warning changes `tevu validate`'s exit code.
+
+When a pull-request task's `base_commit` is a full hash the repository does not hold, `tevu validate` names the fetch to run, from the pull request's own repository:
+
+```
+error tasks.<id>.base_commit: base commit <hash> is not in repository "<id>" ("<path>"); fetch it there first, for example: git fetch https://<host>/<owner>/<repo>.git <hash>
+```
+
+`tevu validate` and `tevu run` also reject a task whose agent prompt contains, in any letter case, the first 7 characters of a recorded reference commit (the same rule already applied to `base_commit`) or, for a pull-request reference, its `OWNER/REPO#NUMBER` key or its URL form `HOST/OWNER/REPO/pull/NUMBER`, matched as plain substrings built from the recorded identifier. Neither command checks a prompt for any other hint to the accepted solution, such as a bare issue-style `#NUMBER`, a branch name, or a title.
+
+The `## GitHub issues` section below covers the gh setup a pull-request reference shares with issue import.
 
 ### Source trees
 
@@ -330,3 +381,5 @@ The [Jira import guide](../guides/import-jira-task.md) describes connection setu
 GitHub issues has no configuration fields. `task add --github` needs the GitHub CLI (`gh`) on `PATH`, authenticated for the issue's host: `gh auth login` for `github.com`, or `gh auth login --hostname <host>` for a GitHub Enterprise Server host, because gh never receives `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. tevu reads and stores no GitHub token; gh owns authentication entirely.
 
 Each import makes one `gh issue view` call with a 30-second limit and no retries beyond gh's own. `tevu validate`, `tevu run`, and `tevu report` never run gh.
+
+A pull-request reference answer uses this same gh setup and makes one `gh api graphql` call, also with a 30-second limit. GitHub lists at most 250 commits of a pull request; tevu records a pull request only when it can read its complete commit list.

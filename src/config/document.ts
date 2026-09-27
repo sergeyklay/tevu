@@ -275,6 +275,17 @@ function buildTaskNode(task: TaskInput, guard: GuardedRedactor): Record<string, 
       body: guard.redact(task.source.body),
     };
   }
+  if (task.reference !== undefined) {
+    const reference: Record<string, unknown> = {
+      kind: task.reference.kind,
+      identifier: guard.redact(task.reference.identifier),
+      commits: task.reference.commits.map((hash) => quotedScalar(guard.redact(hash))),
+    };
+    if (task.reference.kind === 'pull-request' && task.reference.merge_commit !== undefined) {
+      reference.merge_commit = quotedScalar(guard.redact(task.reference.merge_commit));
+    }
+    node.reference = reference;
+  }
   node.readiness = task.readiness.map((item) => guard.redact(item));
   node.checks = {
     acceptance: task.checks.acceptance.map((check) => buildCheckNode(check, guard)),

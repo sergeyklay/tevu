@@ -34,6 +34,12 @@ For a missing configuration, the wizard first asks for the run settings (output 
 
 Choose a repository commit from before the task was solved. Describe the task, the instructions for the model, the prerequisites you have checked, the acceptance criteria, and the completion checks. A check can run a command or require your manual verdict. See the [configuration reference](../reference/configuration.md) for the field definitions.
 
+Optionally enter the accepted pull request, from the task's repository or its fork network, or a commit that already holds the accepted solution, as the reference solution. Leave the question empty to add the task exactly as without a reference.
+
+For a pull request, accept the proposed base or override it: when the wizard warns that the pull request conflicts, or that its mergeability is unknown, enter the hash the warning names, the parent of its first commit. Before `tevu validate`, fetch a missing base with the command validation prints, and fetch its branch too, for example `git fetch origin`, because a commit fetched only by hash is on no ref and a later `git gc` can remove it. For a commit, the wizard proposes the commit's parent as the base commit, which you can accept or override; a commit reference must hold the whole solution: for the last commit of a series, its parent already holds the earlier ones, and for a merge, a base among the commits it merged passes. For a long-lived branch merged by squash, enter the squash commit itself as a commit reference, since its first parent becomes the proposed base; never pick a base among a rebase merge's other copies of the same commits.
+
+tevu rejects only a reference commit prefix and, for a pull request, its key and URL form in the agent prompt. Check the prompt for any other hint to the accepted solution, such as a bare `#NUMBER`, the branch name, or the pull request title, and reword the prompt if you find one.
+
 Confirm the final review to write `tevu.yaml`. Cancelling leaves the configuration unchanged.
 
 For a Jira source, use the [Jira import guide](import-jira-task.md) when adding the task, then continue with validation below.

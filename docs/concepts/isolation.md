@@ -30,6 +30,14 @@ A one-shot model call, such as drafting acceptance criteria or grading a case's 
 
 This isolation is context isolation, not a sandbox, for the same reason case isolation is not one: see [Context isolation is not a sandbox](#context-isolation-is-not-a-sandbox).
 
+## The reference solution stays out of the agent's context
+
+A task may record a reference solution: a pull request or a commit `tevu task add` proposed the base commit from. It is provenance, kept for later use, and it never reaches an agent prompt. The sealed repository already excludes every commit after the base, every reference commit included, so a case worktree cannot contain them.
+
+`tevu validate` and `tevu run` also reject a task whose agent prompt contains, in any letter case, the first 7 characters of a recorded reference commit, the same rule enforced for `base_commit`; for a pull-request reference, they also reject its `OWNER/REPO#NUMBER` key and its URL form, matched as plain substrings built from the recorded identifier. Neither check sees the pull request itself: `validate` and `run` never call GitHub, so a rename or a transfer of the repository after the task was added is not followed, and neither command checks a prompt for any other hint to the accepted solution, such as a bare `#NUMBER`, a branch name, or a title.
+
+The configuration file and `run.json` still record the reference outside the case, which is context isolation, not a sandbox: see [Context isolation is not a sandbox](#context-isolation-is-not-a-sandbox).
+
 ## Evidence outlives the workspace
 
 Temporary workspaces are useful while models and checks are running. Saved evidence has a different purpose: it lets an operator inspect a solution, assess a manual criterion, or rebuild a report without starting another model run.

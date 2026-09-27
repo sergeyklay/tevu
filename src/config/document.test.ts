@@ -8,6 +8,7 @@ import { createConfigStore } from '@/adapters/artifact-store';
 import { createTask } from '@/application/create-task';
 
 import { appendToConfigText, renderConfigDocument } from './document';
+import { parseConfigText } from './load';
 
 import type {
   CheckInput,
@@ -210,6 +211,87 @@ describe('renderConfigDocument', () => {
     expect(error.reason).toContain('redaction backend unavailable');
   });
 
+  it('renders and reloads a commit reference unchanged, with the hash double-quoted', () => {
+    const config = buildConfig({
+      tasks: [
+        buildTask({
+          reference: {
+            kind: 'commit',
+            identifier: 'HEAD~3',
+            commits: ['0123456789abcdef0123456789abcdef01234567'],
+          },
+        }),
+      ],
+    });
+
+    const rendered = renderConfigDocument(config, { redact: (text) => text });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value).toContain(
+      'commits:\n        - "0123456789abcdef0123456789abcdef01234567"',
+    );
+
+    const reparsed = parseConfigText(rendered.value);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.value.tasks[0]?.reference).toEqual({
+      kind: 'commit',
+      identifier: 'HEAD~3',
+      commits: ['0123456789abcdef0123456789abcdef01234567'],
+    });
+  });
+
+  it('renders and reloads a pull-request reference unchanged, including a merge commit', () => {
+    const reference = {
+      kind: 'pull-request' as const,
+      identifier: 'octo/app#128',
+      commits: [
+        '0123456789abcdef0123456789abcdef01234567',
+        'fedcba9876543210fedcba9876543210fedcba98',
+      ],
+      merge_commit: '1111111111111111111111111111111111111111',
+    };
+    const config = buildConfig({ tasks: [buildTask({ reference })] });
+
+    const rendered = renderConfigDocument(config, { redact: (text) => text });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value).toContain('merge_commit: "1111111111111111111111111111111111111111"');
+
+    const reparsed = parseConfigText(rendered.value);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.value.tasks[0]?.reference).toEqual(reference);
+  });
+
+  it('redacts the reference identifier before it becomes YAML', () => {
+    const config = buildConfig({
+      tasks: [
+        buildTask({
+          reference: {
+            kind: 'commit',
+            identifier: 'secret-token-branch',
+            commits: ['0123456789abcdef0123456789abcdef01234567'],
+          },
+        }),
+      ],
+    });
+    const redact = (text: string): string => text.replaceAll('secret-token', '[REDACTED]');
+
+    const rendered = renderConfigDocument(config, { redact });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value).not.toContain('secret-token');
+
+    const reparsed = parseConfigText(rendered.value);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.value.tasks[0]?.reference).toMatchObject({ identifier: '[REDACTED]-branch' });
+  });
+
   it('returns an ArtifactError when redaction returns a non-string value', () => {
     const redact = (): string => 42 as unknown as string;
 
@@ -368,7 +450,8 @@ function buildTaskDependencies(overrides: Partial<TaskDependencies> = {}): TaskD
           resolvedCommit: `resolved-${commit}`,
         },
       }),
-    } satisfies Pick<GitWorkspaceAdapter, 'validateSource'>,
+      resolveCommit: async () => ({ kind: 'not-found' }),
+    } satisfies Pick<GitWorkspaceAdapter, 'validateSource' | 'resolveCommit'>,
     registerSecrets: () => undefined,
     redact: (text) => text,
     ...overrides,
@@ -430,7 +513,8 @@ describe('createTask leaves the configuration file byte-identical on failure', (
             reason: 'commit not found',
           },
         }),
-      } satisfies Pick<GitWorkspaceAdapter, 'validateSource'>,
+        resolveCommit: async () => ({ kind: 'not-found' }),
+      } satisfies Pick<GitWorkspaceAdapter, 'validateSource' | 'resolveCommit'>,
     });
 
     const result = await createTask(input, dependencies);

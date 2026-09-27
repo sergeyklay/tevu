@@ -20,6 +20,7 @@ import {
 
 import type { AssessmentCaseContext, ManualCheckSummary } from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
+import type { ResolvedReferenceSolution } from '@/application/reference-solution';
 import type {
   CheckInput,
   ModelDefinitionInput,
@@ -71,6 +72,13 @@ export type TaskWizardDependencies = {
   importGitHubIssue: (
     reference: string,
   ) => Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>>;
+  /** Resolves one reference-solution answer exactly once against the task's repository. */
+  resolveReference: (
+    repository: Pick<RepositoryDefinition, 'id' | 'path'>,
+    identifier: string,
+  ) => Promise<
+    TevuResult<ResolvedReferenceSolution, 'ReferenceResolutionError' | 'CancellationError'>
+  >;
   now: () => Date;
   redact: (textContent: string) => string;
 };
@@ -481,12 +489,17 @@ async function interviewTask(
   }
   const repositories = existing?.repositories ?? bootstrap?.repositories ?? [];
   const { repo, newRepository } = await interviewRepositorySelection(io, repositories);
-  const baseCommit = (
-    await askText(io, {
-      message: 'Base commit (a commit from before the fix; resolved and pinned when saved)',
-      validate: validateNonWhitespace,
-    })
-  ).trim();
+  const selectedRepository = resolveSelectedRepository(repositories, repo, newRepository);
+  const resolvedReference = await interviewReferenceSolution(io, dependencies, selectedRepository);
+  const baseCommit =
+    resolvedReference === undefined || resolvedReference.proposedBase === undefined
+      ? (
+          await askText(io, {
+            message: 'Base commit (a commit from before the fix; resolved and pinned when saved)',
+            validate: validateNonWhitespace,
+          })
+        ).trim()
+      : await askBaseCommitWithProposal(io, resolvedReference);
   const taskId = await askText(io, {
     message: 'Task ID',
     validate: validateId(new Set((existing?.tasks ?? []).map((task) => task.id))),
@@ -531,6 +544,7 @@ async function interviewTask(
     prompt,
     description,
     ...(source.value.source === undefined ? {} : { source: source.value.source }),
+    ...(resolvedReference === undefined ? {} : { reference: resolvedReference.reference }),
     readiness,
     checks: { acceptance, done },
   };
@@ -674,6 +688,150 @@ async function interviewRepositorySelection(
     new Set(repositories.map((repository) => repository.id)),
   );
   return { repo: entry.id, newRepository: entry };
+}
+
+/** Recovers the full repository entry `interviewRepositorySelection` chose, by id or as a new entry. */
+function resolveSelectedRepository(
+  repositories: readonly Pick<RepositoryDefinition, 'id' | 'path'>[],
+  repo: string,
+  newRepository: RepositoryDefinition | undefined,
+): Pick<RepositoryDefinition, 'id' | 'path'> {
+  if (newRepository !== undefined) {
+    return newRepository;
+  }
+  const found = repositories.find((repository) => repository.id === repo);
+  if (found === undefined) {
+    throw new Error('unreachable: interviewRepositorySelection returns an id from its own options');
+  }
+  return found;
+}
+
+/**
+ * Interviews for the optional reference-solution answer, resolving it once
+ * and re-asking on any failure other than cancellation.
+ */
+async function interviewReferenceSolution(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+  repository: Pick<RepositoryDefinition, 'id' | 'path'>,
+): Promise<ResolvedReferenceSolution | undefined> {
+  for (;;) {
+    const identifier = (
+      await askText(io, {
+        message: `Reference solution: a pull request (OWNER/REPO#NUMBER or URL) or a commit in "${repository.id}" (empty for none)`,
+      })
+    ).trim();
+    if (identifier === '') {
+      return undefined;
+    }
+    const result = await dependencies.resolveReference(repository, identifier);
+    if (result.ok) {
+      const resolved = result.value;
+      const warningText = describeReferenceWarning(resolved);
+      if (warningText !== undefined) {
+        log.warn(dependencies.redact(warningText), promptOptions(io));
+      }
+      note(
+        dependencies.redact(renderReferenceNote(resolved, repository.id)),
+        'Reference solution (read once)',
+        promptOptions(io),
+      );
+      return resolved;
+    }
+    if (result.error.kind === 'CancellationError') {
+      throw new WizardCancelledError();
+    }
+    log.warn(
+      dependencies.redact(`Reference solution cannot be resolved: ${result.error.reason}`),
+      promptOptions(io),
+    );
+  }
+}
+
+/** The at-most-one warning line a resolved reference prints before its note, or `undefined`. */
+function describeReferenceWarning(resolved: ResolvedReferenceSolution): string | undefined {
+  const pullRequest = resolved.pullRequest;
+  if (pullRequest === undefined) {
+    return undefined;
+  }
+  if (pullRequest.noProposedBase !== undefined) {
+    return `No base commit is proposed: ${pullRequest.noProposedBase}`;
+  }
+  if (pullRequest.warning === undefined) {
+    return undefined;
+  }
+  const { key, targetBranch, firstCommitParent, warning } = pullRequest;
+  const hint =
+    firstCommitParent === undefined
+      ? ''
+      : `; if it conflicts, enter ${firstCommitParent}, the parent of its first commit`;
+  if (warning === 'conflicting') {
+    return `Pull request ${key} conflicts with ${targetBranch}; the proposed base is the parent of its first commit, not the tip of ${targetBranch}`;
+  }
+  if (warning === 'closed') {
+    return `Pull request ${key} is closed, and GitHub does not recheck closed pull requests against ${targetBranch}; the proposed base is the tip of ${targetBranch}${hint}`;
+  }
+  if (warning === 'mergeability-unknown') {
+    return `GitHub has not determined whether pull request ${key} conflicts with ${targetBranch}; the proposed base is the tip of ${targetBranch}${hint}`;
+  }
+  return `Branch ${targetBranch} of pull request ${key} no longer exists on GitHub; the proposed base is the parent of its first commit`;
+}
+
+/** The proposed base's basis, in operator-facing terms; `target-tip` names the pull request's target branch. */
+function describeProposedBaseBasis(resolved: ResolvedReferenceSolution): string {
+  const basis = resolved.proposedBase?.basis;
+  if (basis === 'target-tip') {
+    return `the tip of ${resolved.pullRequest?.targetBranch} read from GitHub`;
+  }
+  if (basis === 'first-commit-parent') {
+    return "the parent of the pull request's first commit";
+  }
+  return 'the parent of the reference commit';
+}
+
+/** Renders the `Reference solution (read once)` note body. */
+function renderReferenceNote(resolved: ResolvedReferenceSolution, repositoryId: string): string {
+  if (resolved.pullRequest !== undefined && resolved.reference.kind === 'pull-request') {
+    const { key, state, targetBranch } = resolved.pullRequest;
+    const mergeCommitSuffix =
+      resolved.reference.merge_commit === undefined
+        ? ''
+        : `, merge commit ${resolved.reference.merge_commit}`;
+    return [
+      `Pull request ${key} (${state}) into ${targetBranch}`,
+      `Commits: ${resolved.reference.commits.length}${mergeCommitSuffix}`,
+      resolved.proposedBase === undefined
+        ? 'Proposed base: none'
+        : `Proposed base: ${resolved.proposedBase.commit} (${describeProposedBaseBasis(resolved)})`,
+    ].join('\n');
+  }
+  const [commit] = resolved.reference.commits;
+  const lines = [`Commit ${commit} in "${repositoryId}"`];
+  if (resolved.proposedBase !== undefined) {
+    lines.push(
+      `Proposed base: ${resolved.proposedBase.commit} (${describeProposedBaseBasis(resolved)})`,
+    );
+  }
+  return lines.join('\n');
+}
+
+/** Asks the base-commit question with the resolved reference's proposed base as its default. */
+async function askBaseCommitWithProposal(
+  io: WizardIo,
+  resolved: ResolvedReferenceSolution,
+): Promise<string> {
+  const proposedBase = resolved.proposedBase;
+  if (proposedBase === undefined) {
+    throw new Error('unreachable: askBaseCommitWithProposal requires a resolved proposed base');
+  }
+  const answer = (
+    await askText(io, {
+      message: `Base commit (empty for ${proposedBase.commit}, ${describeProposedBaseBasis(resolved)})`,
+      placeholder: proposedBase.commit,
+      defaultValue: proposedBase.commit,
+    })
+  ).trim();
+  return answer === '' ? proposedBase.commit : answer;
 }
 
 /** Collects at least one readiness item, never sent to the agent. */
@@ -862,6 +1020,15 @@ function renderTaskReview(input: TaskWizardInput): string {
       `  imported body: ${task.source.body}`,
     );
   }
+  if (task.reference !== undefined) {
+    lines.push(
+      `  reference: ${task.reference.kind} ${task.reference.identifier}`,
+      `  reference commits: ${task.reference.commits.length}`,
+    );
+    if (task.reference.kind === 'pull-request' && task.reference.merge_commit !== undefined) {
+      lines.push(`  reference merge commit: ${task.reference.merge_commit}`);
+    }
+  }
   lines.push(`  description: ${task.description}`, `  prompt: ${task.prompt}`);
   for (const item of task.readiness) {
     lines.push(`  readiness: ${item}`);
@@ -960,6 +1127,7 @@ async function askText(
     message: string;
     defaultValue?: string;
     initialValue?: string;
+    placeholder?: string;
     validate?: (value: string | undefined) => string | undefined;
   },
 ): Promise<string> {

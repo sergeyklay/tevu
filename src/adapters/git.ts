@@ -33,6 +33,7 @@ import type {
   CaseWorkspace,
   CheckStateRecord,
   CheckStateRequest,
+  CommitLookup,
   GitWorkspaceAdapter,
   OverlayEntry,
   OverlayFileRecord,
@@ -75,21 +76,60 @@ const SYNTHETIC_COMMIT_IDENTITY: Record<string, string> = {
  * needing no configuration: it reads only the `repository`/`commit`
  * parameters it is called with.
  */
-export function createSourceValidator(): Pick<GitWorkspaceAdapter, 'validateSource'> {
-  return { validateSource };
+export function createSourceValidator(): Pick<
+  GitWorkspaceAdapter,
+  'validateSource' | 'resolveCommit'
+> {
+  return { validateSource, resolveCommit: resolveCommitInRepository };
+}
+
+function resolveCommitInRepository(
+  repository: RepositoryDefinition,
+  reference: string,
+): Promise<CommitLookup> {
+  return resolveCommit(repository.path, reference);
+}
+
+/** Reports whether `ancestor` precedes or equals `descendant`; `null` when Git cannot decide. */
+async function isAncestor(
+  repository: RepositoryDefinition,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean | null> {
+  const outcome = await runGit(repository.path, [
+    'merge-base',
+    '--is-ancestor',
+    '--end-of-options',
+    ancestor,
+    descendant,
+  ]);
+  if (outcome.exitCode === 0) {
+    return true;
+  }
+  if (outcome.exitCode === 1) {
+    return false;
+  }
+  return null;
 }
 
 async function validateSource(
   repository: RepositoryDefinition,
   commit: string,
 ): Promise<TevuResult<SourceValidation, 'SourceMaterializationError'>> {
-  const resolvedCommit = await resolveCommit(repository.path, commit);
-  if (resolvedCommit === null) {
+  const lookup = await resolveCommit(repository.path, commit);
+  if (lookup.kind === 'no-repository') {
     return sourceError(
       repository.id,
-      `repository "${repository.id}": "${commit}" is not readable as exactly one commit`,
+      `repository "${repository.id}": "${repository.path}" is not a Git repository`,
     );
   }
+  if (lookup.kind === 'not-found') {
+    return sourceError(
+      repository.id,
+      `repository "${repository.id}": "${commit}" is not readable as exactly one commit in "${repository.path}"`,
+    );
+  }
+  const resolvedCommit = lookup.commit;
   const inspection = await inspectSourceTree(repository.path, resolvedCommit);
   if (!inspection.ok) {
     return sourceError(repository.id, `repository "${repository.id}": ${inspection.reason}`);
@@ -114,6 +154,8 @@ export function createGitWorkspaceAdapter(
 
   return {
     validateSource,
+    resolveCommit: resolveCommitInRepository,
+    isAncestor,
     readOverlay,
     applyCheckState,
     initializeEmptyRepository,
@@ -122,13 +164,14 @@ export function createGitWorkspaceAdapter(
       identity: CaseIdentity,
       repository: RepositoryDefinition,
     ): Promise<TevuResult<CaseWorkspace, 'SourceMaterializationError' | 'IsolationError'>> {
-      const resolvedCommit = await resolveCommit(repository.path, identity.sourceCommit);
-      if (resolvedCommit === null) {
+      const lookup = await resolveCommit(repository.path, identity.sourceCommit);
+      if (lookup.kind !== 'found') {
         return sourceError(
           identity.taskId,
           `repository "${repository.id}": "${identity.sourceCommit}" is not readable as exactly one commit`,
         );
       }
+      const resolvedCommit = lookup.commit;
       const sourceObjects = await runGit(repository.path, [
         'rev-parse',
         '--path-format=absolute',
@@ -505,8 +548,12 @@ async function inspectSourceTree(repositoryPath: string, commit: string): Promis
   return { ok: true };
 }
 
-/** Resolves a reference to exactly one full commit hash, or `null`. */
-async function resolveCommit(repositoryPath: string, reference: string): Promise<string | null> {
+/**
+ * Resolves a revision to exactly one full commit hash, distinguishing a
+ * repository that does not hold the revision from a path that is not a Git
+ * repository at all.
+ */
+async function resolveCommit(repositoryPath: string, reference: string): Promise<CommitLookup> {
   const outcome = await runGit(repositoryPath, [
     'rev-parse',
     '--verify',
@@ -514,10 +561,14 @@ async function resolveCommit(repositoryPath: string, reference: string): Promise
     '--end-of-options',
     `${reference}^{commit}`,
   ]);
-  if (outcome.exitCode !== 0 || !COMMIT_HASH_PATTERN.test(outcome.stdout)) {
-    return null;
+  if (outcome.exitCode === 0 && COMMIT_HASH_PATTERN.test(outcome.stdout)) {
+    return { kind: 'found', commit: outcome.stdout };
   }
-  return outcome.stdout;
+  if (outcome.exitCode === 1) {
+    return { kind: 'not-found' };
+  }
+  const gitDir = await runGit(repositoryPath, ['rev-parse', '--git-dir']);
+  return gitDir.exitCode === 0 ? { kind: 'not-found' } : { kind: 'no-repository' };
 }
 
 type GitCommandOutcome = {

@@ -185,8 +185,8 @@ function buildConfigStore(overrides: Partial<ConfigStore> = {}): ConfigStore {
 }
 
 function buildGit(
-  overrides: Partial<Pick<GitWorkspaceAdapter, 'validateSource'>> = {},
-): Pick<GitWorkspaceAdapter, 'validateSource'> {
+  overrides: Partial<Pick<GitWorkspaceAdapter, 'validateSource' | 'resolveCommit'>> = {},
+): Pick<GitWorkspaceAdapter, 'validateSource' | 'resolveCommit'> {
   return {
     validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
       ok: true as const,
@@ -196,6 +196,7 @@ function buildGit(
         resolvedCommit: `resolved-${commit}`,
       },
     })),
+    resolveCommit: vi.fn(async () => ({ kind: 'not-found' as const })),
     ...overrides,
   };
 }
@@ -203,6 +204,8 @@ function buildGit(
 function buildFullGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspaceAdapter {
   return {
     ...buildGit(),
+    resolveCommit: vi.fn(async () => ({ kind: 'not-found' as const })),
+    isAncestor: vi.fn(async () => null),
     snapshotPatchBase: vi.fn(async () => ({
       ok: false as const,
       error: {
@@ -827,6 +830,145 @@ describe('TevuConfigSchema', () => {
     };
 
     expect(TevuConfigSchema.safeParse(config).success).toBe(false);
+  });
+
+  it('accepts a task with a commit reference and materializes it', () => {
+    const reference: TaskInput['reference'] = {
+      kind: 'commit',
+      identifier: 'HEAD~3',
+      commits: ['0123456789abcdef0123456789abcdef01234567'],
+    };
+    const config = buildConfig({ tasks: [buildTaskDefinition({ reference })] });
+
+    expect(expectSchemaAcceptance(config).tasks[0]?.reference).toEqual(reference);
+  });
+
+  it('materializes a task with no reference property when the file declares none', () => {
+    const config = buildConfig({ tasks: [buildTaskDefinition()] });
+
+    const accepted = expectSchemaAcceptance(config);
+
+    expect('reference' in (accepted.tasks[0] ?? {})).toBe(false);
+  });
+
+  it('rejects an unknown field inside a commit reference', () => {
+    const config = {
+      ...buildConfig(),
+      tasks: [
+        {
+          ...buildTaskDefinition(),
+          reference: {
+            kind: 'commit',
+            identifier: 'HEAD~3',
+            commits: ['0123456789abcdef0123456789abcdef01234567'],
+            extra: 'field',
+          },
+        },
+      ],
+    };
+
+    expect(TevuConfigSchema.safeParse(config).success).toBe(false);
+  });
+
+  it('rejects a malformed reference commit hash', () => {
+    const config = buildConfig({
+      tasks: [
+        buildTaskDefinition({
+          reference: { kind: 'commit', identifier: 'HEAD~3', commits: ['not-a-hash'] },
+        }),
+      ],
+    });
+
+    expect(expectSchemaRejection(config)).toContainEqual({
+      path: 'tasks.0.reference.commits.0',
+      message: 'must be a full commit hash: 40 or 64 lowercase hexadecimal characters',
+    });
+  });
+
+  describe('pull-request reference', () => {
+    const COMMIT_A = '0123456789abcdef0123456789abcdef01234567';
+    const COMMIT_B = 'fedcba9876543210fedcba9876543210fedcba98';
+    const MERGE_COMMIT = '1111111111111111111111111111111111111111';
+
+    it('accepts a pull-request reference and materializes it', () => {
+      const reference: TaskInput['reference'] = {
+        kind: 'pull-request',
+        identifier: 'octo/app#128',
+        commits: [COMMIT_A, COMMIT_B],
+        merge_commit: MERGE_COMMIT,
+      };
+      const config = buildConfig({ tasks: [buildTaskDefinition({ reference })] });
+
+      expect(expectSchemaAcceptance(config).tasks[0]?.reference).toEqual(reference);
+    });
+
+    it('accepts a pull-request reference given as a URL', () => {
+      const reference: TaskInput['reference'] = {
+        kind: 'pull-request',
+        identifier: 'https://github.com/octo/app/pull/128',
+        commits: [COMMIT_A],
+      };
+      const config = buildConfig({ tasks: [buildTaskDefinition({ reference })] });
+
+      expect(expectSchemaAcceptance(config).tasks[0]?.reference).toEqual(reference);
+    });
+
+    it('rejects a duplicate reference commit', () => {
+      const config = buildConfig({
+        tasks: [
+          buildTaskDefinition({
+            reference: {
+              kind: 'pull-request',
+              identifier: 'octo/app#128',
+              commits: [COMMIT_A, COMMIT_A],
+            },
+          }),
+        ],
+      });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: 'tasks.0.reference.commits.1',
+        message: `duplicate reference commit "${COMMIT_A}"`,
+      });
+    });
+
+    it('rejects a merge commit that repeats a listed commit', () => {
+      const config = buildConfig({
+        tasks: [
+          buildTaskDefinition({
+            reference: {
+              kind: 'pull-request',
+              identifier: 'octo/app#128',
+              commits: [COMMIT_A],
+              merge_commit: COMMIT_A,
+            },
+          }),
+        ],
+      });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: 'tasks.0.reference.merge_commit',
+        message: 'merge commit repeats a pull request commit',
+      });
+    });
+
+    it.each([
+      { description: 'user info', identifier: 'https://user:pass@github.com/octo/app/pull/128' },
+      { description: 'a port', identifier: 'https://github.com:8443/octo/app/pull/128' },
+      { description: 'path issues', identifier: 'https://github.com/octo/app/issues/128' },
+    ])('rejects an identifier with $description', ({ identifier }) => {
+      const config = buildConfig({
+        tasks: [
+          buildTaskDefinition({
+            reference: { kind: 'pull-request', identifier, commits: [COMMIT_A] },
+          }),
+        ],
+      });
+
+      expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain(
+        'tasks.0.reference.identifier',
+      );
+    });
   });
 
   it('accepts an explicit agent value naming a configured agent', () => {
@@ -2280,6 +2422,74 @@ describe('createTask', () => {
     expect(error).toEqual(replaceFailure.error);
     expect(vi.mocked(dependencies.configStore.replaceText)).toHaveBeenCalledTimes(1);
   });
+
+  describe('a pull-request reference', () => {
+    const FULL_HASH = '0123456789abcdef0123456789abcdef01234567';
+
+    function buildPullRequestTask(overrides: Partial<TaskInput> = {}): TaskInput {
+      return buildTaskDefinition({
+        id: 'new-task',
+        base_commit: FULL_HASH,
+        reference: { kind: 'pull-request', identifier: 'octo/repo#42', commits: [FULL_HASH] },
+        ...overrides,
+      });
+    }
+
+    it('saves an unavailable full-hash base unchanged without calling validateSource', async () => {
+      const validateSource = vi.fn();
+      const resolveCommit = vi.fn(async () => ({ kind: 'not-found' as const }));
+      const dependencies = buildTaskDependencies({
+        git: buildGit({ validateSource, resolveCommit }),
+      });
+
+      const task = expectOk(
+        await createTask(buildTaskWizardInput({ task: buildPullRequestTask() }), dependencies),
+      );
+
+      expect(task.base_commit).toBe(FULL_HASH);
+      expect(validateSource).not.toHaveBeenCalled();
+      expect(resolveCommit).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ id: 'sample-repo' }),
+        FULL_HASH,
+      );
+    });
+
+    it('still pins the base through validateSource when the lookup finds no repository', async () => {
+      const resolveCommit = vi.fn(async () => ({ kind: 'no-repository' as const }));
+      const dependencies = buildTaskDependencies({ git: buildGit({ resolveCommit }) });
+
+      const task = expectOk(
+        await createTask(buildTaskWizardInput({ task: buildPullRequestTask() }), dependencies),
+      );
+
+      expect(task.base_commit).toBe(`resolved-${FULL_HASH}`);
+    });
+
+    it('pins the base through validateSource as today when the base is not a full hash', async () => {
+      const validateSource = vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
+        ok: true as const,
+        value: {
+          repositoryId: repository.id,
+          requestedCommit: commit,
+          resolvedCommit: 'resolved-head',
+        },
+      }));
+      const resolveCommit = vi.fn();
+      const dependencies = buildTaskDependencies({
+        git: buildGit({ validateSource, resolveCommit }),
+      });
+
+      const task = expectOk(
+        await createTask(
+          buildTaskWizardInput({ task: buildPullRequestTask({ base_commit: 'HEAD' }) }),
+          dependencies,
+        ),
+      );
+
+      expect(task.base_commit).toBe('resolved-head');
+      expect(resolveCommit).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('validateConfig', () => {
@@ -2586,6 +2796,400 @@ describe('validateConfig', () => {
         message: 'agent prompt contains resolved base commit abcdef0',
       },
     ]);
+  });
+
+  describe('a task with a commit reference', () => {
+    const BASE = 'abcdef0123456789abcdef0123456789abcdef01';
+    const REFERENCE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+
+    function buildTaskWithReference(overrides: Partial<TaskInput> = {}): TaskInput {
+      return buildTaskDefinition({
+        reference: { kind: 'commit', identifier: 'HEAD~3', commits: [REFERENCE_COMMIT] },
+        ...overrides,
+      });
+    }
+
+    function buildDependenciesResolvingBaseTo(
+      resolvedCommit: string,
+      overrides: Partial<GitWorkspaceAdapter> = {},
+    ): ValidationDependencies {
+      return buildValidationDependencies({
+        git: buildFullGit({
+          validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
+            ok: true as const,
+            value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
+          })),
+          ...overrides,
+        }),
+      });
+    }
+
+    it('rejects a base commit equal to the reference commit', async () => {
+      const task = buildTaskWithReference({ base_commit: REFERENCE_COMMIT });
+      const dependencies = buildDependenciesResolvingBaseTo(REFERENCE_COMMIT, {
+        resolveCommit: vi.fn(async () => ({ kind: 'found' as const, commit: REFERENCE_COMMIT })),
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(false);
+      expect(report.findings).toEqual([
+        {
+          severity: 'error',
+          identifier: `tasks.${task.id}.base_commit`,
+          message: `base commit ${REFERENCE_COMMIT.slice(0, 7)} is reference commit ${REFERENCE_COMMIT.slice(0, 7)}`,
+        },
+      ]);
+    });
+
+    it('rejects a base commit that does not precede the reference commit', async () => {
+      const task = buildTaskWithReference({ base_commit: BASE });
+      const dependencies = buildDependenciesResolvingBaseTo(BASE, {
+        resolveCommit: vi.fn(async () => ({ kind: 'found' as const, commit: REFERENCE_COMMIT })),
+        isAncestor: vi.fn(async () => false),
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(false);
+      expect(report.findings).toEqual([
+        {
+          severity: 'error',
+          identifier: `tasks.${task.id}.base_commit`,
+          message: `base commit ${BASE.slice(0, 7)} does not precede reference commit ${REFERENCE_COMMIT.slice(0, 7)}`,
+        },
+      ]);
+    });
+
+    it('rejects a base commit that could not be compared with the reference commit', async () => {
+      const task = buildTaskWithReference({ base_commit: BASE });
+      const dependencies = buildDependenciesResolvingBaseTo(BASE, {
+        resolveCommit: vi.fn(async () => ({ kind: 'found' as const, commit: REFERENCE_COMMIT })),
+        isAncestor: vi.fn(async () => null),
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(false);
+      expect(report.findings).toEqual([
+        {
+          severity: 'error',
+          identifier: `tasks.${task.id}.base_commit`,
+          message: `base commit ${BASE.slice(0, 7)} could not be compared with reference commit ${REFERENCE_COMMIT.slice(0, 7)}`,
+        },
+      ]);
+    });
+
+    it('warns once when the reference commit is unavailable, and skips the comparison', async () => {
+      const task = buildTaskWithReference({ base_commit: BASE });
+      const isAncestor = vi.fn();
+      const dependencies = buildDependenciesResolvingBaseTo(BASE, {
+        resolveCommit: vi.fn(async () => ({ kind: 'not-found' as const })),
+        isAncestor,
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(true);
+      expect(report.findings).toEqual([
+        {
+          severity: 'warning',
+          identifier: `tasks.${task.id}.reference`,
+          message:
+            'reference commits not available in repository "sample-repo": 1 of 1; the base commit was not compared with them',
+        },
+      ]);
+      expect(isAncestor).not.toHaveBeenCalled();
+    });
+
+    it('rejects a task whose prompt names its reference commit', async () => {
+      const task = buildTaskWithReference({
+        base_commit: BASE,
+        prompt: `follow the same approach as ${REFERENCE_COMMIT.slice(0, 7)}`,
+      });
+      const dependencies = buildDependenciesResolvingBaseTo(BASE, {
+        resolveCommit: vi.fn(async () => ({ kind: 'found' as const, commit: REFERENCE_COMMIT })),
+        isAncestor: vi.fn(async () => true),
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(false);
+      expect(report.findings).toEqual([
+        {
+          severity: 'error',
+          identifier: `tasks.${task.id}`,
+          message: `agent prompt contains resolved reference commit ${REFERENCE_COMMIT.slice(0, 7)}`,
+        },
+      ]);
+    });
+  });
+
+  describe('a task with a pull-request reference', () => {
+    const BASE = 'abcdef0123456789abcdef0123456789abcdef01';
+    const PR_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+    const MERGE_COMMIT = '1111111111111111111111111111111111111111';
+
+    function buildTaskWithReference(overrides: Partial<TaskInput> = {}): TaskInput {
+      return buildTaskDefinition({
+        reference: { kind: 'pull-request', identifier: 'octo/app#128', commits: [PR_COMMIT] },
+        ...overrides,
+      });
+    }
+
+    function buildDependenciesResolvingBaseTo(
+      resolvedCommit: string,
+      overrides: Partial<GitWorkspaceAdapter> = {},
+    ): ValidationDependencies {
+      return buildValidationDependencies({
+        git: buildFullGit({
+          validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
+            ok: true as const,
+            value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
+          })),
+          ...overrides,
+        }),
+      });
+    }
+
+    it('rejects a base commit that descends from a recorded pull-request commit', async () => {
+      const task = buildTaskWithReference({ base_commit: 'main' });
+      const dependencies = buildDependenciesResolvingBaseTo(BASE, {
+        resolveCommit: vi.fn(async () => ({ kind: 'found' as const, commit: PR_COMMIT })),
+        isAncestor: vi.fn(async () => true),
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(false);
+      expect(report.findings).toEqual([
+        {
+          severity: 'error',
+          identifier: `tasks.${task.id}.base_commit`,
+          message: `base commit ${BASE.slice(0, 7)} contains reference commit ${PR_COMMIT.slice(0, 7)}`,
+        },
+      ]);
+    });
+
+    it('accepts an unmerged target tip that neither equals nor descends from a pull-request commit', async () => {
+      const task = buildTaskWithReference({ base_commit: 'main' });
+      const dependencies = buildDependenciesResolvingBaseTo(BASE, {
+        resolveCommit: vi.fn(async () => ({ kind: 'found' as const, commit: PR_COMMIT })),
+        isAncestor: vi.fn(async () => false),
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(true);
+      expect(report.findings).toEqual([]);
+    });
+
+    it('names the fetch when the full-hash base is not available locally', async () => {
+      const task = buildTaskWithReference({ base_commit: BASE });
+      const validateSource = vi.fn();
+      const dependencies = buildValidationDependencies({
+        git: buildFullGit({
+          validateSource,
+          resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) =>
+            commit === BASE
+              ? { kind: 'not-found' as const }
+              : { kind: 'found' as const, commit: PR_COMMIT },
+          ),
+        }),
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(false);
+      expect(report.findings).toContainEqual({
+        severity: 'error',
+        identifier: `tasks.${task.id}.base_commit`,
+        message: `base commit ${BASE} is not in repository "sample-repo" ("/tmp/tevu/sample-repo"); fetch it there first, for example: git fetch https://github.com/octo/app.git ${BASE}`,
+      });
+      expect(validateSource).not.toHaveBeenCalled();
+    });
+
+    it('still validates through validateSource when the full-hash base lookup finds no repository', async () => {
+      const task = buildTaskWithReference({ base_commit: BASE });
+      const validateSource = vi.fn(async () => ({
+        ok: false as const,
+        error: {
+          kind: 'SourceMaterializationError' as const,
+          taskId: task.id,
+          reason: `repository "sample-repo": "/tmp/tevu/sample-repo" is not a Git repository`,
+        },
+      }));
+      const dependencies = buildValidationDependencies({
+        git: buildFullGit({
+          validateSource,
+          resolveCommit: vi.fn(async () => ({ kind: 'no-repository' as const })),
+        }),
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(validateSource).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ id: 'sample-repo' }),
+        BASE,
+      );
+      expect(report.findings).toContainEqual({
+        severity: 'error',
+        identifier: `tasks.${task.id}.base_commit`,
+        message: `repository "sample-repo": "/tmp/tevu/sample-repo" is not a Git repository`,
+      });
+    });
+
+    it('reports only the first violation in recorded order and stops comparing further commits', async () => {
+      const secondCommit = '2222222222222222222222222222222222222222';
+      const task = buildTaskWithReference({
+        base_commit: 'main',
+        reference: {
+          kind: 'pull-request',
+          identifier: 'octo/app#128',
+          commits: [PR_COMMIT, secondCommit],
+        },
+      });
+      const isAncestor = vi.fn(async () => true);
+      const dependencies = buildDependenciesResolvingBaseTo(BASE, {
+        resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) => ({
+          kind: 'found' as const,
+          commit,
+        })),
+        isAncestor,
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(false);
+      expect(report.findings).toEqual([
+        {
+          severity: 'error',
+          identifier: `tasks.${task.id}.base_commit`,
+          message: `base commit ${BASE.slice(0, 7)} contains reference commit ${PR_COMMIT.slice(0, 7)}`,
+        },
+      ]);
+      expect(isAncestor).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ id: 'sample-repo' }),
+        PR_COMMIT,
+        BASE,
+      );
+    });
+
+    it('also checks the raw base text against the agent prompt when the base is missing', async () => {
+      const task = buildTaskWithReference({
+        base_commit: BASE,
+        prompt: `use commit ${BASE.slice(0, 7)} as a starting point`,
+      });
+      const dependencies = buildValidationDependencies({
+        git: buildFullGit({
+          resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) =>
+            commit === BASE
+              ? { kind: 'not-found' as const }
+              : { kind: 'found' as const, commit: PR_COMMIT },
+          ),
+        }),
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.findings).toContainEqual({
+        severity: 'error',
+        identifier: `tasks.${task.id}`,
+        message: `agent prompt contains resolved base commit ${BASE.slice(0, 7)}`,
+      });
+    });
+
+    it('rejects a task whose prompt names its pull-request key', async () => {
+      const task = buildTaskWithReference({
+        base_commit: 'main',
+        prompt: 'follow octo/app#128 exactly',
+      });
+      const dependencies = buildDependenciesResolvingBaseTo(BASE, {
+        resolveCommit: vi.fn(async () => ({ kind: 'found' as const, commit: PR_COMMIT })),
+        isAncestor: vi.fn(async () => false),
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(false);
+      expect(report.findings).toContainEqual({
+        severity: 'error',
+        identifier: `tasks.${task.id}`,
+        message: 'agent prompt contains pull request octo/app#128',
+      });
+    });
+
+    it('counts the merge commit together with the pull-request commits in the Summary warning', async () => {
+      const task = buildTaskWithReference({
+        base_commit: 'main',
+        reference: {
+          kind: 'pull-request',
+          identifier: 'octo/app#128',
+          commits: [PR_COMMIT],
+          merge_commit: MERGE_COMMIT,
+        },
+      });
+      const dependencies = buildDependenciesResolvingBaseTo(BASE, {
+        resolveCommit: vi.fn(async () => ({ kind: 'not-found' as const })),
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.findings).toContainEqual({
+        severity: 'warning',
+        identifier: `tasks.${task.id}.reference`,
+        message:
+          'reference commits not available in repository "sample-repo": 2 of 2; the base commit was not compared with them',
+      });
+    });
+
+    it('warns about the merge commit separately exactly when it is unavailable', async () => {
+      const task = buildTaskWithReference({
+        base_commit: 'main',
+        reference: {
+          kind: 'pull-request',
+          identifier: 'octo/app#128',
+          commits: [PR_COMMIT],
+          merge_commit: MERGE_COMMIT,
+        },
+      });
+      const dependencies = buildDependenciesResolvingBaseTo(BASE, {
+        resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) =>
+          commit === MERGE_COMMIT
+            ? { kind: 'not-found' as const }
+            : { kind: 'found' as const, commit: PR_COMMIT },
+        ),
+        isAncestor: vi.fn(async () => false),
+      });
+
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.findings).toContainEqual({
+        severity: 'warning',
+        identifier: `tasks.${task.id}.reference.merge_commit`,
+        message: `merge commit ${MERGE_COMMIT.slice(0, 7)} is not available in repository "sample-repo"; the base commit was not checked to precede it`,
+      });
+      expect(report.findings).toContainEqual({
+        severity: 'warning',
+        identifier: `tasks.${task.id}.reference`,
+        message:
+          'reference commits not available in repository "sample-repo": 1 of 2; the base commit was not compared with them',
+      });
+    });
   });
 
   describe('with declared model roles', () => {
