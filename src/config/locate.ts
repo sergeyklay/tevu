@@ -82,3 +82,21 @@ function userConfigFile(environment: ConfigSearchEnvironment): string | undefine
 function isUsableBase(value: string | undefined): value is string {
   return value !== undefined && value.length > 0 && path.isAbsolute(value);
 }
+
+/**
+ * Resolves the managed-clone root: `$XDG_CACHE_HOME/tevu/repositories` when
+ * `XDG_CACHE_HOME` is set, non-empty, and absolute; otherwise
+ * `$HOME/.cache/tevu/repositories` under the same test; otherwise `undefined`.
+ */
+export function managedCloneRoot(environment: {
+  home: string | undefined;
+  xdgCacheHome: string | undefined;
+}): string | undefined {
+  if (isUsableBase(environment.xdgCacheHome)) {
+    return path.join(environment.xdgCacheHome, 'tevu', 'repositories');
+  }
+  if (isUsableBase(environment.home)) {
+    return path.join(environment.home, '.cache', 'tevu', 'repositories');
+  }
+  return undefined;
+}

@@ -7,24 +7,33 @@
 
 import * as path from 'node:path';
 
-import { resolveConfigPath } from '@/config/load';
-import { parseGitHubReference } from '@/domain/github-reference';
+import { resolveRepositoryPath } from '@/config/load';
+import {
+  formatGitHubRepository,
+  parseGitHubReference,
+  parseGitHubRepository,
+} from '@/domain/github-reference';
 
+import { describeManagedCloneError, ensureManagedCommits } from './managed-clone';
+
+import type { ManagedCloneDependencies, ManagedCommitsRequest } from './managed-clone';
+import type { RepositoryInput } from '@/config/schema';
+import type { ParsedGitHubRepository } from '@/domain/github-reference';
 import type {
-  GitWorkspaceAdapter,
   PullRequestCommit,
   PullRequestReader,
   PullRequestSnapshot,
   PullRequestState,
   RepositoryDefinition,
   TaskReference,
+  TevuError,
   TevuResult,
 } from '@/domain/types';
 
 /** Inputs to resolve one `task add` reference-solution answer. */
 export type ReferenceSolutionRequest = {
   configPath: string;
-  repository: Pick<RepositoryDefinition, 'id' | 'path'>;
+  repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>;
   identifier: string;
 };
 
@@ -50,12 +59,13 @@ export type ResolvedReferenceSolution = {
     warning?: PullRequestWarning;
     /** The E-NO-PARENT or E-FIRST-COMMITS reason; present exactly when `proposedBase` is absent. */
     noProposedBase?: string;
+    /** Set only for a GitHub entry whose fetch for this pull request's commits failed or fell short. */
+    unfetched?: string;
   };
 };
 
 /** Effects `resolveReferenceSolution` needs. */
-export type ReferenceSolutionDependencies = {
-  git: Pick<GitWorkspaceAdapter, 'resolveCommit'>;
+export type ReferenceSolutionDependencies = ManagedCloneDependencies & {
   pullRequests: PullRequestReader;
 };
 
@@ -65,35 +75,64 @@ export type ReferenceSolutionDependencies = {
  *
  * A pull-request identifier (containing `://`, or read as the short form)
  * resolves through {@link PullRequestReader.readPullRequest} and issues no
- * Git command. A commit identifier resolves against the task's repository,
- * pinned by {@link GitWorkspaceAdapter.resolveCommit}; its proposed base is
- * the commit's first parent. Fails with `ReferenceResolutionError` when the
+ * Git command directly, though a GitHub entry also fetches its commits into
+ * the managed clone. A commit identifier resolves against the task's
+ * repository, pinned by `resolveCommit`; for a GitHub entry not yet found
+ * locally, it is fetched once and resolved again. Its proposed base is the
+ * commit's first parent. Fails with `ReferenceResolutionError` when the
  * identifier is empty, a commit's repository path is not a Git repository,
- * a commit identifier does not name a commit, or a commit has no parent.
+ * a commit identifier does not name a commit even after fetching, or a
+ * commit has no parent.
  */
 export async function resolveReferenceSolution(
   request: ReferenceSolutionRequest,
   dependencies: ReferenceSolutionDependencies,
 ): Promise<
-  TevuResult<ResolvedReferenceSolution, 'ReferenceResolutionError' | 'CancellationError'>
+  TevuResult<
+    ResolvedReferenceSolution,
+    'ReferenceResolutionError' | 'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'
+  >
 > {
   const identifier = request.identifier.trim();
   if (identifier.length === 0) {
     return referenceFailure('reference must not be empty');
   }
   if (isPullRequestKind(identifier)) {
-    return resolvePullRequest(identifier, dependencies);
+    return resolvePullRequest(identifier, request, dependencies);
   }
 
-  const repository: RepositoryDefinition = {
-    id: request.repository.id,
-    path: resolveConfigPath(
-      path.dirname(path.resolve(request.configPath)),
-      request.repository.path,
-    ),
-  };
+  const configDirectory = path.dirname(path.resolve(request.configPath));
+  const directory = resolveRepositoryPath(
+    request.repository,
+    configDirectory,
+    dependencies.managedCloneRoot,
+  );
+  if (directory === undefined) {
+    return {
+      ok: false,
+      error: {
+        kind: 'PrerequisiteError',
+        tool: 'managed-clone-directory',
+        expected: 'XDG_CACHE_HOME or HOME set to an absolute path',
+        actual: 'unset',
+      },
+    };
+  }
+  const repository: RepositoryDefinition = { id: request.repository.id, path: directory };
 
-  const found = await dependencies.git.resolveCommit(repository, identifier);
+  let found = await dependencies.git.resolveCommit(repository, identifier);
+  const { github } = request.repository;
+  if (github !== undefined && found.kind === 'not-found') {
+    const fetched = await ensureManagedCommits(
+      { repository: { id: repository.id, github }, revisions: [identifier] },
+      dependencies,
+    );
+    if (!fetched.ok) {
+      return fetched;
+    }
+    found = await dependencies.git.resolveCommit(repository, identifier);
+  }
+
   if (found.kind === 'no-repository') {
     return referenceFailure(
       `repository "${repository.id}": "${repository.path}" is not a Git repository`,
@@ -223,9 +262,13 @@ function resolveProposedBase(
 
 async function resolvePullRequest(
   identifier: string,
+  request: ReferenceSolutionRequest,
   dependencies: ReferenceSolutionDependencies,
 ): Promise<
-  TevuResult<ResolvedReferenceSolution, 'ReferenceResolutionError' | 'CancellationError'>
+  TevuResult<
+    ResolvedReferenceSolution,
+    'ReferenceResolutionError' | 'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'
+  >
 > {
   const read = await dependencies.pullRequests.readPullRequest(identifier);
   if (!read.ok) {
@@ -246,6 +289,21 @@ async function resolvePullRequest(
     noProposedBaseReason(parentResult, pr.key),
   );
 
+  let unfetched: string | undefined;
+  const { github } = request.repository;
+  if (github !== undefined) {
+    const fetched = await fetchPullRequestCommits(
+      { id: request.repository.id, github },
+      reference,
+      proposedBase,
+      dependencies,
+    );
+    if (!fetched.ok) {
+      return fetched;
+    }
+    unfetched = fetched.value;
+  }
+
   return {
     ok: true,
     value: {
@@ -258,9 +316,76 @@ async function resolvePullRequest(
         ...(parentHash === undefined ? {} : { firstCommitParent: parentHash }),
         ...(warning === undefined ? {} : { warning }),
         ...(noProposedBase === undefined ? {} : { noProposedBase }),
+        ...(unfetched === undefined ? {} : { unfetched }),
       },
     },
   };
+}
+
+/**
+ * Fetches a pull-request reference's commits, its merge commit, and its
+ * proposed base into a GitHub entry's managed clone.
+ *
+ * Never fails resolution: a `ManagedCloneError` or `PrerequisiteError`
+ * becomes the returned description, and commits still missing after a
+ * successful fetch become a count description; only cancellation
+ * propagates as a failure.
+ */
+async function fetchPullRequestCommits(
+  entry: { id: string; github: string },
+  reference: TaskReference,
+  proposedBase: { commit: string; basis: ProposedBaseBasis } | undefined,
+  dependencies: ManagedCloneDependencies,
+): Promise<TevuResult<string | undefined, 'CancellationError'>> {
+  if (reference.kind !== 'pull-request') {
+    return { ok: true, value: undefined };
+  }
+  const parsedReference = parseGitHubReference(reference.identifier);
+  const source: ParsedGitHubRepository | undefined =
+    parsedReference === null
+      ? undefined
+      : { host: parsedReference.host, owner: parsedReference.owner, repo: parsedReference.repo };
+  const revisions = [
+    ...reference.commits,
+    ...(reference.merge_commit === undefined ? [] : [reference.merge_commit]),
+    ...(proposedBase === undefined ? [] : [proposedBase.commit]),
+  ];
+  const request: ManagedCommitsRequest = {
+    repository: entry,
+    revisions,
+    ...(source === undefined ? {} : { source }),
+  };
+  const result = await ensureManagedCommits(request, dependencies);
+  if (!result.ok) {
+    const { error } = result;
+    if (error.kind === 'CancellationError') {
+      return { ok: false, error };
+    }
+    return { ok: true, value: describeFetchFailure(error) };
+  }
+  const missing = result.value.missing.length;
+  if (missing === 0) {
+    return { ok: true, value: undefined };
+  }
+  const parsedEntry = parseGitHubRepository(entry.github);
+  if (parsedEntry === null) {
+    throw new Error('unreachable: a GitHub entry always parses; the schema already validated it');
+  }
+  const display = formatGitHubRepository(source ?? parsedEntry);
+  return {
+    ok: true,
+    value: `${missing === 1 ? '1 commit is' : `${missing} commits are`} still missing after fetching from ${display}`,
+  };
+}
+
+/** Renders a fetch failure for `pullRequest.unfetched`, whichever error kind `ensureManagedCommits` returned. */
+function describeFetchFailure(
+  error: Extract<TevuError, { kind: 'ManagedCloneError' | 'PrerequisiteError' }>,
+): string {
+  if (error.kind === 'ManagedCloneError') {
+    return describeManagedCloneError(error);
+  }
+  return `prerequisite "${error.tool}" is not satisfied; expected ${error.expected}${error.actual === undefined ? '' : `, actual ${error.actual}`}`;
 }
 
 function referenceFailure(reason: string): TevuResult<never, 'ReferenceResolutionError'> {

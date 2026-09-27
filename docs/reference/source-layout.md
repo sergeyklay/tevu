@@ -4,9 +4,9 @@
 | --- | --- |
 | `src/config` | YAML loading, configuration file search, the strict configuration schema, the configuration template, configuration document rendering and append, and run-snapshot decoding |
 | `src/domain` | Shared records, dependency contracts, and helpers that every layer may import |
-| `src/application` | Task creation, task prompt building, reference-solution resolution, validation, orchestration, assessment, report rebuilding, and the one-shot model call |
+| `src/application` | Task creation, task prompt building, reference-solution resolution, managed-clone preparation, validation, orchestration, assessment, report rebuilding, and the one-shot model call |
 | `src/evaluation` | Checks, agent-independent metric rules, and report rendering |
-| `src/adapters` | Git, issue tracker, process, and artifact I/O |
+| `src/adapters` | Git, managed clones, issue tracker, process, and artifact I/O |
 | `src/adapters/agents` | One directory per agent adapter: probing, case runs, session export, model calls, metric normalization, and protocol decoding |
 | `src/interface` | Command parsing and interactive prompts |
 | `src/index.ts` | Executable entry point and dependency wiring |

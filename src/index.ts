@@ -17,6 +17,7 @@ import { pathToFileURL } from 'node:url';
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createArtifactStore, createConfigStore } from '@/adapters/artifact-store';
 import { createGitWorkspaceAdapter, createSourceValidator } from '@/adapters/git';
+import { createManagedCloneAdapter } from '@/adapters/managed-clone';
 import {
   createEnvironmentAdapter,
   createEvaluatorProcessAdapter,
@@ -28,20 +29,22 @@ import {
 import {
   createGitHubIssuesAdapter,
   createGitHubPullRequestReader,
-  GH_CREDENTIAL_ENVIRONMENT_VARIABLES,
 } from '@/adapters/trackers/github-issues';
 import { createJiraCloudAdapter } from '@/adapters/trackers/jira-cloud';
 import { assessCase, readAssessmentContext, rebuildReport } from '@/application/assess';
 import { createTask } from '@/application/create-task';
+import { ensureManagedCommits, prepareManagedRepositories } from '@/application/managed-clone';
 import { resolveReferenceSolution } from '@/application/reference-solution';
 import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
 import { validateConfig } from '@/application/validate';
 import { canonicalConfigSerialization, loadConfig } from '@/config/load';
-import { locateConfig } from '@/config/locate';
+import { locateConfig, managedCloneRoot as resolveManagedCloneRoot } from '@/config/locate';
 import { referencedVariableName } from '@/config/schema';
+import { GH_CREDENTIAL_ENVIRONMENT_VARIABLES } from '@/domain/github-cli';
 import { runProgram } from '@/interface/program';
 
 import type { JiraCloudSettings } from '@/adapters/trackers/jira-cloud';
+import type { ManagedCloneDependencies } from '@/application/managed-clone';
 import type {
   AgentRegistry,
   ArtifactStore,
@@ -85,11 +88,23 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
   const prerequisites = createPrerequisiteAdapter();
   const configStore = createConfigStore({ redact: registry.redact });
   const environments = wrapEnvironmentAdapter(createEnvironmentAdapter(), registry);
+  const cloneRoot = resolveManagedCloneRoot({
+    home: process.env['HOME'],
+    xdgCacheHome: process.env['XDG_CACHE_HOME'],
+  });
+
+  registry.add(GH_CREDENTIAL_ENVIRONMENT_VARIABLES.map((name) => process.env[name]));
+  const clones = createManagedCloneAdapter({
+    runProcess: runManagedProcess,
+    parentEnvironment: process.env,
+    secretValues: registry.read,
+    cancellation,
+  });
 
   const loadConfigAndRegisterSecrets = async (
     configPath: string,
   ): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>> => {
-    const loaded = await loadConfig(configPath, configStore);
+    const loaded = await loadConfig(configPath, configStore, cloneRoot);
     if (loaded.ok) {
       registerConfigSecrets(registry, loaded.value);
     }
@@ -100,6 +115,15 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
     createGitWorkspaceAdapter({ workspacesDirectory: createWorkspacesRoot() });
 
   const secrets = createSecretRedactor(registry.read, registry.redact);
+
+  const managedCloneDependencies = (
+    onProgress: (line: string) => void,
+  ): ManagedCloneDependencies => ({
+    clones,
+    git: createSourceValidator(),
+    managedCloneRoot: cloneRoot,
+    onProgress,
+  });
 
   /** Registers every configured agent under its own name; currently the schema declares only "opencode". */
   const agentsFor = (config: TevuConfig): AgentRegistry =>
@@ -164,9 +188,9 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       });
       return github.readIssue(reference);
     },
-    resolveReference: (request) =>
+    resolveReference: (request, onProgress) =>
       resolveReferenceSolution(request, {
-        git: createSourceValidator(),
+        ...managedCloneDependencies(onProgress),
         pullRequests: createGitHubPullRequestReader({
           runGh: (ghRequest) => {
             registry.add(GH_CREDENTIAL_ENVIRONMENT_VARIABLES.map((name) => process.env[name]));
@@ -181,12 +205,17 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
           cancellation,
         }),
       }),
+    ensureManagedCommits: (request, onProgress) =>
+      ensureManagedCommits(request, managedCloneDependencies(onProgress)),
+    prepareRepositories: (config, onProgress) =>
+      prepareManagedRepositories(config, managedCloneDependencies(onProgress)),
     createTask: (input) =>
       createTask(input, {
         configStore,
         git: createSourceValidator(),
         registerSecrets: (names) => registry.add(names.map((name) => process.env[name])),
         redact: registry.redact,
+        managedCloneRoot: cloneRoot,
         cancellation,
       }),
     validateConfig: (config) =>
@@ -195,6 +224,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
         agents: agentsFor(config),
         environments,
         prerequisites,
+        clones: { inspectClone: clones.inspectClone },
       }),
     planBenchmark,
     executeBenchmark: async (plan, hooks) => {

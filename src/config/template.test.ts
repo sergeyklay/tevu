@@ -7,8 +7,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createConfigStore } from '@/adapters/artifact-store';
 
 import { loadConfig, parseConfigText } from './load';
-import { TevuConfigSchema } from './schema';
+import { repositoryInputOf, TevuConfigSchema } from './schema';
 import { CONFIG_TEMPLATE } from './template';
+
+import type { TevuConfig } from '@/domain/types';
 
 const OPTIONAL_LINE_PATTERN = /^( *)# ( *(?:- )?[A-Za-z][A-Za-z0-9_]*:(?: |$))/;
 
@@ -25,8 +27,9 @@ function uncomment(text: string): string {
 }
 
 /** Re-parses a value the schema already accepted; the output must remain valid input. */
-function reparse(config: unknown): unknown {
-  const result = TevuConfigSchema.safeParse(config);
+function reparse(config: TevuConfig): unknown {
+  const input = { ...config, repositories: config.repositories.map(repositoryInputOf) };
+  const result = TevuConfigSchema.safeParse(input);
   if (!result.success) {
     throw new Error(
       `expected the materialized configuration to re-parse: ${JSON.stringify(result.error.issues)}`,
@@ -50,12 +53,12 @@ describe('CONFIG_TEMPLATE', () => {
     expect(CONFIG_TEMPLATE.endsWith('\n\n')).toBe(false);
   });
 
-  it('enables exactly twenty-one commented-out key lines', () => {
+  it('enables exactly twenty-three commented-out key lines', () => {
     const enabledCount = CONFIG_TEMPLATE.split('\n').filter((line) =>
       OPTIONAL_LINE_PATTERN.test(line),
     ).length;
 
-    expect(enabledCount).toBe(21);
+    expect(enabledCount).toBe(23);
   });
 
   it.each([
@@ -92,7 +95,11 @@ describe('CONFIG_TEMPLATE', () => {
     it('is accepted as written', async () => {
       const configPath = await writeConfigFile(CONFIG_TEMPLATE);
 
-      const result = await loadConfig(configPath, createConfigStore({ redact: (text) => text }));
+      const result = await loadConfig(
+        configPath,
+        createConfigStore({ redact: (text) => text }),
+        undefined,
+      );
 
       expect(result.ok).toBe(true);
     });
@@ -100,7 +107,11 @@ describe('CONFIG_TEMPLATE', () => {
     it('is accepted with every optional field enabled', async () => {
       const configPath = await writeConfigFile(uncomment(CONFIG_TEMPLATE));
 
-      const result = await loadConfig(configPath, createConfigStore({ redact: (text) => text }));
+      const result = await loadConfig(
+        configPath,
+        createConfigStore({ redact: (text) => text }),
+        tempDirectory,
+      );
 
       expect(result.ok).toBe(true);
       if (!result.ok) {
@@ -114,6 +125,24 @@ describe('CONFIG_TEMPLATE', () => {
       );
       expect(checkIds).toContain('csv-content');
       expect(checkIds).toContain('tests');
+    });
+
+    it('adds a second repository app-upstream with a resolved GitHub clone path when enabled', async () => {
+      const configPath = await writeConfigFile(uncomment(CONFIG_TEMPLATE));
+
+      const result = await loadConfig(
+        configPath,
+        createConfigStore({ redact: (text) => text }),
+        tempDirectory,
+      );
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const upstream = result.value.repositories.find(
+        (repository) => repository.id === 'app-upstream',
+      );
+      expect(upstream?.github).toBe('your-org/your-app');
+      expect(upstream?.path).toBe(join(tempDirectory, 'github.com/your-org/your-app.git'));
     });
   });
 });

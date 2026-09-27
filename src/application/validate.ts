@@ -1,5 +1,14 @@
-import { agentNamesInUse, evaluatorEnvironmentNames, TevuConfigSchema } from '@/config/schema';
-import { parseGitHubReference } from '@/domain/github-reference';
+import {
+  agentNamesInUse,
+  evaluatorEnvironmentNames,
+  repositoryInputOf,
+  TevuConfigSchema,
+} from '@/config/schema';
+import {
+  formatGitHubRepository,
+  parseGitHubReference,
+  parseGitHubRepository,
+} from '@/domain/github-reference';
 
 import { buildEnvironmentVariableNames } from './environment-variable-names';
 import {
@@ -108,7 +117,8 @@ export async function validateConfig(
  * refinements cover duplicates, classifications, and cross-references.
  */
 function collectSchemaFindings(config: TevuConfig): ValidationFinding[] {
-  const parsed = TevuConfigSchema.safeParse(config);
+  const input = { ...config, repositories: config.repositories.map(repositoryInputOf) };
+  const parsed = TevuConfigSchema.safeParse(input);
   if (parsed.success) {
     return [];
   }
@@ -180,6 +190,7 @@ async function collectSourceFindings(
   const repositories = new Map(
     config.repositories.map((repository) => [repository.id, repository]),
   );
+  const cloneProblems = await collectGitHubCloneProblems(config, dependencies, findings);
   // Tasks sharing a repository and commit reuse one probe so a large source
   // tree is scanned once per pinned commit.
   const validated = new Map<string, TevuResult<SourceValidation, 'SourceMaterializationError'>>();
@@ -190,14 +201,18 @@ async function collectSourceFindings(
       continue;
     }
     const prompt = buildTaskPrompt(task);
-    const resolvedBase = await resolveTaskBaseForValidation(
-      task,
-      repository,
-      prompt,
-      findings,
-      validated,
-      dependencies,
-    );
+    // A GitHub entry with a clone-state problem cannot resolve any commit
+    // locally: skip the resolution calls and keep only the text-only checks.
+    const resolvedBase = cloneProblems.has(repository.id)
+      ? undefined
+      : await resolveTaskBaseForValidation(
+          task,
+          repository,
+          prompt,
+          findings,
+          validated,
+          dependencies,
+        );
 
     const recorded = recordedReferenceCommits(task.reference);
     for (const commit of recorded) {
@@ -232,10 +247,53 @@ async function collectSourceFindings(
 }
 
 /**
- * Resolves one task's base commit: names the fetch to run when a pull-request
- * task's full-hash base is not available locally (MISSING-BASE), otherwise
- * pins it through the cached `validateSource` call as today. Either way,
- * checks the base text itself against the agent prompt.
+ * Inspects, once per GitHub entry named by at least one task, whether its
+ * managed clone exists and is one tevu made; pushes the matching error
+ * finding for a missing or foreign clone and returns the repository IDs that
+ * failed, so their tasks skip commit resolution entirely (`validateConfig`
+ * never reaches the network).
+ */
+async function collectGitHubCloneProblems(
+  config: TevuConfig,
+  dependencies: ValidationDependencies,
+  findings: ValidationFinding[],
+): Promise<Set<string>> {
+  const namedRepositoryIds = new Set(config.tasks.map((task) => task.repo));
+  const problems = new Set<string>();
+  for (const repository of config.repositories) {
+    if (repository.github === undefined || !namedRepositoryIds.has(repository.id)) {
+      continue;
+    }
+    const parsed = parseGitHubRepository(repository.github);
+    if (parsed === null) {
+      // The schema stage already reports the grammar failure.
+      continue;
+    }
+    const state = await dependencies.clones.inspectClone(repository.path);
+    if (state === 'repository') {
+      continue;
+    }
+    problems.add(repository.id);
+    const display = formatGitHubRepository(parsed);
+    const message =
+      state === 'missing'
+        ? `repository "${repository.id}" has no clone of ${display} at "${repository.path}"; tevu run --dry-run clones it`
+        : `"${repository.path}" is not a clone tevu made for repository "${repository.id}"; remove it, then tevu run --dry-run clones ${display} there`;
+    findings.push({
+      severity: 'error',
+      identifier: `repositories.${repository.id}.github`,
+      message,
+    });
+  }
+  return problems;
+}
+
+/**
+ * Resolves one task's base commit: names the fetch to run when the base of a
+ * GitHub-entry task, or a pull-request task's full-hash base, is not
+ * available locally (MISSING-BASE), otherwise pins it through the cached
+ * `validateSource` call as today. Either way, checks the base text itself
+ * against the agent prompt.
  */
 async function resolveTaskBaseForValidation(
   task: TaskDefinition,
@@ -245,7 +303,8 @@ async function resolveTaskBaseForValidation(
   validated: Map<string, TevuResult<SourceValidation, 'SourceMaterializationError'>>,
   dependencies: ValidationDependencies,
 ): Promise<string | undefined> {
-  if (task.reference?.kind === 'pull-request' && FULL_COMMIT_HASH_PATTERN.test(task.base_commit)) {
+  const isFullHash = FULL_COMMIT_HASH_PATTERN.test(task.base_commit);
+  if (repository.github !== undefined || (task.reference?.kind === 'pull-request' && isFullHash)) {
     const lookup = await dependencies.git.resolveCommit(repository, task.base_commit);
     if (lookup.kind === 'not-found') {
       findings.push({
@@ -253,7 +312,9 @@ async function resolveTaskBaseForValidation(
         identifier: `tasks.${task.id}.base_commit`,
         message: missingBaseMessage(task, repository),
       });
-      const reason = describeSourceCommitInPrompt(prompt, task.base_commit);
+      const reason = isFullHash
+        ? describeSourceCommitInPrompt(prompt, task.base_commit)
+        : undefined;
       if (reason !== undefined) {
         findings.push({ severity: 'error', identifier: `tasks.${task.id}`, message: reason });
       }
@@ -281,9 +342,20 @@ async function resolveTaskBaseForValidation(
   return result.value.resolvedCommit;
 }
 
-/** The MISSING-BASE text, naming a fetch from the pull request's own repository when it parses. */
+/**
+ * The missing-base text: for a GitHub entry, names `tevu run --dry-run` as
+ * the fix; for a path entry, keeps today's fetch example from the pull
+ * request's own repository when it parses, byte for byte.
+ */
 function missingBaseMessage(task: TaskDefinition, repository: RepositoryDefinition): string {
   const base = task.base_commit;
+  if (repository.github !== undefined) {
+    const parsed = parseGitHubRepository(repository.github);
+    const inClone = `base commit "${base}" is not in the clone of repository "${repository.id}"`;
+    return parsed === null
+      ? inClone
+      : `${inClone}; tevu run --dry-run fetches it from ${formatGitHubRepository(parsed)}`;
+  }
   const prefix = `base commit ${base} is not in repository "${repository.id}" ("${repository.path}"); fetch it there first`;
   const identifier =
     task.reference?.kind === 'pull-request' ? task.reference.identifier : undefined;
@@ -341,19 +413,21 @@ async function collectReferenceCommitFindings(
     }
   }
   if (missing.length > 0) {
+    const fetchHint = repository.github === undefined ? '' : '; tevu run --dry-run fetches them';
     findings.push({
       severity: 'warning',
       identifier: `tasks.${task.id}.reference`,
-      message: `reference commits not available in repository "${repository.id}": ${missing.length} of ${recorded.length}; the base commit was not compared with them`,
+      message: `reference commits not available in repository "${repository.id}": ${missing.length} of ${recorded.length}; the base commit was not compared with them${fetchHint}`,
     });
   }
   const mergeCommit =
     task.reference?.kind === 'pull-request' ? task.reference.merge_commit : undefined;
   if (mergeCommit !== undefined && missing.includes(mergeCommit)) {
+    const fetchHint = repository.github === undefined ? '' : '; tevu run --dry-run fetches it';
     findings.push({
       severity: 'warning',
       identifier: `tasks.${task.id}.reference.merge_commit`,
-      message: `merge commit ${mergeCommit.slice(0, 7)} is not available in repository "${repository.id}"; the base commit was not checked to precede it`,
+      message: `merge commit ${mergeCommit.slice(0, 7)} is not available in repository "${repository.id}"; the base commit was not checked to precede it${fetchHint}`,
     });
   }
   for (const commit of available) {

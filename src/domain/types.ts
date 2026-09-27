@@ -7,6 +7,8 @@
  * Execa, Git commands, Jira transport code, or Node.js process globals.
  */
 
+import type { ParsedGitHubRepository } from '@/domain/github-reference';
+
 /** Result of a fallible module contract; errors never cross boundaries as thrown exceptions. */
 export type TevuResult<T, K extends TevuError['kind']> =
   { ok: true; value: T } | { ok: false; error: Extract<TevuError, { kind: K }> };
@@ -93,7 +95,14 @@ export type TevuError =
   | { kind: 'CancellationError'; activeCaseIds: string[] }
   | { kind: 'CheckStateError'; step: 'restore' | 'overlay'; reason: string }
   | { kind: 'SetupError'; phase: SetupPhase; argv: string[]; reason: string }
-  | { kind: 'ReferenceResolutionError'; reason: string };
+  | { kind: 'ReferenceResolutionError'; reason: string }
+  | {
+      kind: 'ManagedCloneError';
+      operation: 'clone' | 'fetch';
+      /** Display form of the repository contacted for this operation. */
+      repository: string;
+      reason: string;
+    };
 
 /** Where a run's effective repeat came from: the configuration (set or defaulted) or `tevu run --repeat`. */
 type RepeatSource = 'config' | 'cli';
@@ -154,9 +163,40 @@ export interface RepositorySetup {
 /** One configured source repository. */
 export type RepositoryDefinition = {
   id: string;
+  /** Path entry: the repository. GitHub entry: its managed clone. Relative to its base until `resolveConfig`, then absolute. */
   path: string;
+  /** Present exactly for a GitHub entry: the `github` value as written. */
+  github?: string;
   setup?: RepositorySetup;
 };
+
+/** Offline state of one managed-clone directory. */
+export type CloneState = 'missing' | 'repository' | 'not-a-repository';
+
+/**
+ * Clones and fetches managed clones through git, with gh as git's credential
+ * helper. Implemented over the local git CLI and gh; see `src/adapters/managed-clone.ts`.
+ */
+export interface ManagedCloneAdapter {
+  /** Offline: no network, no gh, no write. */
+  inspectClone(directory: string): Promise<CloneState>;
+  /** Bare-clones `repository` into `directory`; succeeds without cloning when a clone appeared meanwhile. */
+  clone(
+    directory: string,
+    repository: ParsedGitHubRepository,
+  ): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>>;
+  /** Fetches full commit hashes from `source`, each into `refs/tevu/fetched/<hash>`. */
+  fetchCommits(
+    directory: string,
+    source: ParsedGitHubRepository,
+    commits: readonly string[],
+  ): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>>;
+  /** Fetches every branch and tag of `repository`, force-updating `refs/heads/*` and `refs/tags/*`. */
+  fetchBranchesAndTags(
+    directory: string,
+    repository: ParsedGitHubRepository,
+  ): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>>;
+}
 
 /** One resolved benchmark model entry: what the benchmark compares. */
 export interface ModelDefinition {
@@ -1078,6 +1118,7 @@ export type ValidationDependencies = {
   agents: AgentRegistry;
   environments: EnvironmentAdapter;
   prerequisites: PrerequisiteAdapter;
+  clones: Pick<ManagedCloneAdapter, 'inspectClone'>;
 };
 
 /** Aggregate validation outcome; any error-severity finding makes the configuration invalid. */

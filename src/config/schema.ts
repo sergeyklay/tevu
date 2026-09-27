@@ -7,13 +7,18 @@
 
 import { z } from 'zod';
 
-import { parseGitHubReference } from '@/domain/github-reference';
+import {
+  managedCloneLocation,
+  parseGitHubReference,
+  parseGitHubRepository,
+} from '@/domain/github-reference';
 
 import type {
   CheckDefinition,
   ModelDefinition,
   ModelRole,
   ModelRoleName,
+  RepositoryDefinition,
   RepositorySetup,
   SetupCommand,
   TaskDefinition,
@@ -283,15 +288,85 @@ const RepositorySetupSchema = RawRepositorySetupShape.superRefine(refineReposito
   },
 );
 
-/** One local source repository referenced by tasks. */
-const RepositoryDefinitionSchema = z.strictObject({
+const NEITHER_REPOSITORY_FORM_MESSAGE =
+  'a repository declares path (a local repository) or github (a GitHub repository)';
+const BOTH_REPOSITORY_FORMS_MESSAGE = 'a repository declares either path or github, not both';
+const GITHUB_GRAMMAR_MESSAGE =
+  'github must be OWNER/REPO or https://HOST/OWNER/REPO, with a HOST of letters, digits, hyphens, and dots, and without surrounding spaces, user info, a port, a query, or a fragment';
+
+const RawRepositoryShape = z.strictObject({
   id: IdSchema,
-  path: z.string().min(1),
+  path: z.string().min(1).optional(),
+  github: z.string().optional(),
   setup: RepositorySetupSchema.optional(),
 });
 
-/** File-shape repository entry; identical to `RepositoryDefinition`. */
+type RawRepository = z.infer<typeof RawRepositoryShape>;
+
+function refineRepositoryDefinition(value: RawRepository, ctx: z.RefinementCtx): void {
+  if (value.path === undefined && value.github === undefined) {
+    ctx.addIssue({ code: 'custom', message: NEITHER_REPOSITORY_FORM_MESSAGE });
+    return;
+  }
+  if (value.path !== undefined && value.github !== undefined) {
+    ctx.addIssue({ code: 'custom', message: BOTH_REPOSITORY_FORMS_MESSAGE });
+    return;
+  }
+  if (value.github !== undefined && parseGitHubRepository(value.github) === null) {
+    ctx.addIssue({ code: 'custom', path: ['github'], message: GITHUB_GRAMMAR_MESSAGE });
+  }
+}
+
+/**
+ * One source repository referenced by tasks: a local `path`, or a `github`
+ * repository whose materialized `path` becomes its managed-clone location.
+ */
+const RepositoryDefinitionSchema = RawRepositoryShape.superRefine(
+  refineRepositoryDefinition,
+).transform((value): RepositoryDefinition => {
+  const { github } = value;
+  if (github !== undefined) {
+    const parsed = parseGitHubRepository(github);
+    if (parsed === null) {
+      throw new Error(
+        'unreachable: refineRepositoryDefinition guarantees github parses when present',
+      );
+    }
+    return {
+      id: value.id,
+      path: managedCloneLocation(parsed),
+      github,
+      ...(value.setup === undefined ? {} : { setup: value.setup }),
+    };
+  }
+  const { path } = value;
+  if (path === undefined) {
+    throw new Error(
+      'unreachable: refineRepositoryDefinition guarantees path when github is absent',
+    );
+  }
+  return {
+    id: value.id,
+    path,
+    ...(value.setup === undefined ? {} : { setup: value.setup }),
+  };
+});
+
+/** File-shape repository entry: `id`, exactly one of `path` or `github`, and optional `setup`. */
 export type RepositoryInput = z.input<typeof RepositoryDefinitionSchema>;
+
+/**
+ * Projects a materialized {@link RepositoryDefinition} back to its file
+ * shape. A GitHub entry's materialized `path` holds a derived managed-clone
+ * location rather than file input, so this drops it and keeps `github`; a
+ * path entry passes through unchanged.
+ */
+export function repositoryInputOf(repository: RepositoryDefinition): RepositoryInput {
+  const setupField = repository.setup === undefined ? {} : { setup: repository.setup };
+  return repository.github === undefined
+    ? { id: repository.id, path: repository.path, ...setupField }
+    : { id: repository.id, github: repository.github, ...setupField };
+}
 
 /** `provider/model` grammar shared by a model entry and a model role. */
 const ModelIdentifierSchema = z.templateLiteral([z.string().min(1), '/', z.string().min(1)]);

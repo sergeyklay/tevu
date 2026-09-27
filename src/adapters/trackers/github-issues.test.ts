@@ -1,10 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-  createGitHubIssuesAdapter,
-  createGitHubPullRequestReader,
-  GH_CREDENTIAL_ENVIRONMENT_VARIABLES,
-} from './github-issues';
+import { GH_CREDENTIAL_ENVIRONMENT_VARIABLES } from '@/domain/github-cli';
+
+import { createGitHubIssuesAdapter, createGitHubPullRequestReader } from './github-issues';
 
 import type {
   GhCapture,

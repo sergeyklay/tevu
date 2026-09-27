@@ -111,6 +111,41 @@ describe('renderConfigDocument', () => {
     expect(rendered.value).toContain('trackers:\n  jira:\n    url: https://jira.example.com\n');
   });
 
+  it('writes {id, path} for a path repository entry', () => {
+    const rendered = renderConfigDocument(buildConfig({ repositories: [buildRepository()] }), {
+      redact: (text) => text,
+    });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value).toContain('repositories:\n  - id: app\n    path: ../app\n');
+  });
+
+  it('writes {id, github} for a GitHub repository entry, omitting path', () => {
+    const config = buildConfig({
+      repositories: [{ id: 'upstream', github: 'octo/app' }],
+    });
+
+    const rendered = renderConfigDocument(config, { redact: (text) => text });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value).toContain('repositories:\n  - id: upstream\n    github: octo/app\n');
+    expect(rendered.value).not.toContain('path: github.com');
+  });
+
+  it('redacts a GitHub repository entry before it becomes YAML', () => {
+    const config = buildConfig({ repositories: [{ id: 'upstream', github: 'SECRET_REPO' }] });
+    const redact = (text: string): string => text.replaceAll('SECRET_REPO', '[REDACTED]');
+
+    const rendered = renderConfigDocument(config, { redact });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value).toContain('github: "[REDACTED]"');
+    expect(rendered.value).not.toContain('SECRET_REPO');
+  });
+
   it('omits empty agents.opencode.secrets and env, and omits an absent trackers block', () => {
     const rendered = renderConfigDocument(buildConfig(), { redact: (text) => text });
 
@@ -454,6 +489,7 @@ function buildTaskDependencies(overrides: Partial<TaskDependencies> = {}): TaskD
     } satisfies Pick<GitWorkspaceAdapter, 'validateSource' | 'resolveCommit'>,
     registerSecrets: () => undefined,
     redact: (text) => text,
+    managedCloneRoot: undefined,
     ...overrides,
   };
 }

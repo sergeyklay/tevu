@@ -1,15 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { describeManagedCloneError } from './managed-clone';
 import { resolveReferenceSolution } from './reference-solution';
 
 import type { ReferenceSolutionDependencies, ReferenceSolutionRequest } from './reference-solution';
+import type { ParsedGitHubRepository } from '@/domain/github-reference';
 import type {
   CommitLookup,
   GitWorkspaceAdapter,
+  ManagedCloneAdapter,
   PullRequestCommit,
   PullRequestReader,
   PullRequestSnapshot,
   RepositoryDefinition,
+  TevuError,
   TevuResult,
 } from '@/domain/types';
 
@@ -26,6 +30,13 @@ function failingResolveCommit(): Promise<CommitLookup> {
   throw new Error('unexpected Git call while resolving a pull request');
 }
 
+function failingManagedCloneAdapter(): ManagedCloneAdapter {
+  const fail = (): never => {
+    throw new Error('unexpected managed-clone call for a path repository');
+  };
+  return { inspectClone: fail, clone: fail, fetchCommits: fail, fetchBranchesAndTags: fail };
+}
+
 function buildDependencies(
   resolveCommit: (
     repository: RepositoryDefinition,
@@ -37,7 +48,13 @@ function buildDependencies(
     }),
   },
 ): ReferenceSolutionDependencies {
-  return { git: { resolveCommit } as Pick<GitWorkspaceAdapter, 'resolveCommit'>, pullRequests };
+  return {
+    git: { resolveCommit } as Pick<GitWorkspaceAdapter, 'resolveCommit'>,
+    pullRequests,
+    clones: failingManagedCloneAdapter(),
+    managedCloneRoot: undefined,
+    onProgress: vi.fn(),
+  };
 }
 
 function buildPullRequestSnapshot(
@@ -472,5 +489,227 @@ describe('resolveReferenceSolution pull-request reference block', () => {
       identifier: 'octo/repo#42',
       commits: [A, B],
     });
+  });
+});
+
+function buildGitHubRequest(
+  overrides: Partial<ReferenceSolutionRequest> = {},
+): ReferenceSolutionRequest {
+  return {
+    configPath: '/tmp/tevu/tevu.yaml',
+    repository: { id: 'upstream', github: 'octo/app', path: 'github.com/octo/app.git' },
+    identifier: 'octo/app#128',
+    ...overrides,
+  };
+}
+
+function buildOkManagedCloneAdapter(
+  overrides: Partial<ManagedCloneAdapter> = {},
+): ManagedCloneAdapter {
+  return {
+    inspectClone: vi.fn(async () => 'repository' as const),
+    clone: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    fetchCommits: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    fetchBranchesAndTags: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    ...overrides,
+  };
+}
+
+/**
+ * A `clones` adapter and `resolveCommit` sharing one mutable resolved set, so
+ * a fetch that succeeds makes its hashes (and, for a `^1` lookup, `PARENT`)
+ * resolvable on the next call, mirroring how a real fetch reaches history.
+ */
+function buildFetchingClones(overrides: Partial<ManagedCloneAdapter> = {}): {
+  clones: ManagedCloneAdapter;
+  resolveCommit: (repository: RepositoryDefinition, reference: string) => Promise<CommitLookup>;
+  resolved: Set<string>;
+} {
+  const resolved = new Set<string>();
+  const clones = buildOkManagedCloneAdapter({
+    fetchCommits: vi.fn(async (_directory, _source, commits: readonly string[]) => {
+      for (const hash of commits) {
+        resolved.add(hash);
+      }
+      return { ok: true as const, value: undefined };
+    }),
+    ...overrides,
+  });
+  const resolveCommit = vi.fn(async (_repository: RepositoryDefinition, revision: string) => {
+    if (revision.endsWith('^1')) {
+      const base = revision.slice(0, -2);
+      return resolved.has(base)
+        ? { kind: 'found' as const, commit: PARENT }
+        : { kind: 'not-found' as const };
+    }
+    return resolved.has(revision)
+      ? { kind: 'found' as const, commit: revision }
+      : { kind: 'not-found' as const };
+  });
+  return { clones, resolveCommit, resolved };
+}
+
+function buildGitHubDependencies(
+  clones: ManagedCloneAdapter,
+  resolveCommit: (repository: RepositoryDefinition, reference: string) => Promise<CommitLookup>,
+  pullRequests: PullRequestReader,
+): ReferenceSolutionDependencies {
+  return {
+    git: { resolveCommit },
+    pullRequests,
+    clones,
+    managedCloneRoot: '/cache/tevu/repositories',
+    onProgress: vi.fn(),
+  };
+}
+
+describe('resolveReferenceSolution for a GitHub entry (AC-8, AC-13, AC-20, properties 8 and 12)', () => {
+  it('resolves a pull-request reference whose commits exist only on the remote, fetching every recorded commit and the proposed base', async () => {
+    const snapshot = buildPullRequestSnapshot({
+      state: 'merged',
+      commits: [commit(A, [P0]), commit(B, [A])],
+    });
+    const { clones, resolveCommit, resolved } = buildFetchingClones();
+    const dependencies = buildGitHubDependencies(
+      clones,
+      resolveCommit,
+      buildPullRequestReader(snapshot),
+    );
+
+    const result = await resolveReferenceSolution(buildGitHubRequest(), dependencies);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.reference).toEqual({
+      kind: 'pull-request',
+      identifier: 'octo/app#128',
+      commits: [A, B],
+    });
+    expect(result.value.proposedBase).toEqual({ commit: P0, basis: 'first-commit-parent' });
+    expect(result.value.pullRequest?.unfetched).toBeUndefined();
+    expect(resolved.has(A)).toBe(true);
+    expect(resolved.has(B)).toBe(true);
+    expect(resolved.has(P0)).toBe(true);
+  });
+
+  it("sources the fetch from the pull request's own repository for a cross-repository reference", async () => {
+    const snapshot = buildPullRequestSnapshot({ state: 'merged', commits: [commit(A, [P0])] });
+    const { clones, resolveCommit } = buildFetchingClones();
+    const dependencies = buildGitHubDependencies(
+      clones,
+      resolveCommit,
+      buildPullRequestReader(snapshot),
+    );
+
+    await resolveReferenceSolution(buildGitHubRequest({ identifier: 'other/app#5' }), dependencies);
+
+    const source: ParsedGitHubRepository = { host: 'github.com', owner: 'other', repo: 'app' };
+    expect(clones.fetchCommits).toHaveBeenCalledWith(
+      '/cache/tevu/repositories/github.com/octo/app.git',
+      source,
+      expect.arrayContaining([A]),
+    );
+  });
+
+  it('keeps the reference and proposed base unchanged and sets pullRequest.unfetched to the described error when the fetch fails', async () => {
+    const snapshot = buildPullRequestSnapshot({ state: 'merged', commits: [commit(A, [P0])] });
+    const failure: Extract<TevuError, { kind: 'ManagedCloneError' }> = {
+      kind: 'ManagedCloneError',
+      operation: 'fetch',
+      repository: 'github.com/octo/app',
+      reason: 'git fetch did not finish within 10 minutes',
+    };
+    const clones = buildOkManagedCloneAdapter({
+      fetchCommits: vi.fn(async () => ({ ok: false as const, error: failure })),
+    });
+    const resolveCommit = vi.fn(async () => ({ kind: 'not-found' as const }));
+    const dependencies = buildGitHubDependencies(
+      clones,
+      resolveCommit,
+      buildPullRequestReader(snapshot),
+    );
+
+    const result = await resolveReferenceSolution(buildGitHubRequest(), dependencies);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.reference).toEqual({
+      kind: 'pull-request',
+      identifier: 'octo/app#128',
+      commits: [A],
+    });
+    expect(result.value.proposedBase).toEqual({ commit: P0, basis: 'first-commit-parent' });
+    expect(result.value.pullRequest?.unfetched).toBe(describeManagedCloneError(failure));
+  });
+
+  it('sets pullRequest.unfetched to a missing-count message when commits remain missing after a successful fetch', async () => {
+    const snapshot = buildPullRequestSnapshot({
+      state: 'merged',
+      commits: [commit(A, [P0]), commit(B, [A])],
+    });
+    const clones = buildOkManagedCloneAdapter();
+    const resolveCommit = vi.fn(async () => ({ kind: 'not-found' as const }));
+    const dependencies = buildGitHubDependencies(
+      clones,
+      resolveCommit,
+      buildPullRequestReader(snapshot),
+    );
+
+    const result = await resolveReferenceSolution(buildGitHubRequest(), dependencies);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Requested revisions are the two pull-request commits plus the proposed
+    // base (the first-commit parent); all three stay unresolved.
+    expect(result.value.pullRequest?.unfetched).toBe(
+      '3 commits are still missing after fetching from github.com/octo/app',
+    );
+  });
+
+  it('fetches a not-yet-cloned commit identifier once, then resolves it', async () => {
+    const { clones, resolveCommit } = buildFetchingClones();
+    const pullRequests: PullRequestReader = {
+      readPullRequest: vi.fn(async () => {
+        throw new Error('unexpected pull-request read for a commit reference');
+      }),
+    };
+    const dependencies = buildGitHubDependencies(clones, resolveCommit, pullRequests);
+
+    const result = await resolveReferenceSolution(
+      buildGitHubRequest({ identifier: COMMIT }),
+      dependencies,
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        reference: { kind: 'commit', identifier: COMMIT, commits: [COMMIT] },
+        proposedBase: { commit: PARENT, basis: 'commit-parent' },
+      },
+    });
+    expect(clones.fetchCommits).toHaveBeenCalledTimes(1);
+  });
+
+  it('never calls dependencies.clones for a path entry, even with a pull-request identifier', async () => {
+    const clones = buildOkManagedCloneAdapter();
+    const snapshot = buildPullRequestSnapshot({ state: 'merged', commits: [commit(A, [P0])] });
+    const dependencies: ReferenceSolutionDependencies = {
+      git: { resolveCommit: vi.fn(failingResolveCommit) },
+      pullRequests: buildPullRequestReader(snapshot),
+      clones,
+      managedCloneRoot: '/cache/tevu/repositories',
+      onProgress: vi.fn(),
+    };
+
+    const result = await resolveReferenceSolution(
+      buildRequest({ identifier: 'octo/repo#42' }),
+      dependencies,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(clones.inspectClone).not.toHaveBeenCalled();
+    expect(clones.clone).not.toHaveBeenCalled();
+    expect(clones.fetchCommits).not.toHaveBeenCalled();
+    expect(clones.fetchBranchesAndTags).not.toHaveBeenCalled();
   });
 });

@@ -63,6 +63,8 @@ repositories:
     #   before_checks: [[npm, ci]]  # after restore and overlay, before the checks
     #   timeout: 5m                 # limit for one setup command; required with setup
     #   env: [NPM_CONFIG_REGISTRY]  # ordinary variables the setup commands receive
+  # - id: app-upstream              # a GitHub repository tevu clones itself, instead of a path
+  #   github: your-org/your-app     # OWNER/REPO, or https://HOST/OWNER/REPO on GitHub Enterprise Server
 
 # --- Models -----------------------------------------------------------------
 # What the benchmark compares: at least two entries.
@@ -141,12 +143,12 @@ tasks:
 | `agents.opencode.secrets` | Variable names passed to the agent and redacted from every artifact; default `[]` |
 | `agents.opencode.env` | Variable names passed to the agent as-is; default `[]` |
 | `trackers.jira` | Optional Jira Cloud connection settings |
-| `repositories` | At least one `{id, path}` entry, each optionally carrying `setup` |
+| `repositories` | At least one entry, each `{id, path}` (a local repository) or `{id, github}` (a GitHub repository tevu clones itself), optionally carrying `setup`; see [GitHub repositories](#github-repositories) |
 | `models` | At least two `{id, model, effort, agent}` entries |
 | `roles` | Optional; the `criteria` and `grader` model roles used by future commands, covered under [Model roles](#model-roles) |
 | `tasks` | At least one task |
 
-Paths resolve relative to the configuration file. Resolution uses the directory of the path tevu read, without following symbolic links; tevu does not expand `~`. When the configuration lives in the user configuration directory rather than the current directory, use absolute paths for `run.output_dir`, `repositories[].path`, `checks.overlay`, and a path-form `agents.opencode.command`, since a relative value there resolves against the user configuration directory, not the directory tevu ran from. Bare executable names are found through `PATH`. IDs start with a lowercase letter, contain lowercase letters, digits, or hyphens, and have at most 64 characters. IDs are unique within their collection.
+Paths resolve relative to the configuration file. Resolution uses the directory of the path tevu read, without following symbolic links; tevu does not expand `~`. A GitHub repository entry's `github` value does not resolve against the file at all: its directory is the managed-clone location under the managed-clone root, covered under [GitHub repositories](#github-repositories). When the configuration lives in the user configuration directory rather than the current directory, use absolute paths for `run.output_dir`, `repositories[].path`, `checks.overlay`, and a path-form `agents.opencode.command`, since a relative value there resolves against the user configuration directory, not the directory tevu ran from. Bare executable names are found through `PATH`. IDs start with a lowercase letter, contain lowercase letters, digits, or hyphens, and have at most 64 characters. IDs are unique within their collection.
 
 A block keyed by an adapter kind (`agents.opencode`, `trackers.jira`) holds that adapter's settings only, so a new agent or tracker adds a block and changes nothing else. `opencode` is the only configured agent today, so `models[].agent` and `roles.<role>.agent` both default to it; a configuration with more than one agent must set `agent` explicitly to a configured agent key.
 
@@ -169,7 +171,7 @@ The duration bound keeps a configured value inside what a Node.js timer can sche
 | `id` | Unique task ID |
 | `title` | Non-whitespace; shown in the report, never sent to the agent |
 | `repo` | An ID from `repositories`; defaults to the sole repository when exactly one is configured |
-| `base_commit` | A commit resolvable in that repository; `tevu task add` records the resolved commit. For a pull-request reference, `tevu task add` can save a commit the repository does not hold yet; `tevu validate` and `tevu run` require it locally |
+| `base_commit` | A commit resolvable in that repository; `tevu task add` records the resolved commit. For a pull-request reference, `tevu task add` can save a commit the repository does not hold yet; `tevu validate` requires it locally for a path entry, and names it as a `tevu run --dry-run clones it`/`fetches it` finding for a GitHub entry, which `tevu run` then clones or fetches |
 | `timeout` | Duration, optional; agent time limit of every case of this task, for every model entry and attempt; replaces `run.timeout`, which applies when the key is absent |
 | `prompt` | Non-whitespace instructions sent to every model |
 | `description` | Non-whitespace task description, sent to every model |
@@ -223,12 +225,18 @@ When the first commits do not share exactly one parent, for example because the 
 
 `tevu validate` rejects a base commit that equals a recorded reference commit, descends from a recorded pull-request commit, or does not precede a recorded merge commit or a commit reference's commit, counting only commits available locally; an unmerged pull request's target tip passes unless it equals or descends from a recorded pull-request commit available locally. Comparison uses hashes and ancestry only, never content, so a base holding the solution under another hash still passes: a rebase merge's other copies, a cherry-pick, or an equivalent squash on another branch. Because comparison is by hash, a commit reference must hold the whole solution in the one commit it names.
 
-When a reference commit is not available in the local repository, `tevu validate` warns once per task, `reference commits not available in repository "<repo id>": <n> of <total>; the base commit was not compared with them`. An unavailable merge commit also draws a warning of its own, `merge commit <hash> is not available in repository "<repo id>"; the base commit was not checked to precede it`, since a clone holding only the target branch never has the original commits a squash or rebase merge folded together; expect this pair of warnings after such a merge. A commit reference's single unavailable commit draws only the first warning. Neither warning changes `tevu validate`'s exit code.
+When a reference commit is not available in the local repository, `tevu validate` warns once per task, `reference commits not available in repository "<repo id>": <n> of <total>; the base commit was not compared with them`. For a GitHub entry, this warning ends `; tevu run --dry-run fetches them`. An unavailable merge commit also draws a warning of its own, `merge commit <hash> is not available in repository "<repo id>"; the base commit was not checked to precede it`, ending `; tevu run --dry-run fetches it` for a GitHub entry, since a clone holding only the target branch never has the original commits a squash or rebase merge folded together; expect this pair of warnings after such a merge. A commit reference's single unavailable commit draws only the first warning. Neither warning changes `tevu validate`'s exit code.
 
-When a pull-request task's `base_commit` is a full hash the repository does not hold, `tevu validate` names the fetch to run, from the pull request's own repository:
+When a pull-request task's `base_commit` is a full hash a path-entry repository does not hold, `tevu validate` names the fetch to run, from the pull request's own repository:
 
 ```
 error tasks.<id>.base_commit: base commit <hash> is not in repository "<id>" ("<path>"); fetch it there first, for example: git fetch https://<host>/<owner>/<repo>.git <hash>
+```
+
+For a GitHub entry, any task whose `base_commit` its clone does not hold, whatever its reference, instead names `tevu run --dry-run` as the fix:
+
+```
+error tasks.<id>.base_commit: base commit "<base_commit>" is not in the clone of repository "<id>"; tevu run --dry-run fetches it from <host>/<owner>/<repo>
 ```
 
 `tevu validate` and `tevu run` also reject a task whose agent prompt contains, in any letter case, the first 7 characters of a recorded reference commit (the same rule already applied to `base_commit`) or, for a pull-request reference, its `OWNER/REPO#NUMBER` key or its URL form `HOST/OWNER/REPO/pull/NUMBER`, matched as plain substrings built from the recorded identifier. Neither command checks a prompt for any other hint to the accepted solution, such as a bare issue-style `#NUMBER`, a branch name, or a title.
@@ -237,7 +245,7 @@ The `## GitHub issues` section below covers the gh setup a pull-request referenc
 
 ### Source trees
 
-The configured source repository is read-only to tevu. Each case receives a sealed repository with one synthetic root commit containing the tracked tree at `base_commit`. Dirty and untracked source-worktree files are excluded.
+Every configured source repository, a local path or a managed GitHub clone, is read-only to every case. Each case receives a sealed repository with one synthetic root commit containing the tracked tree at `base_commit`. Dirty and untracked source-worktree files are excluded. tevu writes only to a managed clone, and only before cases start: cloning or fetching for `tevu task add` or `tevu run` finishes before the first case is sealed, never while a case runs.
 
 The case contains no source remotes, later history, tags, stashes, or shared object database. Sibling cases have separate Git metadata and writable directories. The original repository and commit identity are retained separately from the synthetic commit.
 
@@ -306,6 +314,22 @@ The patch base records the worktree state `before_agent` left, in a private obje
 Restore resets every `checks.restore`-matched path to `base_commit` and removes every matched untracked path, so its removed-path evidence can list `before_agent` output. A file `before_checks` reads, such as `package.json`, `package-lock.json`, or `.npmrc`, stays agent-editable unless a restore pattern names it.
 
 `tevu validate` and `tevu run` reject a `setup` block that declares neither phase, a command that is empty or starts with an empty argument, a missing `timeout`, a `setup.env` name shared with an agent's `secrets` or `env`, a Jira credential variable, a duplicate name, or a fixed name.
+
+## GitHub repositories
+
+A `github` entry names a repository on `github.com` or a GitHub Enterprise Server host, in place of `path`: `OWNER/REPO`, or `https://HOST/OWNER/REPO` for a host other than `github.com`. `OWNER` is a letter or digit followed by up to 99 letters, digits, hyphens, or underscores; `REPO` is 1 to 100 letters, digits, dots, hyphens, or underscores, never `.` or `..`, with one trailing `.git` stripped before that grammar applies. The URL form takes no user info, port, query, or fragment, and its host holds only letters, digits, hyphens, and dots. A repository entry declares exactly one of `path` or `github`.
+
+tevu keeps one bare clone per lowercased `<host>/<owner>/<repo>`, shared by every entry and configuration that names it, at `<root>/<host>/<owner>/<repo>.git` under the managed-clone root: `$XDG_CACHE_HOME/tevu/repositories` when `XDG_CACHE_HOME` is set, non-empty, and absolute, otherwise `$HOME/.cache/tevu/repositories` under the same test, otherwise there is no root and every command that would need one reports a finding naming the unset variable. The clone holds full history, no `--depth` and no `--filter`, because sealing borrows objects through a temporary alternates link and the reference-solution ancestry checks walk history; its local configuration sets `gc.auto=0` and `maintenance.auto=false` so a concurrent fetch never drops an object or pack a reader needs, and it carries no `credential` configuration key. Deleting the managed-clone root is always safe: the next command that needs a clone creates it again.
+
+`tevu task add` clones a newly selected GitHub entry immediately and fetches its base-commit and reference-solution answers as they are typed. `tevu run` and `tevu run --dry-run` clone or fetch, once per GitHub entry a task names, before validation: first each entry's tasks' base commits, then each task's reference-solution commits, only for whatever `tevu validate`'s own commit resolution would not already find locally. `tevu validate`, `tevu assess`, `tevu report`, and `tevu config example` never clone, fetch, or otherwise reach the network; a missing clone or a commit absent from it is reported as a validation finding naming the command that fixes it, covered in [Tasks](#tasks) and [Reference solution](#reference-solution).
+
+A clone or fetch holds a `mkdir` lock directory (the clone's own path with `.lock` appended) for its duration, across processes; the lock never waits and is never removed automatically, so a command that finds one already present fails, naming the lock path, whether another tevu command is updating the clone or the lock is stale and needs the operator to remove it.
+
+Access goes through the GitHub CLI (`gh`), set up the same way as GitHub issue import: `gh auth login` for `github.com`, or `gh auth login --hostname <host>` for a GitHub Enterprise Server host. tevu runs git itself, with a top-level `git -c credential.https://<host>.helper=` reset followed by `-c credential.https://<host>.helper=!gh auth git-credential`, scoped to the one command that needs it; git never stores the helper, and gh, not tevu, ever holds or sees a token. Every network git command ignores the operator's gitconfig (`GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` point at `/dev/null`), so settings such as `http.sslCAInfo`, `http.proxy`, and `url.<base>.insteadOf` have no effect; TLS and proxy behavior come only from `GIT_SSL_*`, `GIT_HTTP_*`, `GIT_PROXY_SSL_*`, and proxy variables such as `HTTPS_PROXY`, which pass through unlike every other `GIT_*` variable.
+
+A branch or tag name in `base_commit` or a reference solution is fetched only when it does not already resolve; when it is fetched, every branch and tag of the remote is force-updated, so a shared name can resolve to a different commit across runs. Pin a full commit hash, which `tevu task add` always writes for `base_commit`, to keep a task's pinned commit fixed regardless of what the remote does later.
+
+A GitHub entry's clone directory, and the managed-clone root itself, must not equal, lie inside, or contain `run.output_dir`, an overlay directory, or a path-entry repository's directory, after resolving symbolic links; `tevu validate` and `tevu run` report an overlap the same way they report any other repository or output-directory overlap.
 
 ## Environment variables
 
@@ -380,6 +404,12 @@ The [Jira import guide](../guides/import-jira-task.md) describes connection setu
 
 GitHub issues has no configuration fields. `task add --github` needs the GitHub CLI (`gh`) on `PATH`, authenticated for the issue's host: `gh auth login` for `github.com`, or `gh auth login --hostname <host>` for a GitHub Enterprise Server host, because gh never receives `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`. tevu reads and stores no GitHub token; gh owns authentication entirely.
 
-Each import makes one `gh issue view` call with a 30-second limit and no retries beyond gh's own. `tevu validate`, `tevu run`, and `tevu report` never run gh.
+Each import makes one `gh issue view` call with a 30-second limit and no retries beyond gh's own.
+
+| Command | Network use |
+| --- | --- |
+| `tevu task add` | Jira and gh as described above; clone and fetch for a selected GitHub repository entry |
+| `tevu run`, `tevu run --dry-run` | Preparation clone and fetch, only for a missing clone or commit; model sessions in `run` only |
+| `tevu validate`, `tevu assess`, `tevu report`, `tevu config example` | None; none of them runs gh |
 
 A pull-request reference answer uses this same gh setup and makes one `gh api graphql` call, also with a 30-second limit. GitHub lists at most 250 commits of a pull request; tevu records a pull request only when it can read its complete commit list.

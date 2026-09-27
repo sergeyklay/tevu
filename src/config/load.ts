@@ -4,9 +4,11 @@ import { parseDocument } from 'yaml';
 
 import { TevuConfigSchema } from './schema';
 
+import type { RepositoryInput } from './schema';
 import type {
   ConfigStore,
   LoadConfigErrorKind,
+  RepositoryDefinition,
   TevuConfig,
   TevuResult,
   ValidationFinding,
@@ -67,13 +69,38 @@ export function parseConfigText(
 }
 
 /**
+ * Resolves a repository entry's directory: a local `path` against
+ * `configDirectory`, or a GitHub entry's managed-clone location (already
+ * materialized onto `path` by the schema transform) against
+ * `managedCloneRoot`. Returns `undefined` only for a GitHub entry with no
+ * managed-clone root.
+ */
+export function resolveRepositoryPath(
+  repository: Pick<RepositoryInput, 'path' | 'github'>,
+  configDirectory: string,
+  managedCloneRoot: string | undefined,
+): string | undefined {
+  const { path: repositoryPath, github } = repository;
+  if (github !== undefined) {
+    return managedCloneRoot === undefined || repositoryPath === undefined
+      ? undefined
+      : path.join(managedCloneRoot, repositoryPath);
+  }
+  return repositoryPath === undefined
+    ? undefined
+    : resolveConfigPath(configDirectory, repositoryPath);
+}
+
+/**
  * Resolves a parsed configuration's relative paths against `configPath`'s
- * directory and enforces real-path separation between the run output
- * directory and every configured repository.
+ * directory and `managedCloneRoot`, and enforces real-path separation
+ * between the run output directory, every configured repository, and every
+ * managed clone.
  */
 export async function resolveConfig(
   config: TevuConfig,
   configPath: string,
+  managedCloneRoot: string | undefined,
 ): Promise<TevuResult<TevuConfig, 'ConfigValidationError'>> {
   const configDirectory = path.dirname(path.resolve(configPath));
   const resolved: TevuConfig = {
@@ -95,7 +122,7 @@ export async function resolveConfig(
     ),
     repositories: config.repositories.map((repository) => ({
       ...repository,
-      path: resolveConfigPath(configDirectory, repository.path),
+      path: resolveRepositoryPath(repository, configDirectory, managedCloneRoot) ?? repository.path,
     })),
     tasks: config.tasks.map((task) =>
       task.checks.overlay === undefined
@@ -110,12 +137,13 @@ export async function resolveConfig(
     ),
   };
 
-  const separationFindings = await collectSeparationFindings(resolved);
-  if (separationFindings.length > 0) {
-    return {
-      ok: false,
-      error: { kind: 'ConfigValidationError', findings: separationFindings },
-    };
+  const findings = [
+    ...missingManagedCloneRootFindings(config, managedCloneRoot),
+    ...(await collectSeparationFindings(resolved)),
+    ...(await collectManagedCloneOverlapFindings(resolved, managedCloneRoot)),
+  ];
+  if (findings.length > 0) {
+    return { ok: false, error: { kind: 'ConfigValidationError', findings } };
   }
 
   return { ok: true, value: resolved };
@@ -134,6 +162,7 @@ export async function resolveConfig(
 export async function loadConfig(
   configPath: string,
   configStore: Pick<ConfigStore, 'readText'>,
+  managedCloneRoot: string | undefined,
 ): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>> {
   const text = await configStore.readText(configPath);
   if (!text.ok) {
@@ -143,7 +172,7 @@ export async function loadConfig(
   if (!parsed.ok) {
     return parsed;
   }
-  return resolveConfig(parsed.value, configPath);
+  return resolveConfig(parsed.value, configPath, managedCloneRoot);
 }
 
 /** Resolves a configuration-relative path against the configuration file directory. */
@@ -177,6 +206,65 @@ function sortKeysDeep(value: unknown): unknown {
   return value;
 }
 
+/** `repositories.<id>.github` for a GitHub entry; `repositories.<id>.path` for a path entry. */
+function repositoryPathIdentifier(repository: RepositoryDefinition): string {
+  return repository.github === undefined
+    ? `repositories.${repository.id}.path`
+    : `repositories.${repository.id}.github`;
+}
+
+/** A GitHub entry with no managed-clone root: `resolveRepositoryPath` cannot locate its clone. */
+function missingManagedCloneRootFindings(
+  config: TevuConfig,
+  managedCloneRoot: string | undefined,
+): ValidationFinding[] {
+  if (managedCloneRoot !== undefined) {
+    return [];
+  }
+  return config.repositories
+    .filter((repository) => repository.github !== undefined)
+    .map((repository) => ({
+      severity: 'error' as const,
+      identifier: `repositories.${repository.id}.github`,
+      message:
+        'a GitHub repository entry needs XDG_CACHE_HOME or HOME set to an absolute path for its managed clone',
+    }));
+}
+
+/**
+ * With at least one GitHub entry present, flags a path entry whose real path
+ * equals, lies inside, or contains the managed-clone root after real-path
+ * resolution: tevu never writes to a repository declared by `path`.
+ */
+async function collectManagedCloneOverlapFindings(
+  config: TevuConfig,
+  managedCloneRoot: string | undefined,
+): Promise<ValidationFinding[]> {
+  const hasGitHubEntry = config.repositories.some((repository) => repository.github !== undefined);
+  if (!hasGitHubEntry || managedCloneRoot === undefined) {
+    return [];
+  }
+  const rootReal = await canonicalRealPath(managedCloneRoot);
+  const findings: ValidationFinding[] = [];
+  for (const repository of config.repositories) {
+    if (repository.github !== undefined) {
+      continue;
+    }
+    const repositoryReal = await canonicalRealPath(repository.path);
+    if (
+      isSamePathOrInside(repositoryReal, rootReal) ||
+      isSamePathOrInside(rootReal, repositoryReal)
+    ) {
+      findings.push({
+        severity: 'error',
+        identifier: `repositories.${repository.id}.path`,
+        message: `repository "${repository.id}" overlaps the managed-clone directory "${managedCloneRoot}" after real-path resolution`,
+      });
+    }
+  }
+  return findings;
+}
+
 async function collectSeparationFindings(config: TevuConfig): Promise<ValidationFinding[]> {
   const findings: ValidationFinding[] = [];
   const outputReal = await canonicalRealPath(config.run.output_dir);
@@ -193,7 +281,7 @@ async function collectSeparationFindings(config: TevuConfig): Promise<Validation
     } else if (isSamePathOrInside(outputReal, repositoryReal)) {
       findings.push({
         severity: 'error',
-        identifier: `repositories.${repository.id}.path`,
+        identifier: repositoryPathIdentifier(repository),
         message: `repository "${repository.id}" overlaps the run output directory after real-path resolution`,
       });
     }
