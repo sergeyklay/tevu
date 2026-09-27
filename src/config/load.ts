@@ -176,7 +176,7 @@ export async function loadConfig(
 }
 
 /** Resolves a configuration-relative path against the configuration file directory. */
-export function resolveConfigPath(configDirectory: string, target: string): string {
+function resolveConfigPath(configDirectory: string, target: string): string {
   return path.resolve(configDirectory, target);
 }
 
