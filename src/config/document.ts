@@ -236,6 +236,12 @@ function buildRepositoryNode(
   repository: RepositoryInput,
   guard: GuardedRedactor,
 ): Record<string, unknown> {
+  if (repository.github !== undefined) {
+    return { id: guard.redact(repository.id), github: guard.redact(repository.github) };
+  }
+  if (repository.path === undefined) {
+    throw new Error('unreachable: a repository entry declares path when github is absent');
+  }
   return { id: guard.redact(repository.id), path: guard.redact(repository.path) };
 }
 

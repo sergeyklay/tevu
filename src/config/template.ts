@@ -49,6 +49,8 @@ repositories:
     #   before_checks: [[npm, ci]]  # after restore and overlay, before the checks
     #   timeout: 5m                 # limit for one setup command; required with setup
     #   env: [NPM_CONFIG_REGISTRY]  # ordinary variables the setup commands receive
+  # - id: app-upstream              # a GitHub repository tevu clones itself, instead of a path
+  #   github: your-org/your-app     # OWNER/REPO, or https://HOST/OWNER/REPO on GitHub Enterprise Server
 
 # --- Models -----------------------------------------------------------------
 # What the benchmark compares: at least two entries.

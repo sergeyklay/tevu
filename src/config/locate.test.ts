@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createConfigStore } from '@/adapters/artifact-store';
 
 import { loadConfig } from './load';
-import { locateConfig } from './locate';
+import { locateConfig, managedCloneRoot } from './locate';
 
 import type { ConfigStore, TevuError, TevuResult } from '@/domain/types';
 
@@ -15,6 +15,14 @@ type Environment = { cwd: string; home: string | undefined; xdgConfigHome: strin
 
 function buildEnvironment(overrides: Partial<Environment> = {}): Environment {
   return { cwd: '/work', home: undefined, xdgConfigHome: undefined, ...overrides };
+}
+
+type CloneRootEnvironment = { home: string | undefined; xdgCacheHome: string | undefined };
+
+function buildCloneRootEnvironment(
+  overrides: Partial<CloneRootEnvironment> = {},
+): CloneRootEnvironment {
+  return { home: undefined, xdgCacheHome: undefined, ...overrides };
 }
 
 type ReadTextResult = TevuResult<string, 'ConfigReadError'>;
@@ -47,6 +55,42 @@ function buildConfigStore(routes: Record<string, ReadTextResult>): Pick<ConfigSt
     }),
   };
 }
+
+describe('managedCloneRoot', () => {
+  it('prefers an absolute XDG_CACHE_HOME over $HOME/.cache', () => {
+    const environment = buildCloneRootEnvironment({
+      home: '/home/user',
+      xdgCacheHome: '/home/user/xdg-cache',
+    });
+
+    expect(managedCloneRoot(environment)).toBe('/home/user/xdg-cache/tevu/repositories');
+  });
+
+  it('falls back to $HOME/.cache/tevu/repositories when XDG_CACHE_HOME is unset', () => {
+    const environment = buildCloneRootEnvironment({ home: '/home/user' });
+
+    expect(managedCloneRoot(environment)).toBe('/home/user/.cache/tevu/repositories');
+  });
+
+  it.each([
+    { label: 'a relative path', xdgCacheHome: 'relative/xdg-cache' },
+    { label: 'an empty string', xdgCacheHome: '' },
+  ])('ignores $label XDG_CACHE_HOME and falls back to $HOME/.cache', ({ xdgCacheHome }) => {
+    const environment = buildCloneRootEnvironment({ home: '/home/user', xdgCacheHome });
+
+    expect(managedCloneRoot(environment)).toBe('/home/user/.cache/tevu/repositories');
+  });
+
+  it('returns undefined when neither XDG_CACHE_HOME nor HOME is an absolute path', () => {
+    const environment = buildCloneRootEnvironment({ home: 'relative/home' });
+
+    expect(managedCloneRoot(environment)).toBeUndefined();
+  });
+
+  it('returns undefined when both are unset', () => {
+    expect(managedCloneRoot(buildCloneRootEnvironment())).toBeUndefined();
+  });
+});
 
 describe('locateConfig', () => {
   describe('explicit mode', () => {
@@ -343,7 +387,7 @@ tasks:
     );
     const configStore = createConfigStore({ redact: (text) => text });
 
-    const loaded = await loadConfig(configPath, configStore);
+    const loaded = await loadConfig(configPath, configStore, undefined);
 
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;

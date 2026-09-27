@@ -10,6 +10,10 @@ Each tevu case therefore gets a sealed repository whose history begins with the 
 
 Tracked project instructions remain part of the task. Host sessions, global prompts, caches, and login stores do not: they are state from the operator's previous work, not a shared starting condition. The precise source-tree rules and unsupported features are in the [configuration reference](../reference/configuration.md#source-trees).
 
+## A managed clone is a source repository like any other
+
+A GitHub repository entry's managed clone is, for isolation purposes, a source repository like a local path: read-only to every case, and sealed the same way, into a repository with one synthetic root commit at `base_commit`. Preparation, the clone or fetch a command performs before validation, finishes before the first case is sealed; a concurrent fetch by another tevu command only adds objects and refs, so it cannot reach an already-sealed case. The clone lies outside every case and no case-scoped variable names it, though an agent with shell access can still find it on disk, the same limitation [Context isolation is not a sandbox](#context-isolation-is-not-a-sandbox) describes for hidden checks. See [GitHub repositories](../reference/configuration.md#github-repositories) for the clone's layout and lifecycle.
+
 ## The evaluator has a different job
 
 The agent needs enough context and credentials to produce a solution. An acceptance command needs the submitted files and its declared test inputs. Sharing the agent's home or authentication state would give the evaluator dependencies that its check definition does not describe.
@@ -34,7 +38,7 @@ This isolation is context isolation, not a sandbox, for the same reason case iso
 
 A task may record a reference solution: a pull request or a commit `tevu task add` proposed the base commit from. It is provenance, kept for later use, and it never reaches an agent prompt. The sealed repository already excludes every commit after the base, every reference commit included, so a case worktree cannot contain them.
 
-`tevu validate` and `tevu run` also reject a task whose agent prompt contains, in any letter case, the first 7 characters of a recorded reference commit, the same rule enforced for `base_commit`; for a pull-request reference, they also reject its `OWNER/REPO#NUMBER` key and its URL form, matched as plain substrings built from the recorded identifier. Neither check sees the pull request itself: `validate` and `run` never call GitHub, so a rename or a transfer of the repository after the task was added is not followed, and neither command checks a prompt for any other hint to the accepted solution, such as a bare `#NUMBER`, a branch name, or a title.
+`tevu validate` and `tevu run` also reject a task whose agent prompt contains, in any letter case, the first 7 characters of a recorded reference commit, the same rule enforced for `base_commit`; for a pull-request reference, they also reject its `OWNER/REPO#NUMBER` key and its URL form, matched as plain substrings built from the recorded identifier. Neither check sees the pull request itself: `validate` never contacts GitHub, and `run` contacts it only to clone or fetch a GitHub repository entry's managed clone, never to read the pull request, so a rename or a transfer of the repository after the task was added is not followed, and neither command checks a prompt for any other hint to the accepted solution, such as a bare `#NUMBER`, a branch name, or a title.
 
 The configuration file and `run.json` still record the reference outside the case, which is context isolation, not a sandbox: see [Context isolation is not a sandbox](#context-isolation-is-not-a-sandbox).
 

@@ -12,7 +12,13 @@ import { validateConfig } from '@/application/validate';
 
 import { renderConfigDocument } from './document';
 import { canonicalConfigSerialization, loadConfig, parseConfigText } from './load';
-import { AGENT_NAMES, agentNamesInUse, agentSettingsSchema, TevuConfigSchema } from './schema';
+import {
+  AGENT_NAMES,
+  agentNamesInUse,
+  agentSettingsSchema,
+  repositoryInputOf,
+  TevuConfigSchema,
+} from './schema';
 import { CONFIG_TEMPLATE } from './template';
 
 import type {
@@ -265,6 +271,7 @@ function buildTaskDependencies(overrides: Partial<TaskDependencies> = {}): TaskD
     git: buildGit(),
     registerSecrets: vi.fn(),
     redact: (text: string) => text,
+    managedCloneRoot: undefined,
     ...overrides,
   };
 }
@@ -377,6 +384,7 @@ function buildValidationDependencies(
     agents: new Map([['opencode', buildFakeAgentAdapter()]]),
     environments: buildEnvironments(),
     prerequisites: buildPrerequisites(),
+    clones: { inspectClone: vi.fn(async () => 'repository' as const) },
     ...overrides,
   };
 }
@@ -420,6 +428,57 @@ tasks:
       - The spec is approved
     checks:
 ${options.checksExtra ?? ''}      acceptance:
+        - id: api-returns-200
+          description: The API returns 200
+          manual: true
+      done:
+        - id: tests-pass
+          description: The tests pass
+          run: [npm, test]
+          timeout: 1m
+`;
+}
+
+/** A single-repository configuration whose repository is a `github` entry, and an optional second repository. */
+function githubRepositoryConfigYaml(options: {
+  outputDirectory: string;
+  github: string;
+  command: string;
+  /** Extra repository entries, indented to two spaces, appended after the GitHub entry. */
+  extraRepositories?: string;
+}): string {
+  return `version: 1
+run:
+  output_dir: ${options.outputDirectory}
+  concurrency: 2
+  timeout: 10m
+  stop_grace: 3s
+agents:
+  opencode:
+    command: ${options.command}
+    secrets: []
+    env: []
+repositories:
+  - id: sample-repo
+    github: ${options.github}
+${options.extraRepositories ?? ''}models:
+  - id: alpha
+    model: openai/gpt-5
+    effort: high
+  - id: beta
+    model: anthropic/claude-4
+    effort: max
+tasks:
+  - id: write-report
+    title: Write the report
+    repo: sample-repo
+    base_commit: "0123456789abcdef0123456789abcdef01234567"
+    description: Write a report
+    prompt: Write the report
+    readiness:
+      - The spec is approved
+    checks:
+      acceptance:
         - id: api-returns-200
           description: The API returns 200
           manual: true
@@ -1608,6 +1667,127 @@ describe('TevuConfigSchema', () => {
       });
     });
   });
+
+  describe('github repository entry (AC-1, AC-15, V1)', () => {
+    it('rejects a repository entry declaring neither path nor github', () => {
+      const config = buildConfig({
+        repositories: [{ id: 'sample-repo' } as unknown as RepositoryDefinition],
+      });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: 'repositories.0',
+        message: 'a repository declares path (a local repository) or github (a GitHub repository)',
+      });
+    });
+
+    it('rejects a repository entry declaring both path and github', () => {
+      const config = buildConfig({
+        repositories: [
+          {
+            id: 'sample-repo',
+            path: '../app',
+            github: 'octo/app',
+          } as unknown as RepositoryDefinition,
+        ],
+      });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: 'repositories.0',
+        message: 'a repository declares either path or github, not both',
+      });
+    });
+
+    const GITHUB_GRAMMAR_MESSAGE =
+      'github must be OWNER/REPO or https://HOST/OWNER/REPO, with a HOST of letters, digits, hyphens, and dots, and without surrounding spaces, user info, a port, a query, or a fragment';
+
+    it.each([
+      { description: 'no slash', github: 'octo-app' },
+      { description: 'leading whitespace', github: '  octo/app' },
+      { description: 'a URL with user info', github: 'https://user:pass@github.com/octo/app' },
+      { description: 'a URL with a port', github: 'https://github.com:8443/octo/app' },
+      {
+        description: 'an IPv6-literal host, which fails the plain-host rule',
+        github: 'https://[::1]/octo/app',
+      },
+    ])('rejects github with $description', ({ github }) => {
+      const config = buildConfig({
+        repositories: [{ id: 'sample-repo', github } as unknown as RepositoryDefinition],
+      });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: 'repositories.0.github',
+        message: GITHUB_GRAMMAR_MESSAGE,
+      });
+    });
+
+    it('accepts the short form and materializes an absolute-clone-location path, lowercased', () => {
+      const config = buildConfig({
+        repositories: [{ id: 'upstream', github: 'Octo/App' } as unknown as RepositoryDefinition],
+        tasks: [buildTaskDefinition({ repo: 'upstream' })],
+      });
+
+      const accepted = expectSchemaAcceptance(config);
+
+      expect(accepted.repositories[0]).toEqual({
+        id: 'upstream',
+        github: 'Octo/App',
+        path: 'github.com/octo/app.git',
+      });
+    });
+
+    it('accepts a GitHub Enterprise Server URL naming its own host', () => {
+      const config = buildConfig({
+        repositories: [
+          {
+            id: 'upstream',
+            github: 'https://ghe.example.com/platform/api',
+          } as unknown as RepositoryDefinition,
+        ],
+        tasks: [buildTaskDefinition({ repo: 'upstream' })],
+      });
+
+      const accepted = expectSchemaAcceptance(config);
+
+      expect(accepted.repositories[0]?.path).toBe('ghe.example.com/platform/api.git');
+    });
+
+    it('keeps setup on a GitHub entry', () => {
+      const config = buildConfig({
+        repositories: [
+          {
+            id: 'upstream',
+            github: 'octo/app',
+            setup: { before_agent: [['npm', 'ci']], timeout: '1m', env: [] },
+          } as unknown as RepositoryDefinition,
+        ],
+        tasks: [buildTaskDefinition({ repo: 'upstream' })],
+      });
+
+      const accepted = expectSchemaAcceptance(config);
+
+      expect(accepted.repositories[0]?.setup).toEqual({
+        before_agent: [['npm', 'ci']],
+        timeout: '1m',
+        env: [],
+      });
+    });
+
+    it('re-parses a materialized GitHub entry through repositoryInputOf to a deeply equal value', () => {
+      const config = buildConfig({
+        repositories: [{ id: 'upstream', github: 'octo/app' } as unknown as RepositoryDefinition],
+        tasks: [buildTaskDefinition({ repo: 'upstream' })],
+      });
+      const parsedOnce = expectSchemaAcceptance(config);
+
+      const reparsedInput = {
+        ...parsedOnce,
+        repositories: parsedOnce.repositories.map(repositoryInputOf),
+      };
+      const parsedTwice = expectSchemaAcceptance(reparsedInput);
+
+      expect(parsedTwice).toEqual(parsedOnce);
+    });
+  });
 });
 
 describe('loadConfig', () => {
@@ -1637,7 +1817,7 @@ describe('loadConfig', () => {
       }),
     );
 
-    const config = expectOk(await loadConfig(configPath, configStore));
+    const config = expectOk(await loadConfig(configPath, configStore, undefined));
 
     expect(config.run.output_dir).toBe(join(tempDirectory, 'runs'));
     expect(config.repositories[0]?.path).toBe(join(tempDirectory, 'repo'));
@@ -1651,7 +1831,7 @@ describe('loadConfig', () => {
       configYaml({ outputDirectory: './runs', repositoryPath: './repo', command: 'opencode' }),
     );
 
-    const config = expectOk(await loadConfig(configPath, configStore));
+    const config = expectOk(await loadConfig(configPath, configStore, undefined));
 
     expect(config.agents.opencode.command).toBe('opencode');
   });
@@ -1678,7 +1858,10 @@ describe('loadConfig', () => {
   ])('reports not-found for $description', async ({ buildPath }) => {
     const requestedPath = await buildPath(tempDirectory);
 
-    const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
+    const error = expectFailure(
+      await loadConfig(requestedPath, configStore, undefined),
+      'ConfigReadError',
+    );
 
     expect(error).toEqual({
       kind: 'ConfigReadError',
@@ -1694,7 +1877,10 @@ describe('loadConfig', () => {
   ])('reports not-a-file for $description', async ({ buildPath }) => {
     const requestedPath = await buildPath(tempDirectory);
 
-    const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
+    const error = expectFailure(
+      await loadConfig(requestedPath, configStore, undefined),
+      'ConfigReadError',
+    );
 
     expect(error).toEqual({
       kind: 'ConfigReadError',
@@ -1710,7 +1896,10 @@ describe('loadConfig', () => {
     await fs.chmod(requestedPath, 0o000);
 
     try {
-      const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
+      const error = expectFailure(
+        await loadConfig(requestedPath, configStore, undefined),
+        'ConfigReadError',
+      );
 
       expect(error).toEqual({
         kind: 'ConfigReadError',
@@ -1734,7 +1923,7 @@ describe('loadConfig', () => {
 
       try {
         const error = expectFailure(
-          await loadConfig(requestedPath, configStore),
+          await loadConfig(requestedPath, configStore, undefined),
           'ConfigReadError',
         );
 
@@ -1755,7 +1944,10 @@ describe('loadConfig', () => {
     await fs.symlink('loop-a', join(tempDirectory, 'loop-b'));
     const requestedPath = join(tempDirectory, 'loop-a');
 
-    const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
+    const error = expectFailure(
+      await loadConfig(requestedPath, configStore, undefined),
+      'ConfigReadError',
+    );
 
     expect(error).toEqual({
       kind: 'ConfigReadError',
@@ -1771,7 +1963,10 @@ describe('loadConfig', () => {
       Object.assign(new Error('blocked'), { code: 'EPERM' }),
     );
 
-    const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
+    const error = expectFailure(
+      await loadConfig(requestedPath, configStore, undefined),
+      'ConfigReadError',
+    );
 
     expect(error).toEqual({
       kind: 'ConfigReadError',
@@ -1787,7 +1982,10 @@ describe('loadConfig', () => {
       Object.assign(new Error('is a directory'), { code: 'EISDIR' }),
     );
 
-    const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
+    const error = expectFailure(
+      await loadConfig(requestedPath, configStore, undefined),
+      'ConfigReadError',
+    );
 
     expect(error).toEqual({
       kind: 'ConfigReadError',
@@ -1801,7 +1999,10 @@ describe('loadConfig', () => {
     const requestedPath = join(tempDirectory, 'tevu.yaml');
     vi.mocked(fs.stat).mockRejectedValueOnce('boom');
 
-    const error = expectFailure(await loadConfig(requestedPath, configStore), 'ConfigReadError');
+    const error = expectFailure(
+      await loadConfig(requestedPath, configStore, undefined),
+      'ConfigReadError',
+    );
 
     expect(error).toEqual({
       kind: 'ConfigReadError',
@@ -1814,7 +2015,10 @@ describe('loadConfig', () => {
   it('reports a ConfigParseError with a line identifier for malformed YAML', async () => {
     const configPath = await writeConfigFile('version: 1\nbroken: [1, 2');
 
-    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigParseError');
+    const error = expectFailure(
+      await loadConfig(configPath, configStore, undefined),
+      'ConfigParseError',
+    );
 
     expect(error.findings.length).toBeGreaterThan(0);
     expect(error.findings[0]?.severity).toBe('error');
@@ -1825,7 +2029,10 @@ describe('loadConfig', () => {
   it('reports ConfigParseError when YAML aliases cannot be resolved', async () => {
     const configPath = await writeConfigFile('m:\n  <<: *missing\n');
 
-    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigParseError');
+    const error = expectFailure(
+      await loadConfig(configPath, configStore, undefined),
+      'ConfigParseError',
+    );
 
     expect(error.findings).toEqual([
       { severity: 'error', identifier: 'config', message: 'Cannot resolve YAML aliases' },
@@ -1835,7 +2042,10 @@ describe('loadConfig', () => {
   it('reports field identifiers for schema violations', async () => {
     const configPath = await writeConfigFile('version: 2\n');
 
-    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
+    const error = expectFailure(
+      await loadConfig(configPath, configStore, undefined),
+      'ConfigValidationError',
+    );
 
     const identifiers = error.findings.map((finding) => finding.identifier);
     expect(identifiers).toContain('version');
@@ -1848,7 +2058,10 @@ describe('loadConfig', () => {
       `${configYaml({ outputDirectory: './runs', repositoryPath: './repo', command: 'opencode' })}\nunknownSection: {}\n`,
     );
 
-    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
+    const error = expectFailure(
+      await loadConfig(configPath, configStore, undefined),
+      'ConfigValidationError',
+    );
 
     expect(error.findings).toContainEqual({
       severity: 'error',
@@ -1867,7 +2080,10 @@ describe('loadConfig', () => {
       }),
     );
 
-    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
+    const error = expectFailure(
+      await loadConfig(configPath, configStore, undefined),
+      'ConfigValidationError',
+    );
 
     expect(error.findings).toEqual([
       {
@@ -1885,7 +2101,10 @@ describe('loadConfig', () => {
       configYaml({ outputDirectory: './runs', repositoryPath: './runs/repo', command: 'opencode' }),
     );
 
-    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
+    const error = expectFailure(
+      await loadConfig(configPath, configStore, undefined),
+      'ConfigValidationError',
+    );
 
     expect(error.findings).toEqual([
       {
@@ -1904,7 +2123,10 @@ describe('loadConfig', () => {
       configYaml({ outputDirectory: './runs-link', repositoryPath: './repo', command: 'opencode' }),
     );
 
-    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
+    const error = expectFailure(
+      await loadConfig(configPath, configStore, undefined),
+      'ConfigValidationError',
+    );
 
     expect(error.findings).toEqual([
       {
@@ -1914,6 +2136,113 @@ describe('loadConfig', () => {
           'run.output_dir must be outside repository "sample-repo" after real-path resolution',
       },
     ]);
+  });
+
+  describe('GitHub repository entry findings (AC-15, section 3.3.5)', () => {
+    it('reports the missing-managed-clone-root finding when a GitHub entry has no root', async () => {
+      const configPath = await writeConfigFile(
+        githubRepositoryConfigYaml({
+          outputDirectory: './runs',
+          github: 'octo/app',
+          command: 'opencode',
+        }),
+      );
+
+      const error = expectFailure(
+        await loadConfig(configPath, configStore, undefined),
+        'ConfigValidationError',
+      );
+
+      expect(error.findings).toEqual([
+        {
+          severity: 'error',
+          identifier: 'repositories.sample-repo.github',
+          message:
+            'a GitHub repository entry needs XDG_CACHE_HOME or HOME set to an absolute path for its managed clone',
+        },
+      ]);
+    });
+
+    it('resolves a GitHub entry clone path against the managed-clone root', async () => {
+      const configPath = await writeConfigFile(
+        githubRepositoryConfigYaml({
+          outputDirectory: './runs',
+          github: 'octo/app',
+          command: 'opencode',
+        }),
+      );
+      const root = join(tempDirectory, 'cache');
+
+      const config = expectOk(await loadConfig(configPath, configStore, root));
+
+      expect(config.repositories[0]).toEqual({
+        id: 'sample-repo',
+        github: 'octo/app',
+        path: join(root, 'github.com/octo/app.git'),
+      });
+    });
+
+    it('rejects a managed clone overlapping the run output directory, naming repositories.<id>.github', async () => {
+      const root = join(tempDirectory, 'cache');
+      await fs.mkdir(root, { recursive: true });
+      const configPath = await writeConfigFile(
+        githubRepositoryConfigYaml({
+          outputDirectory: './cache',
+          github: 'octo/app',
+          command: 'opencode',
+        }),
+      );
+
+      const error = expectFailure(
+        await loadConfig(configPath, configStore, root),
+        'ConfigValidationError',
+      );
+
+      expect(error.findings).toEqual([
+        {
+          severity: 'error',
+          identifier: 'repositories.sample-repo.github',
+          message:
+            'repository "sample-repo" overlaps the run output directory after real-path resolution',
+        },
+      ]);
+    });
+
+    it('flags a path entry whose real path equals the managed-clone root, when a GitHub entry is present', async () => {
+      const root = join(tempDirectory, 'cache');
+      const configPath = await writeConfigFile(
+        githubRepositoryConfigYaml({
+          outputDirectory: './runs',
+          github: 'octo/app',
+          command: 'opencode',
+          extraRepositories: '  - id: local-repo\n    path: ./cache\n',
+        }),
+      );
+
+      const error = expectFailure(
+        await loadConfig(configPath, configStore, root),
+        'ConfigValidationError',
+      );
+
+      expect(error.findings).toEqual([
+        {
+          severity: 'error',
+          identifier: 'repositories.local-repo.path',
+          message: `repository "local-repo" overlaps the managed-clone directory "${root}" after real-path resolution`,
+        },
+      ]);
+    });
+
+    it('does not flag a path entry overlapping the managed-clone root directory when no GitHub entry is present', async () => {
+      const root = join(tempDirectory, 'cache');
+      const configPath = await writeConfigFile(
+        configYaml({ outputDirectory: './runs', repositoryPath: './cache', command: 'opencode' }),
+      );
+
+      const config = expectOk(await loadConfig(configPath, configStore, root));
+
+      expect(config.repositories[0]?.path).toBe(root);
+    });
   });
 
   it('round-trips a github task source through ConfigStore.replaceText and readText', async () => {
@@ -2073,7 +2402,7 @@ describe('ConfigStore.readText and loadConfig ConfigReadError parity', () => {
     const configStore = createConfigStore({ redact: (text) => text });
 
     const fromStore = await configStore.readText(requestedPath);
-    const fromLoad = await loadConfig(requestedPath, configStore);
+    const fromLoad = await loadConfig(requestedPath, configStore, undefined);
 
     expect(fromStore.ok).toBe(false);
     expect(fromLoad.ok).toBe(false);
@@ -3192,6 +3521,219 @@ describe('validateConfig', () => {
     });
   });
 
+  describe('a task on a GitHub entry (AC-10, AC-19, section 3.3.5)', () => {
+    const CLONE_DIRECTORY = '/cache/tevu/repositories/github.com/octo/app.git';
+
+    function buildGitHubRepository(
+      overrides: Partial<RepositoryDefinition> = {},
+    ): RepositoryDefinition {
+      return { id: 'sample-repo', github: 'octo/app', path: CLONE_DIRECTORY, ...overrides };
+    }
+
+    /** A schema-accepted base config with its sole repository swapped for a GitHub entry. */
+    function buildGitHubTaskConfig(
+      tasks: TaskInput[],
+      repositoryOverrides: Partial<RepositoryDefinition> = {},
+    ): TevuConfig {
+      return {
+        ...expectSchemaAcceptance(buildConfig({ tasks })),
+        repositories: [buildGitHubRepository(repositoryOverrides)],
+      };
+    }
+
+    it('reports a missing-clone finding and skips commit resolution entirely', async () => {
+      const inspectClone = vi.fn(async () => 'missing' as const);
+      const dependencies = buildValidationDependencies({ clones: { inspectClone } });
+      const config = buildGitHubTaskConfig([buildTaskDefinition()]);
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(false);
+      expect(report.findings).toContainEqual({
+        severity: 'error',
+        identifier: 'repositories.sample-repo.github',
+        message: `repository "sample-repo" has no clone of github.com/octo/app at "${CLONE_DIRECTORY}"; tevu run --dry-run clones it`,
+      });
+      expect(inspectClone).toHaveBeenCalledExactlyOnceWith(CLONE_DIRECTORY);
+      expect(dependencies.git.validateSource).not.toHaveBeenCalled();
+      expect(dependencies.git.resolveCommit).not.toHaveBeenCalled();
+    });
+
+    it('reports a not-a-repository finding naming the removal-and-reclone hint', async () => {
+      const inspectClone = vi.fn(async () => 'not-a-repository' as const);
+      const dependencies = buildValidationDependencies({ clones: { inspectClone } });
+      const config = buildGitHubTaskConfig([buildTaskDefinition()]);
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.findings).toContainEqual({
+        severity: 'error',
+        identifier: 'repositories.sample-repo.github',
+        message: `"${CLONE_DIRECTORY}" is not a clone tevu made for repository "sample-repo"; remove it, then tevu run --dry-run clones github.com/octo/app there`,
+      });
+    });
+
+    it('inspects the clone exactly once even when several tasks name the same entry', async () => {
+      const inspectClone = vi.fn(async () => 'missing' as const);
+      const dependencies = buildValidationDependencies({ clones: { inspectClone } });
+      const config = buildGitHubTaskConfig([
+        buildTaskDefinition({ id: 'task-one' }),
+        buildTaskDefinition({ id: 'task-two' }),
+      ]);
+
+      await validateConfig(config, dependencies);
+
+      expect(inspectClone).toHaveBeenCalledOnce();
+    });
+
+    it('leaves today\'s checks unaffected when the clone state is "repository"', async () => {
+      const inspectClone = vi.fn(async () => 'repository' as const);
+      const dependencies = buildValidationDependencies({
+        clones: { inspectClone },
+        git: buildFullGit({
+          ...buildGit(),
+          resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) => ({
+            kind: 'found' as const,
+            commit,
+          })),
+        }),
+      });
+      const config = buildGitHubTaskConfig([buildTaskDefinition()]);
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(true);
+      expect(report.findings).toEqual([]);
+      expect(dependencies.git.validateSource).toHaveBeenCalledOnce();
+    });
+
+    it("names the tevu run --dry-run fetch when a pull-request task's full-hash base is not in the clone", async () => {
+      const BASE = 'abcdef0123456789abcdef0123456789abcdef01';
+      const PR_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+      const task = buildTaskDefinition({
+        base_commit: BASE,
+        reference: { kind: 'pull-request', identifier: 'octo/app#128', commits: [PR_COMMIT] },
+      });
+      const validateSource = vi.fn();
+      const dependencies = buildValidationDependencies({
+        clones: { inspectClone: vi.fn(async () => 'repository' as const) },
+        git: buildFullGit({
+          validateSource,
+          resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) =>
+            commit === BASE
+              ? { kind: 'not-found' as const }
+              : { kind: 'found' as const, commit: PR_COMMIT },
+          ),
+        }),
+      });
+      const config = buildGitHubTaskConfig([task]);
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.findings).toContainEqual({
+        severity: 'error',
+        identifier: `tasks.${task.id}.base_commit`,
+        message: `base commit "${BASE}" is not in the clone of repository "sample-repo"; tevu run --dry-run fetches it from github.com/octo/app`,
+      });
+      expect(validateSource).not.toHaveBeenCalled();
+    });
+
+    it('names the tevu run --dry-run fetch when a branch base of a task without a reference is not in the clone', async () => {
+      const task = buildTaskDefinition({ base_commit: 'release-2' });
+      const validateSource = vi.fn();
+      const dependencies = buildValidationDependencies({
+        clones: { inspectClone: vi.fn(async () => 'repository' as const) },
+        git: buildFullGit({
+          validateSource,
+          resolveCommit: vi.fn(async () => ({ kind: 'not-found' as const })),
+        }),
+      });
+      const config = buildGitHubTaskConfig([task]);
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.findings).toContainEqual({
+        severity: 'error',
+        identifier: `tasks.${task.id}.base_commit`,
+        message:
+          'base commit "release-2" is not in the clone of repository "sample-repo"; tevu run --dry-run fetches it from github.com/octo/app',
+      });
+      expect(validateSource).not.toHaveBeenCalled();
+    });
+
+    it('appends the tevu run --dry-run hint to the reference-commits-unavailable warning', async () => {
+      const BASE = 'abcdef0123456789abcdef0123456789abcdef01';
+      const REFERENCE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+      const task = buildTaskDefinition({
+        base_commit: BASE,
+        reference: { kind: 'commit', identifier: 'HEAD~3', commits: [REFERENCE_COMMIT] },
+      });
+      const dependencies = buildValidationDependencies({
+        clones: { inspectClone: vi.fn(async () => 'repository' as const) },
+        git: buildFullGit({
+          validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
+            ok: true as const,
+            value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit: BASE },
+          })),
+          resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) =>
+            commit === BASE
+              ? { kind: 'found' as const, commit: BASE }
+              : { kind: 'not-found' as const },
+          ),
+        }),
+      });
+      const config = buildGitHubTaskConfig([task]);
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.findings).toContainEqual({
+        severity: 'warning',
+        identifier: `tasks.${task.id}.reference`,
+        message:
+          'reference commits not available in repository "sample-repo": 1 of 1; the base commit was not compared with them; tevu run --dry-run fetches them',
+      });
+    });
+
+    it('appends the tevu run --dry-run hint to the merge-commit-unavailable warning', async () => {
+      const BASE = 'abcdef0123456789abcdef0123456789abcdef01';
+      const PR_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+      const MERGE_COMMIT = '1111111111111111111111111111111111111111';
+      const task = buildTaskDefinition({
+        base_commit: BASE,
+        reference: {
+          kind: 'pull-request',
+          identifier: 'octo/app#128',
+          commits: [PR_COMMIT],
+          merge_commit: MERGE_COMMIT,
+        },
+      });
+      const dependencies = buildValidationDependencies({
+        clones: { inspectClone: vi.fn(async () => 'repository' as const) },
+        git: buildFullGit({
+          validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
+            ok: true as const,
+            value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit: BASE },
+          })),
+          resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) =>
+            commit === MERGE_COMMIT
+              ? { kind: 'not-found' as const }
+              : { kind: 'found' as const, commit: PR_COMMIT },
+          ),
+          isAncestor: vi.fn(async () => false),
+        }),
+      });
+      const config = buildGitHubTaskConfig([task]);
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.findings).toContainEqual({
+        severity: 'warning',
+        identifier: `tasks.${task.id}.reference.merge_commit`,
+        message: `merge commit ${MERGE_COMMIT.slice(0, 7)} is not available in repository "sample-repo"; the base commit was not checked to precede it; tevu run --dry-run fetches it`,
+      });
+    });
+  });
+
   describe('with declared model roles', () => {
     it('probes the single configured agent once even when both model roles declare it', async () => {
       const probe = vi.fn(async () => ({
@@ -3274,7 +3816,10 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
+    const error = expectFailure(
+      await loadConfig(configPath, configStore, undefined),
+      'ConfigValidationError',
+    );
 
     expect(error.findings).toContainEqual({
       severity: 'error',
@@ -3293,7 +3838,10 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
+    const error = expectFailure(
+      await loadConfig(configPath, configStore, undefined),
+      'ConfigValidationError',
+    );
 
     expect(error.findings).toContainEqual({
       severity: 'error',
@@ -3313,7 +3861,10 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
+    const error = expectFailure(
+      await loadConfig(configPath, configStore, undefined),
+      'ConfigValidationError',
+    );
 
     expect(error.findings).toContainEqual({
       severity: 'error',
@@ -3333,7 +3884,10 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
+    const error = expectFailure(
+      await loadConfig(configPath, configStore, undefined),
+      'ConfigValidationError',
+    );
 
     expect(error.findings).toEqual([
       {
@@ -3356,7 +3910,10 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(await loadConfig(configPath, configStore), 'ConfigValidationError');
+    const error = expectFailure(
+      await loadConfig(configPath, configStore, undefined),
+      'ConfigValidationError',
+    );
 
     expect(error.findings).toEqual([
       {

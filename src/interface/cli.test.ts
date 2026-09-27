@@ -32,6 +32,7 @@ import type {
   ConfigReadCause,
   IssueSnapshot,
   JiraTrackerSettings,
+  ManagedCloneAdapter,
   ReportResult,
   RunFinding,
   RunResult,
@@ -436,6 +437,13 @@ function configParseError(
   return { kind: 'ConfigParseError', findings };
 }
 
+function failingManagedCloneAdapter(): ManagedCloneAdapter {
+  const fail = (): never => {
+    throw new Error('unexpected managed-clone call for a path repository');
+  };
+  return { inspectClone: fail, clone: fail, fetchCommits: fail, fetchBranchesAndTags: fail };
+}
+
 function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOperations {
   const config = buildTevuConfig();
   return {
@@ -448,6 +456,10 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
     resolveReference: vi.fn(async () => {
       throw new Error('resolveReference should not be called without a scripted reference answer');
     }),
+    ensureManagedCommits: vi.fn(async () => {
+      throw new Error('ensureManagedCommits should not be called without a scripted GitHub entry');
+    }),
+    prepareRepositories: vi.fn(async () => ({ ok: true as const, value: [] })),
     createTask: vi.fn(async () => ({
       ok: true as const,
       value: buildMaterializedTask({ id: 'task-2' }),
@@ -609,6 +621,7 @@ const BOOTSTRAP_PROMPTS = [
   'Add a ordinary variable for the agent?',
   'Configure Jira Cloud issue import?',
   'Repository ID',
+  'Where does tevu read repository "alpha" from?',
   'Local path of repository "alpha" (relative to the configuration file)',
   'Add another repository?',
   'Model entry ID',
@@ -1115,6 +1128,15 @@ describe('tevu CLI', () => {
       expect(operations.importGitHubIssue).not.toHaveBeenCalled();
     });
 
+    it('never calls prepareRepositories and prints no progress line (AC-10)', async () => {
+      const operations = createOperations();
+
+      const { out } = await runCli(['validate'], { operations });
+
+      expect(out).toEqual(['Configuration: tevu.yaml', 'Configuration is valid.']);
+      expect(operations.prepareRepositories).not.toHaveBeenCalled();
+    });
+
     it('prints the invalid verdict with exit 1 and plans nothing', async () => {
       const operations = createOperations({
         validateConfig: vi.fn(async () => ({
@@ -1534,6 +1556,85 @@ describe('tevu CLI', () => {
     });
   });
 
+  describe('repository preparation (AC-9, AC-10)', () => {
+    it.each([{ argv: ['run', '--dry-run'] }, { argv: ['run'] }])(
+      'prints preparation progress and warning lines before validation output for tevu $argv',
+      async ({ argv }) => {
+        const operations = createOperations({
+          prepareRepositories: vi.fn(async (_config, onProgress: (line: string) => void) => {
+            onProgress(
+              'Cloning github.com/octo/app for repository "repo-1" into /cache/github.com/octo/app.git',
+            );
+            return {
+              ok: true as const,
+              value: [
+                {
+                  severity: 'warning' as const,
+                  identifier: 'tasks.task-1.reference',
+                  message:
+                    'reference commits cannot be fetched from github.com/octo/app: git fetch timed out',
+                },
+              ],
+            };
+          }),
+        });
+
+        const { code, out } = await runCli(argv, { operations });
+
+        expect(code).toBe(0);
+        expect(out.slice(0, 3)).toEqual([
+          'Configuration: tevu.yaml',
+          'Cloning github.com/octo/app for repository "repo-1" into /cache/github.com/octo/app.git',
+          'warning tasks.task-1.reference: reference commits cannot be fetched from github.com/octo/app: git fetch timed out',
+        ]);
+        expect(vi.mocked(operations.prepareRepositories)).toHaveBeenCalledExactlyOnceWith(
+          buildTevuConfig(),
+          expect.any(Function),
+        );
+        expect(vi.mocked(operations.validateConfig)).toHaveBeenCalledOnce();
+      },
+    );
+
+    it('maps a ManagedCloneError from prepareRepositories to exit 1 and never validates', async () => {
+      const operations = createOperations({
+        prepareRepositories: vi.fn(async () => ({
+          ok: false as const,
+          error: {
+            kind: 'ManagedCloneError' as const,
+            operation: 'clone' as const,
+            repository: 'github.com/octo/app',
+            reason: 'git clone exited with code 128',
+          },
+        })),
+      });
+
+      const { code, out, err } = await runCli(['run', '--dry-run'], { operations });
+
+      expect(code).toBe(1);
+      expect(out).toEqual(['Configuration: tevu.yaml']);
+      expect(err).toEqual([
+        'error: cloning github.com/octo/app failed: git clone exited with code 128',
+      ]);
+      expect(operations.validateConfig).not.toHaveBeenCalled();
+      expect(operations.planBenchmark).not.toHaveBeenCalled();
+    });
+
+    it('maps a CancellationError from prepareRepositories to exit 130', async () => {
+      const operations = createOperations({
+        prepareRepositories: vi.fn(async () => ({
+          ok: false as const,
+          error: { kind: 'CancellationError' as const, activeCaseIds: [] },
+        })),
+      });
+
+      const { code, err } = await runCli(['run'], { operations });
+
+      expect(code).toBe(130);
+      expect(err).toEqual(['Cancelled.']);
+      expect(operations.validateConfig).not.toHaveBeenCalled();
+    });
+  });
+
   describe('run --repeat', () => {
     it.each(['0', '00', 'abc', '1.5', '-1', '+3', ' 3', '1e3', '101', '100000000', ''])(
       'rejects %j with exit code 1 before any ProgramOperations call (AC-4, verification properties 8, 9)',
@@ -1924,6 +2025,7 @@ describe('tevu CLI', () => {
         false,
         false,
         'alpha',
+        'path',
         '../repos/alpha',
         false,
         'c1',
@@ -1954,6 +2056,87 @@ describe('tevu CLI', () => {
       });
     });
 
+    const GITHUB_GRAMMAR_MESSAGE =
+      'github must be OWNER/REPO or https://HOST/OWNER/REPO, with a HOST of letters, digits, hyphens, and dots, and without surrounding spaces, user info, a port, a query, or a fragment';
+
+    it('offers the GitHub repository option during bootstrap and re-prompts on a malformed answer (AC-7)', async () => {
+      const operations = createOperations({ configExists: vi.fn(async () => false) });
+      scriptAnswers(
+        '/tmp/bench-artifacts',
+        '4',
+        '10m',
+        '5s',
+        '',
+        'opencode',
+        false,
+        false,
+        false,
+        'alpha',
+        'github',
+        { invalid: 'bad repo' },
+        'octo/app',
+        clack.CANCEL,
+      );
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(130);
+      expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
+        'tevu task add',
+        ...BOOTSTRAP_PROMPTS.slice(0, 10),
+        'Where does tevu read repository "alpha" from?',
+        'GitHub repository of "alpha" (OWNER/REPO, or https://HOST/OWNER/REPO for GitHub Enterprise Server)',
+        'GitHub repository of "alpha" (OWNER/REPO, or https://HOST/OWNER/REPO for GitHub Enterprise Server)',
+        'Add another repository?',
+      ]);
+      expect(clack.state.rejections).toEqual([
+        {
+          kind: 'text',
+          message:
+            'GitHub repository of "alpha" (OWNER/REPO, or https://HOST/OWNER/REPO for GitHub Enterprise Server)',
+          reason: GITHUB_GRAMMAR_MESSAGE,
+        },
+      ]);
+    });
+
+    it('re-asks the Task repository select on a ManagedCloneError, keeping every earlier answer (AC-9)', async () => {
+      const config = buildTevuConfig({ repositories: [{ id: 'repo-1', github: 'octo/app' }] });
+      const ensureManagedCommits = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false as const,
+          error: {
+            kind: 'ManagedCloneError' as const,
+            operation: 'clone' as const,
+            repository: 'github.com/octo/app',
+            reason: 'git clone exited with code 128',
+          },
+        })
+        .mockResolvedValue({ ok: true as const, value: { missing: [] } });
+      const operations = createOperations({
+        loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+        ensureManagedCommits,
+      });
+      const remainingTaskAnswers = taskInterviewAnswers('repo-1').slice(2);
+      scriptAnswers('manual', 'repo-1', 'repo-1', ...remainingTaskAnswers, true);
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(0);
+      expect(
+        clack.state.prompts.filter((prompt) => prompt.message === 'Task repository'),
+      ).toHaveLength(2);
+      expect(clack.state.logs).toContainEqual({
+        kind: 'warn',
+        message:
+          'Repository "repo-1" cannot be used: cloning github.com/octo/app failed: git clone exited with code 128',
+      });
+      expect(ensureManagedCommits).toHaveBeenCalledWith(
+        { repository: { id: 'repo-1', github: 'octo/app' }, revisions: [] },
+        expect.any(Function),
+      );
+    });
+
     it('bootstraps the complete configuration, re-prompts invalid integers, and lets createTask perform the only write', async () => {
       const operations = createOperations({ configExists: vi.fn(async () => false) });
       scriptAnswers(
@@ -1968,6 +2151,7 @@ describe('tevu CLI', () => {
         false,
         false,
         'alpha',
+        'path',
         '../repos/alpha',
         false,
         'c1',
@@ -2090,6 +2274,7 @@ describe('tevu CLI', () => {
         false,
         false,
         'alpha',
+        'path',
         '../repos/alpha',
         false,
         'c1',
@@ -2537,9 +2722,12 @@ describe('tevu CLI', () => {
         stderr: { text: '', truncated: false },
       }));
       const operations = createOperations({
-        resolveReference: (request) =>
+        resolveReference: (request, onProgress) =>
           resolveReferenceSolution(request, {
             git: { resolveCommit: async () => ({ kind: 'not-found' as const }) },
+            clones: failingManagedCloneAdapter(),
+            managedCloneRoot: undefined,
+            onProgress,
             pullRequests: createGitHubPullRequestReader({
               runGh,
               parentEnvironment: {},
@@ -2660,9 +2848,12 @@ describe('tevu CLI', () => {
         stderr: { text: '', truncated: false },
       }));
       const operations = createOperations({
-        resolveReference: (request) =>
+        resolveReference: (request, onProgress) =>
           resolveReferenceSolution(request, {
             git: { resolveCommit: async () => ({ kind: 'not-found' as const }) },
+            clones: failingManagedCloneAdapter(),
+            managedCloneRoot: undefined,
+            onProgress,
             pullRequests: createGitHubPullRequestReader({
               runGh,
               parentEnvironment: {},

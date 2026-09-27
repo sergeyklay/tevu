@@ -9,6 +9,7 @@
 
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 
+import { describeManagedCloneError } from '@/application/managed-clone';
 import { agentNamesInUse, MAX_REPEAT, RepeatSchema } from '@/config/schema';
 import { CONFIG_TEMPLATE } from '@/config/template';
 
@@ -16,6 +17,7 @@ import { runAssessmentWizard, runTaskWizard } from './task-wizard';
 
 import type { AssessmentCaseContext } from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
+import type { ManagedCommitsOutcome, ManagedCommitsRequest } from '@/application/managed-clone';
 import type {
   ReferenceSolutionRequest,
   ResolvedReferenceSolution,
@@ -77,8 +79,27 @@ export type ProgramOperations = {
   ): Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>>;
   resolveReference(
     request: ReferenceSolutionRequest,
+    onProgress: (line: string) => void,
   ): Promise<
-    TevuResult<ResolvedReferenceSolution, 'ReferenceResolutionError' | 'CancellationError'>
+    TevuResult<
+      ResolvedReferenceSolution,
+      'ReferenceResolutionError' | 'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'
+    >
+  >;
+  ensureManagedCommits(
+    request: ManagedCommitsRequest,
+    onProgress: (line: string) => void,
+  ): Promise<
+    TevuResult<
+      ManagedCommitsOutcome,
+      'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'
+    >
+  >;
+  prepareRepositories(
+    config: TevuConfig,
+    onProgress: (line: string) => void,
+  ): Promise<
+    TevuResult<ValidationFinding[], 'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'>
   >;
   createTask(
     input: TaskWizardInput,
@@ -517,8 +538,10 @@ async function runTaskAdd(
       },
       importJiraIssue: operations.importJiraIssue,
       importGitHubIssue: operations.importGitHubIssue,
-      resolveReference: (repository, identifier) =>
-        operations.resolveReference({ configPath: loaderPath, repository, identifier }),
+      resolveReference: (repository, identifier, onProgress) =>
+        operations.resolveReference({ configPath: loaderPath, repository, identifier }, onProgress),
+      ensureManagedCommits: (repository, revisions, onProgress) =>
+        operations.ensureManagedCommits({ repository, revisions }, onProgress),
       now: dependencies.now,
       redact: dependencies.redact,
     },
@@ -561,6 +584,13 @@ async function runBenchmarkCommand(
   const loaded = await loadCommandConfig(dependencies, options.config, out);
   if (!loaded.ok) {
     return reportFailure(err, loaded.error, dependencies.redact);
+  }
+  const prepared = await operations.prepareRepositories(loaded.value.config, out);
+  if (!prepared.ok) {
+    return reportFailure(err, prepared.error, dependencies.redact);
+  }
+  for (const warning of prepared.value) {
+    out(`warning ${warning.identifier}: ${warning.message}`);
   }
   const validation = await operations.validateConfig(loaded.value.config);
   if (!validation.ok) {
@@ -833,6 +863,8 @@ function renderTevuError(error: TevuError, redact: (text: string) => string): st
       ];
     case 'ReferenceResolutionError':
       return [`error: reference solution cannot be resolved: ${error.reason}`];
+    case 'ManagedCloneError':
+      return [`error: ${describeManagedCloneError(error)}`];
   }
 }
 

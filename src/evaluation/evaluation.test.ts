@@ -2896,7 +2896,7 @@ describe('credential-secret redaction at serialization boundaries', () => {
 
       const replaced = await configStore.replaceText(configPath, rendered.value);
       expect(replaced.ok).toBe(true);
-      const loaded = await loadConfig(configPath, configStore);
+      const loaded = await loadConfig(configPath, configStore, undefined);
       expect(loaded.ok).toBe(true);
       if (!loaded.ok) return;
       expect(loaded.value.run.stop_grace).toBe('1s');
@@ -2924,7 +2924,7 @@ describe('credential-secret redaction at serialization boundaries', () => {
 
       const replaced = await configStore.replaceText(configPath, rendered.value);
       expect(replaced.ok).toBe(true);
-      const loaded = await loadConfig(configPath, configStore);
+      const loaded = await loadConfig(configPath, configStore, undefined);
       expect(loaded.ok).toBe(true);
       if (!loaded.ok) return;
       expect(loaded.value.run.stop_grace).toBe('1s');

@@ -7,6 +7,7 @@
  * Entry points: {@link createGitHubIssuesAdapter}, {@link createGitHubPullRequestReader}.
  */
 
+import { authenticationReason, ghEnvironment, stderrExcerpt } from '@/domain/github-cli';
 import { parseGitHubReference } from '@/domain/github-reference';
 
 import type { ParsedGitHubReference } from '@/domain/github-reference';
@@ -58,18 +59,9 @@ export type GitHubIssuesDependencies = {
   cancellation: AbortSignal;
 };
 
-/** Token variables gh 2.86.0 reads (`gh help environment`); registered as secrets before every import. */
-export const GH_CREDENTIAL_ENVIRONMENT_VARIABLES: readonly string[] = [
-  'GH_TOKEN',
-  'GITHUB_TOKEN',
-  'GH_ENTERPRISE_TOKEN',
-  'GITHUB_ENTERPRISE_TOKEN',
-];
-
 const TIMEOUT_MS = 30_000;
 const TERMINATION_GRACE_MS = 3_000;
 const MAX_CAPTURE_BYTES = 1_048_576;
-const EXCERPT_MAX_CODE_POINTS = 200;
 
 const MALFORMED_REFERENCE_REASON =
   'reference must be OWNER/REPO#NUMBER or https://HOST/OWNER/REPO/issues/NUMBER';
@@ -101,19 +93,6 @@ const PULL_REQUEST_QUERY = `query($owner: String!, $repo: String!, $number: Int!
     }
   }
 }`;
-
-/** Environment variables gh 2.86.0 must never see, per gh's own documented behavior. */
-const GH_ENVIRONMENT_EXCLUSIONS = new Set([
-  'CLICOLOR_FORCE',
-  'GH_FORCE_TTY',
-  'GH_DEBUG',
-  'DEBUG',
-  'GH_ENTERPRISE_TOKEN',
-  'GITHUB_ENTERPRISE_TOKEN',
-]);
-
-/** GitHub token shapes masked from a stderr excerpt before line selection and truncation. */
-const TOKEN_SHAPE_PATTERN = /gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}/g;
 
 /**
  * Creates the read-only, one-time GitHub issue importer.
@@ -564,12 +543,6 @@ function referenceFailure(reason: string): TevuResult<never, 'ReferenceResolutio
   return { ok: false, error: { kind: 'ReferenceResolutionError', reason } };
 }
 
-function authenticationReason(host: string): string {
-  return host === 'github.com'
-    ? 'gh is not authenticated; run gh auth login'
-    : `gh is not authenticated for ${host}; run gh auth login --hostname ${host}`;
-}
-
 function unexpectedExitReason(exitCode: number | null, signal: string | null): string {
   return exitCode !== null
     ? `gh exited unexpectedly (exit code ${exitCode})`
@@ -579,26 +552,6 @@ function unexpectedExitReason(exitCode: number | null, signal: string | null): s
 /** Builds gh's canonical issue URL from a parsed reference, always under the `issues` path. */
 function canonicalIssueUrl(parsed: ParsedGitHubReference): string {
   return `https://${parsed.host}/${parsed.owner}/${parsed.repo}/issues/${parsed.number}`;
-}
-
-/**
- * Builds gh's complete replacement environment: every defined parent
- * variable except the excluded set, plus the fixed non-interactive settings
- * gh always receives.
- */
-function ghEnvironment(
-  parentEnvironment: Readonly<Record<string, string | undefined>>,
-): Record<string, string> {
-  const environment: Record<string, string> = {};
-  for (const [name, value] of Object.entries(parentEnvironment)) {
-    if (value !== undefined && !GH_ENVIRONMENT_EXCLUSIONS.has(name)) {
-      environment[name] = value;
-    }
-  }
-  environment['GH_PROMPT_DISABLED'] = '1';
-  environment['GH_NO_UPDATE_NOTIFIER'] = '1';
-  environment['NO_COLOR'] = '1';
-  return environment;
 }
 
 /**
@@ -691,29 +644,8 @@ function parseIssueUrlOnHost(urlText: string, host: string): ParsedGitHubReferen
   return parseGitHubReference(urlText);
 }
 
-/**
- * Masks every GitHub token shape in stderr, then returns the first non-empty
- * trimmed line, truncated to 200 code points. Masking runs before line
- * selection and truncation so no cut leaves a partial token the pattern no
- * longer matches.
- */
-function excerpt(stderrText: string): string {
-  const masked = stderrText.replace(TOKEN_SHAPE_PATTERN, '[REDACTED]');
-  for (const line of masked.split('\n')) {
-    const candidate = line.trim();
-    if (candidate.length === 0) {
-      continue;
-    }
-    const codePoints = [...candidate];
-    return codePoints.length <= EXCERPT_MAX_CODE_POINTS
-      ? candidate
-      : `${codePoints.slice(0, EXCERPT_MAX_CODE_POINTS).join('')}...`;
-  }
-  return '';
-}
-
 function withExcerptSuffix(reason: string, stderrText: string): string {
-  const text = excerpt(stderrText);
+  const text = stderrExcerpt(stderrText);
   return text.length === 0 ? reason : `${reason}: ${text}`;
 }
 

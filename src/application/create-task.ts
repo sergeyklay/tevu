@@ -1,7 +1,7 @@
 import * as path from 'node:path';
 
 import { appendToConfigText, renderConfigDocument } from '@/config/document';
-import { parseConfigText, resolveConfig, resolveConfigPath } from '@/config/load';
+import { parseConfigText, resolveConfig, resolveRepositoryPath } from '@/config/load';
 import { referencedVariableName } from '@/config/schema';
 
 import type { RepositoryInput, TaskInput, TevuConfigInput } from '@/config/schema';
@@ -40,8 +40,12 @@ export type TaskDependencies = {
   git: Pick<GitWorkspaceAdapter, 'validateSource' | 'resolveCommit'>;
   registerSecrets: (variableNames: readonly string[]) => void;
   redact: (text: string) => string;
+  managedCloneRoot: string | undefined;
   cancellation?: AbortSignal;
 };
+
+/** A repository candidate before pinning: either a materialized entry or a newly interviewed one. */
+type RepositoryCandidate = Pick<RepositoryInput, 'id' | 'path' | 'github'>;
 
 /** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
 const FULL_COMMIT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -82,7 +86,7 @@ export async function createTask(
 
   dependencies.registerSecrets(collectBaseSecretNames(doc.base));
 
-  const repositories: RepositoryDefinition[] =
+  const repositories: RepositoryCandidate[] =
     input.newRepository === undefined
       ? doc.base.repositories
       : [...doc.base.repositories, input.newRepository];
@@ -93,9 +97,25 @@ export async function createTask(
   const repository = matched.value;
 
   const configDirectory = path.dirname(path.resolve(input.configPath));
+  const directory = resolveRepositoryPath(
+    repository,
+    configDirectory,
+    dependencies.managedCloneRoot,
+  );
+  if (directory === undefined) {
+    return validationFailure([
+      {
+        severity: 'error',
+        identifier: `repositories.${repository.id}.github`,
+        message:
+          'a GitHub repository entry needs XDG_CACHE_HOME or HOME set to an absolute path for its managed clone',
+      },
+    ]);
+  }
   const resolvedRepository: RepositoryDefinition = {
-    ...repository,
-    path: resolveConfigPath(configDirectory, repository.path),
+    id: repository.id,
+    path: directory,
+    ...(repository.github === undefined ? {} : { github: repository.github }),
   };
   const resolvedBase = await resolveTaskBaseCommit(
     input.task,
@@ -137,7 +157,11 @@ export async function createTask(
   if (!reparsed.ok) {
     return reparsed;
   }
-  const resolved = await resolveConfig(reparsed.value, input.configPath);
+  const resolved = await resolveConfig(
+    reparsed.value,
+    input.configPath,
+    dependencies.managedCloneRoot,
+  );
   if (!resolved.ok) {
     return resolved;
   }
@@ -183,7 +207,11 @@ async function loadBaseDocument(
     if (!parsed.ok) {
       return parsed;
     }
-    const resolved = await resolveConfig(parsed.value, input.configPath);
+    const resolved = await resolveConfig(
+      parsed.value,
+      input.configPath,
+      dependencies.managedCloneRoot,
+    );
     if (!resolved.ok) {
       return resolved;
     }
@@ -232,10 +260,10 @@ function collectBaseSecretNames(base: BaseDocument['base']): string[] {
 }
 
 function matchRepository(
-  repositories: readonly RepositoryDefinition[],
+  repositories: readonly RepositoryCandidate[],
   requestedRepo: string | undefined,
   taskId: string,
-): TevuResult<RepositoryDefinition, 'ConfigValidationError'> {
+): TevuResult<RepositoryCandidate, 'ConfigValidationError'> {
   if (requestedRepo !== undefined) {
     const repository = repositories.find((candidate) => candidate.id === requestedRepo);
     if (repository === undefined) {

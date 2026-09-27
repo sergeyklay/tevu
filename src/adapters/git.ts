@@ -27,6 +27,7 @@ import process from 'node:process';
 import { execa } from 'execa';
 
 import { describeCause } from '@/domain/describe-cause';
+import { GIT_COMMAND_TIMEOUT_MS, ISOLATED_GIT_SETTINGS } from '@/domain/git-environment';
 
 import type {
   CaseIdentity,
@@ -54,8 +55,6 @@ export type GitWorkspaceAdapterOptions = {
   workspacesDirectory: string;
 };
 
-const GIT_COMMAND_TIMEOUT_MS = 600_000;
-const FIXED_LOCALE = 'C.UTF-8';
 const SUBMODULE_MODE = '160000';
 const LFS_POINTER_SIGNATURE = 'https://git-lfs.github.com/spec';
 const LFS_ATTRIBUTE = 'filter=lfs';
@@ -614,13 +613,7 @@ async function runGit(
 function baseGitEnvironment(): Record<string, string> {
   const environment: Record<string, string> = {
     PATH: process.env.PATH ?? '',
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_CONFIG_SYSTEM: '/dev/null',
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_TERMINAL_PROMPT: '0',
-    GIT_OPTIONAL_LOCKS: '0',
-    LANG: FIXED_LOCALE,
-    LC_ALL: FIXED_LOCALE,
+    ...ISOLATED_GIT_SETTINGS,
   };
   const home = process.env.HOME;
   if (home !== undefined) {

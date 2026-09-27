@@ -11,15 +11,22 @@
 
 import { confirm, intro, isCancel, log, note, select, text } from '@clack/prompts';
 
+import { describeManagedCloneError } from '@/application/managed-clone';
 import {
   AGENT_NAMES,
   DurationSchema,
   referencedVariableName,
   VariableNameSchema,
 } from '@/config/schema';
+import {
+  formatGitHubRepository,
+  managedCloneLocation,
+  parseGitHubRepository,
+} from '@/domain/github-reference';
 
 import type { AssessmentCaseContext, ManualCheckSummary } from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
+import type { ManagedCommitsOutcome } from '@/application/managed-clone';
 import type { ResolvedReferenceSolution } from '@/application/reference-solution';
 import type {
   CheckInput,
@@ -37,6 +44,7 @@ import type {
   LoadConfigErrorKind,
   RepositoryDefinition,
   TevuConfig,
+  TevuError,
   TevuResult,
   ValidationFinding,
 } from '@/domain/types';
@@ -74,10 +82,25 @@ export type TaskWizardDependencies = {
   ) => Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>>;
   /** Resolves one reference-solution answer exactly once against the task's repository. */
   resolveReference: (
-    repository: Pick<RepositoryDefinition, 'id' | 'path'>,
+    repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>,
     identifier: string,
+    onProgress: (line: string) => void,
   ) => Promise<
-    TevuResult<ResolvedReferenceSolution, 'ReferenceResolutionError' | 'CancellationError'>
+    TevuResult<
+      ResolvedReferenceSolution,
+      'ReferenceResolutionError' | 'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'
+    >
+  >;
+  /** Ensures a GitHub entry's managed clone holds `revisions`, cloning or fetching as needed. */
+  ensureManagedCommits: (
+    repository: { id: string; github: string },
+    revisions: readonly string[],
+    onProgress: (line: string) => void,
+  ) => Promise<
+    TevuResult<
+      ManagedCommitsOutcome,
+      'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'
+    >
   >;
   now: () => Date;
   redact: (textContent: string) => string;
@@ -117,6 +140,20 @@ const ID_RULE = 'must match ^[a-z][a-z0-9-]{0,63}$';
 const ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 const FIXED_ENVIRONMENT_NAMES = new Set(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'CI']);
 const NEW_REPOSITORY_CHOICE = '__add-new-repository__';
+const GITHUB_GRAMMAR_MESSAGE =
+  'github must be OWNER/REPO or https://HOST/OWNER/REPO, with a HOST of letters, digits, hyphens, and dots, and without surrounding spaces, user info, a port, a query, or a fragment';
+/** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
+const FULL_COMMIT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** Renders a `ManagedCloneError` or `PrerequisiteError` for a wizard warning line. */
+function describeManagedCloneOrPrerequisiteFailure(
+  error: Extract<TevuError, { kind: 'ManagedCloneError' | 'PrerequisiteError' }>,
+): string {
+  if (error.kind === 'ManagedCloneError') {
+    return describeManagedCloneError(error);
+  }
+  return `prerequisite "${error.tool}" is not satisfied; expected ${error.expected}${error.actual === undefined ? '' : `, actual ${error.actual}`}`;
+}
 
 /** Internal control-flow sentinel; never crosses the module boundary. */
 class WizardCancelledError extends Error {
@@ -428,7 +465,15 @@ async function interviewRepositories(io: WizardIo): Promise<RepositoryInput[]> {
   return repositories;
 }
 
-/** Asks the ID and local path of one repository. */
+/**
+ * Asks the ID and source of one repository: a local path, or a GitHub
+ * repository tevu clones itself.
+ *
+ * A GitHub entry's `path` is set to its managed-clone location up front, the
+ * same value the configuration schema derives on load, so every downstream
+ * consumer (reference resolution, base-commit fetching) locates the clone
+ * the same way whether the entry came from the file or from this interview.
+ */
 async function interviewRepositoryEntry(
   io: WizardIo,
   usedIds: ReadonlySet<string>,
@@ -437,11 +482,41 @@ async function interviewRepositoryEntry(
     message: 'Repository ID',
     validate: validateId(usedIds),
   });
-  const path = await askText(io, {
-    message: `Local path of repository "${id}" (relative to the configuration file)`,
-    validate: validateNonWhitespace,
+  const source = await askSelect<'path' | 'github'>(io, {
+    message: `Where does tevu read repository "${id}" from?`,
+    options: [
+      { value: 'path', label: 'Local path' },
+      { value: 'github', label: 'GitHub repository, cloned by tevu' },
+    ],
   });
-  return { id, path };
+  if (source === 'path') {
+    const path = await askText(io, {
+      message: `Local path of repository "${id}" (relative to the configuration file)`,
+      validate: validateNonWhitespace,
+    });
+    return { id, path };
+  }
+  const github = await askGitHubRepository(io, id);
+  return { id, path: managedCloneLocation(github), github: github.text };
+}
+
+/** Asks a GitHub repository answer, re-prompting with the grammar message until it parses. */
+async function askGitHubRepository(
+  io: WizardIo,
+  id: string,
+): Promise<{ host: string; owner: string; repo: string; text: string }> {
+  const text = (
+    await askText(io, {
+      message: `GitHub repository of "${id}" (OWNER/REPO, or https://HOST/OWNER/REPO for GitHub Enterprise Server)`,
+      validate: (value) =>
+        parseGitHubRepository((value ?? '').trim()) === null ? GITHUB_GRAMMAR_MESSAGE : undefined,
+    })
+  ).trim();
+  const parsed = parseGitHubRepository(text);
+  if (parsed === null) {
+    throw new Error('unreachable: askText only returns a value its validate callback accepted');
+  }
+  return { ...parsed, text };
 }
 
 /** Collects at least two model entries during bootstrap. */
@@ -488,10 +563,13 @@ async function interviewTask(
     return source;
   }
   const repositories = existing?.repositories ?? bootstrap?.repositories ?? [];
-  const { repo, newRepository } = await interviewRepositorySelection(io, repositories);
-  const selectedRepository = resolveSelectedRepository(repositories, repo, newRepository);
+  const { repo, newRepository, selectedRepository } = await selectTaskRepository(
+    io,
+    dependencies,
+    repositories,
+  );
   const resolvedReference = await interviewReferenceSolution(io, dependencies, selectedRepository);
-  const baseCommit =
+  const baseCommitAnswer =
     resolvedReference === undefined || resolvedReference.proposedBase === undefined
       ? (
           await askText(io, {
@@ -500,6 +578,13 @@ async function interviewTask(
           })
         ).trim()
       : await askBaseCommitWithProposal(io, resolvedReference);
+  const baseCommit = await ensureBaseCommitInClone(
+    io,
+    dependencies,
+    selectedRepository,
+    resolvedReference,
+    baseCommitAnswer,
+  );
   const taskId = await askText(io, {
     message: 'Task ID',
     validate: validateId(new Set((existing?.tasks ?? []).map((task) => task.id))),
@@ -667,15 +752,18 @@ async function interviewImportedSource(
 async function interviewRepositorySelection(
   io: WizardIo,
   // Accepts both a resolved `TevuConfig`'s repositories and a bootstrap
-  // interview's, which never carry `setup`; only `id` and `path` are read.
-  repositories: readonly Pick<RepositoryDefinition, 'id' | 'path'>[],
+  // interview's, which never carry `setup`; only `id`, `path`, and `github` are read.
+  repositories: readonly Pick<RepositoryInput, 'id' | 'path' | 'github'>[],
 ): Promise<{ repo: string; newRepository?: RepositoryDefinition }> {
   const choice = await askSelect<string>(io, {
     message: 'Task repository',
     options: [
       ...repositories.map((repository) => ({
         value: repository.id,
-        label: `${repository.id} (${repository.path})`,
+        label:
+          repository.github === undefined
+            ? `${repository.id} (${repository.path})`
+            : `${repository.id} (GitHub ${repository.github})`,
       })),
       { value: NEW_REPOSITORY_CHOICE, label: 'Add a new repository' },
     ],
@@ -692,10 +780,10 @@ async function interviewRepositorySelection(
 
 /** Recovers the full repository entry `interviewRepositorySelection` chose, by id or as a new entry. */
 function resolveSelectedRepository(
-  repositories: readonly Pick<RepositoryDefinition, 'id' | 'path'>[],
+  repositories: readonly Pick<RepositoryInput, 'id' | 'path' | 'github'>[],
   repo: string,
   newRepository: RepositoryDefinition | undefined,
-): Pick<RepositoryDefinition, 'id' | 'path'> {
+): Pick<RepositoryInput, 'id' | 'path' | 'github'> {
   if (newRepository !== undefined) {
     return newRepository;
   }
@@ -707,13 +795,58 @@ function resolveSelectedRepository(
 }
 
 /**
+ * Selects the task repository, ensuring a GitHub entry's managed clone right
+ * after selection; a `ManagedCloneError` warns and re-asks the repository
+ * select, keeping every earlier answer.
+ */
+async function selectTaskRepository(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+  repositories: readonly Pick<RepositoryInput, 'id' | 'path' | 'github'>[],
+): Promise<{
+  repo: string;
+  newRepository?: RepositoryDefinition;
+  selectedRepository: Pick<RepositoryInput, 'id' | 'path' | 'github'>;
+}> {
+  for (;;) {
+    const selection = await interviewRepositorySelection(io, repositories);
+    const selectedRepository = resolveSelectedRepository(
+      repositories,
+      selection.repo,
+      selection.newRepository,
+    );
+    const { github } = selectedRepository;
+    if (github === undefined) {
+      return { ...selection, selectedRepository };
+    }
+    const ensured = await dependencies.ensureManagedCommits(
+      { id: selectedRepository.id, github },
+      [],
+      (line) => log.step(dependencies.redact(line), promptOptions(io)),
+    );
+    if (ensured.ok) {
+      return { ...selection, selectedRepository };
+    }
+    if (ensured.error.kind === 'CancellationError') {
+      throw new WizardCancelledError();
+    }
+    log.warn(
+      dependencies.redact(
+        `Repository "${selectedRepository.id}" cannot be used: ${describeManagedCloneOrPrerequisiteFailure(ensured.error)}`,
+      ),
+      promptOptions(io),
+    );
+  }
+}
+
+/**
  * Interviews for the optional reference-solution answer, resolving it once
  * and re-asking on any failure other than cancellation.
  */
 async function interviewReferenceSolution(
   io: WizardIo,
   dependencies: TaskWizardDependencies,
-  repository: Pick<RepositoryDefinition, 'id' | 'path'>,
+  repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>,
 ): Promise<ResolvedReferenceSolution | undefined> {
   for (;;) {
     const identifier = (
@@ -724,12 +857,21 @@ async function interviewReferenceSolution(
     if (identifier === '') {
       return undefined;
     }
-    const result = await dependencies.resolveReference(repository, identifier);
+    const result = await dependencies.resolveReference(repository, identifier, (line) =>
+      log.step(dependencies.redact(line), promptOptions(io)),
+    );
     if (result.ok) {
       const resolved = result.value;
       const warningText = describeReferenceWarning(resolved);
       if (warningText !== undefined) {
         log.warn(dependencies.redact(warningText), promptOptions(io));
+      }
+      const unfetched = resolved.pullRequest?.unfetched;
+      if (unfetched !== undefined) {
+        log.warn(
+          dependencies.redact(`Reference commits cannot be fetched: ${unfetched}`),
+          promptOptions(io),
+        );
       }
       note(
         dependencies.redact(renderReferenceNote(resolved, repository.id)),
@@ -741,10 +883,78 @@ async function interviewReferenceSolution(
     if (result.error.kind === 'CancellationError') {
       throw new WizardCancelledError();
     }
+    const description =
+      result.error.kind === 'ReferenceResolutionError'
+        ? result.error.reason
+        : describeManagedCloneOrPrerequisiteFailure(result.error);
     log.warn(
-      dependencies.redact(`Reference solution cannot be resolved: ${result.error.reason}`),
+      dependencies.redact(`Reference solution cannot be resolved: ${description}`),
       promptOptions(io),
     );
+  }
+}
+
+/**
+ * Ensures a GitHub entry's base-commit answer resolves in its managed clone
+ * before the `Task ID` question; a path entry returns the answer unchanged.
+ *
+ * A commit still missing after the fetch keeps the answer unchanged for a
+ * pull-request task whose answer is a full hash, per `resolveTaskBaseCommit`'s
+ * own rule; any other answer is re-asked with itself as the default.
+ */
+async function ensureBaseCommitInClone(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+  repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>,
+  resolvedReference: ResolvedReferenceSolution | undefined,
+  initialAnswer: string,
+): Promise<string> {
+  const { github } = repository;
+  if (github === undefined) {
+    return initialAnswer;
+  }
+  let answer = initialAnswer;
+  for (;;) {
+    const ensured = await dependencies.ensureManagedCommits(
+      { id: repository.id, github },
+      [answer],
+      (line) => log.step(dependencies.redact(line), promptOptions(io)),
+    );
+    if (!ensured.ok) {
+      if (ensured.error.kind === 'CancellationError') {
+        throw new WizardCancelledError();
+      }
+      log.warn(
+        dependencies.redact(
+          `Base commit cannot be fetched: ${describeManagedCloneOrPrerequisiteFailure(ensured.error)}`,
+        ),
+        promptOptions(io),
+      );
+    } else if (ensured.value.missing.includes(answer)) {
+      const keepsUnfetchedAnswer =
+        resolvedReference?.reference.kind === 'pull-request' &&
+        FULL_COMMIT_HASH_PATTERN.test(answer);
+      if (keepsUnfetchedAnswer) {
+        return answer;
+      }
+      const parsed = parseGitHubRepository(github);
+      const display = parsed === null ? github : formatGitHubRepository(parsed);
+      log.warn(
+        dependencies.redact(
+          `Base commit "${answer}" is not in repository "${repository.id}" and cannot be fetched from ${display}`,
+        ),
+        promptOptions(io),
+      );
+    } else {
+      return answer;
+    }
+    answer = (
+      await askText(io, {
+        message: 'Base commit (a commit from before the fix; resolved and pinned when saved)',
+        defaultValue: answer,
+        validate: validateNonWhitespace,
+      })
+    ).trim();
   }
 }
 
@@ -993,7 +1203,7 @@ function renderTaskReview(input: TaskWizardInput): string {
       );
     }
     for (const repository of bootstrap.repositories) {
-      lines.push(`  repositories: ${repository.id} (${repository.path})`);
+      lines.push(`  repositories: ${repository.id} (${describeRepositorySource(repository)})`);
     }
     for (const model of bootstrap.models) {
       lines.push(`  models: ${model.id}: ${model.model} (effort ${model.effort})`);
@@ -1003,7 +1213,9 @@ function renderTaskReview(input: TaskWizardInput): string {
   const task = input.task;
   lines.push(`Task ${task.id}:`);
   if (input.newRepository !== undefined) {
-    lines.push(`  new repository ${input.newRepository.id}: ${input.newRepository.path}`);
+    lines.push(
+      `  new repository ${input.newRepository.id}: ${describeRepositorySource(input.newRepository)}`,
+    );
   }
   lines.push(
     `  repo: ${task.repo}`,
@@ -1042,6 +1254,11 @@ function renderTaskReview(input: TaskWizardInput): string {
     }
   }
   return lines.join('\n');
+}
+
+/** `GitHub <github>` for a GitHub entry, its `path` otherwise. */
+function describeRepositorySource(repository: Pick<RepositoryInput, 'path' | 'github'>): string {
+  return repository.github === undefined ? (repository.path ?? '') : `GitHub ${repository.github}`;
 }
 
 function renderVariableList(names: readonly string[]): string {
