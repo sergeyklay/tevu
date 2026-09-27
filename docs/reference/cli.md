@@ -21,6 +21,8 @@ Without `--config`, tevu searches `./tevu.yaml`, then `$XDG_CONFIG_HOME/tevu/tev
 
 `<reference>` for `--github` is `OWNER/REPO#NUMBER` or an issue URL (`https://HOST/OWNER/REPO/issues/NUMBER`). `--github` needs the GitHub CLI (`gh`) installed and authenticated for the issue's host; see the [configuration reference](configuration.md#github-issues).
 
+`task add` also asks, after the repository question, for an optional reference solution: a GitHub pull request (`OWNER/REPO#NUMBER` or a pull request URL) or a commit in the selected repository. Text containing `://`, or read as the short form, is a pull request; anything else names a commit. An empty answer skips it. A resolved commit proposes the base commit question's default, the commit's parent, which the operator can still override; a resolved pull request proposes a base by its state and mergeability, printing a warning when the proposal is not the default one built the solution on, or no base at all when the pull request's own commits do not share one parent. A failed resolution is reported and the question asked again, keeping every earlier answer. A pull-request answer needs the GitHub CLI (`gh`) set up the same way `--github` does; see [GitHub issues](configuration.md#github-issues).
+
 `task add` and `assess` require terminal input and output. The other commands produce plain text when output is redirected. Interactive benchmark progress is prefixed with the case ID.
 
 ## Exit codes

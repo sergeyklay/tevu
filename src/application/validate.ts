@@ -1,12 +1,19 @@
 import { agentNamesInUse, evaluatorEnvironmentNames, TevuConfigSchema } from '@/config/schema';
+import { parseGitHubReference } from '@/domain/github-reference';
 
 import { buildEnvironmentVariableNames } from './environment-variable-names';
-import { describeSourceCommitInPrompt } from './source-commit-in-prompt';
+import {
+  describePullRequestInPrompt,
+  describeReferenceCommitInPrompt,
+  describeSourceCommitInPrompt,
+} from './source-commit-in-prompt';
 import { buildTaskPrompt } from './task-prompt';
 
 import type {
   AgentCapabilityReport,
+  RepositoryDefinition,
   SourceValidation,
+  TaskDefinition,
   TevuConfig,
   TevuError,
   TevuResult,
@@ -14,6 +21,9 @@ import type {
   ValidationFinding,
   ValidationReport,
 } from '@/domain/types';
+
+/** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
+const FULL_COMMIT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /** Error kinds the validation contract declares. */
 type ValidateConfigErrorKind =
@@ -157,8 +167,10 @@ function collectEnvironmentFindings(
 }
 
 /**
- * Resolves each task's start commit, inspects its source tree, and rejects a
- * task whose agent prompt names the resolved commit.
+ * Resolves each task's start commit, inspects its source tree, rejects a task
+ * whose agent prompt names the resolved commit, a reference commit, or a
+ * pull-request reference, and enforces the reference containment and
+ * precedence rules against an available base.
  */
 async function collectSourceFindings(
   config: TevuConfig,
@@ -177,26 +189,227 @@ async function collectSourceFindings(
       // A broken reference is already an error finding from the schema stage.
       continue;
     }
-    const key = `${repository.id}\u0000${task.base_commit}`;
-    let result = validated.get(key);
-    if (result === undefined) {
-      result = await dependencies.git.validateSource(repository, task.base_commit);
-      validated.set(key, result);
+    const prompt = buildTaskPrompt(task);
+    const resolvedBase = await resolveTaskBaseForValidation(
+      task,
+      repository,
+      prompt,
+      findings,
+      validated,
+      dependencies,
+    );
+
+    const recorded = recordedReferenceCommits(task.reference);
+    for (const commit of recorded) {
+      const reason = describeReferenceCommitInPrompt(prompt, commit.hash);
+      if (reason !== undefined) {
+        findings.push({ severity: 'error', identifier: `tasks.${task.id}`, message: reason });
+      }
     }
-    if (!result.ok) {
+    if (task.reference?.kind === 'pull-request') {
+      const parsed = parseGitHubReference(task.reference.identifier);
+      if (parsed !== null) {
+        const reason = describePullRequestInPrompt(prompt, parsed);
+        if (reason !== undefined) {
+          findings.push({ severity: 'error', identifier: `tasks.${task.id}`, message: reason });
+        }
+      }
+    }
+    if (resolvedBase === undefined) {
+      continue;
+    }
+    findings.push(
+      ...(await collectReferenceCommitFindings(
+        task,
+        repository,
+        resolvedBase,
+        recorded,
+        dependencies,
+      )),
+    );
+  }
+  return findings;
+}
+
+/**
+ * Resolves one task's base commit: names the fetch to run when a pull-request
+ * task's full-hash base is not available locally (MISSING-BASE), otherwise
+ * pins it through the cached `validateSource` call as today. Either way,
+ * checks the base text itself against the agent prompt.
+ */
+async function resolveTaskBaseForValidation(
+  task: TaskDefinition,
+  repository: RepositoryDefinition,
+  prompt: string,
+  findings: ValidationFinding[],
+  validated: Map<string, TevuResult<SourceValidation, 'SourceMaterializationError'>>,
+  dependencies: ValidationDependencies,
+): Promise<string | undefined> {
+  if (task.reference?.kind === 'pull-request' && FULL_COMMIT_HASH_PATTERN.test(task.base_commit)) {
+    const lookup = await dependencies.git.resolveCommit(repository, task.base_commit);
+    if (lookup.kind === 'not-found') {
       findings.push({
         severity: 'error',
         identifier: `tasks.${task.id}.base_commit`,
-        message: result.error.reason,
+        message: missingBaseMessage(task, repository),
       });
-      continue;
+      const reason = describeSourceCommitInPrompt(prompt, task.base_commit);
+      if (reason !== undefined) {
+        findings.push({ severity: 'error', identifier: `tasks.${task.id}`, message: reason });
+      }
+      return undefined;
     }
-    const reason = describeSourceCommitInPrompt(buildTaskPrompt(task), result.value.resolvedCommit);
-    if (reason !== undefined) {
-      findings.push({ severity: 'error', identifier: `tasks.${task.id}`, message: reason });
+  }
+  const key = `${repository.id}\u0000${task.base_commit}`;
+  let result = validated.get(key);
+  if (result === undefined) {
+    result = await dependencies.git.validateSource(repository, task.base_commit);
+    validated.set(key, result);
+  }
+  if (!result.ok) {
+    findings.push({
+      severity: 'error',
+      identifier: `tasks.${task.id}.base_commit`,
+      message: result.error.reason,
+    });
+    return undefined;
+  }
+  const reason = describeSourceCommitInPrompt(prompt, result.value.resolvedCommit);
+  if (reason !== undefined) {
+    findings.push({ severity: 'error', identifier: `tasks.${task.id}`, message: reason });
+  }
+  return result.value.resolvedCommit;
+}
+
+/** The MISSING-BASE text, naming a fetch from the pull request's own repository when it parses. */
+function missingBaseMessage(task: TaskDefinition, repository: RepositoryDefinition): string {
+  const base = task.base_commit;
+  const prefix = `base commit ${base} is not in repository "${repository.id}" ("${repository.path}"); fetch it there first`;
+  const identifier =
+    task.reference?.kind === 'pull-request' ? task.reference.identifier : undefined;
+  const parsed = identifier === undefined ? null : parseGitHubReference(identifier);
+  if (parsed === null) {
+    return prefix;
+  }
+  return `${prefix}, for example: git fetch https://${parsed.host}/${parsed.owner}/${parsed.repo}.git ${base}`;
+}
+
+/** One reference commit as validation must check it: containment only for a pull request's own commits. */
+type RecordedReferenceCommit = { hash: string; checkContainment: boolean };
+
+/** `commits`, then `merge_commit` when present; empty without a reference. */
+function recordedReferenceCommits(
+  reference: TaskDefinition['reference'],
+): RecordedReferenceCommit[] {
+  if (reference === undefined) {
+    return [];
+  }
+  if (reference.kind === 'commit') {
+    const [hash] = reference.commits;
+    return [{ hash, checkContainment: false }];
+  }
+  const commits = reference.commits.map((hash) => ({ hash, checkContainment: true }));
+  return reference.merge_commit === undefined
+    ? commits
+    : [...commits, { hash: reference.merge_commit, checkContainment: false }];
+}
+
+/**
+ * Checks which reference commits are available locally, warns once about the
+ * rest, warns again when an unavailable merge commit could not be checked,
+ * and rejects the first available commit the base violates.
+ */
+async function collectReferenceCommitFindings(
+  task: TaskDefinition,
+  repository: RepositoryDefinition,
+  resolvedBase: string,
+  recorded: readonly RecordedReferenceCommit[],
+  dependencies: ValidationDependencies,
+): Promise<ValidationFinding[]> {
+  if (recorded.length === 0) {
+    return [];
+  }
+  const findings: ValidationFinding[] = [];
+  const available: RecordedReferenceCommit[] = [];
+  const missing: string[] = [];
+  for (const commit of recorded) {
+    const lookup = await dependencies.git.resolveCommit(repository, commit.hash);
+    if (lookup.kind === 'found' && lookup.commit === commit.hash) {
+      available.push(commit);
+    } else {
+      missing.push(commit.hash);
+    }
+  }
+  if (missing.length > 0) {
+    findings.push({
+      severity: 'warning',
+      identifier: `tasks.${task.id}.reference`,
+      message: `reference commits not available in repository "${repository.id}": ${missing.length} of ${recorded.length}; the base commit was not compared with them`,
+    });
+  }
+  const mergeCommit =
+    task.reference?.kind === 'pull-request' ? task.reference.merge_commit : undefined;
+  if (mergeCommit !== undefined && missing.includes(mergeCommit)) {
+    findings.push({
+      severity: 'warning',
+      identifier: `tasks.${task.id}.reference.merge_commit`,
+      message: `merge commit ${mergeCommit.slice(0, 7)} is not available in repository "${repository.id}"; the base commit was not checked to precede it`,
+    });
+  }
+  for (const commit of available) {
+    const violation = await describeReferenceCommitViolation(
+      resolvedBase,
+      commit,
+      repository,
+      dependencies,
+    );
+    if (violation !== undefined) {
+      findings.push({
+        severity: 'error',
+        identifier: `tasks.${task.id}.base_commit`,
+        message: violation,
+      });
+      break;
     }
   }
   return findings;
+}
+
+/**
+ * Reports the base's violation against one available reference commit, or
+ * `undefined` when the base satisfies the rule that commit draws: containment
+ * for a pull request's own commit, precedence for its merge commit or a
+ * commit reference's commit.
+ */
+async function describeReferenceCommitViolation(
+  base: string,
+  commit: RecordedReferenceCommit,
+  repository: RepositoryDefinition,
+  dependencies: ValidationDependencies,
+): Promise<string | undefined> {
+  const basePrefix = base.slice(0, 7);
+  const commitPrefix = commit.hash.slice(0, 7);
+  if (commit.hash === base) {
+    return `base commit ${basePrefix} is reference commit ${commitPrefix}`;
+  }
+  if (commit.checkContainment) {
+    const contains = await dependencies.git.isAncestor(repository, commit.hash, base);
+    if (contains === true) {
+      return `base commit ${basePrefix} contains reference commit ${commitPrefix}`;
+    }
+    if (contains === null) {
+      return `base commit ${basePrefix} could not be compared with reference commit ${commitPrefix}`;
+    }
+    return undefined;
+  }
+  const precedes = await dependencies.git.isAncestor(repository, base, commit.hash);
+  if (precedes === false) {
+    return `base commit ${basePrefix} does not precede reference commit ${commitPrefix}`;
+  }
+  if (precedes === null) {
+    return `base commit ${basePrefix} could not be compared with reference commit ${commitPrefix}`;
+  }
+  return undefined;
 }
 
 /**

@@ -1,12 +1,25 @@
 /**
- * Read-only, one-time GitHub issue importer over the operator's installed
- * `gh`. tevu never talks to the GitHub API directly and never reads, stores,
- * or forwards a GitHub token; every credential decision is gh's own.
+ * Read-only, one-time GitHub issue and pull-request readers over the
+ * operator's installed `gh`. tevu never talks to the GitHub API directly and
+ * never reads, stores, or forwards a GitHub token; every credential decision
+ * is gh's own.
  *
- * Entry point: {@link createGitHubIssuesAdapter}.
+ * Entry points: {@link createGitHubIssuesAdapter}, {@link createGitHubPullRequestReader}.
  */
 
-import type { IssueSnapshot, IssueTrackerAdapter, TevuResult } from '@/domain/types';
+import { parseGitHubReference } from '@/domain/github-reference';
+
+import type { ParsedGitHubReference } from '@/domain/github-reference';
+import type {
+  IssueSnapshot,
+  IssueTrackerAdapter,
+  PullRequestCommit,
+  PullRequestMergeability,
+  PullRequestReader,
+  PullRequestSnapshot,
+  PullRequestState,
+  TevuResult,
+} from '@/domain/types';
 
 /** Literal-argv `gh` invocation request; a subset of the process adapter's own request shape. */
 export type GhRunRequest = {
@@ -64,12 +77,30 @@ const PULL_REQUEST_REASON = 'the reference points to a pull request, not an issu
 const GH_READ_FAILURE_REASON =
   'gh could not read the issue (not found, no access, or no connection)';
 
-const MAX_ISSUE_NUMBER = 2_147_483_647;
+const PULL_REQUEST_MALFORMED_REFERENCE_REASON =
+  'reference must be OWNER/REPO#NUMBER or https://HOST/OWNER/REPO/pull/NUMBER';
+const ISSUE_REFERENCE_REASON = 'the reference points to an issue, not a pull request';
+const PULL_REQUEST_READ_FAILURE_REASON =
+  'gh could not read the pull request (not found, no access, or no connection)';
 
-const SHORT_FORM_PATTERN =
-  /^([A-Za-z0-9][A-Za-z0-9_-]{0,99})\/([A-Za-z0-9._-]{1,100})#([1-9][0-9]*)$/;
-const ISSUE_PATH_PATTERN =
-  /^\/([A-Za-z0-9][A-Za-z0-9_-]{0,99})\/([A-Za-z0-9._-]{1,100})\/(issues|pull)\/([1-9][0-9]*)$/;
+/** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
+const COMMIT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** Selection set the pull-request reader depends on; every page repeats the full pull request object. */
+const PULL_REQUEST_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      number url state headRefOid baseRefName mergeable
+      baseRef { target { oid } }
+      mergeCommit { oid }
+      commits(first: 100, after: $endCursor) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { commit { oid parents(first: 100) { totalCount nodes { oid } } } }
+      }
+    }
+  }
+}`;
 
 /** Environment variables gh 2.86.0 must never see, per gh's own documented behavior. */
 const GH_ENVIRONMENT_EXCLUSIONS = new Set([
@@ -83,12 +114,6 @@ const GH_ENVIRONMENT_EXCLUSIONS = new Set([
 
 /** GitHub token shapes masked from a stderr excerpt before line selection and truncation. */
 const TOKEN_SHAPE_PATTERN = /gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}/g;
-
-/** Repository path segment parsed out of a short-form reference or an issue URL. */
-type IssuePath = { owner: string; repo: string; kind: 'issues' | 'pull'; number: number };
-
-/** Fully parsed reference, including the host the short form implies. */
-type ParsedReference = IssuePath & { host: string };
 
 /**
  * Creates the read-only, one-time GitHub issue importer.
@@ -106,11 +131,11 @@ export function createGitHubIssuesAdapter(
       input: string,
     ): Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>> {
       const reference = input.trim();
-      const parsed = parseReference(reference);
+      const parsed = parseGitHubReference(reference);
       if (parsed === null) {
         return trackerError(reference, MALFORMED_REFERENCE_REASON);
       }
-      if (parsed.kind === 'pull') {
+      if (parsed.path === 'pull') {
         return trackerError(reference, PULL_REQUEST_REASON);
       }
       if (dependencies.cancellation.aborted) {
@@ -169,6 +194,376 @@ export function createGitHubIssuesAdapter(
   };
 }
 
+/**
+ * Creates the read-only, one-time GitHub pull-request reader: one paginated
+ * `gh api graphql` read of state, merge commit, target tip, mergeability, and
+ * every commit with its parents.
+ *
+ * Calls `runGh` at most once per read: never for a malformed reference, an
+ * issue reference, or a signal already aborted before launch. Issues no Git
+ * command.
+ */
+export function createGitHubPullRequestReader(
+  dependencies: GitHubIssuesDependencies,
+): PullRequestReader {
+  return {
+    async readPullRequest(
+      input: string,
+    ): Promise<TevuResult<PullRequestSnapshot, 'ReferenceResolutionError' | 'CancellationError'>> {
+      const reference = input.trim();
+      const parsed = parseGitHubReference(reference);
+      if (parsed === null) {
+        return referenceFailure(PULL_REQUEST_MALFORMED_REFERENCE_REASON);
+      }
+      if (parsed.path === 'issues') {
+        return referenceFailure(ISSUE_REFERENCE_REASON);
+      }
+      if (dependencies.cancellation.aborted) {
+        return cancellationFailure();
+      }
+
+      const result = await dependencies.runGh({
+        argv: [
+          'gh',
+          'api',
+          'graphql',
+          '--hostname',
+          parsed.host,
+          '--paginate',
+          '--slurp',
+          '-f',
+          `query=${PULL_REQUEST_QUERY}`,
+          '-f',
+          `owner=${parsed.owner}`,
+          '-f',
+          `repo=${parsed.repo}`,
+          '-F',
+          `number=${parsed.number}`,
+        ],
+        environment: ghEnvironment(dependencies.parentEnvironment),
+        timeoutMs: TIMEOUT_MS,
+        terminationGraceMs: TERMINATION_GRACE_MS,
+        maxCaptureBytes: MAX_CAPTURE_BYTES,
+        cancellation: dependencies.cancellation,
+      });
+
+      if (dependencies.cancellation.aborted || (result.launched && result.cancelled)) {
+        return cancellationFailure();
+      }
+      if (!result.launched) {
+        return result.code === 'ENOENT'
+          ? referenceFailure(
+              'GitHub CLI (gh) is not installed or not on PATH; install it from https://cli.github.com or enter a commit reference instead',
+            )
+          : referenceFailure(
+              `GitHub CLI (gh) could not be started: ${result.code ?? result.reason}`,
+            );
+      }
+      if (result.timedOut) {
+        return referenceFailure(`gh did not respond within ${TIMEOUT_MS / 1000} seconds`);
+      }
+
+      switch (result.exitCode) {
+        case 0:
+          return decodePullRequestResponse(parsed, result.stdout);
+        case 4:
+          return referenceFailure(authenticationReason(parsed.host));
+        case 1:
+          return referenceFailure(
+            withExcerptSuffix(PULL_REQUEST_READ_FAILURE_REASON, result.stderr.text),
+          );
+        case 2:
+          return referenceFailure('read cancelled (gh exited with code 2)');
+        default:
+          return referenceFailure(
+            withExcerptSuffix(
+              unexpectedExitReason(result.exitCode, result.signal),
+              result.stderr.text,
+            ),
+          );
+      }
+    },
+  };
+}
+
+/** Sentinel a private decoder returns in place of throwing when a field breaks its rule. */
+const INVALID_PULL_REQUEST_FIELD = Symbol('invalid-pull-request-field');
+
+function isCommitHash(value: unknown): value is string {
+  return typeof value === 'string' && COMMIT_HASH_PATTERN.test(value);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** Reads `data.repository.pullRequest` from one decoded page, or `null` when the shape is wrong. */
+function extractPullRequestObject(page: unknown): Record<string, unknown> | null {
+  const pageRecord = asRecord(page);
+  const data = pageRecord === null ? null : asRecord(pageRecord['data']);
+  const repository = data === null ? null : asRecord(data['repository']);
+  const pullRequest = repository === null ? null : asRecord(repository['pullRequest']);
+  return pullRequest;
+}
+
+function decodePullRequestState(value: unknown): PullRequestState | null {
+  if (value === 'OPEN') {
+    return 'open';
+  }
+  if (value === 'CLOSED') {
+    return 'closed';
+  }
+  if (value === 'MERGED') {
+    return 'merged';
+  }
+  return null;
+}
+
+function decodeMergeability(value: unknown): PullRequestMergeability {
+  if (value === 'MERGEABLE') {
+    return 'mergeable';
+  }
+  if (value === 'CONFLICTING') {
+    return 'conflicting';
+  }
+  return 'unknown';
+}
+
+/** Decodes `baseRef.target.oid`; `null` when GitHub reports no target (the branch was deleted). */
+function decodeTargetTip(value: unknown): string | null | typeof INVALID_PULL_REQUEST_FIELD {
+  if (value === null) {
+    return null;
+  }
+  const record = asRecord(value);
+  const target = record === null ? null : asRecord(record['target']);
+  const oid = target === null ? undefined : target['oid'];
+  return isCommitHash(oid) ? oid : INVALID_PULL_REQUEST_FIELD;
+}
+
+/** Decodes `mergeCommit.oid`; kept only when `state` is `merged`, per the field contract. */
+function decodeMergeCommitOid(
+  value: unknown,
+  state: PullRequestState,
+): string | null | typeof INVALID_PULL_REQUEST_FIELD {
+  if (value === null) {
+    return null;
+  }
+  const record = asRecord(value);
+  const oid = record === null ? undefined : record['oid'];
+  if (!isCommitHash(oid)) {
+    return INVALID_PULL_REQUEST_FIELD;
+  }
+  return state === 'merged' ? oid : null;
+}
+
+/** Reads one page's `commits.totalCount` and raw `nodes` array without decoding the nodes yet. */
+function readCommitsConnection(
+  pullRequest: Record<string, unknown>,
+): { totalCount: number; nodes: unknown[] } | typeof INVALID_PULL_REQUEST_FIELD {
+  const commits = asRecord(pullRequest['commits']);
+  if (commits === null) {
+    return INVALID_PULL_REQUEST_FIELD;
+  }
+  const totalCount = commits['totalCount'];
+  const nodes = commits['nodes'];
+  if (
+    typeof totalCount !== 'number' ||
+    !Number.isSafeInteger(totalCount) ||
+    totalCount < 0 ||
+    !Array.isArray(nodes)
+  ) {
+    return INVALID_PULL_REQUEST_FIELD;
+  }
+  return { totalCount, nodes };
+}
+
+function decodeCommitNode(node: unknown): PullRequestCommit | typeof INVALID_PULL_REQUEST_FIELD {
+  const nodeRecord = asRecord(node);
+  const commit = nodeRecord === null ? null : asRecord(nodeRecord['commit']);
+  if (commit === null) {
+    return INVALID_PULL_REQUEST_FIELD;
+  }
+  const oid = commit['oid'];
+  if (!isCommitHash(oid)) {
+    return INVALID_PULL_REQUEST_FIELD;
+  }
+  const parents = asRecord(commit['parents']);
+  if (parents === null) {
+    return INVALID_PULL_REQUEST_FIELD;
+  }
+  const totalCount = parents['totalCount'];
+  const parentNodes = parents['nodes'];
+  if (
+    typeof totalCount !== 'number' ||
+    !Array.isArray(parentNodes) ||
+    parentNodes.length !== totalCount
+  ) {
+    return INVALID_PULL_REQUEST_FIELD;
+  }
+  const parentHashes: string[] = [];
+  for (const parentNode of parentNodes) {
+    const parentRecord = asRecord(parentNode);
+    const parentOid = parentRecord === null ? undefined : parentRecord['oid'];
+    if (!isCommitHash(parentOid)) {
+      return INVALID_PULL_REQUEST_FIELD;
+    }
+    parentHashes.push(parentOid);
+  }
+  return { hash: oid, parents: parentHashes };
+}
+
+function pullRequestFieldError(name: string): TevuResult<never, 'ReferenceResolutionError'> {
+  return referenceFailure(`unexpected response from gh: field "${name}" is missing or invalid`);
+}
+
+/**
+ * Decodes and validates gh's successful `api graphql --paginate --slurp`
+ * output against the field contract of the GraphQL selection set, checking
+ * E-NO-COMMITS, then E-TRUNCATED, then that the head commit is listed.
+ */
+function decodePullRequestResponse(
+  parsed: ParsedGitHubReference,
+  stdout: GhCapture,
+): TevuResult<PullRequestSnapshot, 'ReferenceResolutionError'> {
+  if (stdout.truncated) {
+    return referenceFailure(
+      `unexpected response from gh: output exceeds ${MAX_CAPTURE_BYTES} bytes`,
+    );
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout.text);
+  } catch {
+    return referenceFailure('unexpected response from gh: output is not valid JSON');
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    return referenceFailure(
+      'unexpected response from gh: output is not a non-empty JSON array of pages',
+    );
+  }
+
+  const pullRequestObjects: Record<string, unknown>[] = [];
+  for (const page of value) {
+    const pullRequest = extractPullRequestObject(page);
+    if (pullRequest === null) {
+      return pullRequestFieldError('data.repository.pullRequest');
+    }
+    pullRequestObjects.push(pullRequest);
+  }
+  const first = pullRequestObjects[0];
+  if (first === undefined) {
+    return referenceFailure(
+      'unexpected response from gh: output is not a non-empty JSON array of pages',
+    );
+  }
+
+  const number = first['number'];
+  if (
+    typeof number !== 'number' ||
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
+    number !== parsed.number
+  ) {
+    return pullRequestFieldError('number');
+  }
+  const url = first['url'];
+  if (typeof url !== 'string') {
+    return pullRequestFieldError('url');
+  }
+  const target = parseIssueUrlOnHost(url, parsed.host);
+  if (target === null || target.number !== number) {
+    return referenceFailure(
+      `unexpected response from gh: field "url" is not a pull request URL on ${parsed.host}`,
+    );
+  }
+  if (target.path === 'issues') {
+    return referenceFailure(ISSUE_REFERENCE_REASON);
+  }
+
+  const state = decodePullRequestState(first['state']);
+  if (state === null) {
+    return pullRequestFieldError('state');
+  }
+  const headRefOid = first['headRefOid'];
+  if (!isCommitHash(headRefOid)) {
+    return pullRequestFieldError('headRefOid');
+  }
+  const baseRefName = first['baseRefName'];
+  if (typeof baseRefName !== 'string' || baseRefName.length === 0) {
+    return pullRequestFieldError('baseRefName');
+  }
+  const targetTip = decodeTargetTip(first['baseRef']);
+  if (targetTip === INVALID_PULL_REQUEST_FIELD) {
+    return pullRequestFieldError('baseRef');
+  }
+  const mergeCommitOid = decodeMergeCommitOid(first['mergeCommit'], state);
+  if (mergeCommitOid === INVALID_PULL_REQUEST_FIELD) {
+    return pullRequestFieldError('mergeCommit');
+  }
+  const mergeability = decodeMergeability(first['mergeable']);
+  const firstConnection = readCommitsConnection(first);
+  if (firstConnection === INVALID_PULL_REQUEST_FIELD) {
+    return pullRequestFieldError('commits.totalCount');
+  }
+  const { totalCount } = firstConnection;
+
+  const key = `${target.owner}/${target.repo}#${number}`;
+  if (totalCount === 0) {
+    return referenceFailure(`pull request ${key} has no commits`);
+  }
+
+  const commits: PullRequestCommit[] = [];
+  for (const [pageIndex, pullRequest] of pullRequestObjects.entries()) {
+    const connection = pageIndex === 0 ? firstConnection : readCommitsConnection(pullRequest);
+    if (connection === INVALID_PULL_REQUEST_FIELD) {
+      return pullRequestFieldError('commits.totalCount');
+    }
+    if (
+      pageIndex > 0 &&
+      (connection.totalCount !== totalCount || pullRequest['headRefOid'] !== headRefOid)
+    ) {
+      return referenceFailure(`pull request ${key} changed while tevu read it; enter it again`);
+    }
+    for (const node of connection.nodes) {
+      const commit = decodeCommitNode(node);
+      if (commit === INVALID_PULL_REQUEST_FIELD) {
+        return pullRequestFieldError('commits.nodes');
+      }
+      commits.push(commit);
+    }
+  }
+
+  if (commits.length !== totalCount) {
+    return referenceFailure(
+      `GitHub returned ${commits.length} of the ${totalCount} commits of pull request ${key} and lists at most 250; tevu records a pull request only with its complete commit list`,
+    );
+  }
+  if (!commits.some((commit) => commit.hash === headRefOid)) {
+    return pullRequestFieldError('headRefOid');
+  }
+
+  return {
+    ok: true,
+    value: {
+      key,
+      url,
+      state,
+      targetBranch: baseRefName,
+      targetTip,
+      headCommit: headRefOid,
+      mergeCommit: mergeCommitOid,
+      mergeability,
+      commits,
+    },
+  };
+}
+
+function referenceFailure(reason: string): TevuResult<never, 'ReferenceResolutionError'> {
+  return { ok: false, error: { kind: 'ReferenceResolutionError', reason } };
+}
+
 function authenticationReason(host: string): string {
   return host === 'github.com'
     ? 'gh is not authenticated; run gh auth login'
@@ -181,57 +576,9 @@ function unexpectedExitReason(exitCode: number | null, signal: string | null): s
     : `gh exited unexpectedly (signal ${signal ?? 'unknown'})`;
 }
 
-/** Parses the short form `OWNER/REPO#NUMBER` or an issue/pull-request URL; returns `null` when malformed. */
-function parseReference(reference: string): ParsedReference | null {
-  const shortForm = SHORT_FORM_PATTERN.exec(reference);
-  if (shortForm !== null) {
-    const [, owner, repo, numberText] = shortForm;
-    if (isReservedRepoName(repo)) {
-      return null;
-    }
-    const number = toIssueNumber(numberText);
-    return number === null ? null : { host: 'github.com', owner, repo, kind: 'issues', number };
-  }
-
-  let url: URL;
-  try {
-    url = new URL(reference);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.port !== '') {
-    return null;
-  }
-  const path = parseIssuePath(url.pathname);
-  return path === null ? null : { host: url.hostname, ...path };
-}
-
 /** Builds gh's canonical issue URL from a parsed reference, always under the `issues` path. */
-function canonicalIssueUrl(parsed: ParsedReference): string {
+function canonicalIssueUrl(parsed: ParsedGitHubReference): string {
   return `https://${parsed.host}/${parsed.owner}/${parsed.repo}/issues/${parsed.number}`;
-}
-
-function parseIssuePath(pathname: string): IssuePath | null {
-  const path = pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
-  const match = ISSUE_PATH_PATTERN.exec(path);
-  if (match === null) {
-    return null;
-  }
-  const [, owner, repo, kind, numberText] = match;
-  if (isReservedRepoName(repo)) {
-    return null;
-  }
-  const number = toIssueNumber(numberText);
-  return number === null ? null : { owner, repo, kind: kind as 'issues' | 'pull', number };
-}
-
-function isReservedRepoName(repo: string): boolean {
-  return repo === '.' || repo === '..';
-}
-
-function toIssueNumber(numberText: string): number | null {
-  const value = Number.parseInt(numberText, 10);
-  return value <= MAX_ISSUE_NUMBER ? value : null;
 }
 
 /**
@@ -299,7 +646,7 @@ function decodeResponse(
   if (target === null || target.number !== number) {
     return decodeError(reference, `field "url" is not an issue URL on ${host}`);
   }
-  if (target.kind === 'pull') {
+  if (target.path === 'pull') {
     return trackerError(reference, PULL_REQUEST_REASON);
   }
   return {
@@ -317,8 +664,13 @@ function decodeError(reference: string, detail: string): TevuResult<never, 'Issu
   return trackerError(reference, `unexpected response from gh: ${detail}`);
 }
 
-/** Parses gh's decoded `url` field, requiring it to name an issue or pull request on `host` exactly. */
-function parseIssueUrlOnHost(urlText: string, host: string): IssuePath | null {
+/**
+ * Parses gh's decoded `url` field, requiring it to name an issue or pull
+ * request on `host` exactly: this module's own host, scheme, user-info, port,
+ * query, and fragment checks, with the path segments read through
+ * {@link parseGitHubReference}.
+ */
+function parseIssueUrlOnHost(urlText: string, host: string): ParsedGitHubReference | null {
   let url: URL;
   try {
     url = new URL(urlText);
@@ -336,7 +688,7 @@ function parseIssueUrlOnHost(urlText: string, host: string): IssuePath | null {
   ) {
     return null;
   }
-  return parseIssuePath(url.pathname);
+  return parseGitHubReference(urlText);
 }
 
 /**

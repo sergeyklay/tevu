@@ -6,6 +6,8 @@ import { Readable, Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createGitHubPullRequestReader } from '@/adapters/trackers/github-issues';
+import { resolveReferenceSolution } from '@/application/reference-solution';
 import { TevuConfigSchema } from '@/config/schema';
 import { CONFIG_TEMPLATE } from '@/config/template';
 
@@ -17,6 +19,7 @@ import type {
   ProgramIo,
   ProgramOperations,
 } from './program';
+import type { GhRun } from '@/adapters/trackers/github-issues';
 import type { AssessmentCaseContext, ManualCheckSummary } from '@/application/assess';
 import type { CheckInput, ModelDefinitionInput, TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
@@ -442,6 +445,9 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
     locateConfig: vi.fn(async () => ({ ok: true as const, value: 'tevu.yaml' })),
     importJiraIssue: vi.fn(async () => ({ ok: true as const, value: buildJiraIssueSnapshot() })),
     importGitHubIssue: vi.fn(async () => ({ ok: true as const, value: buildJiraIssueSnapshot() })),
+    resolveReference: vi.fn(async () => {
+      throw new Error('resolveReference should not be called without a scripted reference answer');
+    }),
     createTask: vi.fn(async () => ({
       ok: true as const,
       value: buildMaterializedTask({ id: 'task-2' }),
@@ -571,6 +577,7 @@ function taskInterviewAnswers(repositoryChoice: string): unknown[] {
   return [
     'manual',
     repositoryChoice,
+    '',
     'abc123',
     'task-2',
     'Add an export button',
@@ -2140,6 +2147,7 @@ describe('tevu CLI', () => {
       });
       scriptAnswers(
         'repo-1',
+        '',
         'abc123',
         'task-2',
         'Add an export button',
@@ -2194,6 +2202,7 @@ describe('tevu CLI', () => {
       });
       scriptAnswers(
         'repo-1',
+        '',
         'abc123',
         'task-2',
         'Add an export button',
@@ -2383,6 +2392,377 @@ describe('tevu CLI', () => {
 
       expect(code).toBe(0);
       expect(operations.requireConfigDirectory).not.toHaveBeenCalled();
+    });
+
+    it('adds a task exactly as without a reference when the reference question is left empty', async () => {
+      const operations = createOperations();
+      scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(0);
+      expect(operations.resolveReference).not.toHaveBeenCalled();
+      expect(clack.state.prompts.map((prompt) => prompt.message)).toContain(
+        'Reference solution: a pull request (OWNER/REPO#NUMBER or URL) or a commit in "repo-1" (empty for none)',
+      );
+      expect(clack.state.prompts.map((prompt) => prompt.message)).toContain(
+        'Base commit (a commit from before the fix; resolved and pinned when saved)',
+      );
+      expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task).not.toHaveProperty(
+        'reference',
+      );
+      const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
+      expect(reviewNote?.message).not.toContain('reference');
+    });
+
+    it('resolves a local commit reference, retries after a failed resolution, and proposes its parent as the base commit', async () => {
+      const hash = '0123456789abcdef0123456789abcdef01234567';
+      const parent = 'fedcba9876543210fedcba9876543210fedcba98';
+      const resolveReference = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false as const,
+          error: {
+            kind: 'ReferenceResolutionError' as const,
+            reason: 'the answer does not name a commit',
+          },
+        })
+        .mockResolvedValueOnce({
+          ok: true as const,
+          value: {
+            reference: { kind: 'commit' as const, identifier: 'HEAD~3', commits: [hash] },
+            proposedBase: { commit: parent, basis: 'commit-parent' as const },
+          },
+        });
+      const operations = createOperations({ resolveReference });
+      scriptAnswers(
+        'manual',
+        'repo-1',
+        'bad-ref',
+        'HEAD~3',
+        '',
+        'task-2',
+        'Add an export button',
+        'Export the current view as CSV.',
+        'Implement CSV export for the current view.',
+        'Repository is readable',
+        false,
+        'acc-1',
+        'Export produces a CSV',
+        true,
+        'manual',
+        false,
+        'dod-1',
+        'README documents the button',
+        true,
+        'manual',
+        false,
+        true,
+      );
+
+      const { code, out } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(0);
+      expect(out).toEqual(['Configuration: tevu.yaml', 'Task "task-2" added to tevu.yaml.']);
+      expect(resolveReference).toHaveBeenCalledTimes(2);
+      expect(resolveReference.mock.calls[0]?.[0]).toEqual({
+        configPath: 'tevu.yaml',
+        repository: { id: 'repo-1', path: '../repos/fixture' },
+        identifier: 'bad-ref',
+      });
+      expect(resolveReference.mock.calls[1]?.[0]).toEqual({
+        configPath: 'tevu.yaml',
+        repository: { id: 'repo-1', path: '../repos/fixture' },
+        identifier: 'HEAD~3',
+      });
+      expect(clack.state.logs).toContainEqual({
+        kind: 'warn',
+        message: 'Reference solution cannot be resolved: the answer does not name a commit',
+      });
+      expect(clack.state.notes).toContainEqual({
+        title: 'Reference solution (read once)',
+        message: `Commit ${hash} in "repo-1"\nProposed base: ${parent} (the parent of the reference commit)`,
+      });
+      expect(clack.state.prompts.map((prompt) => prompt.message)).toContain(
+        `Base commit (empty for ${parent}, the parent of the reference commit)`,
+      );
+      expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task).toMatchObject({
+        base_commit: parent,
+        reference: { kind: 'commit', identifier: 'HEAD~3', commits: [hash] },
+      });
+      const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
+      expect(reviewNote?.message).toContain('  reference: commit HEAD~3\n  reference commits: 1');
+    });
+
+    it('resolves a pull-request reference through resolveReferenceSolution over a fake gh, recording its merge commit', async () => {
+      const headHash = 'a'.repeat(40);
+      const parentHash = 'b'.repeat(40);
+      const targetTipHash = 'c'.repeat(40);
+      const mergeHash = 'd'.repeat(40);
+      const page = {
+        data: {
+          repository: {
+            pullRequest: {
+              number: 128,
+              url: 'https://github.com/octo/app/pull/128',
+              state: 'MERGED',
+              headRefOid: headHash,
+              baseRefName: 'main',
+              baseRef: { target: { oid: targetTipHash } },
+              mergeCommit: { oid: mergeHash },
+              mergeable: 'MERGEABLE',
+              commits: {
+                totalCount: 1,
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [
+                  {
+                    commit: {
+                      oid: headHash,
+                      parents: { totalCount: 1, nodes: [{ oid: parentHash }] },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      };
+      const runGh: GhRun = vi.fn(async () => ({
+        launched: true as const,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        cancelled: false,
+        stdout: { text: JSON.stringify([page]), truncated: false },
+        stderr: { text: '', truncated: false },
+      }));
+      const operations = createOperations({
+        resolveReference: (request) =>
+          resolveReferenceSolution(request, {
+            git: { resolveCommit: async () => ({ kind: 'not-found' as const }) },
+            pullRequests: createGitHubPullRequestReader({
+              runGh,
+              parentEnvironment: {},
+              cancellation: new AbortController().signal,
+            }),
+          }),
+      });
+      scriptAnswers(
+        'manual',
+        'repo-1',
+        'octo/app#128',
+        '',
+        'task-2',
+        'Add an export button',
+        'Export the current view as CSV.',
+        'Implement CSV export for the current view.',
+        'Repository is readable',
+        false,
+        'acc-1',
+        'Export produces a CSV',
+        true,
+        'manual',
+        false,
+        'dod-1',
+        'README documents the button',
+        true,
+        'manual',
+        false,
+        true,
+      );
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(0);
+      expect(runGh).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task).toMatchObject({
+        base_commit: parentHash,
+        reference: {
+          kind: 'pull-request',
+          identifier: 'octo/app#128',
+          commits: [headHash],
+          merge_commit: mergeHash,
+        },
+      });
+      expect(clack.state.notes).toContainEqual({
+        title: 'Reference solution (read once)',
+        message: `Pull request octo/app#128 (merged) into main\nCommits: 1, merge commit ${mergeHash}\nProposed base: ${parentHash} (the parent of the pull request's first commit)`,
+      });
+      const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
+      expect(reviewNote?.message).toContain(`  reference merge commit: ${mergeHash}`);
+    });
+
+    it.each([
+      {
+        description: 'a conflicting pull request',
+        snapshotOverrides: { mergeable: 'CONFLICTING' },
+        expectedWarning:
+          'Pull request octo/app#128 conflicts with main; the proposed base is the parent of its first commit, not the tip of main',
+      },
+      {
+        description: 'a closed, mergeable pull request',
+        snapshotOverrides: { state: 'CLOSED' },
+        expectedWarning:
+          'Pull request octo/app#128 is closed, and GitHub does not recheck closed pull requests against main; the proposed base is the tip of main; if it conflicts, enter bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, the parent of its first commit',
+      },
+      {
+        description: 'a pull request with unknown mergeability',
+        snapshotOverrides: { mergeable: null },
+        expectedWarning:
+          'GitHub has not determined whether pull request octo/app#128 conflicts with main; the proposed base is the tip of main; if it conflicts, enter bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, the parent of its first commit',
+      },
+      {
+        description: 'a pull request whose target branch was deleted',
+        snapshotOverrides: { baseRef: null },
+        expectedWarning:
+          'Branch main of pull request octo/app#128 no longer exists on GitHub; the proposed base is the parent of its first commit',
+      },
+    ])('prints the warning for $description', async ({ snapshotOverrides, expectedWarning }) => {
+      const headHash = 'a'.repeat(40);
+      const parentHash = 'b'.repeat(40);
+      const targetTipHash = 'c'.repeat(40);
+      const page = {
+        data: {
+          repository: {
+            pullRequest: {
+              number: 128,
+              url: 'https://github.com/octo/app/pull/128',
+              state: 'OPEN',
+              headRefOid: headHash,
+              baseRefName: 'main',
+              baseRef: { target: { oid: targetTipHash } },
+              mergeCommit: null,
+              mergeable: 'MERGEABLE',
+              commits: {
+                totalCount: 1,
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [
+                  {
+                    commit: {
+                      oid: headHash,
+                      parents: { totalCount: 1, nodes: [{ oid: parentHash }] },
+                    },
+                  },
+                ],
+              },
+              ...snapshotOverrides,
+            },
+          },
+        },
+      };
+      const runGh: GhRun = vi.fn(async () => ({
+        launched: true as const,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        cancelled: false,
+        stdout: { text: JSON.stringify([page]), truncated: false },
+        stderr: { text: '', truncated: false },
+      }));
+      const operations = createOperations({
+        resolveReference: (request) =>
+          resolveReferenceSolution(request, {
+            git: { resolveCommit: async () => ({ kind: 'not-found' as const }) },
+            pullRequests: createGitHubPullRequestReader({
+              runGh,
+              parentEnvironment: {},
+              cancellation: new AbortController().signal,
+            }),
+          }),
+      });
+      scriptAnswers(
+        'manual',
+        'repo-1',
+        'octo/app#128',
+        '',
+        'task-2',
+        'Add an export button',
+        'Export the current view as CSV.',
+        'Implement CSV export for the current view.',
+        'Repository is readable',
+        false,
+        'acc-1',
+        'Export produces a CSV',
+        true,
+        'manual',
+        false,
+        'dod-1',
+        'README documents the button',
+        true,
+        'manual',
+        false,
+        true,
+      );
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(0);
+      expect(clack.state.logs).toContainEqual({ kind: 'warn', message: expectedWarning });
+    });
+
+    it("records the reference and asks today's base commit question when no base is proposed", async () => {
+      const firstCommit = 'a'.repeat(40);
+      const noProposedBase = `first commit ${firstCommit.slice(0, 7)} of pull request octo/app#128 has no parent`;
+      const resolveReference = vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          reference: {
+            kind: 'pull-request' as const,
+            identifier: 'octo/app#128',
+            commits: [firstCommit],
+          },
+          pullRequest: {
+            key: 'octo/app#128',
+            state: 'merged' as const,
+            targetBranch: 'main',
+            noProposedBase,
+          },
+        },
+      }));
+      const operations = createOperations({ resolveReference });
+      const base = 'abcdef0123456789abcdef0123456789abcdef01';
+      scriptAnswers(
+        'manual',
+        'repo-1',
+        'octo/app#128',
+        base,
+        'task-2',
+        'Add an export button',
+        'Export the current view as CSV.',
+        'Implement CSV export for the current view.',
+        'Repository is readable',
+        false,
+        'acc-1',
+        'Export produces a CSV',
+        true,
+        'manual',
+        false,
+        'dod-1',
+        'README documents the button',
+        true,
+        'manual',
+        false,
+        true,
+      );
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(0);
+      expect(clack.state.logs).toContainEqual({
+        kind: 'warn',
+        message: `No base commit is proposed: ${noProposedBase}`,
+      });
+      expect(clack.state.prompts.map((prompt) => prompt.message)).toContain(
+        'Base commit (a commit from before the fix; resolved and pinned when saved)',
+      );
+      expect(clack.state.notes).toContainEqual({
+        title: 'Reference solution (read once)',
+        message: 'Pull request octo/app#128 (merged) into main\nCommits: 1\nProposed base: none',
+      });
+      expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task).toMatchObject({
+        base_commit: base,
+        reference: { kind: 'pull-request', identifier: 'octo/app#128', commits: [firstCommit] },
+      });
     });
   });
 

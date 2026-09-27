@@ -27,11 +27,13 @@ import {
 } from '@/adapters/process';
 import {
   createGitHubIssuesAdapter,
+  createGitHubPullRequestReader,
   GH_CREDENTIAL_ENVIRONMENT_VARIABLES,
 } from '@/adapters/trackers/github-issues';
 import { createJiraCloudAdapter } from '@/adapters/trackers/jira-cloud';
 import { assessCase, readAssessmentContext, rebuildReport } from '@/application/assess';
 import { createTask } from '@/application/create-task';
+import { resolveReferenceSolution } from '@/application/reference-solution';
 import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
 import { validateConfig } from '@/application/validate';
 import { canonicalConfigSerialization, loadConfig } from '@/config/load';
@@ -162,6 +164,23 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       });
       return github.readIssue(reference);
     },
+    resolveReference: (request) =>
+      resolveReferenceSolution(request, {
+        git: createSourceValidator(),
+        pullRequests: createGitHubPullRequestReader({
+          runGh: (ghRequest) => {
+            registry.add(GH_CREDENTIAL_ENVIRONMENT_VARIABLES.map((name) => process.env[name]));
+            return runManagedProcess({
+              ...ghRequest,
+              cwd: process.cwd(),
+              secretValues: registry.read(),
+              stdoutRedaction: 'structured',
+            });
+          },
+          parentEnvironment: process.env,
+          cancellation,
+        }),
+      }),
     createTask: (input) =>
       createTask(input, {
         configStore,

@@ -92,7 +92,8 @@ export type TevuError =
   | { kind: 'RedactionError'; reason: string }
   | { kind: 'CancellationError'; activeCaseIds: string[] }
   | { kind: 'CheckStateError'; step: 'restore' | 'overlay'; reason: string }
-  | { kind: 'SetupError'; phase: SetupPhase; argv: string[]; reason: string };
+  | { kind: 'SetupError'; phase: SetupPhase; argv: string[]; reason: string }
+  | { kind: 'ReferenceResolutionError'; reason: string };
 
 /** Where a run's effective repeat came from: the configuration (set or defaulted) or `tevu run --repeat`. */
 type RepeatSource = 'config' | 'cli';
@@ -181,6 +182,38 @@ type ImportedTaskSource = {
   body: string;
 };
 
+/** A task's reference solution, read once by `tevu task add`; field contract in the configuration reference. */
+export type TaskReference =
+  | { kind: 'pull-request'; identifier: string; commits: string[]; merge_commit?: string }
+  | { kind: 'commit'; identifier: string; commits: [string] };
+
+/** A GitHub pull request's state, as `readPullRequest` reports it. */
+export type PullRequestState = 'open' | 'closed' | 'merged';
+
+/** Whether a pull request's head merges cleanly into its target, as GitHub last computed it. */
+export type PullRequestMergeability = 'mergeable' | 'conflicting' | 'unknown';
+
+/** One pull request commit as GitHub lists it. */
+export type PullRequestCommit = { hash: string; parents: string[] };
+
+/** One GitHub pull request read once through gh, with its complete commit list. */
+export type PullRequestSnapshot = {
+  /** `OWNER/REPO#NUMBER`, taken from gh's `url` field. */
+  key: string;
+  url: string;
+  state: PullRequestState;
+  /** GraphQL `baseRefName`. */
+  targetBranch: string;
+  /** GraphQL `baseRef.target.oid` when read; `null` when the target branch no longer exists. */
+  targetTip: string | null;
+  headCommit: string;
+  /** GraphQL `mergeCommit.oid` when `state` is `merged` and GitHub reports one; otherwise `null`. */
+  mergeCommit: string | null;
+  mergeability: PullRequestMergeability;
+  /** Every commit GitHub lists, in GitHub's order; never a partial list. */
+  commits: PullRequestCommit[];
+};
+
 /** A command check's resolved shape: literal argv, no shell, and every default materialized. */
 export interface CommandCheck {
   id: string;
@@ -214,6 +247,7 @@ export interface TaskDefinition {
   prompt: string;
   description: string;
   source?: ImportedTaskSource;
+  reference?: TaskReference;
   readiness: string[];
   checks: {
     /** Present only when the file declares it; `[]` declares nothing to restore. */
@@ -576,6 +610,10 @@ export type OverlayRecord = {
 /** One overlay file; `sha256` is 64 lowercase hexadecimal characters. */
 export type OverlayFileRecord = { path: string; sha256: string };
 
+/** Result of looking up one revision in a repository. */
+export type CommitLookup =
+  { kind: 'found'; commit: string } | { kind: 'not-found' } | { kind: 'no-repository' };
+
 /**
  * Sealed Git source validation, case materialization, patch capture, disposal,
  * and the check-state setup (restore and overlay) that runs between patch
@@ -590,6 +628,14 @@ export interface GitWorkspaceAdapter {
     repository: RepositoryDefinition,
     commit: string,
   ): Promise<TevuResult<SourceValidation, 'SourceMaterializationError'>>;
+  /** Looks up a revision without failing: distinguishes a repository the path does not hold from a revision it does not resolve. */
+  resolveCommit(repository: RepositoryDefinition, reference: string): Promise<CommitLookup>;
+  /** Reports whether `ancestor` precedes or equals `descendant`; `null` when Git cannot decide. */
+  isAncestor(
+    repository: RepositoryDefinition,
+    ancestor: string,
+    descendant: string,
+  ): Promise<boolean | null>;
   createIsolatedCase(
     identity: CaseIdentity,
     repository: RepositoryDefinition,
@@ -909,6 +955,13 @@ export interface IssueTrackerAdapter {
   readIssue(
     reference: string,
   ): Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>>;
+}
+
+/** Reads one GitHub pull request, complete with its commit list, exactly once. */
+export interface PullRequestReader {
+  readPullRequest(
+    reference: string,
+  ): Promise<TevuResult<PullRequestSnapshot, 'ReferenceResolutionError' | 'CancellationError'>>;
 }
 
 /** Exclusive assessment lock held across replacement and derived regeneration. */

@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { createGitHubIssuesAdapter, GH_CREDENTIAL_ENVIRONMENT_VARIABLES } from './github-issues';
+import {
+  createGitHubIssuesAdapter,
+  createGitHubPullRequestReader,
+  GH_CREDENTIAL_ENVIRONMENT_VARIABLES,
+} from './github-issues';
 
 import type {
   GhCapture,
@@ -9,7 +13,7 @@ import type {
   GhRunResult,
   GitHubIssuesDependencies,
 } from './github-issues';
-import type { IssueSnapshot, TevuResult } from '@/domain/types';
+import type { IssueSnapshot, PullRequestSnapshot, TevuResult } from '@/domain/types';
 
 type ReadIssueResult = TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>;
 
@@ -537,5 +541,483 @@ describe('createGitHubIssuesAdapter stderr excerpt masking', () => {
     expect(error.reason).toBe(
       `gh could not read the issue (not found, no access, or no connection): ${'x'.repeat(200)}...`,
     );
+  });
+});
+
+type ReadPullRequestResult = TevuResult<
+  PullRequestSnapshot,
+  'ReferenceResolutionError' | 'CancellationError'
+>;
+
+function expectPullRequestOk(result: ReadPullRequestResult): PullRequestSnapshot {
+  if (!result.ok) {
+    throw new Error(`expected success, got ${JSON.stringify(result.error)}`);
+  }
+  return result.value;
+}
+
+function expectReferenceResolutionError(
+  result: ReadPullRequestResult,
+): Extract<ReadPullRequestResult, { ok: false }>['error'] & { kind: 'ReferenceResolutionError' } {
+  if (result.ok) {
+    throw new Error(
+      `expected a ReferenceResolutionError, got success: ${JSON.stringify(result.value)}`,
+    );
+  }
+  if (result.error.kind !== 'ReferenceResolutionError') {
+    throw new Error(`expected a ReferenceResolutionError, got ${result.error.kind}`);
+  }
+  return result.error;
+}
+
+const HEAD_HASH = 'a'.repeat(40);
+const PARENT_HASH = 'b'.repeat(40);
+const TARGET_TIP_HASH = 'c'.repeat(40);
+const MERGE_HASH = 'd'.repeat(40);
+
+function buildCommitNode(oid: string, parentOids: readonly string[] = []): unknown {
+  return {
+    commit: {
+      oid,
+      parents: {
+        totalCount: parentOids.length,
+        nodes: parentOids.map((parentOid) => ({ oid: parentOid })),
+      },
+    },
+  };
+}
+
+type PullRequestPageOverrides = {
+  number?: number;
+  url?: string;
+  state?: unknown;
+  headRefOid?: unknown;
+  baseRefName?: unknown;
+  baseRef?: unknown;
+  mergeCommit?: unknown;
+  mergeable?: unknown;
+  totalCount?: number;
+  nodes?: unknown[];
+};
+
+function buildPullRequestPage(overrides: PullRequestPageOverrides = {}): unknown {
+  return {
+    data: {
+      repository: {
+        pullRequest: {
+          number: overrides.number ?? 42,
+          url: overrides.url ?? 'https://github.com/octo/repo/pull/42',
+          state: overrides.state ?? 'OPEN',
+          headRefOid: overrides.headRefOid ?? HEAD_HASH,
+          baseRefName: overrides.baseRefName ?? 'main',
+          baseRef:
+            overrides.baseRef === undefined
+              ? { target: { oid: TARGET_TIP_HASH } }
+              : overrides.baseRef,
+          mergeCommit: overrides.mergeCommit === undefined ? null : overrides.mergeCommit,
+          mergeable: overrides.mergeable === undefined ? 'MERGEABLE' : overrides.mergeable,
+          commits: {
+            totalCount: overrides.totalCount ?? 1,
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: overrides.nodes ?? [buildCommitNode(HEAD_HASH, [PARENT_HASH])],
+          },
+        },
+      },
+    },
+  };
+}
+
+function pagesStdout(pages: readonly unknown[]): GhCapture {
+  return buildCapture(JSON.stringify(pages));
+}
+
+describe('createGitHubPullRequestReader reference grammar', () => {
+  it.each([
+    { description: 'an empty reference', reference: '' },
+    { description: 'a short form missing the pull request number', reference: 'octo/repo' },
+    {
+      description: 'a URL carrying userinfo',
+      reference: 'https://user:pass@github.com/octo/repo/pull/1',
+    },
+    {
+      description: 'a URL carrying an explicit port',
+      reference: 'https://github.com:8443/octo/repo/pull/1',
+    },
+  ])('rejects $description without calling gh', async ({ reference }) => {
+    const runGh = vi.fn(fakeRun(buildLaunchedResult()));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest(reference));
+
+    expect(error.reason).toBe(
+      'reference must be OWNER/REPO#NUMBER or https://HOST/OWNER/REPO/pull/NUMBER',
+    );
+    expect(runGh).not.toHaveBeenCalled();
+  });
+
+  it('rejects an issue reference before calling gh', async () => {
+    const runGh = vi.fn(fakeRun(buildLaunchedResult()));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(
+      await reader.readPullRequest('https://github.com/octo/repo/issues/5'),
+    );
+
+    expect(error.reason).toBe('the reference points to an issue, not a pull request');
+    expect(runGh).not.toHaveBeenCalled();
+  });
+
+  it('builds the documented argv from a short-form reference', async () => {
+    const runGh = vi.fn(
+      fakeRun(buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage()]) })),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    await reader.readPullRequest('octo/repo#42');
+
+    expect(runGh).toHaveBeenCalledTimes(1);
+    const request = vi.mocked(runGh).mock.calls[0]?.[0];
+    expect(request?.argv[0]).toBe('gh');
+    expect(request?.argv).toContain('--hostname');
+    expect(request?.argv[request.argv.indexOf('--hostname') + 1]).toBe('github.com');
+    expect(request?.argv).toContain('--paginate');
+    expect(request?.argv).toContain('--slurp');
+    expect(request?.argv).toContain('owner=octo');
+    expect(request?.argv).toContain('repo=repo');
+    expect(request?.argv).toContain('number=42');
+    expect(request?.argv.some((token) => token.startsWith('query='))).toBe(true);
+  });
+
+  it('calls runGh at most once per read', async () => {
+    const runGh = vi.fn(
+      fakeRun(buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage()]) })),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    await reader.readPullRequest('octo/repo#42');
+
+    expect(runGh).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createGitHubPullRequestReader decoding', () => {
+  it('decodes a single-page open, mergeable pull request', async () => {
+    const runGh = fakeRun(buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage()]) }));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const snapshot = expectPullRequestOk(await reader.readPullRequest('octo/repo#42'));
+
+    expect(snapshot).toEqual({
+      key: 'octo/repo#42',
+      url: 'https://github.com/octo/repo/pull/42',
+      state: 'open',
+      targetBranch: 'main',
+      targetTip: TARGET_TIP_HASH,
+      headCommit: HEAD_HASH,
+      mergeCommit: null,
+      mergeability: 'mergeable',
+      commits: [{ hash: HEAD_HASH, parents: [PARENT_HASH] }],
+    });
+  });
+
+  it("keeps a merged pull request's merge commit only when state is merged", async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({
+        stdout: pagesStdout([
+          buildPullRequestPage({ state: 'MERGED', mergeCommit: { oid: MERGE_HASH } }),
+        ]),
+      }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const snapshot = expectPullRequestOk(await reader.readPullRequest('octo/repo#42'));
+
+    expect(snapshot.state).toBe('merged');
+    expect(snapshot.mergeCommit).toBe(MERGE_HASH);
+  });
+
+  it('reports the target branch deleted as a null target tip', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage({ baseRef: null })]) }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const snapshot = expectPullRequestOk(await reader.readPullRequest('octo/repo#42'));
+
+    expect(snapshot.targetTip).toBeNull();
+  });
+
+  it('reports unknown mergeability for any value other than MERGEABLE or CONFLICTING', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({
+        stdout: pagesStdout([buildPullRequestPage({ mergeable: 'UNKNOWN' })]),
+      }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const snapshot = expectPullRequestOk(await reader.readPullRequest('octo/repo#42'));
+
+    expect(snapshot.mergeability).toBe('unknown');
+  });
+
+  it('fails with E-NO-COMMITS when totalCount is 0', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({
+        stdout: pagesStdout([buildPullRequestPage({ totalCount: 0, nodes: [] })]),
+      }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe('pull request octo/repo#42 has no commits');
+  });
+
+  it('accumulates commits across pages and succeeds when the count matches totalCount', async () => {
+    const firstPageNodes = Array.from({ length: 2 }, (_, index) =>
+      buildCommitNode(`${index}`.repeat(40).slice(0, 40).padStart(40, '0'), []),
+    );
+    const secondPageNodes = [buildCommitNode(HEAD_HASH, [PARENT_HASH])];
+    const runGh = fakeRun(
+      buildLaunchedResult({
+        stdout: pagesStdout([
+          buildPullRequestPage({ totalCount: 3, nodes: firstPageNodes }),
+          buildPullRequestPage({ totalCount: 3, nodes: secondPageNodes }),
+        ]),
+      }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const snapshot = expectPullRequestOk(await reader.readPullRequest('octo/repo#42'));
+
+    expect(snapshot.commits).toHaveLength(3);
+  });
+
+  it('fails with E-TRUNCATED for the nodejs/node#61947 shape: 100, 100, and 50 nodes with totalCount 351', async () => {
+    const buildPageNodes = (count: number, offset: number): unknown[] =>
+      Array.from({ length: count }, (_, index) =>
+        buildCommitNode(String(offset + index).padStart(40, '0'), []),
+      );
+    const runGh = fakeRun(
+      buildLaunchedResult({
+        stdout: pagesStdout([
+          buildPullRequestPage({ totalCount: 351, nodes: buildPageNodes(100, 0) }),
+          buildPullRequestPage({ totalCount: 351, nodes: buildPageNodes(100, 100) }),
+          buildPullRequestPage({ totalCount: 351, nodes: buildPageNodes(50, 200) }),
+        ]),
+      }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe(
+      'GitHub returned 250 of the 351 commits of pull request octo/repo#42 and lists at most 250; tevu records a pull request only with its complete commit list',
+    );
+  });
+
+  it.each([
+    { field: 'totalCount', overrides: { totalCount: 5 } },
+    { field: 'headRefOid', overrides: { headRefOid: PARENT_HASH } },
+  ])('fails with E-CHANGED when a later page disagrees on $field', async ({ overrides }) => {
+    const runGh = fakeRun(
+      buildLaunchedResult({
+        stdout: pagesStdout([
+          buildPullRequestPage({
+            totalCount: 2,
+            nodes: [buildCommitNode(HEAD_HASH, [PARENT_HASH])],
+          }),
+          buildPullRequestPage({
+            totalCount: 2,
+            nodes: [buildCommitNode(PARENT_HASH, [])],
+            ...overrides,
+          }),
+        ]),
+      }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe(
+      'pull request octo/repo#42 changed while tevu read it; enter it again',
+    );
+  });
+
+  it.each([
+    { description: 'number mismatch', overrides: { number: 43 } },
+    { description: 'an invalid state', overrides: { state: 'DRAFT' } },
+    { description: 'an invalid headRefOid', overrides: { headRefOid: 'not-a-hash' } },
+    { description: 'an empty baseRefName', overrides: { baseRefName: '' } },
+    { description: 'an invalid baseRef shape', overrides: { baseRef: { target: {} } } },
+    { description: 'an invalid mergeCommit shape', overrides: { mergeCommit: { oid: 'nope' } } },
+  ])('fails field validation for $description', async ({ overrides }) => {
+    const runGh = fakeRun(
+      buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage(overrides)]) }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toMatch(/^unexpected response from gh: /);
+  });
+
+  it('rejects a decoded url naming an issue as an issue reference, not a field-validation failure', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({
+        stdout: pagesStdout([
+          buildPullRequestPage({ url: 'https://github.com/octo/repo/issues/42' }),
+        ]),
+      }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe('the reference points to an issue, not a pull request');
+  });
+
+  it('fails field validation for an invalid commit node', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({
+        stdout: pagesStdout([
+          buildPullRequestPage({ nodes: [{ commit: { oid: HEAD_HASH, parents: null } }] }),
+        ]),
+      }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe(
+      'unexpected response from gh: field "commits.nodes" is missing or invalid',
+    );
+  });
+
+  it('fails when the head commit is not among the listed commits', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({
+        stdout: pagesStdout([
+          buildPullRequestPage({
+            headRefOid: PARENT_HASH,
+            nodes: [buildCommitNode(HEAD_HASH, [])],
+          }),
+        ]),
+      }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe(
+      'unexpected response from gh: field "headRefOid" is missing or invalid',
+    );
+  });
+});
+
+describe('createGitHubPullRequestReader exit-code mapping', () => {
+  it('reports gh as missing when the launch failure code is ENOENT', async () => {
+    const runGh = fakeRun({ launched: false, code: 'ENOENT', reason: 'spawn gh ENOENT' });
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe(
+      'GitHub CLI (gh) is not installed or not on PATH; install it from https://cli.github.com or enter a commit reference instead',
+    );
+  });
+
+  it('reports the launch failure code for any other launch failure', async () => {
+    const runGh = fakeRun({ launched: false, code: 'EACCES', reason: 'spawn gh EACCES' });
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe('GitHub CLI (gh) could not be started: EACCES');
+  });
+
+  it('reports a timeout when gh does not respond within the deadline', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({ timedOut: true, exitCode: null, signal: 'SIGTERM' }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe('gh did not respond within 30 seconds');
+  });
+
+  it('reports an authentication failure on exit code 4', async () => {
+    const runGh = fakeRun(buildLaunchedResult({ exitCode: 4 }));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe('gh is not authenticated; run gh auth login');
+  });
+
+  it('reports a read failure with a stderr excerpt on exit code 1', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({
+        exitCode: 1,
+        stderr: buildCapture('GraphQL: Could not resolve to a PullRequest'),
+      }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe(
+      'gh could not read the pull request (not found, no access, or no connection): GraphQL: Could not resolve to a PullRequest',
+    );
+  });
+
+  it("reports gh's own cancellation exit code as a read cancellation", async () => {
+    const runGh = fakeRun(buildLaunchedResult({ exitCode: 2 }));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe('read cancelled (gh exited with code 2)');
+  });
+
+  it('reports an unexpected exit code through the generic exit reason', async () => {
+    const runGh = fakeRun(buildLaunchedResult({ exitCode: 7 }));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe('gh exited unexpectedly (exit code 7)');
+  });
+});
+
+describe('createGitHubPullRequestReader cancellation', () => {
+  it('returns a cancellation failure before launch without calling gh', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const runGh = vi.fn(fakeRun(buildLaunchedResult()));
+    const reader = createGitHubPullRequestReader(
+      buildDependencies({ runGh, cancellation: controller.signal }),
+    );
+
+    const result = await reader.readPullRequest('octo/repo#42');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe('CancellationError');
+    }
+    expect(runGh).not.toHaveBeenCalled();
+  });
+
+  it('returns a cancellation failure when gh reports it was cancelled during the run', async () => {
+    const runGh = fakeRun(buildLaunchedResult({ cancelled: true }));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const result = await reader.readPullRequest('octo/repo#42');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe('CancellationError');
+    }
   });
 });

@@ -24,6 +24,7 @@ import type {
   CheckStateRecord,
   CheckStateRequest,
   Clock,
+  CommitLookup,
   EnvironmentAdapter,
   EnvironmentVariableRecord,
   EvaluatorProcessAdapter,
@@ -450,6 +451,10 @@ function createHarness(config: TevuConfig) {
     applyCheckStateCalls: [] as Array<{ caseId: string; request: CheckStateRequest }>,
     applyCheckStateError: null as Extract<TevuError, { kind: 'CheckStateError' }> | null,
     applyCheckStateResults: new Map<string, CheckStateRecord>(),
+    resolveCommitCalls: [] as Array<{ repositoryId: string; reference: string }>,
+    resolveCommitResult: { kind: 'not-found' } as CommitLookup,
+    isAncestorCalls: [] as Array<{ repositoryId: string; ancestor: string; descendant: string }>,
+    isAncestorResult: null as boolean | null,
   };
 
   const git: GitWorkspaceAdapter = {
@@ -467,6 +472,14 @@ function createHarness(config: TevuConfig) {
           resolvedCommit: `pinned-${commit}`,
         },
       };
+    },
+    async resolveCommit(repository, reference) {
+      gitState.resolveCommitCalls.push({ repositoryId: repository.id, reference });
+      return gitState.resolveCommitResult;
+    },
+    async isAncestor(repository, ancestor, descendant) {
+      gitState.isAncestorCalls.push({ repositoryId: repository.id, ancestor, descendant });
+      return gitState.isAncestorResult;
     },
     async createIsolatedCase(identity, repository) {
       gitState.createIsolatedCaseCalls.push(identity);
@@ -1492,6 +1505,63 @@ describe('runBenchmark', () => {
       'probe',
       'validateSource:repo-1',
     ]);
+  });
+
+  it("fails before any case starts when a planned case's prompt names a reference commit", async () => {
+    const referenceCommit = 'fedcba9876543210fedcba9876543210fedcba98';
+    const config = buildTevuConfig({
+      tasks: [
+        buildTask({
+          id: 'task-1',
+          reference: { kind: 'commit', identifier: 'HEAD~3', commits: [referenceCommit] },
+          prompt: `follow the same approach as ${referenceCommit.slice(0, 7)}`,
+        }),
+      ],
+    });
+    const harness = createHarness(config);
+
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: 'SourceMaterializationError',
+        taskId: 'task-1',
+        reason: `agent prompt contains resolved reference commit ${referenceCommit.slice(0, 7)}`,
+      },
+    });
+    expect(harness.artifacts.startedManifests).toHaveLength(0);
+    expect(harness.agent.runCalls.size).toBe(0);
+  });
+
+  it("fails before any case starts when a planned case's prompt names a pull-request reference", async () => {
+    const config = buildTevuConfig({
+      tasks: [
+        buildTask({
+          id: 'task-1',
+          reference: {
+            kind: 'pull-request',
+            identifier: 'octo/app#128',
+            commits: ['fedcba9876543210fedcba9876543210fedcba98'],
+          },
+          prompt: 'follow octo/app#128 exactly',
+        }),
+      ],
+    });
+    const harness = createHarness(config);
+
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: 'SourceMaterializationError',
+        taskId: 'task-1',
+        reason: 'agent prompt contains pull request octo/app#128',
+      },
+    });
+    expect(harness.artifacts.startedManifests).toHaveLength(0);
+    expect(harness.agent.runCalls.size).toBe(0);
   });
 
   it('runs the complete per-case pipeline in order with the patch captured before evaluators', async () => {

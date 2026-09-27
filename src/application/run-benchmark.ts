@@ -9,6 +9,7 @@
 import pLimit from 'p-limit';
 
 import { agentNamesInUse, durationMs } from '@/config/schema';
+import { parseGitHubReference } from '@/domain/github-reference';
 import { unavailableBenchmarkMetrics } from '@/domain/types';
 import {
   buildCheckEnvironment,
@@ -21,7 +22,11 @@ import { compareCaseIds } from '@/evaluation/report';
 
 import { buildEnvironmentVariableNames } from './environment-variable-names';
 import { runSetupPhase } from './repository-setup';
-import { describeSourceCommitInPrompt } from './source-commit-in-prompt';
+import {
+  describePullRequestInPrompt,
+  describeReferenceCommitInPrompt,
+  describeSourceCommitInPrompt,
+} from './source-commit-in-prompt';
 import { buildTaskPrompt } from './task-prompt';
 
 import type { SetupPhaseOutcome } from './repository-setup';
@@ -407,9 +412,31 @@ async function resolvePlannedCases(
       commit = validated.value.resolvedCommit;
       resolvedCommits.set(key, commit);
     }
-    const reason = describeSourceCommitInPrompt(buildTaskPrompt(task), commit);
+    const prompt = buildTaskPrompt(task);
+    const reason = describeSourceCommitInPrompt(prompt, commit);
     if (reason !== undefined) {
       return sourceFailure(task.id, reason);
+    }
+    const recordedReferenceCommits =
+      task.reference === undefined
+        ? []
+        : task.reference.kind === 'pull-request' && task.reference.merge_commit !== undefined
+          ? [...task.reference.commits, task.reference.merge_commit]
+          : task.reference.commits;
+    for (const referenceCommit of recordedReferenceCommits) {
+      const referenceReason = describeReferenceCommitInPrompt(prompt, referenceCommit);
+      if (referenceReason !== undefined) {
+        return sourceFailure(task.id, referenceReason);
+      }
+    }
+    if (task.reference?.kind === 'pull-request') {
+      const parsed = parseGitHubReference(task.reference.identifier);
+      if (parsed !== null) {
+        const pullRequestReason = describePullRequestInPrompt(prompt, parsed);
+        if (pullRequestReason !== undefined) {
+          return sourceFailure(task.id, pullRequestReason);
+        }
+      }
     }
     planned.push({
       identity: { ...identity, sourceCommit: commit },
