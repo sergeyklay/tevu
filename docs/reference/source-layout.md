@@ -7,7 +7,7 @@
 | `src/application` | Task creation, task prompt building, reference-solution resolution, managed-clone preparation, validation, orchestration, assessment, report rebuilding, the one-shot model call, the one-shot grading call, and the one-shot criteria drafting call |
 | `src/evaluation` | Checks, agent-independent metric rules, grading logic, and report rendering |
 | `src/adapters` | Git, managed clones, issue tracker, process, and artifact I/O |
-| `src/adapters/agents` | One directory per agent adapter: probing, case runs, session export, model calls, metric normalization, and protocol decoding |
+| `src/adapters/agents` | One directory per agent adapter: probing, case runs, session export, model calls, metric normalization, protocol decoding, provider copying from the operator's own agent configuration, and model listing |
 | `src/interface` | Command parsing and interactive prompts |
 | `src/index.ts` | Executable entry point and dependency wiring |
 

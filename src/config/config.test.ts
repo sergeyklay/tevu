@@ -263,14 +263,7 @@ function buildFullGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspac
       },
     })),
     dispose: vi.fn(async () => ({ ok: true as const, value: undefined })),
-    initializeEmptyRepository: vi.fn(async () => ({
-      ok: false as const,
-      error: {
-        kind: 'ArtifactError' as const,
-        operation: 'initialize-repository',
-        reason: 'not used in these tests',
-      },
-    })),
+    initializeEmptyRepository: vi.fn(async () => ({ ok: true as const, value: undefined })),
     diffCommit: vi.fn(async () => ({
       ok: false as const,
       error: {
@@ -331,6 +324,25 @@ function buildFakeAgentAdapter(overrides: Partial<AgentAdapter> = {}): AgentAdap
       ok: true as const,
       value: buildAgentCapabilityReport('opencode'),
     })),
+    readProviders: vi.fn(async () => ({
+      ok: true as const,
+      value: { agent: 'opencode', configurationFiles: [], findings: [] },
+    })),
+    // Every `model` string this file's fixtures declare, so the model-resolution
+    // stage reports nothing new for a test that does not override this stub.
+    listModels: vi.fn(async () => ({
+      outcome: 'listed' as const,
+      models: [
+        'anthropic/claude-4',
+        'anthropic/criteria-model',
+        'openai/criteria-model',
+        'openai/gpt-5',
+        'openai/grader-model',
+        'openai/your-criteria-model',
+        'openai/your-grader-model',
+        'other/model',
+      ],
+    })),
     run: vi.fn(async () => ({
       ok: false as const,
       error: { kind: 'CancellationError' as const, activeCaseIds: [] },
@@ -381,11 +393,13 @@ function buildEnvironments(overrides: Partial<EnvironmentAdapter> = {}): Environ
       },
     })),
     createModelCallEnvironment: vi.fn(async () => ({
-      ok: false as const,
-      error: {
-        kind: 'ArtifactError' as const,
-        operation: 'create-model-call-directory',
-        reason: 'not used in these tests',
+      ok: true as const,
+      value: {
+        rootDirectory: '/synthetic/model-call',
+        workingDirectory: '/synthetic/model-call/work',
+        homeDirectory: '/synthetic/model-call/home',
+        variables: {},
+        dispose: vi.fn(async () => ({ ok: true as const, value: undefined })),
       },
     })),
     ...overrides,
@@ -527,7 +541,7 @@ describe('agentSettingsSchema', () => {
 
     expect(parsed.success).toBe(true);
     if (!parsed.success) return;
-    expect(parsed.data).toEqual({ command: 'opencode', secrets: [], env: [] });
+    expect(parsed.data).toEqual({ command: 'opencode', secrets: [], env: [], providers: [] });
   });
 
   it('names the given agent in the both-lists message', () => {
@@ -622,6 +636,56 @@ describe('TevuConfigSchema', () => {
     expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
       'environment variable "SHARED" appears in both agents.opencode.secrets and agents.opencode.env',
     );
+  });
+
+  it('defaults agents.opencode.providers to an empty array when absent', () => {
+    const config = expectSchemaAcceptance(buildConfig());
+
+    expect(config.agents.opencode.providers).toEqual([]);
+  });
+
+  it.each(['', 'acme/proxy'])('rejects the provider id %j', (id) => {
+    const config = buildConfig({ agents: buildAgents({ providers: [{ id }] }) });
+
+    expect(expectSchemaRejection(config)).toContainEqual({
+      path: 'agents.opencode.providers.0.id',
+      message: 'provider id must be non-empty and contain no "/"',
+    });
+  });
+
+  it('rejects a duplicate provider id', () => {
+    const config = buildConfig({
+      agents: buildAgents({ providers: [{ id: 'acme' }, { id: 'acme' }] }),
+    });
+
+    expect(expectSchemaRejection(config)).toContainEqual({
+      path: 'agents.opencode.providers.1.id',
+      message: 'duplicate provider id "acme"',
+    });
+  });
+
+  it("rejects a provider api_key not listed in the block's secrets", () => {
+    const config = buildConfig({
+      agents: buildAgents({ providers: [{ id: 'acme', api_key: 'ACME_KEY' }] }),
+    });
+
+    expect(expectSchemaRejection(config)).toContainEqual({
+      path: 'agents.opencode.providers.0.api_key',
+      message: 'api_key "ACME_KEY" must be listed in agents.opencode.secrets',
+    });
+  });
+
+  it("accepts a provider api_key listed in the block's secrets", () => {
+    const config = expectSchemaAcceptance(
+      buildConfig({
+        agents: buildAgents({
+          secrets: ['ACME_KEY'],
+          providers: [{ id: 'acme', api_key: 'ACME_KEY' }],
+        }),
+      }),
+    );
+
+    expect(config.agents.opencode.providers).toEqual([{ id: 'acme', api_key: 'ACME_KEY' }]);
   });
 
   it.each([

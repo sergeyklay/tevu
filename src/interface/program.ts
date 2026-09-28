@@ -147,6 +147,7 @@ export type ProgramOperations = {
       | 'ArtifactError'
       | 'CancellationError'
       | 'CheckStateError'
+      | 'ConfigValidationError'
     >
   >;
   rebuildRunReport(

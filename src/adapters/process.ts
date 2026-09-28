@@ -9,7 +9,7 @@
 
 import { Buffer } from 'node:buffer';
 import { constants } from 'node:fs';
-import { access, lstat, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
+import { access, lstat, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
@@ -20,6 +20,7 @@ import { ISOLATED_GIT_SETTINGS } from '@/domain/git-environment';
 import { redactDecodedValue } from '@/domain/redaction';
 
 import type {
+  AgentConfigurationFile,
   CaseEnvironments,
   CaseExecutableAdapter,
   CaseExecutableProbe,
@@ -323,6 +324,33 @@ export function createEvaluatorProcessAdapter(
 }
 
 /**
+ * Writes every configuration file into `xdgConfigHome`, in list order, so it
+ * exists in the agent's own global configuration before the agent starts.
+ * Throws on the first failure: an unusable `relativePath`, a directory that
+ * cannot be created, or a target that already exists. An empty `files` list
+ * writes nothing.
+ */
+async function writeConfigurationFiles(
+  xdgConfigHome: string,
+  files: readonly AgentConfigurationFile[],
+): Promise<void> {
+  for (const file of files) {
+    if (
+      file.relativePath.length === 0 ||
+      file.relativePath.startsWith('/') ||
+      file.relativePath.split('/').includes('..')
+    ) {
+      throw new Error(
+        `configuration file path "${file.relativePath}" is empty, absolute, or contains a ".." segment`,
+      );
+    }
+    const target = join(xdgConfigHome, file.relativePath);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, file.text, { encoding: 'utf8', flag: 'wx' });
+  }
+}
+
+/**
  * Creates the environment boundary: one immutable run-level snapshot of the
  * parent PATH and configured variable values, and per-case agent and
  * evaluator replacement environments with private home, XDG, and temporary
@@ -340,6 +368,7 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
       snapshot: ParentEnvironmentSnapshot,
       names: EnvironmentVariableNames,
       agent: string,
+      configurationFiles: readonly AgentConfigurationFile[],
     ): Promise<TevuResult<CaseEnvironments, 'IsolationError'>> {
       const agentSettings = names.agents[agent];
       if (agentSettings === undefined) {
@@ -372,6 +401,10 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
             })),
           ],
         });
+        await writeConfigurationFiles(
+          agentEnvironment.variables.XDG_CONFIG_HOME,
+          configurationFiles,
+        );
         const evaluator = await buildIsolatedEnvironment({
           caseId: workspace.caseId,
           recipient: 'evaluator',
@@ -400,6 +433,7 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
     async createModelCallEnvironment(
       snapshot: ParentEnvironmentSnapshot,
       agentVariables: { secrets: readonly string[]; env: readonly string[] },
+      configurationFiles: readonly AgentConfigurationFile[],
     ): Promise<TevuResult<ModelCallEnvironment, 'ArtifactError'>> {
       let root: string;
       try {
@@ -411,6 +445,7 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
         const workingDirectory = join(root, 'work');
         await mkdir(workingDirectory);
         const base = await createEnvironmentBase(join(root, 'agent'), snapshot.path);
+        await writeConfigurationFiles(base.variables.XDG_CONFIG_HOME, configurationFiles);
         const variables: Record<string, string> = { ...base.variables };
         for (const name of [...agentVariables.secrets, ...agentVariables.env]) {
           const value = snapshot.agentValues[name];

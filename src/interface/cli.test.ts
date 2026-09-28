@@ -348,7 +348,11 @@ function buildRunResult(overrides: Partial<RunResult> = {}): RunResult {
       startedAt: '2026-09-23T10:00:00.000Z',
       completedAt: '2026-09-23T10:05:00.000Z',
       host: { platform: 'linux', nodeVersion: '24.10.0' },
-      tools: { gitVersion: '2.47.0', agentVersions: { [AGENT_NAME]: '1.18.32' } },
+      tools: {
+        gitVersion: '2.47.0',
+        agentVersions: { [AGENT_NAME]: '1.18.32' },
+        agentConfigurationFiles: {},
+      },
       execution: { concurrency: 2, caseTimeoutMs: 600000, repeat: { value: 1, source: 'config' } },
       cases: [identity],
     },

@@ -18,6 +18,7 @@ import type {
   ManagedProcessRequest,
   ManagedProcessResult,
   ManagedProcessRunner,
+  ModelCallEnvironment,
   SecretRedactor,
 } from '@/domain/types';
 
@@ -67,6 +68,7 @@ function buildDependencies(
     secrets: buildSecretRedactor([]),
     probeEnvironment: { PATH: process.env['PATH'] ?? '' },
     probeDirectory: process.cwd(),
+    operatorDirectories: { home: undefined, xdgConfigHome: undefined },
     ...overrides,
   };
 }
@@ -671,6 +673,10 @@ if (args[0] === "export" && args[1] === "--help") {
   console.log("usage: opencode export <session-id>");
   process.exit(0);
 }
+if (args[0] === "models" && args[1] === "--help") {
+  console.log("usage: opencode models");
+  process.exit(0);
+}
 if (args[0] === "run") {
   const session = "${SYNTHETIC_SESSION}";
   const emit = (value) => console.log(JSON.stringify(value));
@@ -745,12 +751,41 @@ if (args[0] === "export" && args[1] === "--help") {
   console.log("usage: opencode export <session-id>");
   process.exit(0);
 }
+if (args[0] === "models" && args[1] === "--help") {
+  console.log("usage: opencode models");
+  process.exit(0);
+}
 process.exit(0);
 `;
 
 const SYNTHETIC_EXIT_FOUR_SCRIPT = `#!/usr/bin/env node
 if (process.argv[2] === "--version") { console.log("7.7.7-exit-four"); process.exit(0); }
 process.exit(4);
+`;
+
+/**
+ * Answers every probe invocation except `models --help`, whose behavior
+ * depends on `TEVU_SYNTH_MODELS_HELP`: "nonzero" exits 1, and any other
+ * value (including unset) exits 0 without ever printing "opencode models".
+ */
+const SYNTHETIC_NO_MODELS_HELP_SCRIPT = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--version") { console.log("1.0.0-no-models"); process.exit(0); }
+if (args[0] === "--help") { console.log("usage: no-models-opencode <command>"); process.exit(0); }
+if (args[0] === "run" && args[1] === "--help") {
+  console.log("usage: opencode run --format json --model <model> --variant <variant> <prompt>");
+  process.exit(0);
+}
+if (args[0] === "export" && args[1] === "--help") {
+  console.log("usage: opencode export <session-id>");
+  process.exit(0);
+}
+if (args[0] === "models" && args[1] === "--help") {
+  if (process.env["TEVU_SYNTH_MODELS_HELP"] === "nonzero") { process.exit(1); }
+  console.log("usage: no-models-opencode <command>");
+  process.exit(0);
+}
+process.exit(0);
 `;
 
 let tempRoot: string;
@@ -831,7 +866,12 @@ const IDENTITY = {
 describe('OpenCode adapter over a synthetic executable', () => {
   it('reports runtime-probed capabilities with version provenance and an unenforceable isolation control', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -844,6 +884,7 @@ describe('OpenCode adapter over a synthetic executable', () => {
     expect(probe.value.capabilities).toEqual([
       { name: 'run command', required: true, availability: 'available' },
       { name: 'export command', required: true, availability: 'available' },
+      { name: 'models command', required: true, availability: 'available' },
       { name: 'run --format json', required: true, availability: 'available' },
       { name: 'run --model', required: true, availability: 'available' },
       { name: 'run --variant', required: true, availability: 'available' },
@@ -853,7 +894,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
 
   it('fails capability probing with a probe-phase protocol error when a required option is missing', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: missingVariantExecutable },
+      {
+        agent: 'opencode',
+        executable: missingVariantExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -870,7 +916,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
 
   it('fails capability probing with a prerequisite error for a nonexistent executable', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: 'definitely-not-installed' },
+      {
+        agent: 'opencode',
+        executable: 'definitely-not-installed',
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -886,7 +937,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
 
   it('fails capability probing when the executable help invocation exits nonzero', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: exitFourExecutable },
+      {
+        agent: 'opencode',
+        executable: exitFourExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -906,7 +962,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
     const delivered: unknown[] = [];
     const diagnostics: string[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -976,7 +1037,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
     await mkdir(worktree, { recursive: true });
     let onProcessResult: AgentRunResult | undefined;
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1011,7 +1077,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
     const diagnostics: string[] = [];
     const delivered: unknown[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1047,7 +1118,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
     const worktree = join(tempRoot, 'worktree-nonjson-nonzero-exit');
     await mkdir(worktree, { recursive: true });
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1074,7 +1150,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
     const worktree = join(tempRoot, 'worktree-self-kill');
     await mkdir(worktree, { recursive: true });
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1107,7 +1188,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
     await mkdir(worktree, { recursive: true });
     const delivered: unknown[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1142,7 +1228,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
     await mkdir(worktree, { recursive: true });
     let onProcessResult: AgentRunResult | undefined;
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1180,7 +1271,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
     await mkdir(worktree, { recursive: true });
     const diagnostics: string[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1216,7 +1312,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
 
   it('exports the requested root session with additive fields retained, decodable by normalizeMetrics', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1241,7 +1342,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
 
   it('rejects an export whose identity does not match the requested root session', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1260,7 +1366,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
 
   it('rejects a child-session export because schema version 1 consumes only the root session', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1280,7 +1391,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
 
   it('rejects an export whose message identity is malformed', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1300,7 +1416,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
 
   it('rejects a non-JSON export output with a protocol error', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1321,7 +1442,12 @@ describe('OpenCode adapter over a synthetic executable', () => {
     await mkdir(worktree, { recursive: true });
     const recordPath = join(tempRoot, `record-sentinel-${scriptCounter()}.json`);
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies(),
     );
 
@@ -1394,7 +1520,12 @@ describe('OpenCode adapter run request over an injected fake process', () => {
     const stdout = events.map((event) => JSON.stringify(event)).join('\n') + '\n';
     const requests: ManagedProcessRequest[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: 'fake-opencode' },
+      {
+        agent: 'opencode',
+        executable: 'fake-opencode',
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies({ runProcess: buildFakeRunner(stdout, requests) }),
     );
 
@@ -1436,7 +1567,12 @@ describe('OpenCode adapter delivery stopping over an injected fake process', () 
     const stdout = events.map((event) => JSON.stringify(event)).join('\n') + '\n';
     const delivered: unknown[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: 'fake-opencode' },
+      {
+        agent: 'opencode',
+        executable: 'fake-opencode',
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies({ runProcess: buildFakeRunner(stdout) }),
     );
 
@@ -1479,7 +1615,12 @@ describe('credential-secret redaction on OpenCode stdout streams', () => {
     const QUOTED_SECRET = 'tevu"sec\\ret\nx';
     const delivered: unknown[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies({ secrets: buildSecretRedactor([QUOTED_SECRET]) }),
     );
 
@@ -1513,7 +1654,12 @@ describe('credential-secret redaction on OpenCode stdout streams', () => {
     await mkdir(worktree, { recursive: true });
     const delivered: unknown[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies({ secrets: buildSecretRedactor(['45']) }),
     );
 
@@ -1543,7 +1689,12 @@ describe('credential-secret redaction on OpenCode stdout streams', () => {
   it('removes an escape-serialized secret from the decoded export content', async () => {
     const QUOTED_SECRET = 'tevu"sec\\ret\nx';
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies({ secrets: buildSecretRedactor([QUOTED_SECRET]) }),
     );
 
@@ -1566,7 +1717,12 @@ describe('credential-secret redaction on OpenCode stdout streams', () => {
 
   it('leaves a digit-only token metric intact in the exported root session', async () => {
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies({ secrets: buildSecretRedactor(['45']) }),
     );
 
@@ -1592,7 +1748,12 @@ describe('credential-secret redaction on OpenCode stdout streams', () => {
     await mkdir(worktree, { recursive: true });
     const delivered: unknown[] = [];
     const adapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable: syntheticExecutable },
+      {
+        agent: 'opencode',
+        executable: syntheticExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       buildDependencies({ secrets: buildAlwaysFailingSecretRedactor() }),
     );
 
@@ -1646,5 +1807,259 @@ describe('createSecretRedactor', () => {
         reason: 'record redaction failed',
       },
     });
+  });
+});
+
+function buildModelCallEnvironment(
+  overrides: Partial<ModelCallEnvironment> = {},
+): ModelCallEnvironment {
+  return {
+    rootDirectory: '/synthetic/model-call/root',
+    workingDirectory: '/synthetic/model-call/work',
+    homeDirectory: '/synthetic/model-call/home',
+    variables: {},
+    async dispose() {
+      return { ok: true, value: undefined };
+    },
+    ...overrides,
+  };
+}
+
+function buildFixedResultRunner(result: ManagedProcessResult): ManagedProcessRunner {
+  return async () => result;
+}
+
+describe('OpenCode adapter listModels over an injected fake process', () => {
+  it('maps a launch failure to a failed outcome naming the reason', async () => {
+    const adapter = createOpenCodeAdapter(
+      {
+        agent: 'opencode',
+        executable: 'fake-opencode',
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
+      buildDependencies({
+        runProcess: buildFixedResultRunner({ launched: false, reason: 'ENOENT: not found' }),
+      }),
+    );
+
+    const listing = await adapter.listModels(buildModelCallEnvironment());
+
+    expect(listing).toEqual({ outcome: 'failed', reason: 'cannot be started: ENOENT: not found' });
+  });
+
+  it('maps a non-zero exit to a failed outcome naming the exit code', async () => {
+    const adapter = createOpenCodeAdapter(
+      {
+        agent: 'opencode',
+        executable: 'fake-opencode',
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
+      buildDependencies({
+        runProcess: buildFixedResultRunner({
+          launched: true,
+          exitCode: 4,
+          signal: null,
+          startedAt: '2026-01-01T00:00:00.000Z',
+          endedAt: '2026-01-01T00:00:01.000Z',
+          durationMs: 1000,
+          timedOut: false,
+          cancelled: false,
+          terminationStage: 'none',
+          stdout: { text: '', totalBytes: 0, truncated: false },
+          stderr: { text: '', totalBytes: 0, truncated: false },
+        }),
+      }),
+    );
+
+    const listing = await adapter.listModels(buildModelCallEnvironment());
+
+    expect(listing).toEqual({ outcome: 'failed', reason: 'exits with code 4' });
+  });
+
+  it('maps a signal termination to a failed outcome naming the signal', async () => {
+    const adapter = createOpenCodeAdapter(
+      {
+        agent: 'opencode',
+        executable: 'fake-opencode',
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
+      buildDependencies({
+        runProcess: buildFixedResultRunner({
+          launched: true,
+          exitCode: null,
+          signal: 'SIGKILL',
+          startedAt: '2026-01-01T00:00:00.000Z',
+          endedAt: '2026-01-01T00:00:01.000Z',
+          durationMs: 1000,
+          timedOut: false,
+          cancelled: false,
+          terminationStage: 'forced',
+          stdout: { text: '', totalBytes: 0, truncated: false },
+          stderr: { text: '', totalBytes: 0, truncated: false },
+        }),
+      }),
+    );
+
+    const listing = await adapter.listModels(buildModelCallEnvironment());
+
+    expect(listing).toEqual({ outcome: 'failed', reason: 'is terminated by signal SIGKILL' });
+  });
+
+  it('maps truncated stdout to a failed outcome naming the capture bound', async () => {
+    const adapter = createOpenCodeAdapter(
+      {
+        agent: 'opencode',
+        executable: 'fake-opencode',
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
+      buildDependencies({
+        runProcess: buildFixedResultRunner({
+          launched: true,
+          exitCode: 0,
+          signal: null,
+          startedAt: '2026-01-01T00:00:00.000Z',
+          endedAt: '2026-01-01T00:00:01.000Z',
+          durationMs: 1000,
+          timedOut: false,
+          cancelled: false,
+          terminationStage: 'none',
+          stdout: { text: 'acme/model-a', totalBytes: 99_999_999, truncated: true },
+          stderr: { text: '', totalBytes: 0, truncated: false },
+        }),
+      }),
+    );
+
+    const listing = await adapter.listModels(buildModelCallEnvironment());
+
+    expect(listing).toEqual({ outcome: 'failed', reason: 'prints more than 16777216 bytes' });
+  });
+
+  it('maps a timeout to a timed-out outcome naming the 120s limit', async () => {
+    const adapter = createOpenCodeAdapter(
+      {
+        agent: 'opencode',
+        executable: 'fake-opencode',
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
+      buildDependencies({
+        runProcess: buildFixedResultRunner({
+          launched: true,
+          exitCode: null,
+          signal: null,
+          startedAt: '2026-01-01T00:00:00.000Z',
+          endedAt: '2026-01-01T00:02:00.000Z',
+          durationMs: 120_000,
+          timedOut: true,
+          cancelled: false,
+          terminationStage: 'forced',
+          stdout: { text: '', totalBytes: 0, truncated: false },
+          stderr: { text: '', totalBytes: 0, truncated: false },
+        }),
+      }),
+    );
+
+    const listing = await adapter.listModels(buildModelCallEnvironment());
+
+    expect(listing).toEqual({ outcome: 'timed-out', limitMs: 120_000 });
+  });
+
+  it('lists every stdout line trimmed and stripped of a trailing carriage return, dropping empty lines', async () => {
+    const adapter = createOpenCodeAdapter(
+      {
+        agent: 'opencode',
+        executable: 'fake-opencode',
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
+      buildDependencies({
+        runProcess: buildFixedResultRunner({
+          launched: true,
+          exitCode: 0,
+          signal: null,
+          startedAt: '2026-01-01T00:00:00.000Z',
+          endedAt: '2026-01-01T00:00:01.000Z',
+          durationMs: 1000,
+          timedOut: false,
+          cancelled: false,
+          terminationStage: 'none',
+          stdout: {
+            text: 'acme/model-a\r\n\nacme/model-b\r\n   \nacme/model-c',
+            totalBytes: 50,
+            truncated: false,
+          },
+          stderr: { text: '', totalBytes: 0, truncated: false },
+        }),
+      }),
+    );
+
+    const listing = await adapter.listModels(buildModelCallEnvironment());
+
+    expect(listing).toEqual({
+      outcome: 'listed',
+      models: ['acme/model-a', 'acme/model-b', 'acme/model-c'],
+    });
+  });
+});
+
+describe('OpenCode adapter models command capability probe', () => {
+  let noModelsExecutable: string;
+
+  beforeAll(async () => {
+    noModelsExecutable = await writeExecutable(
+      'synthetic-opencode-no-models.mjs',
+      SYNTHETIC_NO_MODELS_HELP_SCRIPT,
+    );
+  });
+
+  it('reports the models command unavailable, and probe fails, when models --help exits nonzero', async () => {
+    const adapter = createOpenCodeAdapter(
+      {
+        agent: 'opencode',
+        executable: noModelsExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
+      buildDependencies({
+        probeEnvironment: { PATH: process.env['PATH'] ?? '', TEVU_SYNTH_MODELS_HELP: 'nonzero' },
+      }),
+    );
+
+    const probe = await adapter.probe();
+
+    expect(probe.ok).toBe(false);
+    if (probe.ok || probe.error.kind !== 'AgentProtocolError') {
+      throw new Error(`expected a probe-phase protocol error, got ${JSON.stringify(probe)}`);
+    }
+    expect(probe.error.reason).toContain('models command');
+  });
+
+  it('reports the models command unavailable, and probe fails, when models --help omits "opencode models"', async () => {
+    const adapter = createOpenCodeAdapter(
+      {
+        agent: 'opencode',
+        executable: noModelsExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
+      buildDependencies({
+        probeEnvironment: {
+          PATH: process.env['PATH'] ?? '',
+          TEVU_SYNTH_MODELS_HELP: 'missing-line',
+        },
+      }),
+    );
+
+    const probe = await adapter.probe();
+
+    expect(probe.ok).toBe(false);
+    if (probe.ok || probe.error.kind !== 'AgentProtocolError') {
+      throw new Error(`expected a probe-phase protocol error, got ${JSON.stringify(probe)}`);
+    }
+    expect(probe.error.reason).toContain('models command');
   });
 });

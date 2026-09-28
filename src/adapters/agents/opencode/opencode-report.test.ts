@@ -52,7 +52,12 @@ const AGENTS_REGISTRY: AgentRegistry = new Map([
   [
     'opencode',
     createOpenCodeAdapter(
-      { agent: 'opencode', executable: '/synthetic/opencode' },
+      {
+        agent: 'opencode',
+        executable: '/synthetic/opencode',
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
       {
         runProcess: () => Promise.reject(new Error('unused in report regeneration')),
         secrets: {
@@ -62,6 +67,7 @@ const AGENTS_REGISTRY: AgentRegistry = new Map([
         },
         probeEnvironment: {},
         probeDirectory: '/synthetic',
+        operatorDirectories: { home: undefined, xdgConfigHome: undefined },
       },
     ),
   ],
@@ -321,6 +327,7 @@ function buildManifest(
     tools: {
       gitVersion: 'git version 2.45.0',
       agentVersions: { opencode: capabilities.detectedVersion },
+      agentConfigurationFiles: {},
     },
     execution: {
       concurrency: config.run.concurrency,

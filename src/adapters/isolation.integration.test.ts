@@ -26,12 +26,14 @@ import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
 import { TevuConfigSchema } from '@/config/schema';
 import { buildCheckEnvironment } from '@/evaluation/checks';
 
+import { createOpenCodeAdapter } from './agents/opencode/opencode';
 import { createArtifactStore } from './artifact-store';
 import { createGitWorkspaceAdapter } from './git';
 import {
   createEnvironmentAdapter,
   createEvaluatorProcessAdapter,
   createRedactor,
+  createSecretRedactor,
   createStreamingRedactor,
   runManagedProcess,
 } from './process';
@@ -1121,6 +1123,7 @@ describe('isolated case environments', () => {
       unwrapOk(snapshot),
       environmentNames,
       'opencode',
+      [],
     );
     const { evaluator } = unwrapOk(environments);
     const agent = requireAgentEnvironment(unwrapOk(environments));
@@ -1200,6 +1203,7 @@ describe('isolated case environments', () => {
         snapshotValue,
         environmentNames,
         'opencode',
+        [],
       ),
     );
     const secondEnvironments = unwrapOk(
@@ -1208,6 +1212,7 @@ describe('isolated case environments', () => {
         snapshotValue,
         environmentNames,
         'opencode',
+        [],
       ),
     );
     const firstAgent = requireAgentEnvironment(firstEnvironments);
@@ -1250,7 +1255,13 @@ describe('isolated case environments', () => {
     const workspace = buildFabricatedWorkspace('task-1--c1');
     await mkdir(workspace.runtimeDirectory, { recursive: true });
     const environments = unwrapOk(
-      await adapter.createCaseEnvironments(workspace, snapshotValue, environmentNames, 'opencode'),
+      await adapter.createCaseEnvironments(
+        workspace,
+        snapshotValue,
+        environmentNames,
+        'opencode',
+        [],
+      ),
     );
     const agent = requireAgentEnvironment(environments);
 
@@ -1305,6 +1316,143 @@ describe('isolated case environments', () => {
     expect(evaluatorReported.ordinary).toBe(ORDINARY_VALUE);
     expect(evaluatorReported.provider).toBeUndefined();
     expect(evaluatorOutcome.stdout.text).not.toContain('[REDACTED]');
+  });
+});
+
+describe('copied provider configuration files in case environments', () => {
+  /** Reads `$XDG_CONFIG_HOME/opencode/opencode.json` from inside the given replacement environment. */
+  const CONFIG_READ_PROBE_SCRIPT =
+    "const fs=require('node:fs');const path=require('node:path');" +
+    'const target=path.join(process.env.XDG_CONFIG_HOME,"opencode","opencode.json");' +
+    'let text="";try{text=fs.readFileSync(target,"utf8");}catch(e){text="";}' +
+    'process.stdout.write(text);';
+
+  async function readWrittenConfig(variables: Record<string, string>): Promise<string> {
+    const outcome = await runManagedProcess({
+      argv: [process.execPath, '-e', CONFIG_READ_PROBE_SCRIPT],
+      cwd: testDirectory,
+      environment: variables,
+      timeoutMs: 10_000,
+      terminationGraceMs: 250,
+    });
+    if (!outcome.launched) {
+      throw new Error(`expected the probe to launch, got ${JSON.stringify(outcome)}`);
+    }
+    return outcome.stdout.text;
+  }
+
+  it('writes exactly the named provider under the agent home so a fake executable reads it, and never leaks its host key or sibling entries', async () => {
+    const operatorDirectory = join(testDirectory, 'operator-config');
+    await mkdir(join(operatorDirectory, 'opencode'), { recursive: true });
+    const hostSentinel = 'sk-host-only-should-never-appear-583';
+    await writeFile(
+      join(operatorDirectory, 'opencode', 'opencode.json'),
+      JSON.stringify({
+        provider: {
+          acme: { baseURL: 'https://acme.example.test', options: { apiKey: hostSentinel } },
+          other: { baseURL: 'https://other.example.test' },
+        },
+        instructions: ['do not copy me'],
+        mcp: { server: {} },
+      }),
+    );
+    const config = buildConfig('/synthetic/source', 'f'.repeat(40));
+    const environmentNames = buildEnvironmentVariableNames(config);
+    const adapter = createEnvironmentAdapter();
+    const snapshot = adapter.snapshotParent(environmentNames);
+    const workspace = buildFabricatedWorkspace('task-1--c1');
+    await mkdir(workspace.runtimeDirectory, { recursive: true });
+    const openCodeAdapter = createOpenCodeAdapter(
+      {
+        agent: 'opencode',
+        executable: '/unused/fake-opencode',
+        providers: [{ id: 'acme', api_key: PROVIDER_NAME }],
+        declaredVariables: { secrets: [PROVIDER_NAME, SECRET_NAME], env: [] },
+      },
+      {
+        runProcess: runManagedProcess,
+        secrets: createSecretRedactor(() => [], createRedactor([])),
+        probeEnvironment: {},
+        probeDirectory: testDirectory,
+        operatorDirectories: { home: undefined, xdgConfigHome: operatorDirectory },
+      },
+    );
+    const providers = unwrapOk(await openCodeAdapter.readProviders());
+
+    const environments = await adapter.createCaseEnvironments(
+      workspace,
+      unwrapOk(snapshot),
+      environmentNames,
+      'opencode',
+      providers.configurationFiles,
+    );
+    const agent = requireAgentEnvironment(unwrapOk(environments));
+
+    const written = await readWrittenConfig(agent.variables);
+    const parsed = JSON.parse(written) as { provider: Record<string, unknown> };
+    expect(Object.keys(parsed)).toEqual(['provider']);
+    expect(Object.keys(parsed.provider)).toEqual(['acme']);
+    expect(parsed.provider.acme).toEqual({
+      baseURL: 'https://acme.example.test',
+      options: { apiKey: `{env:${PROVIDER_NAME}}` },
+    });
+    expect(written).not.toContain(hostSentinel);
+    expect(written).not.toContain('other');
+    expect(written).not.toContain('instructions');
+    expect(written).not.toContain('mcp');
+  });
+
+  it('writes no configuration file when the agent block names no provider', async () => {
+    const config = buildConfig('/synthetic/source', 'f'.repeat(40));
+    const environmentNames = buildEnvironmentVariableNames(config);
+    const adapter = createEnvironmentAdapter();
+    const snapshot = adapter.snapshotParent(environmentNames);
+    const workspace = buildFabricatedWorkspace('task-1--c2');
+    await mkdir(workspace.runtimeDirectory, { recursive: true });
+
+    const environments = await adapter.createCaseEnvironments(
+      workspace,
+      unwrapOk(snapshot),
+      environmentNames,
+      'opencode',
+      [],
+    );
+    const agent = requireAgentEnvironment(unwrapOk(environments));
+
+    const written = await readWrittenConfig(agent.variables);
+    expect(written).toBe('');
+  });
+
+  it('never writes the configuration file into the evaluator home', async () => {
+    const config = buildConfig('/synthetic/source', 'f'.repeat(40));
+    const environmentNames = buildEnvironmentVariableNames(config);
+    const adapter = createEnvironmentAdapter();
+    const snapshot = adapter.snapshotParent(environmentNames);
+    const workspace = buildFabricatedWorkspace('task-1--c3');
+    await mkdir(workspace.runtimeDirectory, { recursive: true });
+    const configurationFiles = [
+      { relativePath: 'opencode/opencode.json', text: '{"provider":{"acme":{}}}\n' },
+    ];
+
+    const environments = unwrapOk(
+      await adapter.createCaseEnvironments(
+        workspace,
+        unwrapOk(snapshot),
+        environmentNames,
+        'opencode',
+        configurationFiles,
+      ),
+    );
+    const agent = requireAgentEnvironment(environments);
+
+    expect(existsSync(join(agent.variables.XDG_CONFIG_HOME, 'opencode', 'opencode.json'))).toBe(
+      true,
+    );
+    expect(
+      existsSync(
+        join(environments.evaluator.variables.XDG_CONFIG_HOME, 'opencode', 'opencode.json'),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -1952,6 +2100,12 @@ function buildTrivialAgentAdapter(): AgentAdapter {
         },
       };
     },
+    async readProviders() {
+      return { ok: true, value: { agent: 'fake-agent', configurationFiles: [], findings: [] } };
+    },
+    async listModels() {
+      return { outcome: 'listed', models: [] };
+    },
     async run(input: AgentRunInput): Promise<TevuResult<AgentRunResult, never>> {
       const value: AgentRunResult = {
         process: {
@@ -2131,6 +2285,7 @@ describe('file-backed artifact store with repeated attempts (AC-13)', () => {
       clock,
       generateRunId: () => 'run-ac13-repeat-synthetic',
       configDigest: () => 'digest-ac13-synthetic',
+      textDigest: () => 'digest-ac13-file-synthetic',
       redact: (text) => text,
       cancellation: new AbortController().signal,
     };

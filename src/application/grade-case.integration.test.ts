@@ -20,6 +20,7 @@ import { gradeCase } from './grade-case';
 
 import type {
   AgentAdapter,
+  EnvironmentAdapter,
   ModelCallDependencies,
   Redactor,
   TaskDefinition,
@@ -64,6 +65,10 @@ if (args[0] === "run" && args[1] === "--help") {
 }
 if (args[0] === "export" && args[1] === "--help") {
   console.log("usage: opencode export <session-id>");
+  process.exit(0);
+}
+if (args[0] === "models" && args[1] === "--help") {
+  console.log("usage: opencode models");
   process.exit(0);
 }
 `;
@@ -175,6 +180,7 @@ function buildConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
         command: 'unused-fake-opencode-command',
         secrets: [SECRET_VARIABLE_NAME],
         env: [],
+        providers: [],
       },
     },
     repositories: [],
@@ -208,12 +214,13 @@ async function gradeWithFakeExecutable(options: CallOptions) {
   });
   const secrets = createSecretRedactor(() => [SECRET_VALUE], createRedactor([SECRET_VALUE]));
   const adapter: AgentAdapter = createOpenCodeAdapter(
-    { agent: 'opencode', executable },
+    { agent: 'opencode', executable, providers: [], declaredVariables: { secrets: [], env: [] } },
     {
       runProcess: runManagedProcess,
       secrets,
       probeEnvironment: { PATH: process.env['PATH'] ?? '' },
       probeDirectory: process.cwd(),
+      operatorDirectories: { home: undefined, xdgConfigHome: undefined },
     },
   );
   const dependencies: ModelCallDependencies = {
@@ -229,6 +236,7 @@ async function gradeWithFakeExecutable(options: CallOptions) {
       timeoutMs: options.timeoutMs ?? 10_000,
       redact: options.redact ?? ((text: string) => text),
       cancellation: options.cancellation ?? new AbortController().signal,
+      providers: { agent: 'opencode', configurationFiles: [], findings: [] },
     },
     dependencies,
   );
@@ -398,6 +406,65 @@ describe('gradeCase against a fake OpenCode executable', () => {
     if (outcome.grading.call.status === 'no-reply') {
       expect(outcome.grading.call.reason).toContain('PrerequisiteError:');
     }
+  });
+});
+
+describe('gradeCase providers forwarding', () => {
+  it('forwards request.providers unchanged into the model call, so its own agent never reads providers', async () => {
+    const configurationFiles = [
+      { relativePath: 'opencode/opencode.json', text: '{"provider":{"acme":{}}}\n' },
+    ];
+    const executable = await writeFakeGraderExecutable({ run: 'ok', replyText: '{"grades":[]}' });
+    const secrets = createSecretRedactor(() => [SECRET_VALUE], createRedactor([SECRET_VALUE]));
+    const realAdapter: AgentAdapter = createOpenCodeAdapter(
+      { agent: 'opencode', executable, providers: [], declaredVariables: { secrets: [], env: [] } },
+      {
+        runProcess: runManagedProcess,
+        secrets,
+        probeEnvironment: { PATH: process.env['PATH'] ?? '' },
+        probeDirectory: process.cwd(),
+        operatorDirectories: { home: undefined, xdgConfigHome: undefined },
+      },
+    );
+    let readProvidersCalls = 0;
+    const agent: AgentAdapter = {
+      ...realAdapter,
+      async readProviders() {
+        readProvidersCalls += 1;
+        return { ok: true, value: { agent: 'opencode', configurationFiles: [], findings: [] } };
+      },
+    };
+    const realEnvironments = createEnvironmentAdapter();
+    const receivedFiles: string[][] = [];
+    const environments: EnvironmentAdapter = {
+      ...realEnvironments,
+      async createModelCallEnvironment(snapshot, agentVariables, files) {
+        receivedFiles.push(files.map((file) => file.relativePath));
+        return realEnvironments.createModelCallEnvironment(snapshot, agentVariables, files);
+      },
+    };
+    const dependencies: ModelCallDependencies = {
+      agents: new Map([['opencode', agent]]),
+      environments,
+      git: createGitWorkspaceAdapter({ workspacesDirectory: join(tempRoot, 'workspaces') }),
+    };
+
+    const outcome = await gradeCase(
+      {
+        config: buildConfig(),
+        task: buildTask(),
+        patch: `diff --git a/x b/x\n+${PATCH_MARKER}\n`,
+        timeoutMs: 10_000,
+        redact: (text) => text,
+        cancellation: new AbortController().signal,
+        providers: { agent: 'opencode', configurationFiles, findings: [] },
+      },
+      dependencies,
+    );
+
+    expect(outcome.status).toBe('graded');
+    expect(readProvidersCalls).toBe(0);
+    expect(receivedFiles).toEqual([['opencode/opencode.json']]);
   });
 });
 

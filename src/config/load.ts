@@ -204,6 +204,7 @@ export function resolveBootstrapModelCallConfig(
         command: resolveAgentCommand(settings.command, configDirectory),
         secrets: settings.secrets ?? [],
         env: settings.env ?? [],
+        providers: settings.providers ?? [],
       },
     ]),
   );

@@ -11,6 +11,7 @@ import {
   normalizeMetrics as normalizeOpenCodeMetrics,
 } from './opencode-metrics';
 import { decodeEvent, decodeExport } from './opencode-protocol';
+import { readOpenCodeProviders } from './opencode-providers';
 
 import type { OpenCodeExport, ProtocolContext, ProtocolErrorShape } from './opencode-protocol';
 import type {
@@ -19,6 +20,7 @@ import type {
   AgentCapabilityReport,
   AgentMetrics,
   AgentMetricsInput,
+  AgentProviderSetting,
   AgentRunInput,
   AgentRunResult,
   AgentSessionExport,
@@ -27,10 +29,13 @@ import type {
   ManagedProcessCompletion,
   ManagedProcessResult,
   ManagedProcessRunner,
+  ModelCallEnvironment,
   ModelCallInput,
   ModelCallResult,
+  ModelListing,
   ModelRoleName,
   ProcessResult,
+  ProviderSnapshot,
   SecretRedactor,
   TevuError,
   TevuResult,
@@ -42,6 +47,10 @@ export type OpenCodeAdapterSettings = {
   agent: string;
   /** The block's `command`, as `loadConfig` resolved it. */
   executable: string;
+  /** The block's `providers`, copied from the operator's OpenCode global configuration. */
+  providers: readonly AgentProviderSetting[];
+  /** The block's `secrets` and `env`: the only names a copied definition may reference. */
+  declaredVariables: { secrets: readonly string[]; env: readonly string[] };
 };
 
 /** Effects injected into the OpenCode adapter. */
@@ -52,6 +61,8 @@ export type OpenCodeAdapterDependencies = {
   probeEnvironment: Readonly<Record<string, string>>;
   /** Working directory for capability probes. */
   probeDirectory: string;
+  /** tevu's own HOME and XDG_CONFIG_HOME; only the composition root reads them from process.env. */
+  operatorDirectories: { home: string | undefined; xdgConfigHome: string | undefined };
 };
 
 const PROBE_TIMEOUT_MS = 10_000;
@@ -59,6 +70,9 @@ const PROBE_TERMINATION_GRACE_MS = 2_000;
 const EXPORT_TIMEOUT_MS = 120_000;
 const EXPORT_TERMINATION_GRACE_MS = 2_000;
 const EXPORT_MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
+const MODEL_LISTING_TIMEOUT_MS = 120_000;
+const MODEL_LISTING_TERMINATION_GRACE_MS = 2_000;
+const MODEL_LISTING_MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
 
 /**
  * Creates the OpenCode `AgentAdapter` over the managed process boundary and
@@ -73,6 +87,12 @@ export function createOpenCodeAdapter(
       TevuResult<AgentCapabilityReport, 'PrerequisiteError' | 'AgentProtocolError'>
     > {
       return probeCapabilities(settings, dependencies);
+    },
+    readProviders(): Promise<TevuResult<ProviderSnapshot, 'ConfigValidationError'>> {
+      return readOpenCodeProviders(settings, dependencies.operatorDirectories);
+    },
+    listModels(environment: ModelCallEnvironment): Promise<ModelListing> {
+      return runListModels(settings, dependencies, environment);
     },
     async run(
       input: AgentRunInput,
@@ -742,6 +762,49 @@ async function runModelCall(
   };
 }
 
+/**
+ * Lists every model the agent resolves in `environment` by running
+ * `<executable> models`, without starting a model session.
+ */
+async function runListModels(
+  settings: OpenCodeAdapterSettings,
+  dependencies: OpenCodeAdapterDependencies,
+  environment: ModelCallEnvironment,
+): Promise<ModelListing> {
+  const outcome = await dependencies.runProcess({
+    argv: [settings.executable, 'models'],
+    cwd: environment.workingDirectory,
+    environment: environment.variables,
+    timeoutMs: MODEL_LISTING_TIMEOUT_MS,
+    terminationGraceMs: MODEL_LISTING_TERMINATION_GRACE_MS,
+    secretValues: dependencies.secrets.secretValues(),
+    maxCaptureBytes: MODEL_LISTING_MAX_CAPTURE_BYTES,
+  });
+  if (!outcome.launched) {
+    return { outcome: 'failed', reason: `cannot be started: ${outcome.reason}` };
+  }
+  if (outcome.timedOut) {
+    return { outcome: 'timed-out', limitMs: MODEL_LISTING_TIMEOUT_MS };
+  }
+  if (outcome.exitCode === null) {
+    return { outcome: 'failed', reason: `is terminated by signal ${outcome.signal ?? 'unknown'}` };
+  }
+  if (outcome.exitCode !== 0) {
+    return { outcome: 'failed', reason: `exits with code ${outcome.exitCode}` };
+  }
+  if (outcome.stdout.truncated) {
+    return {
+      outcome: 'failed',
+      reason: `prints more than ${MODEL_LISTING_MAX_CAPTURE_BYTES} bytes`,
+    };
+  }
+  const models = outcome.stdout.text
+    .split('\n')
+    .map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line).trim())
+    .filter((line) => line.length > 0);
+  return { outcome: 'listed', models };
+}
+
 async function probeCapabilities(
   settings: OpenCodeAdapterSettings,
   dependencies: OpenCodeAdapterDependencies,
@@ -779,6 +842,11 @@ async function probeCapabilities(
     [executable, 'export', '--help'],
     environment,
   );
+  const modelsHelp = await probeInvocation(
+    dependencies,
+    [executable, 'models', '--help'],
+    environment,
+  );
   const runHelpText = combinedOutput(runHelp);
   const availableWhen = (available: boolean): CapabilityAvailability =>
     available ? 'available' : 'unavailable';
@@ -789,6 +857,16 @@ async function probeCapabilities(
       name: 'export command',
       required: true,
       availability: availableWhen(helpSucceeded(exportHelp)),
+    },
+    {
+      // Root help lists "opencode models" among the commands when the
+      // executable supports it; `--help` on an unknown subcommand exits 0
+      // and prints root help, so exit status alone cannot decide this.
+      name: 'models command',
+      required: true,
+      availability: availableWhen(
+        helpSucceeded(modelsHelp) && combinedOutput(modelsHelp).includes('opencode models'),
+      ),
     },
     {
       name: 'run --format json',

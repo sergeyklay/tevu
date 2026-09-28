@@ -34,6 +34,7 @@ import { buildTaskPrompt } from './task-prompt';
 import type { SetupPhaseOutcome } from './repository-setup';
 import type {
   AgentCapabilityReport,
+  AgentConfigurationFileRecord,
   AgentEventRecord,
   AgentRegistry,
   AgentRunResult,
@@ -54,6 +55,7 @@ import type {
   OverlaySnapshot,
   ParentEnvironmentSnapshot,
   PatchBase,
+  ProviderSnapshot,
   RepeatSetting,
   RepositoryDefinition,
   RepositorySetup,
@@ -89,7 +91,8 @@ type RunBenchmarkErrorKind =
   | 'EvaluationError'
   | 'ArtifactError'
   | 'CancellationError'
-  | 'CheckStateError';
+  | 'CheckStateError'
+  | 'ConfigValidationError';
 
 /**
  * Builds the deterministic attempt-major execution plan purely from
@@ -244,6 +247,10 @@ export async function runBenchmark(
     capabilities[name] = report.value;
     agentVersions[name] = report.value.detectedVersion;
   }
+  const providers = await readRunProviders(plan.config, agents);
+  if (!providers.ok) {
+    return providers;
+  }
   const planned = await resolvePlannedCases(plan, dependencies);
   if (!planned.ok) {
     return planned;
@@ -268,7 +275,11 @@ export async function runBenchmark(
       platform: host.value.platform,
       nodeVersion: host.value.nodeVersion,
     },
-    tools: { gitVersion: host.value.gitVersion, agentVersions },
+    tools: {
+      gitVersion: host.value.gitVersion,
+      agentVersions,
+      agentConfigurationFiles: buildAgentConfigurationFileRecords(providers.value, dependencies),
+    },
     execution: {
       concurrency: plan.concurrency,
       caseTimeoutMs: plan.defaultCaseTimeoutMs,
@@ -288,6 +299,7 @@ export async function runBenchmark(
     agents,
     snapshot: snapshot.value,
     environmentNames,
+    providers: providers.value,
     findings: [],
     results: new Map(),
     activeAborts: new Map(),
@@ -352,6 +364,7 @@ type RunContext = {
   agents: AgentRegistry;
   snapshot: ParentEnvironmentSnapshot;
   environmentNames: EnvironmentVariableNames;
+  providers: ReadonlyMap<string, ProviderSnapshot>;
   findings: RunFinding[];
   results: Map<string, CaseResult>;
   activeAborts: Map<string, AbortController>;
@@ -390,6 +403,68 @@ function cancellationFailure(): {
   error: Extract<TevuError, { kind: 'CancellationError' }>;
 } {
   return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
+}
+
+/**
+ * Reads providers once for every agent this run's cases start, plus the
+ * grader agent when a configured task declares a graded check, in a
+ * deterministic agent-name order so the resulting map's iteration order
+ * never depends on registration order.
+ */
+async function readRunProviders(
+  config: TevuConfig,
+  agents: AgentRegistry,
+): Promise<
+  TevuResult<ReadonlyMap<string, ProviderSnapshot>, 'PrerequisiteError' | 'ConfigValidationError'>
+> {
+  const names = [...agentNamesInUse(config)];
+  const seen = new Set(names);
+  const graderAgent = config.roles?.grader?.agent;
+  if (
+    graderAgent !== undefined &&
+    !seen.has(graderAgent) &&
+    config.tasks.some((task) => gradedChecksOf(task).length > 0)
+  ) {
+    seen.add(graderAgent);
+    names.push(graderAgent);
+  }
+
+  const providers = new Map<string, ProviderSnapshot>();
+  for (const name of names) {
+    const adapter = agents.get(name);
+    if (adapter === undefined) {
+      return {
+        ok: false,
+        error: {
+          kind: 'PrerequisiteError',
+          tool: name,
+          expected: 'a registered agent adapter',
+          actual: 'none',
+        },
+      };
+    }
+    const read = await adapter.readProviders();
+    if (!read.ok) {
+      return read;
+    }
+    providers.set(name, read.value);
+  }
+  return { ok: true, value: providers };
+}
+
+/** Maps every read agent's snapshot to the written-file digest record `run.json` stores, never the text itself. */
+function buildAgentConfigurationFileRecords(
+  providers: ReadonlyMap<string, ProviderSnapshot>,
+  dependencies: RunDependencies,
+): Record<string, AgentConfigurationFileRecord[]> {
+  const records: Record<string, AgentConfigurationFileRecord[]> = {};
+  for (const [name, snapshot] of providers) {
+    records[name] = snapshot.configurationFiles.map((file) => ({
+      path: file.relativePath,
+      sha256: dependencies.textDigest(file.text),
+    }));
+  }
+  return records;
 }
 
 /**
@@ -546,6 +621,7 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
     run.snapshot,
     run.environmentNames,
     entry.identity.agent,
+    requireCaseAgentProviders(run, entry.identity).configurationFiles,
   );
   if (!environments.ok) {
     await persistAndCleanup(
@@ -805,6 +881,27 @@ function requireCaseAgentAdapter(run: RunContext, identity: CaseIdentity) {
   return adapter;
 }
 
+/** Resolves the provider snapshot `runBenchmark` already read for this case's agent. */
+function requireCaseAgentProviders(run: RunContext, identity: CaseIdentity): ProviderSnapshot {
+  const providers = identity.agent === undefined ? undefined : run.providers.get(identity.agent);
+  if (providers === undefined) {
+    throw new Error(
+      `unreachable: runBenchmark already read providers for agent "${String(identity.agent)}"`,
+    );
+  }
+  return providers;
+}
+
+/** Resolves the provider snapshot `runBenchmark` already read for the configured grader agent. */
+function requireGraderProviders(run: RunContext): ProviderSnapshot {
+  const graderAgent = run.plan.config.roles?.grader?.agent;
+  const providers = graderAgent === undefined ? undefined : run.providers.get(graderAgent);
+  if (providers === undefined) {
+    throw new Error('unreachable: runBenchmark already read providers for the grader agent');
+  }
+  return providers;
+}
+
 /** `createCaseEnvironments` always populates `agent`; narrows past its still-optional shim type. */
 function requireCaseAgentEnvironment(environments: CaseEnvironments) {
   if (environments.agent === undefined) {
@@ -984,6 +1081,7 @@ async function evaluateReadableCase(
         timeoutMs: run.plan.defaultCaseTimeoutMs,
         redact: run.dependencies.redact,
         cancellation: active.abort.signal,
+        providers: requireGraderProviders(run),
       },
       {
         agents: run.agents,

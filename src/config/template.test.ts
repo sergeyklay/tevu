@@ -53,12 +53,12 @@ describe('CONFIG_TEMPLATE', () => {
     expect(CONFIG_TEMPLATE.endsWith('\n\n')).toBe(false);
   });
 
-  it('enables exactly twenty-five commented-out key lines', () => {
+  it('enables exactly twenty-eight commented-out key lines', () => {
     const enabledCount = CONFIG_TEMPLATE.split('\n').filter((line) =>
       OPTIONAL_LINE_PATTERN.test(line),
     ).length;
 
-    expect(enabledCount).toBe(25);
+    expect(enabledCount).toBe(28);
   });
 
   it('declares roles.criteria before roles.grader', () => {

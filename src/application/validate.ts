@@ -21,9 +21,12 @@ import {
 import { buildTaskPrompt } from './task-prompt';
 
 import type {
+  AgentAdapter,
   AgentCapabilityReport,
+  AgentConfigurationFile,
   CaseExecutableAdapter,
   CaseExecutableVerdict,
+  ModelListing,
   ParentEnvironmentSnapshot,
   RepositoryDefinition,
   SourceValidation,
@@ -126,6 +129,17 @@ export async function validateConfig(
     }
   }
 
+  findings.push(
+    ...(await collectModelResolutionFindings(
+      config,
+      dependencies,
+      probeNames,
+      reportedAgents,
+      capabilities,
+      environmentResult.snapshot,
+    )),
+  );
+
   return {
     ok: true,
     value: {
@@ -133,6 +147,189 @@ export async function validateConfig(
       findings,
       capabilities,
     },
+  };
+}
+
+/**
+ * Reads each probed agent's providers, appending its P-NOKEY warnings, and,
+ * for an agent whose capability probe and environment snapshot both
+ * succeeded, lists its models in an environment built like a case agent's
+ * and reports every configured model entry and role whose model the agent
+ * does not list. Never starts the agent's `run` command.
+ */
+async function collectModelResolutionFindings(
+  config: TevuConfig,
+  dependencies: ValidationDependencies,
+  probeNames: readonly string[],
+  reportedAgents: ReadonlySet<string>,
+  capabilities: Record<string, AgentCapabilityReport>,
+  snapshot: ParentEnvironmentSnapshot | undefined,
+): Promise<ValidationFinding[]> {
+  const findings: ValidationFinding[] = [];
+  for (const name of probeNames) {
+    const adapter = dependencies.agents.get(name);
+    if (adapter === undefined) {
+      // Already reported: either the capability loop above or, for a role
+      // agent probed only here, no adapter is registered under this name.
+      continue;
+    }
+    const providers = await adapter.readProviders();
+    if (!providers.ok) {
+      findings.push(...providers.error.findings);
+      continue;
+    }
+    findings.push(...providers.value.findings);
+    const agentSettings = config.agents[name];
+    if (
+      reportedAgents.has(name) ||
+      capabilities[name] === undefined ||
+      snapshot === undefined ||
+      agentSettings === undefined
+    ) {
+      continue;
+    }
+    findings.push(
+      ...(await collectAgentModelListingFindings(
+        config,
+        dependencies,
+        name,
+        adapter,
+        { secrets: agentSettings.secrets, env: agentSettings.env },
+        snapshot,
+        providers.value.configurationFiles,
+      )),
+    );
+  }
+  return findings;
+}
+
+/**
+ * Builds one agent's model-listing environment, lists its models, disposes
+ * the environment, and reports every model entry and role of this agent
+ * that the listing did not include.
+ */
+async function collectAgentModelListingFindings(
+  config: TevuConfig,
+  dependencies: ValidationDependencies,
+  name: string,
+  adapter: AgentAdapter,
+  agentVariables: { secrets: readonly string[]; env: readonly string[] },
+  snapshot: ParentEnvironmentSnapshot,
+  configurationFiles: readonly AgentConfigurationFile[],
+): Promise<ValidationFinding[]> {
+  const environmentResult = await dependencies.environments.createModelCallEnvironment(
+    snapshot,
+    agentVariables,
+    configurationFiles,
+  );
+  if (!environmentResult.ok) {
+    return [
+      modelAgentFinding(
+        name,
+        `the model listing environment could not be prepared: ${environmentResult.error.operation}: ${environmentResult.error.reason}`,
+      ),
+    ];
+  }
+  const environment = environmentResult.value;
+  const initialized = await dependencies.git.initializeEmptyRepository(
+    environment.workingDirectory,
+  );
+  const listing = initialized.ok ? await adapter.listModels(environment) : null;
+  const removal = await environment.dispose();
+
+  const findings: ValidationFinding[] = [];
+  if (!initialized.ok) {
+    findings.push(
+      modelAgentFinding(
+        name,
+        `the model listing environment could not be prepared: ${initialized.error.operation}: ${initialized.error.reason}`,
+      ),
+    );
+  } else if (listing !== null) {
+    findings.push(...describeModelListingOutcome(config, name, listing));
+  }
+  if (!removal.ok) {
+    findings.push({
+      severity: 'warning',
+      identifier: `agents.${name}`,
+      message: `model listing directory could not be removed; retained at "${environment.rootDirectory}"`,
+    });
+  }
+  return findings;
+}
+
+function modelAgentFinding(name: string, message: string): ValidationFinding {
+  return { severity: 'error', identifier: `agents.${name}`, message };
+}
+
+/** Maps one settled model listing to its finding: a timeout, a failure, or every unresolved model entry and role. */
+function describeModelListingOutcome(
+  config: TevuConfig,
+  name: string,
+  listing: ModelListing,
+): ValidationFinding[] {
+  const command = config.agents[name]?.command ?? name;
+  if (listing.outcome === 'timed-out') {
+    return [
+      modelAgentFinding(
+        name,
+        `"${command} models" did not finish within ${listing.limitMs / 1000}s in an environment built like a case agent's; the models of agent "${name}" were not checked`,
+      ),
+    ];
+  }
+  if (listing.outcome === 'failed') {
+    return [
+      modelAgentFinding(
+        name,
+        `"${command} models" ${listing.reason} in an environment built like a case agent's, so the models of agent "${name}" could not be checked`,
+      ),
+    ];
+  }
+  return checkModelsListed(config, name, command, listing.models);
+}
+
+/** Reports every configured model entry and declared role of `name` whose model is not among `models`. */
+function checkModelsListed(
+  config: TevuConfig,
+  name: string,
+  command: string,
+  models: readonly string[],
+): ValidationFinding[] {
+  const listed = new Set(models);
+  const findings: ValidationFinding[] = [];
+  for (const entry of config.models) {
+    if (entry.agent === name && !listed.has(entry.model)) {
+      findings.push(
+        unlistedModelFinding('error', `models.${entry.id}.model`, entry.model, name, command),
+      );
+    }
+  }
+  const hasGradedCheck = config.tasks.some((task) => gradedChecksOf(task).length > 0);
+  for (const roleName of ['criteria', 'grader'] as const) {
+    const role = config.roles?.[roleName];
+    if (role === undefined || role.agent !== name || listed.has(role.model)) {
+      continue;
+    }
+    const severity: ValidationFinding['severity'] =
+      roleName === 'grader' && hasGradedCheck ? 'error' : 'warning';
+    findings.push(
+      unlistedModelFinding(severity, `roles.${roleName}.model`, role.model, name, command),
+    );
+  }
+  return findings;
+}
+
+function unlistedModelFinding(
+  severity: ValidationFinding['severity'],
+  identifier: string,
+  model: string,
+  name: string,
+  command: string,
+): ValidationFinding {
+  return {
+    severity,
+    identifier,
+    message: `"${model}" is not among the models "${command} models" lists in an environment built like a case agent's; add its provider to agents.${name}.providers, or declare its credential variable in agents.${name}.secrets`,
   };
 }
 

@@ -578,6 +578,7 @@ function createHarness(config: TevuConfig) {
       TevuError,
       { kind: 'PrerequisiteError' | 'AgentProtocolError' }
     > | null,
+    providersError: null as Extract<TevuError, { kind: 'ConfigValidationError' }> | null,
   };
 
   const fakeAdapter: AgentAdapter = {
@@ -587,6 +588,15 @@ function createHarness(config: TevuConfig) {
         return { ok: false, error: agentState.probeError };
       }
       return { ok: true, value: buildCapabilityReport() };
+    },
+    async readProviders() {
+      if (agentState.providersError !== null) {
+        return { ok: false, error: agentState.providersError };
+      }
+      return { ok: true, value: { agent: 'fake-agent', configurationFiles: [], findings: [] } };
+    },
+    async listModels() {
+      return { outcome: 'listed', models: [] };
     },
     async run(input) {
       const caseId = input.identity.caseId;
@@ -852,6 +862,7 @@ function createHarness(config: TevuConfig) {
     clock,
     generateRunId: () => RUN_ID,
     configDigest: () => 'digest-synthetic',
+    textDigest: () => 'digest-file-synthetic',
     redact: (text) => text,
     cancellation: cancellationController.signal,
     onLifecycle: (caseId, lifecycle) => lifecycleEvents.push({ caseId, lifecycle }),
@@ -1270,6 +1281,7 @@ describe('runBenchmark', () => {
     expect(manifest.tools).toEqual({
       gitVersion: '2.45.0-synthetic',
       agentVersions: { [AGENT_NAME]: '99.0.0-synthetic' },
+      agentConfigurationFiles: { [AGENT_NAME]: [] },
     });
     expect(manifest.configPath).toBe(CONFIG_PATH);
     expect(manifest.execution).toEqual({
@@ -1431,6 +1443,38 @@ describe('runBenchmark', () => {
 
     const error = unwrapError(result);
     expect(error).toMatchObject({ kind: 'AgentProtocolError', context: { phase: 'probe' } });
+    expect(harness.git.validatedCommits).toHaveLength(0);
+    expect(harness.artifacts.startedManifests).toHaveLength(0);
+    expect(harness.lifecycleEvents).toEqual([]);
+  });
+
+  it('returns a readProviders failure as ConfigValidationError before any startRun call', async () => {
+    const config = buildTevuConfig();
+    const harness = createHarness(config);
+    harness.agent.providersError = {
+      kind: 'ConfigValidationError',
+      findings: [
+        {
+          severity: 'error',
+          identifier: 'agents.opencode.providers.acme',
+          message: 'synthetic provider read failure',
+        },
+      ],
+    };
+
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+
+    const error = unwrapError(result);
+    expect(error).toEqual({
+      kind: 'ConfigValidationError',
+      findings: [
+        {
+          severity: 'error',
+          identifier: 'agents.opencode.providers.acme',
+          message: 'synthetic provider read failure',
+        },
+      ],
+    });
     expect(harness.git.validatedCommits).toHaveLength(0);
     expect(harness.artifacts.startedManifests).toHaveLength(0);
     expect(harness.lifecycleEvents).toEqual([]);
@@ -2456,7 +2500,7 @@ function buildRunManifest(overrides: Partial<RunManifest> = {}): RunManifest {
     startedAt: CLOCK_BASE,
     completedAt: null,
     host: { platform: 'linux', nodeVersion: 'v24.0.0-synthetic' },
-    tools: { gitVersion: '2.45.0-synthetic', agentVersions: {} },
+    tools: { gitVersion: '2.45.0-synthetic', agentVersions: {}, agentConfigurationFiles: {} },
     execution: { concurrency: 1, caseTimeoutMs: 1_000, repeat: { value: 1, source: 'config' } },
     cases: [],
     ...overrides,

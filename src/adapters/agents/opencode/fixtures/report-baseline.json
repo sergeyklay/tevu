@@ -640,6 +640,7 @@
           "opencode": {
             "command": "/synthetic/opencode",
             "env": [],
+            "providers": [],
             "secrets": [
               "TEVU_PROVIDER_KEY"
             ]
@@ -799,6 +800,7 @@
     "schemaVersion": 1,
     "startedAt": "2026-09-23T00:00:00.000Z",
     "tools": {
+      "agentConfigurationFiles": {},
       "agentVersions": {
         "opencode": "9.9.9-synthetic"
       },

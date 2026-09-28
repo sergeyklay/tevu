@@ -19,6 +19,7 @@ import {
 import type {
   CaseGrading,
   ModelCallDependencies,
+  ProviderSnapshot,
   Redactor,
   TaskDefinition,
   TevuConfig,
@@ -32,6 +33,8 @@ export type GradeCaseRequest = {
   timeoutMs: number;
   redact: Redactor;
   cancellation: AbortSignal;
+  /** The run's snapshot of the grader agent's providers. */
+  providers: ProviderSnapshot;
 };
 
 /** Outcome of one grading call; cancellation carries no grading to persist. */
@@ -106,6 +109,7 @@ export async function gradeCase(
       prompt: redacted,
       timeoutMs: request.timeoutMs,
       cancellation: request.cancellation,
+      providers: request.providers,
     },
     dependencies,
   );

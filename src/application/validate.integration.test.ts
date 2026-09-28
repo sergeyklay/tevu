@@ -15,7 +15,12 @@ import {
 import { validateConfig } from '@/application/validate';
 import { TevuConfigSchema } from '@/config/schema';
 
-import type { AgentAdapter, TevuConfig, ValidationDependencies } from '@/domain/types';
+import type {
+  AgentAdapter,
+  AgentConfigurationFile,
+  TevuConfig,
+  ValidationDependencies,
+} from '@/domain/types';
 
 const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 
@@ -78,8 +83,18 @@ async function createSourceRepository(directory: string): Promise<string> {
 
 type FakeAgent = { adapter: AgentAdapter; probe: ReturnType<typeof vi.fn> };
 
-/** An agent adapter whose `probe` is tracked; every other method is unused by `validateConfig`. */
-function buildFakeAgentAdapter(): FakeAgent {
+/**
+ * An agent adapter whose `probe` is tracked; `readProviders` answers with an
+ * empty snapshot, since `validateConfig` calls it for every probed agent;
+ * every other method is unused by `validateConfig`. Either can be overridden
+ * for a scenario that depends on its own provider snapshot or model listing.
+ */
+function buildFakeAgentAdapter(
+  overrides: {
+    readProviders?: AgentAdapter['readProviders'];
+    listModels?: AgentAdapter['listModels'];
+  } = {},
+): FakeAgent {
   const probe = vi.fn(async () => ({
     ok: true as const,
     value: {
@@ -96,6 +111,20 @@ function buildFakeAgentAdapter(): FakeAgent {
     probe,
     adapter: {
       probe,
+      readProviders:
+        overrides.readProviders ??
+        vi.fn(async () => ({
+          ok: true as const,
+          value: { agent: 'opencode', configurationFiles: [], findings: [] },
+        })),
+      // Lists exactly what buildValidatableConfig's fixed `models` entries name,
+      // so the model-resolution stage reports nothing new for these fixtures.
+      listModels:
+        overrides.listModels ??
+        vi.fn(async () => ({
+          outcome: 'listed' as const,
+          models: ['openai/gpt-5', 'anthropic/claude-4'],
+        })),
       run: vi.fn(unused),
       exportSession: vi.fn(unused),
       normalizeMetrics: vi.fn(unused),
@@ -334,5 +363,243 @@ describe('validateConfig with the real case-executable adapter', () => {
       ),
     ).toBe(false);
     expect(await readFile(join(repositoryPath, 'probe-output.txt'), 'utf8')).toBe('created\n');
+  });
+});
+
+/**
+ * A configuration for the model-resolution tests: a real, always-successful
+ * agent command (so the case-executable probe never interferes), two model
+ * entries, and optional declared roles and a graded check, for
+ * `checkModelsListed`'s D8 severity split.
+ */
+function buildModelResolutionConfig(options: {
+  agentCommand: string;
+  repositoryPath: string;
+  baseCommit: string;
+  outputDirectory: string;
+  models: Array<{ id: string; model: `${string}/${string}` }>;
+  roles?: { criteria?: `${string}/${string}`; grader?: `${string}/${string}` };
+  gradedCheck?: boolean;
+}): TevuConfig {
+  return parseConfig({
+    version: 1,
+    run: {
+      output_dir: options.outputDirectory,
+      concurrency: 1,
+      timeout: '10m',
+      stop_grace: '3s',
+    },
+    agents: { opencode: { command: options.agentCommand, secrets: [], env: [] } },
+    repositories: [{ id: 'sample-repo', path: options.repositoryPath }],
+    models: options.models.map((entry) => ({
+      id: entry.id,
+      model: entry.model,
+      effort: 'high',
+      agent: 'opencode',
+    })),
+    ...(options.roles === undefined
+      ? {}
+      : {
+          roles: {
+            ...(options.roles.criteria === undefined
+              ? {}
+              : { criteria: { agent: 'opencode', model: options.roles.criteria, effort: 'high' } }),
+            ...(options.roles.grader === undefined
+              ? {}
+              : { grader: { agent: 'opencode', model: options.roles.grader, effort: 'high' } }),
+          },
+        }),
+    tasks: [
+      {
+        id: 'write-report',
+        title: 'Write the report',
+        repo: 'sample-repo',
+        base_commit: options.baseCommit,
+        description: 'Write a report',
+        prompt: 'Write the report',
+        readiness: ['The spec is approved'],
+        checks: {
+          acceptance:
+            options.gradedCheck === true
+              ? [{ id: 'graded-1', description: 'graded check description', required: true }]
+              : [{ id: 'manual-1', description: 'Manual review', manual: true }],
+          done: [{ id: 'manual-done', description: 'Manual review', manual: true }],
+        },
+      },
+    ],
+  });
+}
+
+describe('validateConfig model resolution (AC-3, AC-4)', () => {
+  /** Answers `listModels` from the given agent's own written configuration file, without a real process. */
+  function buildDependentListModels(listedModels: readonly string[]): AgentAdapter['listModels'] {
+    return vi.fn(async (environment) => {
+      const configPath = join(
+        environment.variables.XDG_CONFIG_HOME ?? '',
+        'opencode',
+        'opencode.json',
+      );
+      const text = await readFile(configPath, 'utf8').catch(() => '');
+      return text.includes('"acme"')
+        ? { outcome: 'listed' as const, models: [...listedModels] }
+        : { outcome: 'listed' as const, models: [] };
+    });
+  }
+
+  function acmeConfigurationFiles(): AgentConfigurationFile[] {
+    return [{ relativePath: 'opencode/opencode.json', text: '{"provider":{"acme":{}}}\n' }];
+  }
+
+  it('reports an unlisted model entry as an error, nothing for a listed one, and never starts run', async () => {
+    const repositoryPath = join(workspace, 'repo');
+    const baseCommit = await createSourceRepository(repositoryPath);
+    const agentScript = join(workspace, 'agent-ok.sh');
+    await writeExecutable(agentScript, shellScript('exit 0\n'));
+    const config = buildModelResolutionConfig({
+      agentCommand: agentScript,
+      repositoryPath,
+      baseCommit,
+      outputDirectory: join(workspace, 'artifacts'),
+      models: [
+        { id: 'alpha', model: 'acme/model-a' },
+        { id: 'beta', model: 'acme/model-missing' },
+      ],
+    });
+    const { adapter } = buildFakeAgentAdapter({
+      readProviders: vi.fn(async () => ({
+        ok: true as const,
+        value: { agent: 'opencode', configurationFiles: acmeConfigurationFiles(), findings: [] },
+      })),
+      listModels: buildDependentListModels(['acme/model-a']),
+    });
+
+    const outcome = await validateConfig(config, buildDependencies(adapter));
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const beta = outcome.value.findings.find(
+      (finding) => finding.identifier === 'models.beta.model',
+    );
+    expect(beta?.severity).toBe('error');
+    expect(beta?.message).toContain('"acme/model-missing" is not among the models');
+    expect(
+      outcome.value.findings.some((finding) => finding.identifier === 'models.alpha.model'),
+    ).toBe(false);
+    expect(outcome.value.valid).toBe(false);
+    expect(adapter.run).not.toHaveBeenCalled();
+  });
+
+  it('reports an unlisted, non-required role model as a warning and leaves the configuration valid', async () => {
+    const repositoryPath = join(workspace, 'repo');
+    const baseCommit = await createSourceRepository(repositoryPath);
+    const agentScript = join(workspace, 'agent-ok.sh');
+    await writeExecutable(agentScript, shellScript('exit 0\n'));
+    const config = buildModelResolutionConfig({
+      agentCommand: agentScript,
+      repositoryPath,
+      baseCommit,
+      outputDirectory: join(workspace, 'artifacts'),
+      models: [
+        { id: 'alpha', model: 'acme/model-a' },
+        { id: 'beta', model: 'acme/model-b' },
+      ],
+      roles: { criteria: 'acme/model-missing-role' },
+    });
+    const { adapter } = buildFakeAgentAdapter({
+      readProviders: vi.fn(async () => ({
+        ok: true as const,
+        value: { agent: 'opencode', configurationFiles: acmeConfigurationFiles(), findings: [] },
+      })),
+      listModels: buildDependentListModels(['acme/model-a', 'acme/model-b']),
+    });
+
+    const outcome = await validateConfig(config, buildDependencies(adapter));
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.findings).toContainEqual(
+      expect.objectContaining({ severity: 'warning', identifier: 'roles.criteria.model' }),
+    );
+    expect(outcome.value.valid).toBe(true);
+  });
+
+  it('reports an unlisted grader model as an error when a task declares a graded check', async () => {
+    const repositoryPath = join(workspace, 'repo');
+    const baseCommit = await createSourceRepository(repositoryPath);
+    const agentScript = join(workspace, 'agent-ok.sh');
+    await writeExecutable(agentScript, shellScript('exit 0\n'));
+    const config = buildModelResolutionConfig({
+      agentCommand: agentScript,
+      repositoryPath,
+      baseCommit,
+      outputDirectory: join(workspace, 'artifacts'),
+      models: [
+        { id: 'alpha', model: 'acme/model-a' },
+        { id: 'beta', model: 'acme/model-b' },
+      ],
+      roles: { grader: 'acme/model-missing-grader' },
+      gradedCheck: true,
+    });
+    const { adapter } = buildFakeAgentAdapter({
+      readProviders: vi.fn(async () => ({
+        ok: true as const,
+        value: { agent: 'opencode', configurationFiles: acmeConfigurationFiles(), findings: [] },
+      })),
+      listModels: buildDependentListModels(['acme/model-a', 'acme/model-b']),
+    });
+
+    const outcome = await validateConfig(config, buildDependencies(adapter));
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.findings).toContainEqual(
+      expect.objectContaining({ severity: 'error', identifier: 'roles.grader.model' }),
+    );
+    expect(outcome.value.valid).toBe(false);
+  });
+
+  it('stays valid on a provider snapshot carrying only a P-NOKEY warning', async () => {
+    const repositoryPath = join(workspace, 'repo');
+    const baseCommit = await createSourceRepository(repositoryPath);
+    const agentScript = join(workspace, 'agent-ok.sh');
+    await writeExecutable(agentScript, shellScript('exit 0\n'));
+    const config = buildModelResolutionConfig({
+      agentCommand: agentScript,
+      repositoryPath,
+      baseCommit,
+      outputDirectory: join(workspace, 'artifacts'),
+      models: [
+        { id: 'alpha', model: 'acme/model-a' },
+        { id: 'beta', model: 'acme/model-b' },
+      ],
+    });
+    const { adapter } = buildFakeAgentAdapter({
+      readProviders: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          agent: 'opencode',
+          configurationFiles: acmeConfigurationFiles(),
+          findings: [
+            {
+              severity: 'warning' as const,
+              identifier: 'agents.opencode.providers.acme',
+              message: 'provider "acme" names no variable listed in agents.opencode.secrets',
+            },
+          ],
+        },
+      })),
+      listModels: buildDependentListModels(['acme/model-a', 'acme/model-b']),
+    });
+
+    const outcome = await validateConfig(config, buildDependencies(adapter));
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.findings).toContainEqual({
+      severity: 'warning',
+      identifier: 'agents.opencode.providers.acme',
+      message: 'provider "acme" names no variable listed in agents.opencode.secrets',
+    });
+    expect(outcome.value.valid).toBe(true);
   });
 });

@@ -73,7 +73,7 @@ Files are stored under the configured artifact directory:
 
 | File | Contents |
 | --- | --- |
-| `run.json` | Run identity, configuration snapshot, `configPath` (the absolute path of the configuration file the run read), tool information (`tools.agentVersions`, one detected version per agent in use), per-agent capability reports, `execution.repeat` (`value`, the effective repeat; `source`, `config` or `cli`), case records, and findings |
+| `run.json` | Run identity, configuration snapshot, `configPath` (the absolute path of the configuration file the run read), tool information (`tools.agentVersions`, one detected version per agent in use; `tools.agentConfigurationFiles`, one entry per agent whose providers the run read, each holding the relative path and SHA-256 of every configuration file tevu wrote into that agent's homes, never the file's text), per-agent capability reports, `execution.repeat` (`value`, the effective repeat; `source`, `config` or `cli`), case records, and findings |
 | Root `result.json` | Normalized report data, including `pairs`, one pair summary per task/model entry pair |
 | `report.md` | Human-readable comparison with links to evidence |
 | `events.jsonl` | Raw agent event records, one JSON value per line; only that case's agent adapter interprets them |

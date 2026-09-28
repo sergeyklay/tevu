@@ -135,12 +135,47 @@ type RunSettings = {
   check_timeout?: string;
 };
 
-/** Parsed agent block settings; `secrets` and `env` default to `[]`. */
+/** One provider an agent block copies from the operator's configuration of that agent. */
+export type AgentProviderSetting = {
+  /** Key of the provider in that configuration's `provider` map. */
+  id: string;
+  /** A name from the same block's `secrets`, written as the provider's API key. */
+  api_key?: string;
+};
+
+/** Parsed agent block settings; `secrets`, `env`, and `providers` default to `[]`. */
 type AgentSettings = {
   command: string;
   secrets: string[];
   env: string[];
+  providers: AgentProviderSetting[];
 };
+
+/** One file an agent adapter places in an agent home before the agent starts. */
+export type AgentConfigurationFile = {
+  /** Relative to the home's XDG_CONFIG_HOME; never empty, absolute, or with a `..` segment. */
+  relativePath: string;
+  /** Complete UTF-8 content. */
+  text: string;
+};
+
+/** The providers one agent block copies, read once and applied to every agent home of one run or call. */
+export type ProviderSnapshot = {
+  agent: string;
+  /** Empty exactly when the block names no provider. */
+  configurationFiles: readonly AgentConfigurationFile[];
+  /** P-NOKEY warnings, in the order met; empty when none. */
+  findings: readonly ValidationFinding[];
+};
+
+/** One file every agent home of one agent received; `sha256` is 64 lowercase hexadecimal characters. */
+export type AgentConfigurationFileRecord = { path: string; sha256: string };
+
+/** Outcome of one model listing; `reason` never carries process output. */
+export type ModelListing =
+  | { outcome: 'listed'; models: readonly string[] }
+  | { outcome: 'timed-out'; limitMs: number }
+  | { outcome: 'failed'; reason: string };
 
 /** Parsed Jira Cloud connection settings. */
 export type JiraTrackerSettings = {
@@ -391,7 +426,12 @@ export type RunManifest = {
     platform: 'linux' | 'darwin';
     nodeVersion: string;
   };
-  tools: { gitVersion: string; agentVersions: Record<string, string | null> };
+  tools: {
+    gitVersion: string;
+    agentVersions: Record<string, string | null>;
+    /** One key per agent whose providers the run read; `[]` when its block names none. */
+    agentConfigurationFiles: Record<string, AgentConfigurationFileRecord[]>;
+  };
   execution: {
     concurrency: number;
     /** Default case timeout: `run.timeout` in milliseconds; each case's own value is `CaseIdentity.timeoutMs`. */
@@ -811,10 +851,12 @@ export interface EnvironmentAdapter {
     snapshot: ParentEnvironmentSnapshot,
     names: EnvironmentVariableNames,
     agent: string,
+    configurationFiles: readonly AgentConfigurationFile[],
   ): Promise<TevuResult<CaseEnvironments, 'IsolationError'>>;
   createModelCallEnvironment(
     snapshot: ParentEnvironmentSnapshot,
     agentVariables: { secrets: readonly string[]; env: readonly string[] },
+    configurationFiles: readonly AgentConfigurationFile[],
   ): Promise<TevuResult<ModelCallEnvironment, 'ArtifactError'>>;
 }
 
@@ -979,6 +1021,14 @@ export type AgentMetricsInput = {
 
 export interface AgentAdapter {
   probe(): Promise<TevuResult<AgentCapabilityReport, 'PrerequisiteError' | 'AgentProtocolError'>>;
+  /**
+   * Reads the providers its agent block names from the operator's configuration
+   * of the agent and prepares the files every agent home receives; writes
+   * nothing and starts no process.
+   */
+  readProviders(): Promise<TevuResult<ProviderSnapshot, 'ConfigValidationError'>>;
+  /** Lists every model the agent resolves in `environment`, without starting a model session. */
+  listModels(environment: ModelCallEnvironment): Promise<ModelListing>;
   run(
     input: AgentRunInput,
   ): Promise<
@@ -1317,6 +1367,8 @@ export type RunDependencies = {
   clock: Clock;
   generateRunId: RunIdGenerator;
   configDigest: (config: TevuConfig) => string;
+  /** The SHA-256 of `text` as UTF-8, in 64 lowercase hexadecimal characters. */
+  textDigest: (text: string) => string;
   redact: (text: string) => string;
   cancellation: AbortSignal;
   onLifecycle?: (caseId: string, lifecycle: CaseLifecycle) => void;
@@ -1336,6 +1388,8 @@ export type ModelRoleCallRequest = {
   prompt: string;
   timeoutMs: number;
   cancellation: AbortSignal;
+  /** The run's snapshot of the role's agent; absent means `callModelRole` reads one. */
+  providers?: ProviderSnapshot;
 };
 
 /** Result of one model-role call. */

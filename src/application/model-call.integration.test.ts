@@ -27,6 +27,7 @@ import type {
   ModelCallDependencies,
   ModelRoleCallRequest,
   ModelRoleName,
+  ProviderSnapshot,
   SecretRedactor,
   TevuConfig,
   TevuError,
@@ -104,6 +105,10 @@ if (args[0] === "run" && args[1] === "--help") {
 }
 if (args[0] === "export" && args[1] === "--help") {
   console.log("usage: opencode export <session-id>");
+  process.exit(0);
+}
+if (args[0] === "models" && args[1] === "--help") {
+  console.log("usage: opencode models");
   process.exit(0);
 }
 `;
@@ -251,6 +256,7 @@ function buildConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
         command: 'unused-fake-opencode-command',
         secrets: [SECRET_VARIABLE_NAME],
         env: [],
+        providers: [],
       },
     },
     repositories: [],
@@ -269,8 +275,12 @@ function captureModelCallRoots(real: EnvironmentAdapter): {
   const roots: string[] = [];
   const environments: EnvironmentAdapter = {
     ...real,
-    async createModelCallEnvironment(snapshot, agentVariables) {
-      const result = await real.createModelCallEnvironment(snapshot, agentVariables);
+    async createModelCallEnvironment(snapshot, agentVariables, configurationFiles) {
+      const result = await real.createModelCallEnvironment(
+        snapshot,
+        agentVariables,
+        configurationFiles,
+      );
       if (result.ok) {
         roots.push(result.value.rootDirectory);
       }
@@ -311,9 +321,10 @@ async function callWithFakeAgent(options: CallOptions) {
     secrets: options.secrets ?? buildSecretRedactor([SECRET_VALUE]),
     probeEnvironment: { PATH: process.env['PATH'] ?? '' },
     probeDirectory: process.cwd(),
+    operatorDirectories: { home: undefined, xdgConfigHome: undefined },
   };
   const adapter: AgentAdapter = createOpenCodeAdapter(
-    { agent: 'opencode', executable },
+    { agent: 'opencode', executable, providers: [], declaredVariables: { secrets: [], env: [] } },
     dependencies,
   );
   const modelCallDependencies: ModelCallDependencies = {
@@ -607,5 +618,132 @@ describe('callModelRole against a fake OpenCode executable', () => {
       expect(error.cause).toBe('failed');
       expect(error.reason).toBe(reason);
     });
+  });
+});
+
+describe('callModelRole providers resolution', () => {
+  function buildProviderSnapshot(): ProviderSnapshot {
+    return {
+      agent: 'opencode',
+      configurationFiles: [
+        { relativePath: 'opencode/opencode.json', text: '{"provider":{"acme":{}}}\n' },
+      ],
+      findings: [],
+    };
+  }
+
+  it('reads providers only after probe, and only when request.providers is absent, forwarding the resolved files to the model-call environment', async () => {
+    const executable = await writeFakeExecutable('ok', 'reply-with-secret');
+    const realAdapter: AgentAdapter = createOpenCodeAdapter(
+      { agent: 'opencode', executable, providers: [], declaredVariables: { secrets: [], env: [] } },
+      {
+        runProcess: runManagedProcess,
+        secrets: buildSecretRedactor([SECRET_VALUE]),
+        probeEnvironment: { PATH: process.env['PATH'] ?? '' },
+        probeDirectory: process.cwd(),
+        operatorDirectories: { home: undefined, xdgConfigHome: undefined },
+      },
+    );
+    const calls: string[] = [];
+    const agent: AgentAdapter = {
+      ...realAdapter,
+      async probe() {
+        calls.push('probe');
+        return realAdapter.probe();
+      },
+      async readProviders() {
+        calls.push('readProviders');
+        return { ok: true, value: buildProviderSnapshot() };
+      },
+    };
+    const realEnvironments = createEnvironmentAdapter();
+    const receivedFiles: string[][] = [];
+    const environments: EnvironmentAdapter = {
+      ...realEnvironments,
+      async createModelCallEnvironment(snapshot, agentVariables, configurationFiles) {
+        receivedFiles.push(configurationFiles.map((file) => file.relativePath));
+        return realEnvironments.createModelCallEnvironment(
+          snapshot,
+          agentVariables,
+          configurationFiles,
+        );
+      },
+    };
+    const modelCallDependencies: ModelCallDependencies = {
+      agents: new Map([['opencode', agent]]),
+      environments,
+      git: createGitWorkspaceAdapter({ workspacesDirectory: join(tempRoot, 'workspaces') }),
+    };
+
+    const result = await callModelRole(
+      {
+        config: buildConfig(),
+        role: 'grader',
+        prompt: PROMPT,
+        timeoutMs: 10_000,
+        cancellation: new AbortController().signal,
+      },
+      modelCallDependencies,
+    );
+
+    expectOk(result);
+    expect(calls).toEqual(['probe', 'readProviders']);
+    expect(receivedFiles).toEqual([['opencode/opencode.json']]);
+  });
+
+  it('skips readProviders and forwards the given snapshot unchanged when request.providers is set', async () => {
+    const executable = await writeFakeExecutable('ok', 'reply-with-secret');
+    const realAdapter: AgentAdapter = createOpenCodeAdapter(
+      { agent: 'opencode', executable, providers: [], declaredVariables: { secrets: [], env: [] } },
+      {
+        runProcess: runManagedProcess,
+        secrets: buildSecretRedactor([SECRET_VALUE]),
+        probeEnvironment: { PATH: process.env['PATH'] ?? '' },
+        probeDirectory: process.cwd(),
+        operatorDirectories: { home: undefined, xdgConfigHome: undefined },
+      },
+    );
+    let readProvidersCalls = 0;
+    const agent: AgentAdapter = {
+      ...realAdapter,
+      async readProviders() {
+        readProvidersCalls += 1;
+        return { ok: true, value: { agent: 'opencode', configurationFiles: [], findings: [] } };
+      },
+    };
+    const realEnvironments = createEnvironmentAdapter();
+    const receivedFiles: string[][] = [];
+    const environments: EnvironmentAdapter = {
+      ...realEnvironments,
+      async createModelCallEnvironment(snapshot, agentVariables, configurationFiles) {
+        receivedFiles.push(configurationFiles.map((file) => file.relativePath));
+        return realEnvironments.createModelCallEnvironment(
+          snapshot,
+          agentVariables,
+          configurationFiles,
+        );
+      },
+    };
+    const modelCallDependencies: ModelCallDependencies = {
+      agents: new Map([['opencode', agent]]),
+      environments,
+      git: createGitWorkspaceAdapter({ workspacesDirectory: join(tempRoot, 'workspaces') }),
+    };
+
+    const result = await callModelRole(
+      {
+        config: buildConfig(),
+        role: 'grader',
+        prompt: PROMPT,
+        timeoutMs: 10_000,
+        cancellation: new AbortController().signal,
+        providers: buildProviderSnapshot(),
+      },
+      modelCallDependencies,
+    );
+
+    expectOk(result);
+    expect(readProvidersCalls).toBe(0);
+    expect(receivedFiles).toEqual([['opencode/opencode.json']]);
   });
 });
