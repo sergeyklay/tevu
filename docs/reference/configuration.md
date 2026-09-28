@@ -10,7 +10,7 @@ tevu reads UTF-8 YAML with `version: 1`. Unknown fields are rejected at every le
 tevu config example > tevu.yaml
 ```
 
-The shell creates the file, or replaces an existing one, before tevu starts; tevu itself writes no file. This template compares two model entries at different reasoning efforts on one task using manual checks. The repository path, commit, model identifier, efforts, and credential-variable name are illustrative values, not a ready-to-run configuration. The [benchmark guide](../guides/run-benchmark.md) covers setup for a real task.
+The shell creates the file, or replaces an existing one, before tevu starts; tevu itself writes no file. This template compares two model entries at different reasoning efforts on one task using a graded check, a command check, and a manual check. The repository path, commit, model identifiers, efforts, grader model, and credential-variable name are illustrative values, not a ready-to-run configuration. The [benchmark guide](../guides/run-benchmark.md) covers setup for a real task.
 
 ```yaml
 # tevu.yaml: compare coding models on tasks from your own backlog.
@@ -77,6 +77,16 @@ models:
     model: openai/your-model
     effort: high
 
+# --- Roles ------------------------------------------------------------------
+# Models tevu uses for its own work rather than comparing them.
+roles:
+  grader:                         # grades each graded check after a case's checks run
+    model: openai/your-grader-model
+    effort: medium                # a variant the agent provides without a repository
+    # agent: opencode             # needed only when more than one agent is configured
+    # Its provider credential goes in that agent's secrets (agents.opencode.secrets),
+    # which every case agent of that agent also receives.
+
 # --- Tasks ------------------------------------------------------------------
 tasks:
   - id: csv-export
@@ -109,9 +119,8 @@ tasks:
       # overlay: ./hidden-checks/csv-export           # copied onto the repository root before checks run
       # Does the change solve the task? At least one check must be required.
       acceptance:
-        - id: csv-content
+        - id: csv-content         # graded by roles.grader against its description
           description: The CSV contains the visible rows and correctly escapes values.
-          manual: true            # you record the verdict with `tevu assess`
         - id: tests
           description: The repository's test suite passes.
           run: [npm, test]        # executable and literal arguments, no shell
@@ -123,7 +132,7 @@ tasks:
       done:
         - id: docs
           description: The export action is documented for users.
-          manual: true
+          manual: true            # you record the verdict with `tevu assess`
 ```
 
 `tevu task add` appends to this file: the interviewed task, and a new repository when one was chosen, are added after the existing content of the `tasks` and `repositories` lists. Every other byte, comment, and blank line is kept unchanged. Both lists must stay in block style (one `- ` item per line, never `tasks: [...]`) for the append to succeed; a flow-style list is reported as a finding and nothing is written. A task added by editing the file by hand keeps every comment the same way.
@@ -145,7 +154,7 @@ tasks:
 | `trackers.jira` | Optional Jira Cloud connection settings |
 | `repositories` | At least one entry, each `{id, path}` (a local repository) or `{id, github}` (a GitHub repository tevu clones itself), optionally carrying `setup`; see [GitHub repositories](#github-repositories) |
 | `models` | At least two `{id, model, effort, agent}` entries |
-| `roles` | Optional; the `criteria` and `grader` model roles used by future commands, covered under [Model roles](#model-roles) |
+| `roles` | Optional; the `criteria` and `grader` model roles, covered under [Model roles](#model-roles); `grader` is read by `tevu run` |
 | `tasks` | At least one task |
 
 Paths resolve relative to the configuration file. Resolution uses the directory of the path tevu read, without following symbolic links; tevu does not expand `~`. A GitHub repository entry's `github` value does not resolve against the file at all: its directory is the managed-clone location under the managed-clone root, covered under [GitHub repositories](#github-repositories). When the configuration lives in the user configuration directory rather than the current directory, use absolute paths for `run.output_dir`, `repositories[].path`, `checks.overlay`, and a path-form `agents.opencode.command`, since a relative value there resolves against the user configuration directory, not the directory tevu ran from. Bare executable names are found through `PATH`. IDs start with a lowercase letter, contain lowercase letters, digits, or hyphens, and have at most 64 characters. IDs are unique within their collection.
@@ -253,9 +262,9 @@ Submodules and Git LFS sources are unsupported. Project instructions tracked at 
 
 ## Checks
 
-Each check has `id`, `description`, and `required` (default `true`), plus either `run` or `manual: true`. Check IDs are unique across both check collections within a task. Every model entry for a task receives the same checks.
+Each check has `id`, `description`, and `required` (default `true`), plus `run` (a command check), `manual: true` (a manual check), or neither (a graded check, the default kind `tevu task add` proposes). Check IDs are unique across both check collections within a task. Every model entry for a task receives the same checks.
 
-`manual: true` requires a verdict through `tevu assess`. A command check (`run`) has the following fields:
+A graded check needs a description with non-whitespace text, since `roles.grader` grades against it; see [Graded checks](#graded-checks). `manual: true` requires a verdict through `tevu assess`. A command check (`run`) has the following fields:
 
 | Field | Contract |
 | --- | --- |
@@ -277,6 +286,14 @@ run: [npm, test]
 ```
 
 Commands run sequentially in the case workspace. Arguments are passed directly, without a shell. A target task's test command is independent of tevu's own product-test runner. The solution patch is captured before checks run, relative to the state `before_agent` left when the repository declares one; restore and overlay then run, followed by `setup.before_checks` when declared, so command checks see the restored and overlaid worktree rather than the state the agent left. Ignore rules never hide a change to a tracked path, meaning a path in the [patch base](#repository-setup) when one was recorded and in `base_commit` otherwise.
+
+### Graded checks
+
+A graded check states a criterion in plain language and is graded by `roles.grader` after a case's other checks run: exactly one model call per case whose task declares at least one graded check, whatever the number of graded checks that task has. The grader receives the task's `prompt` and `description`, every graded check's `id` and `description`, and the captured solution patch, whole and with no size limit; it never receives a reference solution, even when the task records one, a case ID, a run ID, or the identity of the model entry that produced the solution. The call's time limit is `run.timeout`, the same limit an agent attempt runs under; there is no separate grader time-limit setting.
+
+Each graded check's verdict is `passed`, `failed`, or `undetermined`, with a rationale that names the patch files and line ranges it relies on. A grader call that fails, times out, or returns a reply tevu cannot parse leaves every graded check of that case pending with the failure's reason recorded; a pending or `undetermined` graded check is never recorded as a pass or a fail, and the call's usage and cost are recorded as unavailable, never zero or estimated. Recover a pending or `undetermined` verdict with `tevu assess`, or by running the task again in a new run.
+
+`tevu validate` and `tevu run` require `roles.grader` to be declared whenever a configured task declares a graded check; see [Model roles](#model-roles) for the role's configuration and credential.
 
 ### Restore and overlay
 
@@ -380,7 +397,7 @@ roles:
 | `roles.<role>.effort` | Yes | None | Non-empty string, passed verbatim as OpenCode's `--variant`, naming a variant the agent provides without a repository: built-in or provider-defined, never one defined only in a repository's `opencode.json` |
 | `roles.<role>.agent` | No | `opencode` | A key of `agents` |
 
-The two roles are configured and used independently: each is required only by the command that reads it, and a configuration declaring neither is valid. They stay separate settings rather than one shared model because a model grading or drafting for its own family tends to favor it. The same model may serve a model role and a model entry; tevu does not forbid using one model for both.
+The two roles are configured and used independently: each is required only by the command that reads it, and a configuration declaring neither is valid. `tevu run` is the reader of `roles.grader`, calling it once per case whose task declares a graded check; see [Graded checks](#graded-checks). They stay separate settings rather than one shared model because a model grading or drafting for its own family tends to favor it. The same model may serve a model role and a model entry; tevu does not forbid using one model for both.
 
 A model role's provider credential belongs in its agent block's `secrets`, not in the role itself; every case agent of that block receives the same credential, so a role on a provider no model entry uses exposes its credential to every benchmarked case agent of that agent. Neither the loader nor `tevu validate` checks a role's credential or effort against its provider: a missing credential fails the call at run time, and an unknown effort runs at the model's default effort.
 

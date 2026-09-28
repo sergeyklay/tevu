@@ -26,10 +26,12 @@ import type {
   ArtifactStore,
   AssessmentArtifact,
   AssessmentLock,
+  CaseGrading,
   CaseResult,
   CheckResult,
   ConfigReadCause,
   ConfigStore,
+  GradingArtifact,
   PatchArtifact,
   Redactor,
   RepeatSetting,
@@ -60,6 +62,7 @@ type CaseArtifactPaths = {
   solutionPatch: string;
   checks: string;
   assessment: string;
+  grading: string;
   result: string;
   setupBeforeAgent: string;
   setupBeforeChecks: string;
@@ -83,6 +86,7 @@ const CASE_FILE = {
   solutionPatch: 'solution.patch',
   checks: 'checks.json',
   assessment: 'assessment.json',
+  grading: 'grading.json',
   result: 'result.json',
   setupBeforeAgent: 'setup-before-agent.log',
   setupBeforeChecks: 'setup-before-checks.log',
@@ -106,6 +110,7 @@ function caseArtifactPaths(caseId: string): CaseArtifactPaths {
     solutionPatch: path.posix.join(base, CASE_FILE.solutionPatch),
     checks: path.posix.join(base, CASE_FILE.checks),
     assessment: path.posix.join(base, CASE_FILE.assessment),
+    grading: path.posix.join(base, CASE_FILE.grading),
     result: path.posix.join(base, CASE_FILE.result),
     setupBeforeAgent: path.posix.join(base, CASE_FILE.setupBeforeAgent),
     setupBeforeChecks: path.posix.join(base, CASE_FILE.setupBeforeChecks),
@@ -502,6 +507,24 @@ class FileArtifactStore implements ArtifactStore {
     return this.writeJsonSink(operation, active.value.directory, CASE_FILE.checks, artifact);
   }
 
+  async writeGrading(
+    caseId: string,
+    grading: CaseGrading,
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'write-grading';
+    const active = this.requireActiveCase(operation, caseId);
+    if (!active.ok) {
+      return active;
+    }
+    const artifact = {
+      schemaVersion: 1 as const,
+      runId: active.value.runId,
+      caseId,
+      ...grading,
+    };
+    return this.writeJsonSink(operation, active.value.directory, CASE_FILE.grading, artifact);
+  }
+
   async finalizeCase(result: CaseResult): Promise<TevuResult<void, 'ArtifactError'>> {
     const operation = 'finalize-case';
     const active = this.requireActiveCase(operation, result.identity.caseId);
@@ -723,7 +746,8 @@ class FileArtifactStore implements ArtifactStore {
       !isNonEmptyString(value['identity']['agent']) ||
       !isPositiveSafeInteger(value['identity']['attempt']) ||
       !isPositiveSafeInteger(value['identity']['timeoutMs']) ||
-      !isRecord(value['artifacts'])
+      !isRecord(value['artifacts']) ||
+      !(value['artifacts']['grading'] === null || isNonEmptyString(value['artifacts']['grading']))
     ) {
       return artifactFailure(
         operation,
@@ -849,6 +873,26 @@ class FileArtifactStore implements ArtifactStore {
       );
     }
     return { ok: true, value: value['checks'] as CheckResult[] };
+  }
+
+  async readGrading(
+    runId: string,
+    caseId: string,
+  ): Promise<TevuResult<GradingArtifact, 'ArtifactError'>> {
+    const operation = 'read-grading';
+    const caseDirectory = this.resolveCaseDirectory(operation, runId, caseId);
+    if (!caseDirectory.ok) {
+      return caseDirectory;
+    }
+    const parsed = await readJsonFile(operation, path.join(caseDirectory.value, CASE_FILE.grading));
+    if (!parsed.ok) {
+      return parsed;
+    }
+    const defect = describeGradingDefect(parsed.value, runId, caseId);
+    if (defect !== null) {
+      return artifactFailure(operation, defect);
+    }
+    return { ok: true, value: parsed.value as GradingArtifact };
   }
 
   async readAssessment(
@@ -1270,6 +1314,111 @@ function describeStoredManifestDefect(manifest: unknown, runId: string): string 
   return null;
 }
 
+const METRIC_UNITS = new Set(['count', 'token', 'millisecond', 'USD']);
+const METRIC_SCOPES = new Set(['case', 'root-session', 'session-tree']);
+const GRADE_VERDICTS = new Set(['passed', 'failed', 'undetermined']);
+const AGENT_METRIC_KEYS = [
+  'inputTokens',
+  'outputTokens',
+  'reasoningTokens',
+  'cacheReadTokens',
+  'cacheWriteTokens',
+  'turns',
+  'apiCalls',
+  'apiErrors',
+  'toolCalls',
+  'skillCalls',
+  'cost',
+] as const;
+
+/** Holds for a decoded `MetricValue`: a numeric or `null` value, a declared unit and scope, and matching availability. */
+function isMetricValue(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (!(value['value'] === null || typeof value['value'] === 'number')) {
+    return false;
+  }
+  if (typeof value['unit'] !== 'string' || !METRIC_UNITS.has(value['unit'])) {
+    return false;
+  }
+  if (typeof value['scope'] !== 'string' || !METRIC_SCOPES.has(value['scope'])) {
+    return false;
+  }
+  const availability = value['availability'];
+  if (!isRecord(availability)) {
+    return false;
+  }
+  if (availability['status'] === 'available') {
+    return typeof availability['source'] === 'string';
+  }
+  if (availability['status'] === 'unavailable') {
+    return typeof availability['reason'] === 'string';
+  }
+  return false;
+}
+
+function describeGradingDefect(value: unknown, runId: string, caseId: string): string | null {
+  const malformed = `grading artifact for "${caseId}" in run "${runId}" has a malformed shape`;
+  if (!isRecord(value)) {
+    return malformed;
+  }
+  const grader = value['grader'];
+  if (
+    value['schemaVersion'] !== 1 ||
+    value['runId'] !== runId ||
+    value['caseId'] !== caseId ||
+    !isRecord(grader) ||
+    !isNonEmptyString(grader['model']) ||
+    !isNonEmptyString(grader['effort']) ||
+    !isNonEmptyString(grader['agent'])
+  ) {
+    return malformed;
+  }
+  const call = value['call'];
+  if (!isRecord(call)) {
+    return malformed;
+  }
+  if (call['status'] === 'replied') {
+    if (typeof call['reply'] !== 'string') {
+      return malformed;
+    }
+  } else if (call['status'] === 'no-reply') {
+    if (typeof call['reason'] !== 'string') {
+      return malformed;
+    }
+  } else {
+    return malformed;
+  }
+  const metrics = value['metrics'];
+  if (!isRecord(metrics) || !AGENT_METRIC_KEYS.every((key) => isMetricValue(metrics[key]))) {
+    return malformed;
+  }
+  const grades = value['grades'];
+  if (
+    !Array.isArray(grades) ||
+    !grades.every((grade: unknown) => {
+      if (!isRecord(grade) || !isNonEmptyString(grade['checkId'])) {
+        return false;
+      }
+      if (grade['status'] === 'graded') {
+        return (
+          typeof grade['verdict'] === 'string' &&
+          GRADE_VERDICTS.has(grade['verdict']) &&
+          typeof grade['rationale'] === 'string'
+        );
+      }
+      if (grade['status'] === 'pending') {
+        return typeof grade['reason'] === 'string';
+      }
+      return false;
+    })
+  ) {
+    return malformed;
+  }
+  return null;
+}
+
 function describeAssessmentDefect(value: unknown, runId: string, caseId: string): string | null {
   if (!isRecord(value)) {
     return `assessment artifact for "${caseId}" is not a JSON object`;
@@ -1287,7 +1436,8 @@ function describeAssessmentDefect(value: unknown, runId: string, caseId: string)
       (record) =>
         isRecord(record) &&
         isNonEmptyString(record['checkId']) &&
-        isNonEmptyString(record['replacedAt']),
+        isNonEmptyString(record['replacedAt']) &&
+        (record['source'] === 'operator' || record['source'] === 'grader'),
     )
   ) {
     return `assessment artifact for "${caseId}" in run "${runId}" has a malformed shape or mismatched identity`;

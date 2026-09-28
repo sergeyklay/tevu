@@ -24,7 +24,7 @@ import {
   parseGitHubRepository,
 } from '@/domain/github-reference';
 
-import type { AssessmentCaseContext, ManualCheckSummary } from '@/application/assess';
+import type { AssessableCheckSummary, AssessmentCaseContext } from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
 import type { ManagedCommitsOutcome } from '@/application/managed-clone';
 import type { ResolvedReferenceSolution } from '@/application/reference-solution';
@@ -212,7 +212,11 @@ export async function runTaskWizard(
     if (!input.ok) {
       return input;
     }
-    await reviewAndConfirm(io, dependencies.redact, input.value);
+    const graderDeclared =
+      existing.value === null
+        ? bootstrap?.roles?.grader !== undefined
+        : existing.value.roles?.grader !== undefined;
+    await reviewAndConfirm(io, dependencies.redact, input.value, graderDeclared);
     return input;
   } catch (error) {
     if (error instanceof WizardCancelledError) {
@@ -245,12 +249,12 @@ export async function runAssessmentWizard(
   if (!context.ok) {
     return context;
   }
-  if (context.value.manualChecks.length === 0) {
+  if (context.value.checks.length === 0) {
     return configValidationFailure([
       {
         severity: 'error',
         identifier: request.caseId,
-        message: `case "${request.caseId}" has no manual checks; there is nothing to assess`,
+        message: `case "${request.caseId}" has no manual or graded checks; there is nothing to assess`,
       },
     ]);
   }
@@ -273,10 +277,39 @@ export async function runAssessmentWizard(
       validate: validateNonWhitespace,
     });
     const decisions: AssessmentDecision[] = [];
-    for (const check of context.value.manualChecks) {
-      log.step(redact(renderManualCheck(check)), promptOptions(io));
+    for (const check of context.value.checks) {
+      log.step(redact(renderAssessableCheck(check)), promptOptions(io));
       const existingRecord = currentByCheck.get(check.checkId);
-      if (existingRecord === undefined) {
+      if (existingRecord !== undefined) {
+        log.info(redact(renderAssessmentRecord(existingRecord)), promptOptions(io));
+        const wantsReplacement = await askConfirm(io, {
+          message: `Replace the existing assessment for "${check.checkId}"?`,
+          initialValue: false,
+        });
+        if (!wantsReplacement) {
+          continue;
+        }
+        const verdict = await askVerdict(io, check.checkId);
+        const noteText = await askNote(io, verdict);
+        const confirmed = await askConfirm(io, {
+          message: `Confirm replacing "${check.checkId}" (${existingRecord.verdict} -> ${verdict})?`,
+          initialValue: false,
+        });
+        if (!confirmed) {
+          log.info(`Kept the existing assessment for "${check.checkId}".`, promptOptions(io));
+          continue;
+        }
+        decisions.push({
+          checkId: check.checkId,
+          verdict,
+          assessor,
+          note: noteText,
+          replaceExisting: true,
+        });
+        continue;
+      }
+
+      if (check.evaluator === 'manual') {
         const verdict = await askVerdict(io, check.checkId);
         const noteText = await askNote(io, verdict);
         decisions.push({
@@ -288,9 +321,61 @@ export async function runAssessmentWizard(
         });
         continue;
       }
-      log.info(redact(renderAssessmentRecord(existingRecord)), promptOptions(io));
+
+      const grade = check.grade;
+      if (grade === null) {
+        log.info(
+          redact(`"${check.checkId}" was not graded: no grading artifact was saved for this case`),
+          promptOptions(io),
+        );
+        const verdict = await askVerdict(io, check.checkId);
+        const noteText = await askNote(io, verdict);
+        decisions.push({
+          checkId: check.checkId,
+          verdict,
+          assessor,
+          note: noteText,
+          replaceExisting: false,
+        });
+        continue;
+      }
+      if (grade.status === 'pending') {
+        log.info(redact(`"${check.checkId}" was not graded: ${grade.reason}`), promptOptions(io));
+        const verdict = await askVerdict(io, check.checkId);
+        const noteText = await askNote(io, verdict);
+        decisions.push({
+          checkId: check.checkId,
+          verdict,
+          assessor,
+          note: noteText,
+          replaceExisting: false,
+        });
+        continue;
+      }
+      const grader = check.grader;
+      if (grader === null) {
+        throw new Error('unreachable: a saved grade always carries a grader identity');
+      }
+      log.info(
+        redact(
+          `Grader verdict for "${check.checkId}": ${grade.verdict} (${grader.model}, effort ${grader.effort}): ${grade.rationale}`,
+        ),
+        promptOptions(io),
+      );
+      if (grade.verdict === 'undetermined') {
+        const verdict = await askVerdict(io, check.checkId);
+        const noteText = await askNote(io, verdict);
+        decisions.push({
+          checkId: check.checkId,
+          verdict,
+          assessor,
+          note: noteText,
+          replaceExisting: false,
+        });
+        continue;
+      }
       const wantsReplacement = await askConfirm(io, {
-        message: `Replace the existing assessment for "${check.checkId}"?`,
+        message: `Replace the grader's verdict for "${check.checkId}"?`,
         initialValue: false,
       });
       if (!wantsReplacement) {
@@ -299,11 +384,11 @@ export async function runAssessmentWizard(
       const verdict = await askVerdict(io, check.checkId);
       const noteText = await askNote(io, verdict);
       const confirmed = await askConfirm(io, {
-        message: `Confirm replacing "${check.checkId}" (${existingRecord.verdict} -> ${verdict})?`,
+        message: `Confirm replacing "${check.checkId}" (grader ${grade.verdict} -> ${verdict})?`,
         initialValue: false,
       });
       if (!confirmed) {
-        log.info(`Kept the existing assessment for "${check.checkId}".`, promptOptions(io));
+        log.info(`Kept the grader's verdict for "${check.checkId}".`, promptOptions(io));
         continue;
       }
       decisions.push({
@@ -371,6 +456,7 @@ async function interviewBootstrap(
   const jira = await interviewJiraSettings(io, requireJira, agentNames);
   const repositories = await interviewRepositories(io);
   const models = await interviewModels(io);
+  const grader = await interviewGraderRole(io);
   return {
     run: {
       output_dir: outputDirectory,
@@ -383,7 +469,44 @@ async function interviewBootstrap(
     ...(jira === undefined ? {} : { trackers: { jira } }),
     repositories,
     models,
+    ...(grader === undefined ? {} : { roles: { grader } }),
   };
+}
+
+/** Captures an optional `roles.grader` declaration during bootstrap; absent on decline. */
+async function interviewGraderRole(
+  io: WizardIo,
+): Promise<{ model: `${string}/${string}`; effort: string } | undefined> {
+  const wantsGrader = await askConfirm(io, {
+    message: 'Declare a grader model for graded checks?',
+    initialValue: true,
+  });
+  if (!wantsGrader) {
+    return undefined;
+  }
+  log.info(
+    `The grader's provider credential must be one of the secret variables of agent "${AGENT_NAMES[0]}"; every case agent of "${AGENT_NAMES[0]}" receives it too.`,
+    promptOptions(io),
+  );
+  const model = await askGraderModel(io);
+  const effort = await askText(io, {
+    message: 'Grader reasoning effort (a variant the agent provides without a repository)',
+    validate: validateNonWhitespace,
+  });
+  return { model, effort };
+}
+
+/** Asks the grader model question, re-prompting until the answer is a valid `provider/model` identifier. */
+async function askGraderModel(io: WizardIo): Promise<`${string}/${string}`> {
+  for (;;) {
+    const value = await askText(io, {
+      message: 'Grader model (provider/model)',
+      validate: validateModel,
+    });
+    if (isModelIdentifier(value)) {
+      return value;
+    }
+  }
 }
 
 /** Collects one pass-through agent variable list, names only, unique across both lists. */
@@ -1076,30 +1199,39 @@ async function interviewChecks(
       message: `New ${collection} check ID`,
       validate: validateId(usedCheckIds),
     });
-    const description = await askText(io, {
-      message: `Description of "${id}"`,
-      defaultValue: '',
+    const kind = await askSelect<'graded' | 'command' | 'manual'>(io, {
+      message: `How is "${id}" checked?`,
+      options: [
+        { value: 'graded', label: 'Graded by the grader model against its description' },
+        { value: 'command', label: 'Command (literal argv, no shell)' },
+        { value: 'manual', label: 'Manual (assessed through tevu assess)' },
+      ],
+      initialValue: 'graded',
     });
+    const description = await askText(
+      io,
+      kind === 'graded'
+        ? {
+            message: `Description of "${id}" (the criterion the grader grades against)`,
+            validate: validateNonWhitespace,
+          }
+        : { message: `Description of "${id}"`, defaultValue: '' },
+    );
     const required = await askConfirm(io, {
       message: `Is "${id}" required?`,
       initialValue: true,
     });
-    const kind = await askSelect<'command' | 'manual'>(io, {
-      message: `How is "${id}" checked?`,
-      options: [
-        { value: 'command', label: 'Command (literal argv, no shell)' },
-        { value: 'manual', label: 'Manual (assessed through tevu assess)' },
-      ],
-    });
     const check: CheckInput =
       kind === 'manual'
         ? { id, description, manual: true, ...(required ? {} : { required }) }
-        : {
-            id,
-            description,
-            ...(await interviewCommandEvaluator(io, id, excludedNames)),
-            ...(required ? {} : { required }),
-          };
+        : kind === 'graded'
+          ? { id, description, ...(required ? {} : { required }) }
+          : {
+              id,
+              description,
+              ...(await interviewCommandEvaluator(io, id, excludedNames)),
+              ...(required ? {} : { required }),
+            };
     usedCheckIds.add(id);
     checks.push(check);
     if (!checks.some((candidate) => candidate.required !== false)) {
@@ -1165,8 +1297,9 @@ async function reviewAndConfirm(
   io: WizardIo,
   redact: (textContent: string) => string,
   input: TaskWizardInput,
+  graderDeclared: boolean,
 ): Promise<void> {
-  note(redact(renderTaskReview(input)), 'Review', promptOptions(io));
+  note(redact(renderTaskReview(input, graderDeclared)), 'Review', promptOptions(io));
   const accepted = await askConfirm(io, {
     message: `Write this to ${input.configPath}?`,
     initialValue: true,
@@ -1177,7 +1310,7 @@ async function reviewAndConfirm(
 }
 
 /** Renders the complete wizard input for the TTY-only final review. */
-function renderTaskReview(input: TaskWizardInput): string {
+function renderTaskReview(input: TaskWizardInput, graderDeclared: boolean): string {
   const lines: string[] = [];
   if (input.bootstrap !== undefined) {
     const bootstrap = input.bootstrap;
@@ -1196,6 +1329,11 @@ function renderTaskReview(input: TaskWizardInput): string {
         `  agents.${name}.env: ${renderVariableList(settings.env ?? [])}`,
       ]),
     );
+    if (bootstrap.roles?.grader !== undefined) {
+      lines.push(
+        `  roles.grader: ${bootstrap.roles.grader.model} (effort ${bootstrap.roles.grader.effort})`,
+      );
+    }
     if (bootstrap.trackers?.jira !== undefined) {
       lines.push(
         `  trackers.jira.url: ${bootstrap.trackers.jira.url}`,
@@ -1253,7 +1391,19 @@ function renderTaskReview(input: TaskWizardInput): string {
       lines.push(`  ${label} ${check.id}: ${renderCheck(check)}`);
     }
   }
+  if (!graderDeclared && taskDeclaresGradedCheck(task)) {
+    lines.push(
+      'warning: roles.grader is not declared; tevu validate and tevu run refuse this task until it is',
+    );
+  }
   return lines.join('\n');
+}
+
+/** Holds when a check declares neither `run` nor `manual: true` (a graded check). */
+function taskDeclaresGradedCheck(task: TaskInput): boolean {
+  return [...task.checks.acceptance, ...task.checks.done].some(
+    (check) => check.manual !== true && check.run === undefined,
+  );
 }
 
 /** `GitHub <github>` for a GitHub entry, its `path` otherwise. */
@@ -1270,6 +1420,9 @@ function renderCheck(check: CheckInput): string {
   if (check.manual === true) {
     return `${check.description} (${requirement}, manual)`;
   }
+  if (check.run === undefined) {
+    return `${check.description} (${requirement}, graded)`;
+  }
   const env =
     check.env === undefined || check.env.length === 0 ? '' : `, variables ${check.env.join(',')}`;
   return (
@@ -1279,9 +1432,10 @@ function renderCheck(check: CheckInput): string {
   );
 }
 
-function renderManualCheck(check: ManualCheckSummary): string {
+function renderAssessableCheck(check: AssessableCheckSummary): string {
   const requirement = check.required ? 'required' : 'optional';
-  return `${check.checkId} (${check.category}, ${requirement}): ${check.description}`;
+  const kind = check.evaluator === 'grader' ? ', graded' : '';
+  return `${check.checkId} (${check.category}, ${requirement}${kind}): ${check.description}`;
 }
 
 function renderAssessmentRecord(record: AssessmentRecord): string {
@@ -1363,6 +1517,7 @@ async function askSelect<Value extends string>(
   options: {
     message: string;
     options: Option<Value>[];
+    initialValue?: Value;
   },
 ): Promise<Value> {
   return unwrap(await select<Value>({ ...options, ...promptOptions(io) }));

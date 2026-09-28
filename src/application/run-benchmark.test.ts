@@ -294,6 +294,7 @@ function buildCaseResult(overrides: Partial<CaseResult> = {}): CaseResult {
       solutionPatch: null,
       checks: null,
       assessment: null,
+      grading: null,
       result: 'task-1--c1--1/result.json',
     },
     failure: null,
@@ -646,6 +647,7 @@ function createHarness(config: TevuConfig) {
         solutionPatch: `${caseId}/solution.patch`,
         checks: `${caseId}/checks.json`,
         assessment: `${caseId}/assessment.json`,
+        grading: `${caseId}/grading.json`,
         result: `${caseId}/result.json`,
         setupBeforeAgent: `${caseId}/setup-before-agent.log`,
         setupBeforeChecks: `${caseId}/setup-before-checks.log`,
@@ -672,6 +674,9 @@ function createHarness(config: TevuConfig) {
     },
     async writeChecks(caseId) {
       return recordArtifactCall('writeChecks', caseId);
+    },
+    async writeGrading(caseId) {
+      return recordArtifactCall('writeGrading', caseId);
     },
     async finalizeCase(result) {
       artifactState.finalizedCases.push(result);
@@ -704,6 +709,9 @@ function createHarness(config: TevuConfig) {
     },
     async readChecks() {
       return { ok: true, value: [] };
+    },
+    async readGrading() {
+      throw new Error('not used in this test');
     },
     async readAssessment() {
       return { ok: true, value: null };
@@ -1659,6 +1667,7 @@ describe('runBenchmark', () => {
       solutionPatch: 'task-1--c1--1/solution.patch',
       checks: 'task-1--c1--1/checks.json',
       assessment: null,
+      grading: null,
       result: 'task-1--c1--1/result.json',
     });
     expectAvailableMetric(caseResult.metrics.elapsed, 1_000, 'millisecond', 'process', 'case');

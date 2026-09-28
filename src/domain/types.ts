@@ -273,8 +273,32 @@ interface ManualCheck {
   required: boolean;
 }
 
-/** One acceptance or done check: a command check or a manual check. */
-export type CheckDefinition = CommandCheck | ManualCheck;
+/** A graded check's resolved shape: graded by `roles.grader` against its description. */
+export interface GradedCheck {
+  id: string;
+  description: string;
+  required: boolean;
+}
+
+/** One acceptance or done check: a command check, a manual check, or a graded check. */
+export type CheckDefinition = CommandCheck | ManualCheck | GradedCheck;
+
+/** Which evaluator resolves one check's verdict. */
+export type CheckEvaluator = 'command' | 'manual' | 'grader';
+
+/** Which check collection a check belongs to. */
+export type CheckCategory = 'acceptance' | 'definition-of-done';
+
+/** Resolves a live check definition's evaluator: `manual` when declared, `command` when it has `run`, `grader` otherwise. */
+export function checkEvaluator(check: CheckDefinition): CheckEvaluator {
+  if ('run' in check) {
+    return 'command';
+  }
+  if ('manual' in check) {
+    return 'manual';
+  }
+  return 'grader';
+}
 
 /** One resolved acceptance-driven benchmark task pinned to a repository commit. */
 export interface TaskDefinition {
@@ -334,7 +358,7 @@ export type CheckRecord = {
   category: 'acceptance' | 'definition-of-done';
   description: string;
   required: boolean;
-  evaluator: 'command' | 'manual';
+  evaluator: CheckEvaluator;
 };
 
 /** One preserved model entry: id, provider model string, and reasoning effort. */
@@ -417,6 +441,7 @@ type ArtifactIndex = {
   solutionPatch: string | null;
   checks: string | null;
   assessment: string | null;
+  grading: string | null;
   result: string | null;
 };
 
@@ -428,6 +453,7 @@ export type CaseArtifactPathIndex = {
   solutionPatch: string;
   checks: string;
   assessment: string;
+  grading: string;
   result: string;
   setupBeforeAgent: string;
   setupBeforeChecks: string;
@@ -528,6 +554,19 @@ export type AssessmentRecord = {
   assessedAt: string;
 };
 
+/** A replaced operator verdict, retained in assessment history. */
+export type ReplacedOperatorVerdict = AssessmentRecord & { source: 'operator'; replacedAt: string };
+
+/** A replaced grader verdict, retained in assessment history. */
+export type ReplacedGraderVerdict = {
+  source: 'grader';
+  checkId: string;
+  verdict: GradeVerdict;
+  rationale: string;
+  grader: GraderIdentity;
+  replacedAt: string;
+};
+
 /** Versioned assessment artifact; replacement moves prior records to history. */
 export type AssessmentArtifact = {
   schemaVersion: 1;
@@ -535,7 +574,7 @@ export type AssessmentArtifact = {
   caseId: string;
   revision: number;
   current: AssessmentRecord[];
-  history: Array<AssessmentRecord & { replacedAt: string }>;
+  history: Array<ReplacedOperatorVerdict | ReplacedGraderVerdict>;
 };
 
 /** Injectable time source; wall-clock reads must not come from process globals in pure modules. */
@@ -832,6 +871,56 @@ export type AgentCapabilityReport = {
 /** Model metrics an agent derives from its records; evaluation adds `elapsed`. */
 export type AgentMetrics = Omit<BenchmarkMetrics, 'elapsed'>;
 
+/** Constructs a complete agent metric set where every value is unavailable for one reason. */
+export function unavailableAgentMetrics(reason: string): AgentMetrics {
+  return {
+    inputTokens: unavailableMetric('token', reason),
+    outputTokens: unavailableMetric('token', reason),
+    reasoningTokens: unavailableMetric('token', reason),
+    cacheReadTokens: unavailableMetric('token', reason),
+    cacheWriteTokens: unavailableMetric('token', reason),
+    turns: unavailableMetric('count', reason),
+    apiCalls: unavailableMetric('count', reason),
+    apiErrors: unavailableMetric('count', reason),
+    toolCalls: unavailableMetric('count', reason),
+    skillCalls: unavailableMetric('count', reason),
+    cost: unavailableMetric('USD', reason),
+  };
+}
+
+/** One grader's verdict for a graded check: whether the patch satisfies it, or that the evidence does not decide. */
+export type GradeVerdict = 'passed' | 'failed' | 'undetermined';
+
+/** The run's resolved `roles.grader`. */
+export type GraderIdentity = ModelRole;
+
+/** One graded check's derived grade: a verdict with its rationale, or pending with the reason it has none. */
+export type GradeRecord =
+  | {
+      checkId: string;
+      category: CheckCategory;
+      status: 'graded';
+      verdict: GradeVerdict;
+      rationale: string;
+    }
+  | { checkId: string; category: CheckCategory; status: 'pending'; reason: string };
+
+/** The grader call's raw outcome: the reply text as returned, or that no reply was usable. */
+export type GraderCallRecord =
+  { status: 'replied'; reply: string } | { status: 'no-reply'; reason: string };
+
+/** One case's grading: the grader identity, its raw call outcome, its own metrics, and every graded check's grade. */
+export type CaseGrading = {
+  grader: GraderIdentity;
+  call: GraderCallRecord;
+  metrics: AgentMetrics;
+  /** One per graded check: acceptance, then done, configuration order. */
+  grades: GradeRecord[];
+};
+
+/** Versioned case artifact: `cases/<case-id>/grading.json`. */
+export type GradingArtifact = CaseGrading & { schemaVersion: 1; runId: string; caseId: string };
+
 export type ModelCallInput = {
   role: ModelRoleName;
   model: `${string}/${string}`;
@@ -1049,6 +1138,7 @@ export interface ArtifactStore {
   ): Promise<TevuResult<void, 'ArtifactError'>>;
   writePatch(caseId: string, patch: PatchArtifact): Promise<TevuResult<void, 'ArtifactError'>>;
   writeChecks(caseId: string, checks: CheckResult[]): Promise<TevuResult<void, 'ArtifactError'>>;
+  writeGrading(caseId: string, grading: CaseGrading): Promise<TevuResult<void, 'ArtifactError'>>;
   /** Redacts the whole text, failing closed, then atomically writes the phase log in the case directory. */
   writeSetupLog(
     caseId: string,
@@ -1077,6 +1167,7 @@ export interface ArtifactStore {
     caseId: string,
   ): Promise<TevuResult<AgentSessionExport | null, 'ArtifactError'>>;
   readChecks(runId: string, caseId: string): Promise<TevuResult<CheckResult[], 'ArtifactError'>>;
+  readGrading(runId: string, caseId: string): Promise<TevuResult<GradingArtifact, 'ArtifactError'>>;
   readAssessment(
     runId: string,
     caseId: string,

@@ -30,9 +30,9 @@ Run the wizard in an interactive terminal:
 tevu task add
 ```
 
-For a missing configuration, the wizard first asks for the run settings (output directory, concurrency, time limits), the `agents.opencode` command and its secret and ordinary variable names, an optional Jira connection, at least one repository, and at least two model entries with their reasoning efforts. Enter variable names, not their values; tevu reads the values from the environment at run time.
+For a missing configuration, the wizard first asks for the run settings (output directory, concurrency, time limits), the `agents.opencode` command and its secret and ordinary variable names, an optional Jira connection, at least one repository, at least two model entries with their reasoning efforts, and whether to declare a grader model for graded checks. Enter variable names, not their values; tevu reads the values from the environment at run time. The grader's provider credential goes in the same agent's `secrets` as a case agent's, so declaring the grader may mean adding a secret variable there too.
 
-Choose a repository commit from before the task was solved. Describe the task, the instructions for the model, the prerequisites you have checked, the acceptance criteria, and the completion checks. A check can run a command or require your manual verdict. See the [configuration reference](../reference/configuration.md) for the field definitions.
+Choose a repository commit from before the task was solved. Describe the task, the instructions for the model, the prerequisites you have checked, the acceptance criteria, and the completion checks. A criterion you write defaults to graded, meaning `roles.grader` grades it against its description after a case's other checks run; a check can also run a command or require your manual verdict instead. Adding a graded check with no `roles.grader` declared draws a warning in the review, and `tevu validate` and `tevu run` refuse the task until the role is declared. See the [configuration reference](../reference/configuration.md) for the field definitions.
 
 Optionally enter the accepted pull request, from the task's repository or its fork network, or a commit that already holds the accepted solution, as the reference solution. Leave the question empty to add the task exactly as without a reference.
 
@@ -61,19 +61,21 @@ tevu run
 
 This command starts model sessions and can incur provider charges. Open the `report.md` path printed when the run finishes. Check task outcomes separately from runtime errors, then compare the available time, usage, and cost measurements. See the [results reference](../reference/results.md).
 
-For pending manual checks, use the run and case IDs shown in the output. The following IDs are examples; replace them with yours:
+For each case whose task declares a graded check, the report shows the grader's verdict and rationale per check, alongside the grader's own metrics kept separate from the agent's. A pending or `undetermined` grade needs your judgment the same way a manual check does.
+
+For pending manual and graded checks, use the run and case IDs shown in the output. The following IDs are examples; replace them with yours:
 
 ```sh
 tevu assess 20260923t120000z-a1b2c3 csv-export--high--1
 ```
 
-The assessment command records your verdicts and rebuilds the report. To rebuild it again from saved evidence:
+The assessment command records your verdicts, including an override of a grader's verdict, and rebuilds the report. To rebuild it again from saved evidence:
 
 ```sh
 tevu report 20260923t120000z-a1b2c3
 ```
 
-Confirm that required manual checks now have verdicts. Optional checks remain visible but do not change an otherwise passed task outcome.
+Confirm that required manual and graded checks now have verdicts. Optional checks remain visible but do not change an otherwise passed task outcome.
 
 ## Benchmark a project without a local clone
 

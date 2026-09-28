@@ -63,6 +63,16 @@ models:
     model: openai/your-model
     effort: high
 
+# --- Roles ------------------------------------------------------------------
+# Models tevu uses for its own work rather than comparing them.
+roles:
+  grader:                         # grades each graded check after a case's checks run
+    model: openai/your-grader-model
+    effort: medium                # a variant the agent provides without a repository
+    # agent: opencode             # needed only when more than one agent is configured
+    # Its provider credential goes in that agent's secrets (agents.opencode.secrets),
+    # which every case agent of that agent also receives.
+
 # --- Tasks ------------------------------------------------------------------
 tasks:
   - id: csv-export
@@ -95,9 +105,8 @@ tasks:
       # overlay: ./hidden-checks/csv-export           # copied onto the repository root before checks run
       # Does the change solve the task? At least one check must be required.
       acceptance:
-        - id: csv-content
+        - id: csv-content         # graded by roles.grader against its description
           description: The CSV contains the visible rows and correctly escapes values.
-          manual: true            # you record the verdict with \`tevu assess\`
         - id: tests
           description: The repository's test suite passes.
           run: [npm, test]        # executable and literal arguments, no shell
@@ -109,5 +118,5 @@ tasks:
       done:
         - id: docs
           description: The export action is documented for users.
-          manual: true
+          manual: true            # you record the verdict with \`tevu assess\`
 `;

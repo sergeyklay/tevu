@@ -502,10 +502,6 @@ type RawCheck = z.infer<typeof RawCheckShape>;
 function refineCheckDiscrimination(check: RawCheck, ctx: z.RefinementCtx): void {
   const hasRun = check.run !== undefined;
   const hasManual = check.manual !== undefined;
-  if (!hasRun && !hasManual) {
-    ctx.addIssue({ code: 'custom', message: 'a check needs run (a command) or manual: true' });
-    return;
-  }
   if (hasRun && hasManual) {
     ctx.addIssue({ code: 'custom', message: 'a check has either run or manual: true, not both' });
     return;
@@ -514,11 +510,11 @@ function refineCheckDiscrimination(check: RawCheck, ctx: z.RefinementCtx): void 
     ctx.addIssue({
       code: 'custom',
       path: ['manual'],
-      message: 'manual must be true; omit it for a command check',
+      message: 'manual must be true; omit it for a command check or a graded check',
     });
     return;
   }
-  if (hasManual) {
+  if (!hasRun) {
     for (const key of ['timeout', 'exit_codes', 'env'] as const) {
       if (check[key] !== undefined) {
         ctx.addIssue({
@@ -528,6 +524,14 @@ function refineCheckDiscrimination(check: RawCheck, ctx: z.RefinementCtx): void 
         });
       }
     }
+  }
+  if (!hasRun && !hasManual && check.description.trim().length === 0) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['description'],
+      message:
+        'a graded check needs a description with non-whitespace text; the grader grades against it',
+    });
   }
 }
 
@@ -545,14 +549,17 @@ type PreCommandCheck = {
   required: boolean;
 };
 
+/** A resolved graded check; identical to `GradedCheck`. */
+type PreGradedCheck = { id: string; description: string; required: boolean };
+
 /** A check without its `timeout` default resolved; command checks defer that to `run.check_timeout`. */
-type PreCheck = PreManualCheck | PreCommandCheck;
+type PreCheck = PreManualCheck | PreCommandCheck | PreGradedCheck;
 
 /**
- * Validates and normalizes one check: exactly one of `run` or `manual: true`,
- * `required`/`exit_codes`/`env` defaulted for a command check. Leaves a
- * command check's `timeout` unresolved; `TevuConfigSchema` applies the
- * `run.check_timeout` fallback once the sibling `run` block is available.
+ * Validates and normalizes one check: `run`, `manual: true`, or neither (a
+ * graded check), `required`/`exit_codes`/`env` defaulted for a command check.
+ * Leaves a command check's `timeout` unresolved; `TevuConfigSchema` applies
+ * the `run.check_timeout` fallback once the sibling `run` block is available.
  */
 const CheckDefinitionSchema = RawCheckShape.superRefine(refineCheckDiscrimination).transform(
   (check): PreCheck => {
@@ -566,9 +573,11 @@ const CheckDefinitionSchema = RawCheckShape.superRefine(refineCheckDiscriminatio
     }
     const run = check.run;
     if (run === undefined) {
-      throw new Error(
-        'unreachable: refineCheckDiscrimination guarantees a command check declares run',
-      );
+      return {
+        id: check.id,
+        description: check.description,
+        required: check.required ?? true,
+      };
     }
     return {
       id: check.id,

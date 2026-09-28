@@ -1,8 +1,11 @@
 import type {
   AgentCapabilityReport,
+  AgentMetrics,
   AssessmentArtifact,
   CaseIdentity,
   CaseResult,
+  GraderIdentity,
+  GradingArtifact,
   MetricValue,
   ModelRecord,
   ReportResult,
@@ -26,7 +29,11 @@ export type ReportInput = {
   models: readonly ModelRecord[];
   repositories: readonly RepositoryRecord[];
   assessments: readonly AssessmentArtifact[];
+  gradings: readonly GradingArtifact[];
 };
+
+/** One distinct grader identity across a run's gradings, with its shared model entries. */
+type GraderSummary = { grader: GraderIdentity; sharedModelEntryIds: string[] };
 
 /** Attempt counts of one task/model pair, derived while building the report. */
 type PairSummary = {
@@ -52,6 +59,8 @@ export type NormalizedRunModel = {
   tasks: TaskRecord[];
   cases: CaseResult[];
   assessments: AssessmentArtifact[];
+  gradings: GradingArtifact[];
+  graders: GraderSummary[];
   pairs: PairSummary[];
 };
 
@@ -125,11 +134,52 @@ export function buildNormalizedRun(input: ReportInput): NormalizedRunModel {
         current: [...artifact.current].sort((a, b) => compareStrings(a.checkId, b.checkId)),
         history: [...artifact.history].sort(
           (a, b) =>
-            compareStrings(a.checkId, b.checkId) || compareStrings(a.replacedAt, b.replacedAt),
+            compareStrings(a.checkId, b.checkId) ||
+            compareStrings(a.replacedAt, b.replacedAt) ||
+            compareStrings(a.source, b.source),
         ),
       })),
+    gradings: [...input.gradings]
+      .sort((a, b) => compareCaseIds(identities, a.caseId, b.caseId))
+      .map((grading) => ({
+        ...grading,
+        grades: [...grading.grades].sort((a, b) => compareStrings(a.checkId, b.checkId)),
+      })),
+    graders: buildGraderSummaries(input.gradings, input.models),
     pairs: buildPairSummaries(input.run.manifest.cases, input.run.cases),
   };
+}
+
+/**
+ * Distinct `grader` identities across `gradings`, sorted by model, effort,
+ * then agent, each paired with the sorted IDs of `models` entries whose
+ * `model` equals the grader's `model` exactly (informational only).
+ */
+function buildGraderSummaries(
+  gradings: readonly GradingArtifact[],
+  models: readonly ModelRecord[],
+): GraderSummary[] {
+  const seen = new Map<string, GraderIdentity>();
+  for (const grading of gradings) {
+    const key = `${grading.grader.model}\u0000${grading.grader.effort}\u0000${grading.grader.agent}`;
+    if (!seen.has(key)) {
+      seen.set(key, grading.grader);
+    }
+  }
+  return [...seen.values()]
+    .sort(
+      (a, b) =>
+        compareStrings(a.model, b.model) ||
+        compareStrings(a.effort, b.effort) ||
+        compareStrings(a.agent, b.agent),
+    )
+    .map((grader) => ({
+      grader,
+      sharedModelEntryIds: models
+        .filter((model) => model.model === grader.model)
+        .map((model) => model.id)
+        .sort(compareStrings),
+    }));
 }
 
 /**
@@ -243,6 +293,7 @@ function renderMarkdownReport(model: NormalizedRunModel): string {
     `- Case timeout: ${manifest.execution.caseTimeoutMs}ms`,
     ...renderTaskCaseTimeoutLine(manifest.cases, manifest.execution.caseTimeoutMs),
     `- Repeat: ${manifest.execution.repeat.value} (source: ${manifest.execution.repeat.source})`,
+    ...renderGraderLines(model.graders),
     `- Run exit code: ${model.exitCode}`,
     '',
   );
@@ -264,6 +315,7 @@ function renderMarkdownReport(model: NormalizedRunModel): string {
   const assessmentsByCase = new Map(
     model.assessments.map((artifact) => [artifact.caseId, artifact]),
   );
+  const gradingsByCase = new Map(model.gradings.map((grading) => [grading.caseId, grading]));
 
   const taskIds = [...new Set(model.pairs.map((pair) => pair.taskId))].sort(compareStrings);
 
@@ -301,7 +353,13 @@ function renderMarkdownReport(model: NormalizedRunModel): string {
       lines.push('');
 
       for (const caseResult of taskCases) {
-        renderCase(lines, caseResult, task, assessmentsByCase.get(caseResult.identity.caseId));
+        renderCase(
+          lines,
+          caseResult,
+          task,
+          assessmentsByCase.get(caseResult.identity.caseId),
+          gradingsByCase.get(caseResult.identity.caseId),
+        );
       }
     }
   }
@@ -331,6 +389,21 @@ function renderAgentCapabilityLines(
     lines.push(
       `- Agent "${name}" isolation control (deny outside worktree): ${capabilities[name]?.isolation.denyOutsideWorktree ?? 'not probed'}`,
     );
+  }
+  return lines;
+}
+
+/** Renders one `- Grader:` line, and a shared-model-entry note when one applies, per distinct grader identity. */
+function renderGraderLines(graders: readonly GraderSummary[]): string[] {
+  const lines: string[] = [];
+  for (const summary of graders) {
+    const { grader, sharedModelEntryIds } = summary;
+    lines.push(`- Grader: ${grader.model} (effort ${grader.effort}, agent ${grader.agent})`);
+    if (sharedModelEntryIds.length > 0) {
+      lines.push(
+        `- Grader model ${grader.model} is also benchmarked as model entry ${sharedModelEntryIds.join(', ')} (informational; tevu does not forbid it)`,
+      );
+    }
   }
   return lines;
 }
@@ -387,6 +460,7 @@ function renderCase(
   caseResult: CaseResult,
   task: TaskRecord | undefined,
   assessment: AssessmentArtifact | undefined,
+  grading: GradingArtifact | undefined,
 ): void {
   const identity = caseResult.identity;
   const definitions = new Map((task?.checks ?? []).map((check) => [check.id, check]));
@@ -432,11 +506,20 @@ function renderCase(
     }
     lines.push('');
     const pendingChecks = caseResult.checks.filter((check) => check.verdict === 'pending');
-    if (pendingChecks.length > 0) {
-      lines.push(
-        `Pending manual checks: ${pendingChecks.map((check) => check.checkId).join(', ')}.`,
-        '',
-      );
+    const pendingManualIds = pendingChecks
+      .filter((check) => definitions.get(check.checkId)?.evaluator === 'manual')
+      .map((check) => check.checkId);
+    const pendingGradedIds = pendingChecks
+      .filter((check) => definitions.get(check.checkId)?.evaluator === 'grader')
+      .map((check) => check.checkId);
+    if (pendingManualIds.length > 0) {
+      lines.push(`Pending manual checks: ${pendingManualIds.join(', ')}.`);
+    }
+    if (pendingGradedIds.length > 0) {
+      lines.push(`Pending graded checks: ${pendingGradedIds.join(', ')}.`);
+    }
+    if (pendingManualIds.length > 0 || pendingGradedIds.length > 0) {
+      lines.push('');
     }
   }
 
@@ -446,6 +529,10 @@ function renderCase(
   }
   lines.push('');
 
+  if (grading !== undefined) {
+    lines.push(...renderGradingBlock(grading));
+  }
+
   lines.push('Artifacts:', '');
   const artifacts = caseResult.artifacts;
   lines.push(
@@ -454,6 +541,7 @@ function renderCase(
     `- Diagnostics: ${artifactLink(artifacts.diagnostics)}`,
     `- Session export: ${artifactLink(artifacts.sessionExport)}`,
     `- Check evidence: ${artifactLink(artifacts.checks)}`,
+    ...(artifacts.grading === null ? [] : [`- Grading: ${artifactLink(artifacts.grading)}`]),
     `- Result: ${artifactLink(artifacts.result)}`,
     '',
   );
@@ -471,6 +559,44 @@ function renderCase(
 
 function sortedMetricEntries(caseResult: CaseResult): Array<[string, MetricValue]> {
   return (Object.entries(caseResult.metrics) as Array<[string, MetricValue]>).sort((a, b) =>
+    compareStrings(a[0], b[0]),
+  );
+}
+
+/**
+ * Renders one case's grading: the grader identity, a grade or reason per
+ * check in `checkId` order, and the grader's own metrics, kept in a block
+ * separate from the case's agent metrics above it and never added to them.
+ */
+function renderGradingBlock(grading: GradingArtifact): string[] {
+  const lines: string[] = [
+    `Grades by ${grading.grader.model} (effort ${grading.grader.effort}, agent ${grading.grader.agent}):`,
+    '',
+  ];
+  if (grading.call.status === 'no-reply') {
+    lines.push(`- Grader call: no reply. ${cell(grading.call.reason)}`);
+  }
+  for (const grade of grading.grades) {
+    lines.push(
+      grade.status === 'graded'
+        ? `- ${cell(grade.checkId)}: ${grade.verdict}. ${cell(grade.rationale)}`
+        : `- ${cell(grade.checkId)}: not graded. ${cell(grade.reason)}`,
+    );
+  }
+  lines.push(
+    '',
+    'Grader metrics (separate from the agent metrics above; never added to them):',
+    '',
+  );
+  for (const [name, metric] of sortedAgentMetricEntries(grading.metrics)) {
+    lines.push(`- ${name}: ${formatMetricValue(metric)}`);
+  }
+  lines.push('');
+  return lines;
+}
+
+function sortedAgentMetricEntries(metrics: AgentMetrics): Array<[string, MetricValue]> {
+  return (Object.entries(metrics) as Array<[string, MetricValue]>).sort((a, b) =>
     compareStrings(a[0], b[0]),
   );
 }

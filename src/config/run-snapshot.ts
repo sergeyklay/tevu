@@ -25,6 +25,7 @@ const projectionCheckSchema = z.object({
   description: z.string(),
   required: z.boolean(),
   manual: z.boolean().optional(),
+  run: z.unknown().optional(),
 });
 
 const projectionTaskSchema = z.object({
@@ -124,6 +125,6 @@ function projectCheck(
     category,
     description: check.description,
     required: check.required,
-    evaluator: check.manual === true ? 'manual' : 'command',
+    evaluator: check.manual === true ? 'manual' : check.run !== undefined ? 'command' : 'grader',
   };
 }

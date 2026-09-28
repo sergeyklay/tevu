@@ -8,6 +8,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createGitHubPullRequestReader } from '@/adapters/trackers/github-issues';
 import { resolveReferenceSolution } from '@/application/reference-solution';
+import { renderConfigDocument } from '@/config/document';
+import { parseConfigText } from '@/config/load';
 import { TevuConfigSchema } from '@/config/schema';
 import { CONFIG_TEMPLATE } from '@/config/template';
 
@@ -20,7 +22,8 @@ import type {
   ProgramOperations,
 } from './program';
 import type { GhRun } from '@/adapters/trackers/github-issues';
-import type { AssessmentCaseContext, ManualCheckSummary } from '@/application/assess';
+import type { AssessableCheckSummary, AssessmentCaseContext } from '@/application/assess';
+import type { TaskWizardInput } from '@/application/create-task';
 import type { CheckInput, ModelDefinitionInput, TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentCapabilityReport,
@@ -30,6 +33,8 @@ import type {
   CaseIdentity,
   CaseResult,
   ConfigReadCause,
+  GradeRecord,
+  GraderIdentity,
   IssueSnapshot,
   JiraTrackerSettings,
   ManagedCloneAdapter,
@@ -314,6 +319,7 @@ function buildCaseResult(overrides: Partial<CaseResult> = {}): CaseResult {
       solutionPatch: null,
       checks: null,
       assessment: null,
+      grading: null,
       result: null,
     },
     failure: null,
@@ -372,14 +378,36 @@ function buildJiraIssueSnapshot(overrides: Partial<IssueSnapshot> = {}): IssueSn
   };
 }
 
-function buildManualCheckSummary(overrides: Partial<ManualCheckSummary> = {}): ManualCheckSummary {
+function buildManualCheckSummary(
+  overrides: Partial<AssessableCheckSummary> = {},
+): AssessableCheckSummary {
   return {
     checkId: 'acc-1',
     category: 'acceptance',
     description: 'Export produces a CSV',
     required: true,
+    evaluator: 'manual',
     ...overrides,
-  };
+  } as AssessableCheckSummary;
+}
+
+function buildGrader(overrides: Partial<GraderIdentity> = {}): GraderIdentity {
+  return { model: 'openai/grader-model', effort: 'high', agent: AGENT_NAME, ...overrides };
+}
+
+function buildGradedCheckSummary(
+  overrides: Partial<AssessableCheckSummary> & { grade?: GradeRecord | null } = {},
+): AssessableCheckSummary {
+  return {
+    checkId: 'acc-1',
+    category: 'acceptance',
+    description: 'The criterion holds.',
+    required: true,
+    evaluator: 'grader',
+    grade: null,
+    grader: null,
+    ...overrides,
+  } as AssessableCheckSummary;
 }
 
 function buildAssessmentRecord(overrides: Partial<AssessmentRecord> = {}): AssessmentRecord {
@@ -397,7 +425,7 @@ function buildAssessmentContext(
   overrides: Partial<AssessmentCaseContext> = {},
 ): AssessmentCaseContext {
   return {
-    manualChecks: [buildManualCheckSummary()],
+    checks: [buildManualCheckSummary()],
     existing: [],
     ...overrides,
   };
@@ -549,6 +577,37 @@ function expectNoWrites(operations: ProgramOperations): void {
   expect(operations.applyAssessment).not.toHaveBeenCalled();
 }
 
+function requireCreateTaskCall(operations: ProgramOperations): TaskWizardInput {
+  const call = vi.mocked(operations.createTask).mock.calls[0]?.[0];
+  if (call === undefined) {
+    throw new Error('expected createTask to have captured one call');
+  }
+  return call;
+}
+
+/**
+ * Renders the bootstrap answers and interviewed task through the real
+ * document writer, then re-parses the result with the real config parser -
+ * the same round trip `createTask` performs before its only write.
+ */
+function renderAndParseBootstrap(call: TaskWizardInput): TevuConfig {
+  if (call.bootstrap === undefined) {
+    throw new Error('expected the captured createTask call to carry bootstrap answers');
+  }
+  const rendered = renderConfigDocument(
+    { version: 1, ...call.bootstrap, tasks: [call.task] },
+    { redact: (text) => text },
+  );
+  if (!rendered.ok) {
+    throw new Error(`expected renderConfigDocument to succeed: ${JSON.stringify(rendered.error)}`);
+  }
+  const parsed = parseConfigText(rendered.value);
+  if (!parsed.ok) {
+    throw new Error(`expected the written configuration to parse: ${JSON.stringify(parsed.error)}`);
+  }
+  return parsed.value;
+}
+
 /**
  * Reads the fenced `yaml` block under the `## Example` heading of the
  * configuration reference, resolved from this test file's own module
@@ -598,14 +657,14 @@ function taskInterviewAnswers(repositoryChoice: string): unknown[] {
     'Repository is readable',
     false,
     'acc-1',
+    'manual',
     'Export produces a CSV',
     true,
-    'manual',
     false,
     'dod-1',
+    'manual',
     'README documents the button',
     true,
-    'manual',
     false,
   ];
 }
@@ -631,6 +690,7 @@ const BOOTSTRAP_PROMPTS = [
   'Model for "c2" (provider/model)',
   'Reasoning effort for "c2" (passed to the agent verbatim)',
   'Add another model?',
+  'Declare a grader model for graded checks?',
 ];
 
 const HELP_CASES: Array<{ argv: string[]; description: string; usage: string }> = [
@@ -671,7 +731,7 @@ const HELP_CASES: Array<{ argv: string[]; description: string; usage: string }> 
   },
   {
     argv: ['assess'],
-    description: 'Record manual check results',
+    description: 'Record manual and graded check verdicts',
     usage: 'Usage:\n  tevu assess <run-id> <case-id> [options]',
   },
   {
@@ -2045,7 +2105,6 @@ describe('tevu CLI', () => {
       expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
         'tevu task add',
         ...BOOTSTRAP_PROMPTS,
-        'Task source',
       ]);
       expect(vi.mocked(operations.configExists)).toHaveBeenCalledExactlyOnceWith('tevu.yaml');
       expect(operations.loadConfig).not.toHaveBeenCalled();
@@ -2161,6 +2220,7 @@ describe('tevu CLI', () => {
         'provider/model-b',
         'low',
         false,
+        false,
         ...taskInterviewAnswers('alpha'),
         true,
       );
@@ -2208,6 +2268,144 @@ describe('tevu CLI', () => {
           },
         },
       });
+    });
+
+    it('declares roles.grader in the bootstrap answers when the operator opts in, and the written configuration parses with the role (P11)', async () => {
+      const operations = createOperations({ configExists: vi.fn(async () => false) });
+      scriptAnswers(
+        '/tmp/bench-artifacts',
+        '4',
+        '10m',
+        '5s',
+        '',
+        'opencode',
+        false,
+        false,
+        false,
+        'alpha',
+        'path',
+        '../repos/alpha',
+        false,
+        'c1',
+        'provider/model-a',
+        'high',
+        'c2',
+        'provider/model-b',
+        'low',
+        false,
+        true,
+        'openai/grader-model',
+        'high',
+        ...taskInterviewAnswers('alpha'),
+        true,
+      );
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(0);
+      expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual(
+        expect.arrayContaining([
+          ...BOOTSTRAP_PROMPTS,
+          'Grader model (provider/model)',
+          'Grader reasoning effort (a variant the agent provides without a repository)',
+        ]),
+      );
+      const call = requireCreateTaskCall(operations);
+      expect(call.bootstrap?.roles).toEqual({
+        grader: { model: 'openai/grader-model', effort: 'high' },
+      });
+
+      const parsed = renderAndParseBootstrap(call);
+
+      expect(parsed.roles?.grader).toEqual(buildGrader({ agent: 'opencode' }));
+    });
+
+    it('omits roles from the bootstrap answers when the operator declines a grader model, and the written configuration still parses (P11)', async () => {
+      const operations = createOperations({ configExists: vi.fn(async () => false) });
+      scriptAnswers(
+        '/tmp/bench-artifacts',
+        '4',
+        '10m',
+        '5s',
+        '',
+        'opencode',
+        false,
+        false,
+        false,
+        'alpha',
+        'path',
+        '../repos/alpha',
+        false,
+        'c1',
+        'provider/model-a',
+        'high',
+        'c2',
+        'provider/model-b',
+        'low',
+        false,
+        false,
+        ...taskInterviewAnswers('alpha'),
+        true,
+      );
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(0);
+      const call = requireCreateTaskCall(operations);
+      expect(call.bootstrap?.roles).toBeUndefined();
+
+      const parsed = renderAndParseBootstrap(call);
+
+      expect(parsed.roles?.grader).toBeUndefined();
+    });
+
+    it('re-prompts the grader model question until the answer is a valid provider/model identifier', async () => {
+      const operations = createOperations({ configExists: vi.fn(async () => false) });
+      scriptAnswers(
+        '/tmp/bench-artifacts',
+        '4',
+        '10m',
+        '5s',
+        '',
+        'opencode',
+        false,
+        false,
+        false,
+        'alpha',
+        'path',
+        '../repos/alpha',
+        false,
+        'c1',
+        'provider/model-a',
+        'high',
+        'c2',
+        'provider/model-b',
+        'low',
+        false,
+        true,
+        { invalid: 'not-a-model' },
+        'openai/grader-model',
+        clack.CANCEL,
+      );
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(130);
+      expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
+        'tevu task add',
+        ...BOOTSTRAP_PROMPTS,
+        'Grader model (provider/model)',
+        'Grader model (provider/model)',
+        'Grader reasoning effort (a variant the agent provides without a repository)',
+      ]);
+      expect(clack.state.rejections).toEqual([
+        {
+          kind: 'text',
+          message: 'Grader model (provider/model)',
+          reason: 'model must be "<provider>/<model>"',
+        },
+      ]);
+      expect(operations.createTask).not.toHaveBeenCalled();
     });
 
     it('captures a task against an existing configuration and lets createTask perform the only write', async () => {
@@ -2284,6 +2482,7 @@ describe('tevu CLI', () => {
         'provider/model-b',
         'low',
         false,
+        false,
         ...taskInterviewAnswers('alpha'),
         true,
       );
@@ -2341,14 +2540,14 @@ describe('tevu CLI', () => {
         'Repository is readable',
         false,
         'acc-1',
+        'manual',
         'Export produces a CSV',
         true,
-        'manual',
         false,
         'dod-1',
+        'manual',
         'README documents the button',
         true,
-        'manual',
         false,
         true,
       );
@@ -2396,14 +2595,14 @@ describe('tevu CLI', () => {
         'Repository is readable',
         false,
         'acc-1',
+        'manual',
         'Export produces a CSV',
         true,
-        'manual',
         false,
         'dod-1',
+        'manual',
         'README documents the button',
         true,
-        'manual',
         false,
         true,
       );
@@ -2633,14 +2832,14 @@ describe('tevu CLI', () => {
         'Repository is readable',
         false,
         'acc-1',
+        'manual',
         'Export produces a CSV',
         true,
-        'manual',
         false,
         'dod-1',
+        'manual',
         'README documents the button',
         true,
-        'manual',
         false,
         true,
       );
@@ -2747,14 +2946,14 @@ describe('tevu CLI', () => {
         'Repository is readable',
         false,
         'acc-1',
+        'manual',
         'Export produces a CSV',
         true,
-        'manual',
         false,
         'dod-1',
+        'manual',
         'README documents the button',
         true,
-        'manual',
         false,
         true,
       );
@@ -2873,14 +3072,14 @@ describe('tevu CLI', () => {
         'Repository is readable',
         false,
         'acc-1',
+        'manual',
         'Export produces a CSV',
         true,
-        'manual',
         false,
         'dod-1',
+        'manual',
         'README documents the button',
         true,
-        'manual',
         false,
         true,
       );
@@ -2924,14 +3123,14 @@ describe('tevu CLI', () => {
         'Repository is readable',
         false,
         'acc-1',
+        'manual',
         'Export produces a CSV',
         true,
-        'manual',
         false,
         'dod-1',
+        'manual',
         'README documents the button',
         true,
-        'manual',
         false,
         true,
       );
@@ -2957,6 +3156,97 @@ describe('tevu CLI', () => {
     });
   });
 
+  describe('the graded check default (P13)', () => {
+    function gradedTaskInterviewAnswers(repositoryChoice: string): unknown[] {
+      return [
+        'manual',
+        repositoryChoice,
+        '',
+        'abc123',
+        'task-2',
+        'Add an export button',
+        'Export the current view as CSV.',
+        'Implement CSV export for the current view.',
+        'Repository is readable',
+        false,
+        'acc-1',
+        'graded',
+        'Export produces a CSV',
+        true,
+        false,
+        'dod-1',
+        'graded',
+        'README documents the button',
+        true,
+        false,
+      ];
+    }
+
+    it('asks only the ID, kind, description, and required questions for a graded check, with no command sub-questions', async () => {
+      const operations = createOperations();
+      scriptAnswers(...gradedTaskInterviewAnswers('repo-1'), true);
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(0);
+      const messages = clack.state.prompts.map((prompt) => prompt.message);
+      expect(messages).toContain('How is "acc-1" checked?');
+      expect(messages).toContain(
+        'Description of "acc-1" (the criterion the grader grades against)',
+      );
+      expect(messages).toContain('Is "acc-1" required?');
+      expect(messages).not.toContain('Command for "acc-1" as a JSON array, e.g. ["npm","test"]');
+      expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task).toMatchObject({
+        checks: {
+          acceptance: [{ id: 'acc-1', description: 'Export produces a CSV' }],
+        },
+      });
+      expect(
+        vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task.checks.acceptance[0],
+      ).not.toHaveProperty('run');
+      expect(
+        vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task.checks.acceptance[0],
+      ).not.toHaveProperty('manual');
+    });
+
+    it('shows the roles.grader warning line exactly when a graded check is declared and no source declares the role', async () => {
+      const withoutRoles = createOperations();
+      scriptAnswers(...gradedTaskInterviewAnswers('repo-1'), true);
+      await runCli(['task', 'add'], { operations: withoutRoles });
+      const reviewWithoutRoles = clack.state.notes.find((note) => note.title === 'Review');
+
+      expect(reviewWithoutRoles?.message).toContain(
+        'warning: roles.grader is not declared; tevu validate and tevu run refuse this task until it is',
+      );
+    });
+
+    it('shows no roles.grader warning line when the existing configuration already declares the role', async () => {
+      const configWithGrader: TevuConfig = {
+        ...buildTevuConfig(),
+        roles: { grader: { model: 'openai/grader-model', effort: 'high', agent: AGENT_NAME } },
+      };
+      const withRoles = createOperations({
+        loadConfig: vi.fn(async () => ({ ok: true as const, value: configWithGrader })),
+      });
+      scriptAnswers(...gradedTaskInterviewAnswers('repo-1'), true);
+
+      await runCli(['task', 'add'], { operations: withRoles });
+
+      const reviewWithRoles = clack.state.notes.find((note) => note.title === 'Review');
+      expect(reviewWithRoles?.message).not.toContain('warning: roles.grader is not declared');
+    });
+
+    it('shows no roles.grader warning line when the task declares no graded check', async () => {
+      const operations = createOperations();
+      scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+      await runCli(['task', 'add'], { operations });
+
+      const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
+      expect(reviewNote?.message).not.toContain('warning: roles.grader is not declared');
+    });
+  });
+
   describe('assess', () => {
     it('collects verdicts for every manual check in configuration order and splices the cancellation signal', async () => {
       const cancellation = new AbortController().signal;
@@ -2970,7 +3260,7 @@ describe('tevu CLI', () => {
         readAssessmentContext: vi.fn(async () => ({
           ok: true as const,
           value: buildAssessmentContext({
-            manualChecks: [
+            checks: [
               buildManualCheckSummary({ checkId: 'acc-1', category: 'acceptance', required: true }),
               buildManualCheckSummary({
                 checkId: 'dod-1',
@@ -3114,7 +3404,7 @@ describe('tevu CLI', () => {
       const operations = createOperations({
         readAssessmentContext: vi.fn(async () => ({
           ok: true as const,
-          value: buildAssessmentContext({ manualChecks: [] }),
+          value: buildAssessmentContext({ checks: [] }),
         })),
       });
 
@@ -3123,7 +3413,7 @@ describe('tevu CLI', () => {
       expect(code).toBe(1);
       expect(err).toEqual([
         'error: the configuration is invalid',
-        '  error case-1: case "case-1" has no manual checks; there is nothing to assess',
+        '  error case-1: case "case-1" has no manual or graded checks; there is nothing to assess',
       ]);
       expect(clack.state.prompts).toEqual([]);
       expectNoWrites(operations);
@@ -3207,6 +3497,181 @@ describe('tevu CLI', () => {
         expect(err[0]).toBe(stderr);
       },
     );
+
+    describe('graded checks', () => {
+      it("shows the grader's verdict and records a replacement, kept as replaceExisting: true, when the operator confirms it", async () => {
+        const grade: GradeRecord = {
+          checkId: 'acc-1',
+          category: 'acceptance',
+          status: 'graded',
+          verdict: 'passed',
+          rationale: 'lines 1-4 add escaping',
+        };
+        const operations = createOperations({
+          readAssessmentContext: vi.fn(async () => ({
+            ok: true as const,
+            value: buildAssessmentContext({
+              checks: [buildGradedCheckSummary({ grade, grader: buildGrader() })],
+            }),
+          })),
+        });
+        scriptAnswers('alice', true, 'failed', 'overridden after review', true);
+
+        const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'info',
+          message:
+            'Grader verdict for "acc-1": passed (openai/grader-model, effort high): lines 1-4 add escaping',
+        });
+        expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual(
+          expect.arrayContaining([
+            'Replace the grader\'s verdict for "acc-1"?',
+            'Confirm replacing "acc-1" (grader passed -> failed)?',
+          ]),
+        );
+        expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([
+          {
+            checkId: 'acc-1',
+            verdict: 'failed',
+            assessor: 'alice',
+            note: 'overridden after review',
+            replaceExisting: true,
+          },
+        ]);
+      });
+
+      it('declining the replacement offer for a passed grade records no decision for that check', async () => {
+        const grade: GradeRecord = {
+          checkId: 'acc-1',
+          category: 'acceptance',
+          status: 'graded',
+          verdict: 'passed',
+          rationale: 'ok',
+        };
+        const operations = createOperations({
+          readAssessmentContext: vi.fn(async () => ({
+            ok: true as const,
+            value: buildAssessmentContext({
+              checks: [buildGradedCheckSummary({ grade, grader: buildGrader() })],
+            }),
+          })),
+        });
+        scriptAnswers('alice', false);
+
+        const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
+
+        expect(code).toBe(0);
+        expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([]);
+      });
+
+      it('asks directly for a verdict, with replaceExisting: false, when the grade is undetermined', async () => {
+        const grade: GradeRecord = {
+          checkId: 'acc-1',
+          category: 'acceptance',
+          status: 'graded',
+          verdict: 'undetermined',
+          rationale: 'the patch does not touch the relevant file',
+        };
+        const operations = createOperations({
+          readAssessmentContext: vi.fn(async () => ({
+            ok: true as const,
+            value: buildAssessmentContext({
+              checks: [buildGradedCheckSummary({ grade, grader: buildGrader() })],
+            }),
+          })),
+        });
+        scriptAnswers('alice', 'failed', 'confirmed manually');
+
+        const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'info',
+          message:
+            'Grader verdict for "acc-1": undetermined (openai/grader-model, effort high): the patch does not touch the relevant file',
+        });
+        expect(clack.state.prompts.map((prompt) => prompt.message)).not.toContain(
+          'Replace the grader\'s verdict for "acc-1"?',
+        );
+        expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([
+          {
+            checkId: 'acc-1',
+            verdict: 'failed',
+            assessor: 'alice',
+            note: 'confirmed manually',
+            replaceExisting: false,
+          },
+        ]);
+      });
+
+      it('shows the pending reason and asks directly for a verdict, with replaceExisting: false, when the grade is pending', async () => {
+        const grade: GradeRecord = {
+          checkId: 'acc-1',
+          category: 'acceptance',
+          status: 'pending',
+          reason:
+            'the grader call failed: ModelCallError (timed-out): run process did not finish within 30000ms',
+        };
+        const operations = createOperations({
+          readAssessmentContext: vi.fn(async () => ({
+            ok: true as const,
+            value: buildAssessmentContext({
+              checks: [buildGradedCheckSummary({ grade, grader: buildGrader() })],
+            }),
+          })),
+        });
+        scriptAnswers('alice', 'passed', 'confirmed manually');
+
+        const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'info',
+          message:
+            '"acc-1" was not graded: the grader call failed: ModelCallError (timed-out): run process did not finish within 30000ms',
+        });
+        expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([
+          {
+            checkId: 'acc-1',
+            verdict: 'passed',
+            assessor: 'alice',
+            note: 'confirmed manually',
+            replaceExisting: false,
+          },
+        ]);
+      });
+
+      it('shows a no-grading-artifact reason and asks directly for a verdict, with replaceExisting: false, when the case has no grading artifact', async () => {
+        const operations = createOperations({
+          readAssessmentContext: vi.fn(async () => ({
+            ok: true as const,
+            value: buildAssessmentContext({
+              checks: [buildGradedCheckSummary({ grade: null, grader: null })],
+            }),
+          })),
+        });
+        scriptAnswers('alice', 'passed', '');
+
+        const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'info',
+          message: '"acc-1" was not graded: no grading artifact was saved for this case',
+        });
+        expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([
+          {
+            checkId: 'acc-1',
+            verdict: 'passed',
+            assessor: 'alice',
+            note: '',
+            replaceExisting: false,
+          },
+        ]);
+      });
+    });
   });
 
   describe('report', () => {
