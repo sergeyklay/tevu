@@ -46,6 +46,9 @@ function buildDependencies(
     readPullRequest: vi.fn(async () => {
       throw new Error('unexpected pull-request read for a commit reference');
     }),
+    readPullRequestDiff: vi.fn(async () => {
+      throw new Error('unexpected pull-request diff read for a commit reference');
+    }),
   },
 ): ReferenceSolutionDependencies {
   return {
@@ -63,6 +66,8 @@ function buildPullRequestSnapshot(
   return {
     key: 'octo/repo#42',
     url: 'https://github.com/octo/repo/pull/42',
+    title: 'Add export button',
+    body: 'Implement CSV export for the current view.',
     state: 'open',
     targetBranch: 'main',
     targetTip: 'e'.repeat(40),
@@ -82,6 +87,9 @@ function buildPullRequestReader(snapshot: PullRequestSnapshot): PullRequestReade
         value: snapshot,
       }),
     ),
+    readPullRequestDiff: vi.fn(async () => {
+      throw new Error('unexpected pull-request diff read while resolving a reference solution');
+    }),
   };
 }
 
@@ -213,6 +221,9 @@ describe('resolveReferenceSolution pull-request identifiers', () => {
           reason: 'pull request octo/repo#42 has no commits',
         },
       })),
+      readPullRequestDiff: vi.fn(async () => {
+        throw new Error('unexpected pull-request diff read while resolving a reference solution');
+      }),
     };
     const dependencies = buildDependencies(undefined, reader);
 
@@ -490,6 +501,24 @@ describe('resolveReferenceSolution pull-request reference block', () => {
       commits: [A, B],
     });
   });
+
+  it("copies the pull request's title and body from the read snapshot", async () => {
+    const snapshot = buildPullRequestSnapshot({
+      title: 'Add export button',
+      body: 'Implement CSV export for the current view.',
+    });
+    const dependencies = buildDependencies(undefined, buildPullRequestReader(snapshot));
+
+    const result = await resolveReferenceSolution(
+      buildRequest({ identifier: 'octo/repo#42' }),
+      dependencies,
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.pullRequest?.title).toBe('Add export button');
+    expect(result.value.pullRequest?.body).toBe('Implement CSV export for the current view.');
+  });
 });
 
 function buildGitHubRequest(
@@ -672,6 +701,9 @@ describe('resolveReferenceSolution for a GitHub entry (AC-8, AC-13, AC-20, prope
       readPullRequest: vi.fn(async () => {
         throw new Error('unexpected pull-request read for a commit reference');
       }),
+      readPullRequestDiff: vi.fn(async () => {
+        throw new Error('unexpected pull-request diff read for a commit reference');
+      }),
     };
     const dependencies = buildGitHubDependencies(clones, resolveCommit, pullRequests);
 
@@ -711,5 +743,51 @@ describe('resolveReferenceSolution for a GitHub entry (AC-8, AC-13, AC-20, prope
     expect(clones.clone).not.toHaveBeenCalled();
     expect(clones.fetchCommits).not.toHaveBeenCalled();
     expect(clones.fetchBranchesAndTags).not.toHaveBeenCalled();
+  });
+
+  it('locates the managed clone once for a commit reference on an already-loaded GitHub entry (P11)', async () => {
+    const managedCloneRoot = '/cache/tevu/repositories';
+    const resolvedPath = `${managedCloneRoot}/github.com/octo/app.git`;
+    const resolveCommit = vi.fn(async (repository: RepositoryDefinition, revision: string) => {
+      if (revision === `${COMMIT}^1`) {
+        return { kind: 'found' as const, commit: PARENT };
+      }
+      return repository.path === resolvedPath
+        ? { kind: 'found' as const, commit: COMMIT }
+        : { kind: 'not-found' as const };
+    });
+    const pullRequests: PullRequestReader = {
+      readPullRequest: vi.fn(async () => {
+        throw new Error('unexpected pull-request read for a commit reference');
+      }),
+      readPullRequestDiff: vi.fn(async () => {
+        throw new Error('unexpected pull-request diff read for a commit reference');
+      }),
+    };
+    const dependencies = buildGitHubDependencies(
+      failingManagedCloneAdapter(),
+      resolveCommit,
+      pullRequests,
+    );
+
+    const result = await resolveReferenceSolution(
+      buildGitHubRequest({
+        identifier: COMMIT,
+        repository: { id: 'upstream', github: 'octo/app', path: resolvedPath },
+      }),
+      dependencies,
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        reference: { kind: 'commit', identifier: COMMIT, commits: [COMMIT] },
+        proposedBase: { commit: PARENT, basis: 'commit-parent' },
+      },
+    });
+    expect(resolveCommit).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'upstream', path: resolvedPath }),
+      COMMIT,
+    );
   });
 });

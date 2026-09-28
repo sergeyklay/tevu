@@ -487,6 +487,11 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
     ensureManagedCommits: vi.fn(async () => {
       throw new Error('ensureManagedCommits should not be called without a scripted GitHub entry');
     }),
+    draftCriteria: vi.fn(async () => {
+      throw new Error(
+        'draftCriteria should not be called without a resolved reference and a declared criteria role',
+      );
+    }),
     prepareRepositories: vi.fn(async () => ({ ok: true as const, value: [] })),
     createTask: vi.fn(async () => ({
       ok: true as const,
@@ -985,6 +990,13 @@ describe('tevu CLI', () => {
 
       expect(err).toEqual([]);
       expect((dependencies.io.stdout as MemoryStream).text).toBe(docsBlock);
+    });
+
+    it('prints roles.criteria before roles.grader (AC-13)', async () => {
+      const { dependencies } = await runCli(['config', 'example']);
+
+      const printed = (dependencies.io.stdout as MemoryStream).text;
+      expect(printed.indexOf('  criteria:')).toBeLessThan(printed.indexOf('  grader:'));
     });
   });
 
@@ -2221,6 +2233,7 @@ describe('tevu CLI', () => {
         'low',
         false,
         false,
+        false,
         ...taskInterviewAnswers('alpha'),
         true,
       );
@@ -2296,6 +2309,7 @@ describe('tevu CLI', () => {
         true,
         'openai/grader-model',
         'high',
+        false,
         ...taskInterviewAnswers('alpha'),
         true,
       );
@@ -2318,6 +2332,64 @@ describe('tevu CLI', () => {
       const parsed = renderAndParseBootstrap(call);
 
       expect(parsed.roles?.grader).toEqual(buildGrader({ agent: 'opencode' }));
+    });
+
+    it('asks the criteria question after the grader question and declares roles.criteria when the operator opts in (E5)', async () => {
+      const operations = createOperations({ configExists: vi.fn(async () => false) });
+      scriptAnswers(
+        '/tmp/bench-artifacts',
+        '4',
+        '10m',
+        '5s',
+        '',
+        'opencode',
+        false,
+        false,
+        false,
+        'alpha',
+        'path',
+        '../repos/alpha',
+        false,
+        'c1',
+        'provider/model-a',
+        'high',
+        'c2',
+        'provider/model-b',
+        'low',
+        false,
+        false,
+        true,
+        'openai/criteria-model',
+        'high',
+        ...taskInterviewAnswers('alpha'),
+        true,
+      );
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(0);
+      const graderIndex = clack.state.prompts.findIndex(
+        (prompt) => prompt.message === 'Declare a grader model for graded checks?',
+      );
+      const criteriaIndex = clack.state.prompts.findIndex(
+        (prompt) =>
+          prompt.message ===
+          'Declare a criteria model to draft criteria from a reference solution?',
+      );
+      expect(graderIndex).toBeGreaterThanOrEqual(0);
+      expect(criteriaIndex).toBeGreaterThan(graderIndex);
+      const call = requireCreateTaskCall(operations);
+      expect(call.bootstrap?.roles).toEqual({
+        criteria: { model: 'openai/criteria-model', effort: 'high' },
+      });
+
+      const parsed = renderAndParseBootstrap(call);
+
+      expect(parsed.roles?.criteria).toEqual({
+        model: 'openai/criteria-model',
+        effort: 'high',
+        agent: 'opencode',
+      });
     });
 
     it('omits roles from the bootstrap answers when the operator declines a grader model, and the written configuration still parses (P11)', async () => {
@@ -2344,6 +2416,7 @@ describe('tevu CLI', () => {
         'low',
         false,
         false,
+        false,
         ...taskInterviewAnswers('alpha'),
         true,
       );
@@ -2357,6 +2430,7 @@ describe('tevu CLI', () => {
       const parsed = renderAndParseBootstrap(call);
 
       expect(parsed.roles?.grader).toBeUndefined();
+      expect(parsed.roles?.criteria).toBeUndefined();
     });
 
     it('re-prompts the grader model question until the answer is a valid provider/model identifier', async () => {
@@ -2481,6 +2555,7 @@ describe('tevu CLI', () => {
         'c2',
         'provider/model-b',
         'low',
+        false,
         false,
         false,
         ...taskInterviewAnswers('alpha'),
@@ -2786,6 +2861,7 @@ describe('tevu CLI', () => {
 
       expect(code).toBe(0);
       expect(operations.resolveReference).not.toHaveBeenCalled();
+      expect(operations.draftCriteria).not.toHaveBeenCalled();
       expect(clack.state.prompts.map((prompt) => prompt.message)).toContain(
         'Reference solution: a pull request (OWNER/REPO#NUMBER or URL) or a commit in "repo-1" (empty for none)',
       );
@@ -2889,6 +2965,8 @@ describe('tevu CLI', () => {
             pullRequest: {
               number: 128,
               url: 'https://github.com/octo/app/pull/128',
+              title: 'Add export button',
+              body: 'Implement CSV export for the current view.',
               state: 'MERGED',
               headRefOid: headHash,
               baseRefName: 'main',
@@ -3014,6 +3092,8 @@ describe('tevu CLI', () => {
             pullRequest: {
               number: 128,
               url: 'https://github.com/octo/app/pull/128',
+              title: 'Add export button',
+              body: 'Implement CSV export for the current view.',
               state: 'OPEN',
               headRefOid: headHash,
               baseRefName: 'main',
@@ -3103,6 +3183,8 @@ describe('tevu CLI', () => {
           },
           pullRequest: {
             key: 'octo/app#128',
+            title: 'Add export button',
+            body: 'Implement CSV export for the current view.',
             state: 'merged' as const,
             targetBranch: 'main',
             noProposedBase,
@@ -3152,6 +3234,570 @@ describe('tevu CLI', () => {
       expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task).toMatchObject({
         base_commit: base,
         reference: { kind: 'pull-request', identifier: 'octo/app#128', commits: [firstCommit] },
+      });
+    });
+
+    describe('criteria drafting (AC-1 to AC-6, AC-12, AC-17)', () => {
+      const HASH = '0123456789abcdef0123456789abcdef01234567';
+      const PARENT = 'fedcba9876543210fedcba9876543210fedcba98';
+
+      function buildCriteriaConfig(): TevuConfig {
+        return {
+          ...buildTevuConfig(),
+          roles: {
+            criteria: { model: 'openai/criteria-model', effort: 'high', agent: AGENT_NAME },
+          },
+        };
+      }
+
+      function buildResolvedCommitReference(): {
+        reference: { kind: 'commit'; identifier: string; commits: [string] };
+        proposedBase: { commit: string; basis: 'commit-parent' };
+      } {
+        return {
+          reference: { kind: 'commit', identifier: 'HEAD~3', commits: [HASH] },
+          proposedBase: { commit: PARENT, basis: 'commit-parent' },
+        };
+      }
+
+      const READY_ANSWERS = [
+        'manual',
+        'repo-1',
+        'HEAD~3',
+        '',
+        'task-2',
+        'Add an export button',
+        'Export the current view as CSV.',
+        'Implement CSV export for the current view.',
+        'Repository is readable',
+        false,
+      ];
+
+      it('never calls draftCriteria when roles.criteria is not declared, printing the by-hand notice (C1)', async () => {
+        const operations = createOperations();
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(operations.draftCriteria).not.toHaveBeenCalled();
+      });
+
+      it('hands draftCriteria the same captured bootstrap answers createTask writes when no configuration exists yet', async () => {
+        const draftCriteria = vi.fn(async () => ({
+          status: 'drafted' as const,
+          draft: {
+            acceptance: ['The export button appears on the table view.'],
+            done: ['The change is documented for users.'],
+          },
+          retainedDirectory: null,
+        }));
+        const operations = createOperations({
+          configExists: vi.fn(async () => false),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria,
+        });
+        scriptAnswers(
+          '/tmp/bench-artifacts',
+          '4',
+          '10m',
+          '5s',
+          '',
+          'opencode',
+          false,
+          false,
+          false,
+          'alpha',
+          'path',
+          '../repos/alpha',
+          false,
+          'c1',
+          'provider/model-a',
+          'high',
+          'c2',
+          'provider/model-b',
+          'low',
+          false,
+          false,
+          true,
+          'openai/criteria-model',
+          'high',
+          'manual',
+          'alpha',
+          'HEAD~3',
+          '',
+          'task-2',
+          'Add an export button',
+          'Export the current view as CSV.',
+          'Implement CSV export for the current view.',
+          'Repository is readable',
+          false,
+          'accept',
+          false,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(operations.loadConfig).not.toHaveBeenCalled();
+        const call = requireCreateTaskCall(operations);
+        expect(draftCriteria).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            configuration: { kind: 'bootstrap', answers: call.bootstrap },
+          }),
+        );
+      });
+
+      it('calls draftCriteria exactly once and saves an unchanged draft as acceptance-<n>/done-<n> checks in reply order (P2, P4, E4)', async () => {
+        const config = buildCriteriaConfig();
+        const resolveReference = vi.fn(async () => ({
+          ok: true as const,
+          value: buildResolvedCommitReference(),
+        }));
+        const draftCriteria = vi.fn(async () => ({
+          status: 'drafted' as const,
+          draft: {
+            acceptance: ['The export button appears on the table view.'],
+            done: ['The change is documented for users.'],
+          },
+          retainedDirectory: null,
+        }));
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+          resolveReference,
+          draftCriteria,
+        });
+        scriptAnswers(...READY_ANSWERS, 'accept', false, false, true);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(draftCriteria).toHaveBeenCalledExactlyOnceWith({
+          configPath: 'tevu.yaml',
+          configuration: { kind: 'loaded', config },
+          repository: { id: 'repo-1', path: '../repos/fixture' },
+          reference: buildResolvedCommitReference(),
+          description: 'Export the current view as CSV.',
+        });
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([
+          { id: 'acceptance-1', description: 'The export button appears on the table view.' },
+        ]);
+        expect(task.checks.done).toEqual([
+          { id: 'done-1', description: 'The change is documented for users.' },
+        ]);
+      });
+
+      it('falls back to the check questions with no drafted text reaching createTask when the draft fails, warning about a retained call directory (F4, C4)', async () => {
+        const config = buildCriteriaConfig();
+        const draftCriteria = vi.fn(async () => ({
+          status: 'failed' as const,
+          reason: 'the criteria call failed: ModelCallError (failed): synthetic failure',
+          retainedDirectory: '/tmp/tevu-call-xyz',
+        }));
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria,
+        });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'acc-1',
+          'manual',
+          'Export produces a CSV',
+          true,
+          false,
+          'dod-1',
+          'manual',
+          'README documents the button',
+          true,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message:
+            'Criteria draft failed: the criteria call failed: ModelCallError (failed): synthetic failure; write the acceptance criteria and Definition of Done by hand.',
+        });
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message:
+            'The criteria call directory could not be removed; it remains at "/tmp/tevu-call-xyz".',
+        });
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([
+          { id: 'acc-1', description: 'Export produces a CSV', manual: true },
+        ]);
+        expect(task.checks.done).toEqual([
+          { id: 'dod-1', description: 'README documents the button', manual: true },
+        ]);
+      });
+
+      it('discards the draft for the by-hand fallback when the operator chooses it in the review (E11)', async () => {
+        const config = buildCriteriaConfig();
+        const draftCriteria = vi.fn(async () => ({
+          status: 'drafted' as const,
+          draft: { acceptance: ['Drafted item never saved.'], done: ['Also never saved.'] },
+          retainedDirectory: null,
+        }));
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria,
+        });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'by-hand',
+          'acc-1',
+          'manual',
+          'Export produces a CSV',
+          true,
+          false,
+          'dod-1',
+          'manual',
+          'README documents the button',
+          true,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([
+          { id: 'acc-1', description: 'Export produces a CSV', manual: true },
+        ]);
+        expect(task.checks.done).toEqual([
+          { id: 'dod-1', description: 'README documents the button', manual: true },
+        ]);
+      });
+
+      it('exits 130 without calling createTask when the operator cancels at the draft review (P3)', async () => {
+        const config = buildCriteriaConfig();
+        const draftCriteria = vi.fn(async () => ({
+          status: 'drafted' as const,
+          draft: { acceptance: ['a'], done: ['d'] },
+          retainedDirectory: null,
+        }));
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria,
+        });
+        scriptAnswers(...READY_ANSWERS, clack.CANCEL);
+
+        const { code, err } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(130);
+        expect(err[0]).toBe('Cancelled.');
+        expect(operations.createTask).not.toHaveBeenCalled();
+      });
+
+      it('blocks accept while an item names the reference commit, then accepts once the item is removed and replaced (P6)', async () => {
+        const config = buildCriteriaConfig();
+        const draftCriteria = vi.fn(async () => ({
+          status: 'drafted' as const,
+          draft: {
+            acceptance: [`This touches commit ${HASH.slice(0, 7)} directly.`],
+            done: ['The change is documented for users.'],
+          },
+          retainedDirectory: null,
+        }));
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria,
+        });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'accept',
+          'remove',
+          'acceptance:0',
+          'add',
+          'acceptance',
+          'The export button appears on the page.',
+          'accept',
+          false,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: 'Cannot accept yet: 1 item names the reference solution; edit or remove it.',
+        });
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([
+          { id: 'acceptance-1', description: 'The export button appears on the page.' },
+        ]);
+      });
+
+      it('edits an item in place through the review', async () => {
+        const config = buildCriteriaConfig();
+        const draftCriteria = vi.fn(async () => ({
+          status: 'drafted' as const,
+          draft: { acceptance: ['Original wording.'], done: ['The change is documented.'] },
+          retainedDirectory: null,
+        }));
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria,
+        });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'edit',
+          'acceptance:0',
+          'Edited wording that is clearer.',
+          'accept',
+          false,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([
+          { id: 'acceptance-1', description: 'Edited wording that is clearer.' },
+        ]);
+      });
+
+      it('rejects an edited item that names the reference solution, then accepts the corrected text (R9)', async () => {
+        const config = buildCriteriaConfig();
+        const draftCriteria = vi.fn(async () => ({
+          status: 'drafted' as const,
+          draft: { acceptance: ['Original wording.'], done: ['The change is documented.'] },
+          retainedDirectory: null,
+        }));
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria,
+        });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'edit',
+          'acceptance:0',
+          { invalid: `This touches commit ${HASH.slice(0, 7)} directly.` },
+          'Corrected wording without the identity.',
+          'accept',
+          false,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.rejections).toContainEqual({
+          kind: 'text',
+          message: 'Edited item',
+          reason: `the item names reference commit ${HASH.slice(0, 7)}; tevu validate rejects a task whose agent prompt contains it`,
+        });
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([
+          { id: 'acceptance-1', description: 'Corrected wording without the identity.' },
+        ]);
+      });
+
+      it('blocks accept with a plural hint when more than one item names the reference solution', async () => {
+        const config = buildCriteriaConfig();
+        const draftCriteria = vi.fn(async () => ({
+          status: 'drafted' as const,
+          draft: {
+            acceptance: [
+              `First item touches commit ${HASH.slice(0, 7)}.`,
+              `Second item touches commit ${HASH.slice(0, 7)}.`,
+            ],
+            done: ['Clean done item.'],
+          },
+          retainedDirectory: null,
+        }));
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria,
+        });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'accept',
+          'edit',
+          'acceptance:0',
+          'First item rewritten.',
+          'edit',
+          'acceptance:1',
+          'Second item rewritten.',
+          'accept',
+          false,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: 'Cannot accept yet: 2 items name the reference solution; edit or remove them.',
+        });
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([
+          { id: 'acceptance-1', description: 'First item rewritten.' },
+          { id: 'acceptance-2', description: 'Second item rewritten.' },
+        ]);
+      });
+
+      it('blocks accept once a list empties, and "Back to the review" leaves both lists unchanged (E7)', async () => {
+        const config = buildCriteriaConfig();
+        const draftCriteria = vi.fn(async () => ({
+          status: 'drafted' as const,
+          draft: {
+            acceptance: ['Original acceptance item.'],
+            done: ['The change is documented.'],
+          },
+          retainedDirectory: null,
+        }));
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria,
+        });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'remove',
+          'acceptance:0',
+          'accept',
+          'add',
+          'back',
+          'edit',
+          'back',
+          'add',
+          'acceptance',
+          'Replacement acceptance item.',
+          'accept',
+          false,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: 'Cannot accept yet: the acceptance criteria need at least one item.',
+        });
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([
+          { id: 'acceptance-1', description: 'Replacement acceptance item.' },
+        ]);
+        expect(task.checks.done).toEqual([
+          { id: 'done-1', description: 'The change is documented.' },
+        ]);
+      });
+
+      it('stores checks added through the follow-on questions after the drafted checks, rejecting an ID that collides with a drafted one (P15, AC-17)', async () => {
+        const config = buildCriteriaConfig();
+        const draftCriteria = vi.fn(async () => ({
+          status: 'drafted' as const,
+          draft: {
+            acceptance: ['The export button appears on the table view.'],
+            done: ['The change is documented for users.'],
+          },
+          retainedDirectory: null,
+        }));
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria,
+        });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'accept',
+          true,
+          { invalid: 'acceptance-1' },
+          'acceptance-extra',
+          'command',
+          'The test suite passes',
+          true,
+          '["npm","test"]',
+          '',
+          '0',
+          '',
+          false,
+          true,
+          'done-extra',
+          'manual',
+          'Manually verified',
+          false,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.rejections).toContainEqual({
+          kind: 'text',
+          message: 'New acceptance check ID',
+          reason: '"acceptance-1" is already used',
+        });
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([
+          { id: 'acceptance-1', description: 'The export button appears on the table view.' },
+          { id: 'acceptance-extra', description: 'The test suite passes', run: ['npm', 'test'] },
+        ]);
+        expect(task.checks.done).toEqual([
+          { id: 'done-1', description: 'The change is documented for users.' },
+          { id: 'done-extra', description: 'Manually verified', manual: true, required: false },
+        ]);
+        const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
+        expect(reviewNote?.message).toContain('acceptance-1');
+        expect(reviewNote?.message).toContain('acceptance-extra');
+        expect(reviewNote?.message).toContain('done-1');
+        expect(reviewNote?.message).toContain('done-extra');
       });
     });
   });

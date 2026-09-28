@@ -158,6 +158,7 @@ export function createGitWorkspaceAdapter(
     readOverlay,
     applyCheckState,
     initializeEmptyRepository,
+    diffCommit,
 
     async createIsolatedCase(
       identity: CaseIdentity,
@@ -345,6 +346,25 @@ async function initializeEmptyRepository(
     return artifactError('initialize-repository', describeGitFailure('init', outcome));
   }
   return { ok: true, value: undefined };
+}
+
+/**
+ * Diffs `commit` against its first parent: no color, no external diff driver,
+ * no binary contents.
+ */
+async function diffCommit(
+  repository: RepositoryDefinition,
+  commit: string,
+): Promise<TevuResult<string, 'ArtifactError'>> {
+  const outcome = await runGit(
+    repository.path,
+    ['diff', '--no-color', '--no-ext-diff', `${commit}^1`, commit, '--'],
+    { keepFinalNewline: true },
+  );
+  if (outcome.exitCode !== 0) {
+    return artifactError('diff-reference-commit', describeGitFailure('diff', outcome));
+  }
+  return { ok: true, value: outcome.stdout };
 }
 
 type SealCaseInput = {

@@ -33,6 +33,7 @@ import {
 import { createJiraCloudAdapter } from '@/adapters/trackers/jira-cloud';
 import { assessCase, readAssessmentContext, rebuildReport } from '@/application/assess';
 import { createTask } from '@/application/create-task';
+import { draftCriteria } from '@/application/draft-criteria';
 import { ensureManagedCommits, prepareManagedRepositories } from '@/application/managed-clone';
 import { resolveReferenceSolution } from '@/application/reference-solution';
 import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
@@ -125,8 +126,22 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
     onProgress,
   });
 
+  const pullRequests = createGitHubPullRequestReader({
+    runGh: (ghRequest) => {
+      registry.add(GH_CREDENTIAL_ENVIRONMENT_VARIABLES.map((name) => process.env[name]));
+      return runManagedProcess({
+        ...ghRequest,
+        cwd: process.cwd(),
+        secretValues: registry.read(),
+        stdoutRedaction: 'structured',
+      });
+    },
+    parentEnvironment: process.env,
+    cancellation,
+  });
+
   /** Registers every configured agent under its own name; currently the schema declares only "opencode". */
-  const agentsFor = (config: TevuConfig): AgentRegistry =>
+  const agentsFor = (config: Pick<TevuConfig, 'agents'>): AgentRegistry =>
     new Map([
       [
         'opencode',
@@ -189,24 +204,20 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       return github.readIssue(reference);
     },
     resolveReference: (request, onProgress) =>
-      resolveReferenceSolution(request, {
-        ...managedCloneDependencies(onProgress),
-        pullRequests: createGitHubPullRequestReader({
-          runGh: (ghRequest) => {
-            registry.add(GH_CREDENTIAL_ENVIRONMENT_VARIABLES.map((name) => process.env[name]));
-            return runManagedProcess({
-              ...ghRequest,
-              cwd: process.cwd(),
-              secretValues: registry.read(),
-              stdoutRedaction: 'structured',
-            });
-          },
-          parentEnvironment: process.env,
-          cancellation,
-        }),
-      }),
+      resolveReferenceSolution(request, { ...managedCloneDependencies(onProgress), pullRequests }),
     ensureManagedCommits: (request, onProgress) =>
       ensureManagedCommits(request, managedCloneDependencies(onProgress)),
+    draftCriteria: (request) =>
+      draftCriteria(request, {
+        agentsFor,
+        environments,
+        git: createGit(),
+        pullRequests,
+        managedCloneRoot: cloneRoot,
+        registerSecrets: (names) => registry.add(names.map((name) => process.env[name])),
+        redact: registry.redact,
+        cancellation,
+      }),
     prepareRepositories: (config, onProgress) =>
       prepareManagedRepositories(config, managedCloneDependencies(onProgress)),
     createTask: (input) =>

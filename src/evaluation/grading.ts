@@ -8,6 +8,7 @@
  * {@link deriveGrades}, {@link pendingGrades}, {@link applyGrades}.
  */
 
+import { codeFenceFor, decodeReplyObject } from '@/domain/model-text';
 import { checkEvaluator } from '@/domain/types';
 
 import type {
@@ -98,16 +99,9 @@ function renderPatchBlock(patch: string): string {
   if (patch.length === 0) {
     return 'The solution patch is empty: the solution changed no file.';
   }
-  const fence = computeFence(patch);
+  const fence = codeFenceFor(patch);
   const body = patch.endsWith('\n') ? patch : `${patch}\n`;
   return `${fence}diff\n${body}${fence}`;
-}
-
-/** A run of backticks one longer than the longest run of consecutive backticks in `patch`, at least 3. */
-function computeFence(patch: string): string {
-  const runs = patch.match(/`+/g) ?? [];
-  const longestRun = runs.reduce((max, run) => Math.max(max, run.length), 0);
-  return '`'.repeat(Math.max(3, longestRun + 1));
 }
 
 /** Returns one `{ status: 'pending', reason }` grade per check, in `checks` order. */
@@ -128,38 +122,11 @@ type ParsedReply =
 
 /** Strips a code fence per the reply-parsing grammar, parses JSON, and validates the `grades` shape. */
 function parseReply(reply: string): ParsedReply {
-  const trimmed = reply.trim();
-  let jsonText: string;
-  if (trimmed.startsWith('```')) {
-    const lines = trimmed.split('\n').map((line) => line.replace(/\r$/, ''));
-    const firstLine = lines[0];
-    const lastLine = lines[lines.length - 1];
-    const isCompleteFence =
-      lines.length >= 3 &&
-      firstLine !== undefined &&
-      /^```[A-Za-z]*$/.test(firstLine) &&
-      lastLine === '```';
-    if (!isCompleteFence) {
-      return {
-        ok: false,
-        defect: 'the reply opens a code fence that is not one complete fenced block',
-      };
-    }
-    jsonText = lines.slice(1, -1).join('\n');
-  } else {
-    jsonText = trimmed;
+  const decoded = decodeReplyObject(reply);
+  if (!decoded.ok) {
+    return decoded;
   }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch {
-    return { ok: false, defect: 'the reply is not valid JSON' };
-  }
-  if (!isPlainObject(parsed)) {
-    return { ok: false, defect: 'the reply is not a JSON object' };
-  }
-  const grades = parsed['grades'];
+  const grades = decoded.value['grades'];
   if (!Array.isArray(grades)) {
     return { ok: false, defect: 'grades is not an array' };
   }

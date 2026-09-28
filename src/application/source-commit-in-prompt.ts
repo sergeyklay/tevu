@@ -5,7 +5,10 @@
  * solution that the sealed repository itself withholds.
  */
 
+import { parseGitHubReference } from '@/domain/github-reference';
+
 import type { ParsedGitHubReference } from '@/domain/github-reference';
+import type { TaskReference } from '@/domain/types';
 
 /**
  * Reports whether `prompt` contains the resolved source commit.
@@ -63,6 +66,42 @@ export function describePullRequestInPrompt(
   const lowerPrompt = prompt.toLowerCase();
   if (lowerPrompt.includes(key.toLowerCase()) || lowerPrompt.includes(url.toLowerCase())) {
     return `agent prompt contains pull request ${key}`;
+  }
+  return undefined;
+}
+
+/**
+ * Reports the first reference identity `text` names: a resolved reference
+ * commit, its merge commit, or the pull request itself.
+ *
+ * Checks, in order, each entry of `reference.commits`, then
+ * `reference.merge_commit` when present, through
+ * {@link describeReferenceCommitInPrompt}, then, for a pull-request
+ * reference, its key and URL form through {@link describePullRequestInPrompt}.
+ * Deliberately excludes the task's `base_commit`, which is not part of
+ * `reference`.
+ */
+export function describeReferenceIdentityInText(
+  text: string,
+  reference: TaskReference,
+): string | undefined {
+  for (const commit of reference.commits) {
+    if (describeReferenceCommitInPrompt(text, commit) !== undefined) {
+      return `reference commit ${commit.slice(0, 7)}`;
+    }
+  }
+  if (
+    reference.kind === 'pull-request' &&
+    reference.merge_commit !== undefined &&
+    describeReferenceCommitInPrompt(text, reference.merge_commit) !== undefined
+  ) {
+    return `reference commit ${reference.merge_commit.slice(0, 7)}`;
+  }
+  if (reference.kind === 'pull-request') {
+    const parsed = parseGitHubReference(reference.identifier);
+    if (parsed !== null && describePullRequestInPrompt(text, parsed) !== undefined) {
+      return `pull request ${parsed.owner}/${parsed.repo}#${parsed.number}`;
+    }
   }
   return undefined;
 }

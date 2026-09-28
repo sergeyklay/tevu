@@ -4,9 +4,9 @@
  * empty Git repository as its working directory, calls the agent once, and
  * disposes the environment unconditionally.
  *
- * Entry point: {@link callModelRole}. Ships with no production caller in this
- * change; future callers reuse it for drafting acceptance criteria and for
- * grading a case's solution.
+ * Entry point: {@link callModelRole}. Its two production callers are
+ * `draftCriteria` and `gradeCase`, which both describe a call failure through
+ * {@link describeModelCallFailure}.
  */
 
 import { durationMs } from '@/config/schema';
@@ -16,8 +16,43 @@ import type {
   ModelCallDependencies,
   ModelRoleCallRequest,
   ModelRoleCallResult,
+  TevuError,
   TevuResult,
 } from '@/domain/types';
+
+/** Identifier-only text for a model-role call failure; never includes a secret value. */
+export function describeModelCallFailure(
+  error: Extract<
+    TevuError,
+    {
+      kind:
+        | 'ModelCallError'
+        | 'AgentProtocolError'
+        | 'PrerequisiteError'
+        | 'ArtifactError'
+        | 'ConfigValidationError';
+    }
+  >,
+): string {
+  switch (error.kind) {
+    case 'ModelCallError':
+      return `ModelCallError (${error.cause}): ${error.reason}`;
+    case 'AgentProtocolError':
+      return `AgentProtocolError: ${error.reason}`;
+    case 'PrerequisiteError':
+      return `PrerequisiteError: "${error.tool}" expected ${error.expected}${
+        error.actual === undefined ? '' : `, actual ${error.actual}`
+      }`;
+    case 'ArtifactError':
+      return `ArtifactError: ${error.operation}: ${error.reason}`;
+    case 'ConfigValidationError': {
+      const [first] = error.findings;
+      return first === undefined
+        ? 'ConfigValidationError: no finding was reported'
+        : `ConfigValidationError: ${first.identifier}: ${first.message}`;
+    }
+  }
+}
 
 /**
  * Sends `request.prompt` through the agent configured for `request.role`,

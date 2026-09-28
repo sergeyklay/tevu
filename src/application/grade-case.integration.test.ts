@@ -14,8 +14,9 @@ import {
   createSecretRedactor,
   runManagedProcess,
 } from '@/adapters/process';
+import { describeModelCallFailure } from '@/application/model-call';
 
-import { describeGraderCallFailure, gradeCase } from './grade-case';
+import { gradeCase } from './grade-case';
 
 import type {
   AgentAdapter,
@@ -400,7 +401,7 @@ describe('gradeCase against a fake OpenCode executable', () => {
   });
 });
 
-describe('describeGraderCallFailure', () => {
+describe('describeModelCallFailure', () => {
   function expectFailure<K extends TevuError['kind']>(
     error: Extract<TevuError, { kind: K }>,
   ): Extract<TevuError, { kind: K }> {
@@ -416,7 +417,7 @@ describe('describeGraderCallFailure', () => {
       reason: 'run process did not finish within 700ms',
     });
 
-    expect(describeGraderCallFailure(error)).toBe(
+    expect(describeModelCallFailure(error)).toBe(
       'ModelCallError (timed-out): run process did not finish within 700ms',
     );
   });
@@ -429,7 +430,7 @@ describe('describeGraderCallFailure', () => {
       reason: 'reply redaction failed; reply withheld',
     });
 
-    expect(describeGraderCallFailure(error)).toBe(
+    expect(describeModelCallFailure(error)).toBe(
       'AgentProtocolError: reply redaction failed; reply withheld',
     );
   });
@@ -447,10 +448,10 @@ describe('describeGraderCallFailure', () => {
       expected: 'a registered agent adapter',
     });
 
-    expect(describeGraderCallFailure(withActual)).toBe(
+    expect(describeModelCallFailure(withActual)).toBe(
       'PrerequisiteError: "opencode" expected a registered agent adapter, actual none',
     );
-    expect(describeGraderCallFailure(withoutActual)).toBe(
+    expect(describeModelCallFailure(withoutActual)).toBe(
       'PrerequisiteError: "opencode" expected a registered agent adapter',
     );
   });
@@ -462,7 +463,7 @@ describe('describeGraderCallFailure', () => {
       reason: 'git init exited with code 1',
     });
 
-    expect(describeGraderCallFailure(error)).toBe(
+    expect(describeModelCallFailure(error)).toBe(
       'ArtifactError: initialize-repository: git init exited with code 1',
     );
   });
@@ -475,7 +476,7 @@ describe('describeGraderCallFailure', () => {
       ],
     });
 
-    expect(describeGraderCallFailure(error)).toBe(
+    expect(describeModelCallFailure(error)).toBe(
       'ConfigValidationError: roles.grader: model role is not configured',
     );
   });

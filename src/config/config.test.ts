@@ -11,7 +11,13 @@ import { createTask } from '@/application/create-task';
 import { validateConfig } from '@/application/validate';
 
 import { renderConfigDocument } from './document';
-import { canonicalConfigSerialization, loadConfig, parseConfigText } from './load';
+import {
+  canonicalConfigSerialization,
+  loadConfig,
+  parseConfigText,
+  resolveBootstrapModelCallConfig,
+  resolveRepositoryPath,
+} from './load';
 import {
   AGENT_NAMES,
   agentNamesInUse,
@@ -258,6 +264,14 @@ function buildFullGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspac
       error: {
         kind: 'ArtifactError' as const,
         operation: 'initialize-repository',
+        reason: 'not used in these tests',
+      },
+    })),
+    diffCommit: vi.fn(async () => ({
+      ok: false as const,
+      error: {
+        kind: 'ArtifactError' as const,
+        operation: 'diff-reference-commit',
         reason: 'not used in these tests',
       },
     })),
@@ -1056,10 +1070,11 @@ describe('TevuConfigSchema', () => {
   });
 
   describe('roles', () => {
-    it('parses CONFIG_TEMPLATE with roles.grader declared', () => {
+    it('parses CONFIG_TEMPLATE with roles.criteria and roles.grader declared', () => {
       const parsed = expectOk(parseConfigText(CONFIG_TEMPLATE));
 
       expect(parsed.roles).toEqual({
+        criteria: { model: 'openai/your-criteria-model', effort: 'high', agent: 'opencode' },
         grader: { model: 'openai/your-grader-model', effort: 'medium', agent: 'opencode' },
       });
     });
@@ -2565,6 +2580,33 @@ describe('canonicalConfigSerialization', () => {
   });
 });
 
+describe('resolveRepositoryPath (AC-15, P11)', () => {
+  it('returns a GitHub entry path unchanged when resolveConfig already resolved it', () => {
+    const managedCloneRoot = '/cache/tevu';
+    const resolvedPath = join(managedCloneRoot, 'github.com/octo/app.git');
+
+    expect(
+      resolveRepositoryPath(
+        { path: resolvedPath, github: 'octo/app' },
+        '/config/dir',
+        managedCloneRoot,
+      ),
+    ).toBe(resolvedPath);
+  });
+
+  it('still resolves a relative managed-clone location against the managed-clone root', () => {
+    const managedCloneRoot = '/cache/tevu';
+
+    expect(
+      resolveRepositoryPath(
+        { path: 'github.com/octo/app.git', github: 'octo/app' },
+        '/config/dir',
+        managedCloneRoot,
+      ),
+    ).toBe(join(managedCloneRoot, 'github.com/octo/app.git'));
+  });
+});
+
 describe('createTask', () => {
   it('appends the task text and performs exactly one configuration replacement', async () => {
     const dependencies = buildTaskDependencies();
@@ -2740,6 +2782,57 @@ describe('createTask', () => {
     expect(replaceText.mock.calls[0]?.[1]).toContain('new-task');
   });
 
+  it('resolveBootstrapModelCallConfig matches what loadConfig resolves for the file createTask writes (P10)', async () => {
+    const configPath = '/tmp/tevu/tevu.yaml';
+    const bootstrap: Omit<TevuConfigInput, 'version' | 'tasks'> = {
+      run: buildRunSettings(),
+      agents: buildAgents(),
+      repositories: [buildRepository()],
+      models: [
+        buildModel(),
+        buildModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max' }),
+      ],
+      roles: {
+        criteria: buildModelRole({ model: 'openai/criteria-model', effort: 'high' }),
+        grader: buildModelRole({
+          model: 'openai/grader-model',
+          effort: 'medium',
+          agent: 'opencode',
+        }),
+      },
+    };
+    let writtenText: string | undefined;
+    const dependencies = buildTaskDependencies({
+      configStore: buildConfigStore({
+        exists: vi.fn(async () => false),
+        replaceText: vi.fn(async (_path: string, text: string) => {
+          writtenText = text;
+          return { ok: true as const, value: undefined };
+        }),
+      }),
+    });
+
+    await createTask(buildTaskWizardInput({ configPath, bootstrap }), dependencies);
+    if (writtenText === undefined) {
+      throw new Error('expected createTask to write a configuration');
+    }
+    const text = writtenText;
+
+    const loaded = expectOk(
+      await loadConfig(
+        configPath,
+        buildConfigStore({ readText: vi.fn(async () => ({ ok: true as const, value: text })) }),
+        undefined,
+      ),
+    );
+    const resolved = resolveBootstrapModelCallConfig(bootstrap, configPath);
+
+    expect(resolved.agents).toEqual(loaded.agents);
+    expect(resolved.roles).toEqual(loaded.roles);
+    expect(resolved.run.timeout).toBe(loaded.run.timeout);
+    expect(resolved.run.stop_grace).toBe(loaded.run.stop_grace);
+  });
+
   it('reports a missing configuration when no bootstrap answers were captured', async () => {
     const dependencies = buildTaskDependencies({
       configStore: buildConfigStore({ exists: vi.fn(async () => false) }),
@@ -2841,6 +2934,44 @@ describe('createTask', () => {
 
       expect(task.base_commit).toBe('resolved-head');
       expect(resolveCommit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('GitHub repository entry (AC-15, P11)', () => {
+    it('locates the managed clone once for an existing GitHub-entry configuration file', async () => {
+      const managedCloneRoot = '/cache/tevu';
+      const configText = githubRepositoryConfigYaml({
+        outputDirectory: './runs',
+        github: 'octo/app',
+        command: 'opencode',
+      });
+      const validateSource = vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
+        ok: true as const,
+        value: {
+          repositoryId: repository.id,
+          requestedCommit: commit,
+          resolvedCommit: `resolved-${commit}`,
+        },
+      }));
+      const dependencies = buildTaskDependencies({
+        configStore: buildConfigStore({
+          readText: vi.fn(async () => ({ ok: true as const, value: configText })),
+        }),
+        git: buildGit({ validateSource }),
+        managedCloneRoot,
+      });
+
+      const task = expectOk(await createTask(buildTaskWizardInput(), dependencies));
+
+      expect(task.repo).toBe('sample-repo');
+      expect(validateSource).toHaveBeenCalledExactlyOnceWith(
+        {
+          id: 'sample-repo',
+          path: join(managedCloneRoot, 'github.com/octo/app.git'),
+          github: 'octo/app',
+        },
+        'abc123',
+      );
     });
   });
 });

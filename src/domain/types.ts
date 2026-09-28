@@ -252,6 +252,10 @@ export type PullRequestSnapshot = {
   mergeability: PullRequestMergeability;
   /** Every commit GitHub lists, in GitHub's order; never a partial list. */
   commits: PullRequestCommit[];
+  /** GraphQL `title`. */
+  title: string;
+  /** GraphQL `body`; empty when the pull request has no description. */
+  body: string;
 };
 
 /** A command check's resolved shape: literal argv, no shell, and every default materialized. */
@@ -737,6 +741,11 @@ export interface GitWorkspaceAdapter {
   isReadable?(workspace: CaseWorkspace): Promise<boolean>;
   /** Runs `git init` in an existing empty directory; creates no commit, remote, or configuration. */
   initializeEmptyRepository(directory: string): Promise<TevuResult<void, 'ArtifactError'>>;
+  /** The unified diff `commit` introduces against its first parent: no color, no external diff driver, no binary contents. */
+  diffCommit(
+    repository: RepositoryDefinition,
+    commit: string,
+  ): Promise<TevuResult<string, 'ArtifactError'>>;
 }
 
 /** Name, classification, and recipient of one passed variable; values are never recorded. */
@@ -1091,6 +1100,10 @@ export interface PullRequestReader {
   readPullRequest(
     reference: string,
   ): Promise<TevuResult<PullRequestSnapshot, 'ReferenceResolutionError' | 'CancellationError'>>;
+  /** Reads the pull request's unified diff through GitHub's diff media type. */
+  readPullRequestDiff(
+    reference: string,
+  ): Promise<TevuResult<string, 'ReferenceResolutionError' | 'CancellationError'>>;
 }
 
 /** Exclusive assessment lock held across replacement and derived regeneration. */
@@ -1249,9 +1262,16 @@ export type RunDependencies = {
   onLifecycle?: (caseId: string, lifecycle: CaseLifecycle) => void;
 };
 
+/** The configuration fields one model-role call reads; a `TevuConfig` satisfies it. */
+export type ModelRoleCallConfig = {
+  agents: TevuConfig['agents'];
+  roles?: TevuConfig['roles'];
+  run: Pick<TevuConfig['run'], 'timeout' | 'stop_grace'>;
+};
+
 /** Request for one one-shot model call through a configured model role. */
 export type ModelRoleCallRequest = {
-  config: TevuConfig;
+  config: ModelRoleCallConfig;
   role: ModelRoleName;
   prompt: string;
   timeoutMs: number;

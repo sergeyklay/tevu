@@ -4,10 +4,13 @@ import { parseDocument } from 'yaml';
 
 import { TevuConfigSchema } from './schema';
 
-import type { RepositoryInput } from './schema';
+import type { ModelRoleInput, RepositoryInput, TevuConfigInput } from './schema';
 import type {
   ConfigStore,
   LoadConfigErrorKind,
+  ModelRole,
+  ModelRoleCallConfig,
+  ModelRoleName,
   RepositoryDefinition,
   TevuConfig,
   TevuResult,
@@ -84,7 +87,7 @@ export function resolveRepositoryPath(
   if (github !== undefined) {
     return managedCloneRoot === undefined || repositoryPath === undefined
       ? undefined
-      : path.join(managedCloneRoot, repositoryPath);
+      : path.resolve(managedCloneRoot, repositoryPath);
   }
   return repositoryPath === undefined
     ? undefined
@@ -112,12 +115,7 @@ export async function resolveConfig(
     agents: Object.fromEntries(
       Object.entries(config.agents).map(([name, settings]) => [
         name,
-        {
-          ...settings,
-          command: settings.command.includes(path.sep)
-            ? resolveConfigPath(configDirectory, settings.command)
-            : settings.command,
-        },
+        { ...settings, command: resolveAgentCommand(settings.command, configDirectory) },
       ]),
     ),
     repositories: config.repositories.map((repository) => ({
@@ -178,6 +176,63 @@ export async function loadConfig(
 /** Resolves a configuration-relative path against the configuration file directory. */
 function resolveConfigPath(configDirectory: string, target: string): string {
   return path.resolve(configDirectory, target);
+}
+
+/** Resolves one agent's `command`: a value containing a path separator resolves against `configDirectory`; any other value is a bare executable name, left unchanged. */
+function resolveAgentCommand(command: string, configDirectory: string): string {
+  return command.includes(path.sep) ? resolveConfigPath(configDirectory, command) : command;
+}
+
+/**
+ * Resolves a `tevu task add` bootstrap answer set into a {@link ModelRoleCallConfig},
+ * the same fields `loadConfig` would produce for the file `createTask` writes
+ * from the same answers.
+ *
+ * Defaults every agent block's `secrets` and `env` to `[]`, resolves each
+ * agent's `command` by the same rule {@link resolveConfig} applies, and
+ * defaults each declared role's `agent` to the first configured agent key.
+ */
+export function resolveBootstrapModelCallConfig(
+  answers: Omit<TevuConfigInput, 'version' | 'tasks'>,
+  configPath: string,
+): ModelRoleCallConfig {
+  const configDirectory = path.dirname(path.resolve(configPath));
+  const agents = Object.fromEntries(
+    Object.entries(answers.agents).map(([name, settings]) => [
+      name,
+      {
+        command: resolveAgentCommand(settings.command, configDirectory),
+        secrets: settings.secrets ?? [],
+        env: settings.env ?? [],
+      },
+    ]),
+  );
+  const firstAgentKey = Object.keys(agents)[0];
+  if (firstAgentKey === undefined) {
+    throw new Error('unreachable: the bootstrap answers always declare at least one agent');
+  }
+  const rolesInput = answers.roles;
+  const roles: Partial<Record<ModelRoleName, ModelRole>> | undefined =
+    rolesInput === undefined
+      ? undefined
+      : {
+          ...(rolesInput.criteria === undefined
+            ? {}
+            : { criteria: resolveBootstrapModelRole(rolesInput.criteria, firstAgentKey) }),
+          ...(rolesInput.grader === undefined
+            ? {}
+            : { grader: resolveBootstrapModelRole(rolesInput.grader, firstAgentKey) }),
+        };
+  return {
+    agents,
+    ...(roles === undefined ? {} : { roles }),
+    run: { timeout: answers.run.timeout, stop_grace: answers.run.stop_grace },
+  };
+}
+
+/** Resolves one declared model role's `agent` default, exactly as `schema.ts`'s `materializeModelRole` does. */
+function resolveBootstrapModelRole(role: ModelRoleInput, firstAgentKey: string): ModelRole {
+  return { model: role.model, effort: role.effort, agent: role.agent ?? firstAgentKey };
 }
 
 /**

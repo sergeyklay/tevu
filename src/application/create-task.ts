@@ -250,7 +250,8 @@ async function resolveTaskBaseCommit(
   return validated.ok ? { ok: true, value: validated.value.resolvedCommit } : validated;
 }
 
-function collectBaseSecretNames(base: BaseDocument['base']): string[] {
+/** Every agent block's `secrets` and the Jira token variable, across a loaded or bootstrap configuration base. */
+export function collectBaseSecretNames(base: BaseDocument['base']): string[] {
   const names = Object.values(base.agents).flatMap((settings) => settings.secrets ?? []);
   const token = base.trackers?.jira?.token;
   if (token !== undefined) {

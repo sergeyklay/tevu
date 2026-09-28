@@ -61,7 +61,7 @@ export type GitHubIssuesDependencies = {
 
 const TIMEOUT_MS = 30_000;
 const TERMINATION_GRACE_MS = 3_000;
-const MAX_CAPTURE_BYTES = 1_048_576;
+const MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 
 const MALFORMED_REFERENCE_REASON =
   'reference must be OWNER/REPO#NUMBER or https://HOST/OWNER/REPO/issues/NUMBER';
@@ -74,6 +74,8 @@ const PULL_REQUEST_MALFORMED_REFERENCE_REASON =
 const ISSUE_REFERENCE_REASON = 'the reference points to an issue, not a pull request';
 const PULL_REQUEST_READ_FAILURE_REASON =
   'gh could not read the pull request (not found, no access, or no connection)';
+const PULL_REQUEST_DIFF_READ_FAILURE_REASON =
+  'gh could not read the pull request diff (not found, no access, too large, or no connection)';
 
 /** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
 const COMMIT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -82,7 +84,7 @@ const COMMIT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const PULL_REQUEST_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
-      number url state headRefOid baseRefName mergeable
+      number url title body state headRefOid baseRefName mergeable
       baseRef { target { oid } }
       mergeCommit { oid }
       commits(first: 100, after: $endCursor) {
@@ -173,10 +175,94 @@ export function createGitHubIssuesAdapter(
   };
 }
 
+/** Outcome of one `gh` invocation made on behalf of a pull-request read, before its caller's own success handling. */
+type PullRequestGhOutcome =
+  | { kind: 'cancelled' }
+  | { kind: 'failure'; reason: string }
+  | { kind: 'exit-one'; stderrText: string }
+  | { kind: 'success'; stdout: GhCapture };
+
+/**
+ * Runs one `gh` invocation under the pull-request reader's shared timeout,
+ * termination grace, and capture bound, mapping every outcome but a
+ * successful exit and an exit-1 failure, which each caller decodes for its
+ * own read.
+ */
+async function runPullRequestGh(
+  argv: [string, ...string[]],
+  parsed: ParsedGitHubReference,
+  dependencies: GitHubIssuesDependencies,
+): Promise<PullRequestGhOutcome> {
+  if (dependencies.cancellation.aborted) {
+    return { kind: 'cancelled' };
+  }
+
+  const result = await dependencies.runGh({
+    argv,
+    environment: ghEnvironment(dependencies.parentEnvironment),
+    timeoutMs: TIMEOUT_MS,
+    terminationGraceMs: TERMINATION_GRACE_MS,
+    maxCaptureBytes: MAX_CAPTURE_BYTES,
+    cancellation: dependencies.cancellation,
+  });
+
+  if (dependencies.cancellation.aborted || (result.launched && result.cancelled)) {
+    return { kind: 'cancelled' };
+  }
+  if (!result.launched) {
+    return {
+      kind: 'failure',
+      reason:
+        result.code === 'ENOENT'
+          ? 'GitHub CLI (gh) is not installed or not on PATH; install it from https://cli.github.com or enter a commit reference instead'
+          : `GitHub CLI (gh) could not be started: ${result.code ?? result.reason}`,
+    };
+  }
+  if (result.timedOut) {
+    return { kind: 'failure', reason: `gh did not respond within ${TIMEOUT_MS / 1000} seconds` };
+  }
+
+  switch (result.exitCode) {
+    case 0:
+      return { kind: 'success', stdout: result.stdout };
+    case 4:
+      return { kind: 'failure', reason: authenticationReason(parsed.host) };
+    case 1:
+      return { kind: 'exit-one', stderrText: result.stderr.text };
+    case 2:
+      return { kind: 'failure', reason: 'read cancelled (gh exited with code 2)' };
+    default:
+      return {
+        kind: 'failure',
+        reason: withExcerptSuffix(
+          unexpectedExitReason(result.exitCode, result.signal),
+          result.stderr.text,
+        ),
+      };
+  }
+}
+
+/** Parses and rejects `input` exactly as `readPullRequest` and `readPullRequestDiff` both require. */
+function parsePullRequestReference(
+  input: string,
+):
+  | { ok: true; value: ParsedGitHubReference }
+  | { ok: false; error: TevuResult<never, 'ReferenceResolutionError'> } {
+  const reference = input.trim();
+  const parsed = parseGitHubReference(reference);
+  if (parsed === null) {
+    return { ok: false, error: referenceFailure(PULL_REQUEST_MALFORMED_REFERENCE_REASON) };
+  }
+  if (parsed.path === 'issues') {
+    return { ok: false, error: referenceFailure(ISSUE_REFERENCE_REASON) };
+  }
+  return { ok: true, value: parsed };
+}
+
 /**
  * Creates the read-only, one-time GitHub pull-request reader: one paginated
  * `gh api graphql` read of state, merge commit, target tip, mergeability, and
- * every commit with its parents.
+ * every commit with its parents, plus an on-demand unified-diff read.
  *
  * Calls `runGh` at most once per read: never for a malformed reference, an
  * issue reference, or a signal already aborted before launch. Issues no Git
@@ -189,78 +275,84 @@ export function createGitHubPullRequestReader(
     async readPullRequest(
       input: string,
     ): Promise<TevuResult<PullRequestSnapshot, 'ReferenceResolutionError' | 'CancellationError'>> {
-      const reference = input.trim();
-      const parsed = parseGitHubReference(reference);
-      if (parsed === null) {
-        return referenceFailure(PULL_REQUEST_MALFORMED_REFERENCE_REASON);
-      }
-      if (parsed.path === 'issues') {
-        return referenceFailure(ISSUE_REFERENCE_REASON);
-      }
-      if (dependencies.cancellation.aborted) {
-        return cancellationFailure();
+      const parsed = parsePullRequestReference(input);
+      if (!parsed.ok) {
+        return parsed.error;
       }
 
-      const result = await dependencies.runGh({
-        argv: [
+      const outcome = await runPullRequestGh(
+        [
           'gh',
           'api',
           'graphql',
           '--hostname',
-          parsed.host,
+          parsed.value.host,
           '--paginate',
           '--slurp',
           '-f',
           `query=${PULL_REQUEST_QUERY}`,
           '-f',
-          `owner=${parsed.owner}`,
+          `owner=${parsed.value.owner}`,
           '-f',
-          `repo=${parsed.repo}`,
+          `repo=${parsed.value.repo}`,
           '-F',
-          `number=${parsed.number}`,
+          `number=${parsed.value.number}`,
         ],
-        environment: ghEnvironment(dependencies.parentEnvironment),
-        timeoutMs: TIMEOUT_MS,
-        terminationGraceMs: TERMINATION_GRACE_MS,
-        maxCaptureBytes: MAX_CAPTURE_BYTES,
-        cancellation: dependencies.cancellation,
-      });
+        parsed.value,
+        dependencies,
+      );
 
-      if (dependencies.cancellation.aborted || (result.launched && result.cancelled)) {
+      if (outcome.kind === 'cancelled') {
         return cancellationFailure();
       }
-      if (!result.launched) {
-        return result.code === 'ENOENT'
-          ? referenceFailure(
-              'GitHub CLI (gh) is not installed or not on PATH; install it from https://cli.github.com or enter a commit reference instead',
-            )
-          : referenceFailure(
-              `GitHub CLI (gh) could not be started: ${result.code ?? result.reason}`,
-            );
+      if (outcome.kind === 'failure') {
+        return referenceFailure(outcome.reason);
       }
-      if (result.timedOut) {
-        return referenceFailure(`gh did not respond within ${TIMEOUT_MS / 1000} seconds`);
+      if (outcome.kind === 'exit-one') {
+        return referenceFailure(
+          withExcerptSuffix(PULL_REQUEST_READ_FAILURE_REASON, outcome.stderrText),
+        );
+      }
+      return decodePullRequestResponse(parsed.value, outcome.stdout);
+    },
+
+    async readPullRequestDiff(
+      input: string,
+    ): Promise<TevuResult<string, 'ReferenceResolutionError' | 'CancellationError'>> {
+      const parsed = parsePullRequestReference(input);
+      if (!parsed.ok) {
+        return parsed.error;
       }
 
-      switch (result.exitCode) {
-        case 0:
-          return decodePullRequestResponse(parsed, result.stdout);
-        case 4:
-          return referenceFailure(authenticationReason(parsed.host));
-        case 1:
-          return referenceFailure(
-            withExcerptSuffix(PULL_REQUEST_READ_FAILURE_REASON, result.stderr.text),
-          );
-        case 2:
-          return referenceFailure('read cancelled (gh exited with code 2)');
-        default:
-          return referenceFailure(
-            withExcerptSuffix(
-              unexpectedExitReason(result.exitCode, result.signal),
-              result.stderr.text,
-            ),
-          );
+      const outcome = await runPullRequestGh(
+        [
+          'gh',
+          'api',
+          '--hostname',
+          parsed.value.host,
+          '-H',
+          'Accept: application/vnd.github.diff',
+          `repos/${parsed.value.owner}/${parsed.value.repo}/pulls/${String(parsed.value.number)}`,
+        ],
+        parsed.value,
+        dependencies,
+      );
+
+      if (outcome.kind === 'cancelled') {
+        return cancellationFailure();
       }
+      if (outcome.kind === 'failure') {
+        return referenceFailure(outcome.reason);
+      }
+      if (outcome.kind === 'exit-one') {
+        return referenceFailure(
+          withExcerptSuffix(PULL_REQUEST_DIFF_READ_FAILURE_REASON, outcome.stderrText),
+        );
+      }
+      if (outcome.stdout.truncated) {
+        return referenceFailure(`the pull request diff exceeds ${MAX_CAPTURE_BYTES} bytes`);
+      }
+      return { ok: true, value: outcome.stdout.text };
     },
   };
 }
@@ -451,6 +543,14 @@ function decodePullRequestResponse(
   if (typeof url !== 'string') {
     return pullRequestFieldError('url');
   }
+  const title = first['title'];
+  if (typeof title !== 'string') {
+    return pullRequestFieldError('title');
+  }
+  const body = first['body'];
+  if (typeof body !== 'string') {
+    return pullRequestFieldError('body');
+  }
   const target = parseIssueUrlOnHost(url, parsed.host);
   if (target === null || target.number !== number) {
     return referenceFailure(
@@ -528,6 +628,8 @@ function decodePullRequestResponse(
     value: {
       key,
       url,
+      title,
+      body,
       state,
       targetBranch: baseRefName,
       targetTip,
