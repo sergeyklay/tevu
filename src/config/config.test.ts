@@ -11,7 +11,12 @@ import { createTask } from '@/application/create-task';
 import { validateConfig } from '@/application/validate';
 
 import { renderConfigDocument } from './document';
-import { canonicalConfigSerialization, loadConfig, parseConfigText } from './load';
+import {
+  canonicalConfigSerialization,
+  loadConfig,
+  parseConfigText,
+  resolveRepositoryPath,
+} from './load';
 import {
   AGENT_NAMES,
   agentNamesInUse,
@@ -2565,6 +2570,33 @@ describe('canonicalConfigSerialization', () => {
   });
 });
 
+describe('resolveRepositoryPath (AC-15, P11)', () => {
+  it('returns a GitHub entry path unchanged when resolveConfig already resolved it', () => {
+    const managedCloneRoot = '/cache/tevu';
+    const resolvedPath = join(managedCloneRoot, 'github.com/octo/app.git');
+
+    expect(
+      resolveRepositoryPath(
+        { path: resolvedPath, github: 'octo/app' },
+        '/config/dir',
+        managedCloneRoot,
+      ),
+    ).toBe(resolvedPath);
+  });
+
+  it('still resolves a relative managed-clone location against the managed-clone root', () => {
+    const managedCloneRoot = '/cache/tevu';
+
+    expect(
+      resolveRepositoryPath(
+        { path: 'github.com/octo/app.git', github: 'octo/app' },
+        '/config/dir',
+        managedCloneRoot,
+      ),
+    ).toBe(join(managedCloneRoot, 'github.com/octo/app.git'));
+  });
+});
+
 describe('createTask', () => {
   it('appends the task text and performs exactly one configuration replacement', async () => {
     const dependencies = buildTaskDependencies();
@@ -2841,6 +2873,44 @@ describe('createTask', () => {
 
       expect(task.base_commit).toBe('resolved-head');
       expect(resolveCommit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('GitHub repository entry (AC-15, P11)', () => {
+    it('locates the managed clone once for an existing GitHub-entry configuration file', async () => {
+      const managedCloneRoot = '/cache/tevu';
+      const configText = githubRepositoryConfigYaml({
+        outputDirectory: './runs',
+        github: 'octo/app',
+        command: 'opencode',
+      });
+      const validateSource = vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
+        ok: true as const,
+        value: {
+          repositoryId: repository.id,
+          requestedCommit: commit,
+          resolvedCommit: `resolved-${commit}`,
+        },
+      }));
+      const dependencies = buildTaskDependencies({
+        configStore: buildConfigStore({
+          readText: vi.fn(async () => ({ ok: true as const, value: configText })),
+        }),
+        git: buildGit({ validateSource }),
+        managedCloneRoot,
+      });
+
+      const task = expectOk(await createTask(buildTaskWizardInput(), dependencies));
+
+      expect(task.repo).toBe('sample-repo');
+      expect(validateSource).toHaveBeenCalledExactlyOnceWith(
+        {
+          id: 'sample-repo',
+          path: join(managedCloneRoot, 'github.com/octo/app.git'),
+          github: 'octo/app',
+        },
+        'abc123',
+      );
     });
   });
 });

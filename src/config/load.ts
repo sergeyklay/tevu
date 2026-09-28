@@ -84,7 +84,7 @@ export function resolveRepositoryPath(
   if (github !== undefined) {
     return managedCloneRoot === undefined || repositoryPath === undefined
       ? undefined
-      : path.join(managedCloneRoot, repositoryPath);
+      : path.resolve(managedCloneRoot, repositoryPath);
   }
   return repositoryPath === undefined
     ? undefined

@@ -712,4 +712,47 @@ describe('resolveReferenceSolution for a GitHub entry (AC-8, AC-13, AC-20, prope
     expect(clones.fetchCommits).not.toHaveBeenCalled();
     expect(clones.fetchBranchesAndTags).not.toHaveBeenCalled();
   });
+
+  it('locates the managed clone once for a commit reference on an already-loaded GitHub entry (P11)', async () => {
+    const managedCloneRoot = '/cache/tevu/repositories';
+    const resolvedPath = `${managedCloneRoot}/github.com/octo/app.git`;
+    const resolveCommit = vi.fn(async (repository: RepositoryDefinition, revision: string) => {
+      if (revision === `${COMMIT}^1`) {
+        return { kind: 'found' as const, commit: PARENT };
+      }
+      return repository.path === resolvedPath
+        ? { kind: 'found' as const, commit: COMMIT }
+        : { kind: 'not-found' as const };
+    });
+    const pullRequests: PullRequestReader = {
+      readPullRequest: vi.fn(async () => {
+        throw new Error('unexpected pull-request read for a commit reference');
+      }),
+    };
+    const dependencies = buildGitHubDependencies(
+      failingManagedCloneAdapter(),
+      resolveCommit,
+      pullRequests,
+    );
+
+    const result = await resolveReferenceSolution(
+      buildGitHubRequest({
+        identifier: COMMIT,
+        repository: { id: 'upstream', github: 'octo/app', path: resolvedPath },
+      }),
+      dependencies,
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        reference: { kind: 'commit', identifier: COMMIT, commits: [COMMIT] },
+        proposedBase: { commit: PARENT, basis: 'commit-parent' },
+      },
+    });
+    expect(resolveCommit).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'upstream', path: resolvedPath }),
+      COMMIT,
+    );
+  });
 });
