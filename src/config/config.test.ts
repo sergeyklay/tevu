@@ -15,6 +15,7 @@ import {
   canonicalConfigSerialization,
   loadConfig,
   parseConfigText,
+  resolveBootstrapModelCallConfig,
   resolveRepositoryPath,
 } from './load';
 import {
@@ -263,6 +264,14 @@ function buildFullGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspac
       error: {
         kind: 'ArtifactError' as const,
         operation: 'initialize-repository',
+        reason: 'not used in these tests',
+      },
+    })),
+    diffCommit: vi.fn(async () => ({
+      ok: false as const,
+      error: {
+        kind: 'ArtifactError' as const,
+        operation: 'diff-reference-commit',
         reason: 'not used in these tests',
       },
     })),
@@ -1061,10 +1070,11 @@ describe('TevuConfigSchema', () => {
   });
 
   describe('roles', () => {
-    it('parses CONFIG_TEMPLATE with roles.grader declared', () => {
+    it('parses CONFIG_TEMPLATE with roles.criteria and roles.grader declared', () => {
       const parsed = expectOk(parseConfigText(CONFIG_TEMPLATE));
 
       expect(parsed.roles).toEqual({
+        criteria: { model: 'openai/your-criteria-model', effort: 'high', agent: 'opencode' },
         grader: { model: 'openai/your-grader-model', effort: 'medium', agent: 'opencode' },
       });
     });
@@ -2770,6 +2780,57 @@ describe('createTask', () => {
     const replaceText = vi.mocked(dependencies.configStore.replaceText);
     expect(replaceText).toHaveBeenCalledTimes(1);
     expect(replaceText.mock.calls[0]?.[1]).toContain('new-task');
+  });
+
+  it('resolveBootstrapModelCallConfig matches what loadConfig resolves for the file createTask writes (P10)', async () => {
+    const configPath = '/tmp/tevu/tevu.yaml';
+    const bootstrap: Omit<TevuConfigInput, 'version' | 'tasks'> = {
+      run: buildRunSettings(),
+      agents: buildAgents(),
+      repositories: [buildRepository()],
+      models: [
+        buildModel(),
+        buildModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max' }),
+      ],
+      roles: {
+        criteria: buildModelRole({ model: 'openai/criteria-model', effort: 'high' }),
+        grader: buildModelRole({
+          model: 'openai/grader-model',
+          effort: 'medium',
+          agent: 'opencode',
+        }),
+      },
+    };
+    let writtenText: string | undefined;
+    const dependencies = buildTaskDependencies({
+      configStore: buildConfigStore({
+        exists: vi.fn(async () => false),
+        replaceText: vi.fn(async (_path: string, text: string) => {
+          writtenText = text;
+          return { ok: true as const, value: undefined };
+        }),
+      }),
+    });
+
+    await createTask(buildTaskWizardInput({ configPath, bootstrap }), dependencies);
+    if (writtenText === undefined) {
+      throw new Error('expected createTask to write a configuration');
+    }
+    const text = writtenText;
+
+    const loaded = expectOk(
+      await loadConfig(
+        configPath,
+        buildConfigStore({ readText: vi.fn(async () => ({ ok: true as const, value: text })) }),
+        undefined,
+      ),
+    );
+    const resolved = resolveBootstrapModelCallConfig(bootstrap, configPath);
+
+    expect(resolved.agents).toEqual(loaded.agents);
+    expect(resolved.roles).toEqual(loaded.roles);
+    expect(resolved.run.timeout).toBe(loaded.run.timeout);
+    expect(resolved.run.stop_grace).toBe(loaded.run.stop_grace);
   });
 
   it('reports a missing configuration when no bootstrap answers were captured', async () => {

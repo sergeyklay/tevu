@@ -7,7 +7,7 @@
  * Entry point: {@link gradeCase}.
  */
 
-import { callModelRole } from '@/application/model-call';
+import { callModelRole, describeModelCallFailure } from '@/application/model-call';
 import { unavailableAgentMetrics } from '@/domain/types';
 import {
   buildGraderPrompt,
@@ -22,7 +22,6 @@ import type {
   Redactor,
   TaskDefinition,
   TevuConfig,
-  TevuError,
 } from '@/domain/types';
 
 /** Everything one grading call needs; `patch` is the case's captured solution patch. */
@@ -39,40 +38,6 @@ export type GradeCaseRequest = {
 export type GradeCaseOutcome =
   | { status: 'graded'; grading: CaseGrading; retainedDirectory: string | null }
   | { status: 'cancelled' };
-
-/** Identifier-only text for a grader call failure; never includes a secret value. */
-export function describeGraderCallFailure(
-  error: Extract<
-    TevuError,
-    {
-      kind:
-        | 'ModelCallError'
-        | 'AgentProtocolError'
-        | 'PrerequisiteError'
-        | 'ArtifactError'
-        | 'ConfigValidationError';
-    }
-  >,
-): string {
-  switch (error.kind) {
-    case 'ModelCallError':
-      return `ModelCallError (${error.cause}): ${error.reason}`;
-    case 'AgentProtocolError':
-      return `AgentProtocolError: ${error.reason}`;
-    case 'PrerequisiteError':
-      return `PrerequisiteError: "${error.tool}" expected ${error.expected}${
-        error.actual === undefined ? '' : `, actual ${error.actual}`
-      }`;
-    case 'ArtifactError':
-      return `ArtifactError: ${error.operation}: ${error.reason}`;
-    case 'ConfigValidationError': {
-      const [first] = error.findings;
-      return first === undefined
-        ? 'ConfigValidationError: no finding was reported'
-        : `ConfigValidationError: ${first.identifier}: ${first.message}`;
-    }
-  }
-}
 
 /**
  * Resolves the declared grader role and the task's graded checks.
@@ -148,7 +113,7 @@ export async function gradeCase(
     if (result.error.kind === 'CancellationError') {
       return { status: 'cancelled' };
     }
-    return noReply(`the grader call failed: ${describeGraderCallFailure(result.error)}`);
+    return noReply(`the grader call failed: ${describeModelCallFailure(result.error)}`);
   }
   return {
     status: 'graded',

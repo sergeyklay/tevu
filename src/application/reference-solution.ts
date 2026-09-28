@@ -51,6 +51,8 @@ export type ResolvedReferenceSolution = {
   /** Present only for a pull request. */
   pullRequest?: {
     key: string;
+    title: string;
+    body: string;
     state: PullRequestState;
     targetBranch: string;
     /** Present when defined; the Closed and Mergeability unknown hints name it. */
@@ -311,6 +313,8 @@ async function resolvePullRequest(
       ...(proposedBase === undefined ? {} : { proposedBase }),
       pullRequest: {
         key: pr.key,
+        title: pr.title,
+        body: pr.body,
         state: pr.state,
         targetBranch: pr.targetBranch,
         ...(parentHash === undefined ? {} : { firstCommitParent: parentHash }),

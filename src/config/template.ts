@@ -64,14 +64,18 @@ models:
     effort: high
 
 # --- Roles ------------------------------------------------------------------
-# Models tevu uses for its own work rather than comparing them.
+# Models tevu uses for its own work rather than comparing them. A role's
+# provider credential goes in its agent's secrets (agents.opencode.secrets),
+# which every case agent of that agent also receives.
 roles:
+  criteria:                       # drafts criteria from a reference solution in tevu task add
+    model: openai/your-criteria-model
+    effort: high                  # a variant the agent provides without a repository
+    # agent: opencode             # needed only when more than one agent is configured
   grader:                         # grades each graded check after a case's checks run
     model: openai/your-grader-model
     effort: medium                # a variant the agent provides without a repository
     # agent: opencode             # needed only when more than one agent is configured
-    # Its provider credential goes in that agent's secrets (agents.opencode.secrets),
-    # which every case agent of that agent also receives.
 
 # --- Tasks ------------------------------------------------------------------
 tasks:

@@ -550,6 +550,16 @@ function createHarness(config: TevuConfig) {
         },
       };
     },
+    async diffCommit() {
+      return {
+        ok: false,
+        error: {
+          kind: 'ArtifactError',
+          operation: 'diff-reference-commit',
+          reason: 'not used in these tests',
+        },
+      };
+    },
   };
 
   let heldRuns: PromiseWithResolvers<void> | null = null;

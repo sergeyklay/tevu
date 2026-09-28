@@ -10,7 +10,7 @@ tevu reads UTF-8 YAML with `version: 1`. Unknown fields are rejected at every le
 tevu config example > tevu.yaml
 ```
 
-The shell creates the file, or replaces an existing one, before tevu starts; tevu itself writes no file. This template compares two model entries at different reasoning efforts on one task using a graded check, a command check, and a manual check. The repository path, commit, model identifiers, efforts, grader model, and credential-variable name are illustrative values, not a ready-to-run configuration. The [benchmark guide](../guides/run-benchmark.md) covers setup for a real task.
+The shell creates the file, or replaces an existing one, before tevu starts; tevu itself writes no file. This template compares two model entries at different reasoning efforts on one task using a graded check, a command check, and a manual check. The repository path, commit, model identifiers, efforts, criteria and grader models, and credential-variable name are illustrative values, not a ready-to-run configuration. The [benchmark guide](../guides/run-benchmark.md) covers setup for a real task.
 
 ```yaml
 # tevu.yaml: compare coding models on tasks from your own backlog.
@@ -78,14 +78,18 @@ models:
     effort: high
 
 # --- Roles ------------------------------------------------------------------
-# Models tevu uses for its own work rather than comparing them.
+# Models tevu uses for its own work rather than comparing them. A role's
+# provider credential goes in its agent's secrets (agents.opencode.secrets),
+# which every case agent of that agent also receives.
 roles:
+  criteria:                       # drafts criteria from a reference solution in tevu task add
+    model: openai/your-criteria-model
+    effort: high                  # a variant the agent provides without a repository
+    # agent: opencode             # needed only when more than one agent is configured
   grader:                         # grades each graded check after a case's checks run
     model: openai/your-grader-model
     effort: medium                # a variant the agent provides without a repository
     # agent: opencode             # needed only when more than one agent is configured
-    # Its provider credential goes in that agent's secrets (agents.opencode.secrets),
-    # which every case agent of that agent also receives.
 
 # --- Tasks ------------------------------------------------------------------
 tasks:
@@ -154,7 +158,7 @@ tasks:
 | `trackers.jira` | Optional Jira Cloud connection settings |
 | `repositories` | At least one entry, each `{id, path}` (a local repository) or `{id, github}` (a GitHub repository tevu clones itself), optionally carrying `setup`; see [GitHub repositories](#github-repositories) |
 | `models` | At least two `{id, model, effort, agent}` entries |
-| `roles` | Optional; the `criteria` and `grader` model roles, covered under [Model roles](#model-roles); `grader` is read by `tevu run` |
+| `roles` | Optional; the `criteria` and `grader` model roles, covered under [Model roles](#model-roles); `grader` is read by `tevu run`, `criteria` by `tevu task add` |
 | `tasks` | At least one task |
 
 Paths resolve relative to the configuration file. Resolution uses the directory of the path tevu read, without following symbolic links; tevu does not expand `~`. A GitHub repository entry's `github` value does not resolve against the file at all: its directory is the managed-clone location under the managed-clone root, covered under [GitHub repositories](#github-repositories). When the configuration lives in the user configuration directory rather than the current directory, use absolute paths for `run.output_dir`, `repositories[].path`, `checks.overlay`, and a path-form `agents.opencode.command`, since a relative value there resolves against the user configuration directory, not the directory tevu ran from. Bare executable names are found through `PATH`. IDs start with a lowercase letter, contain lowercase letters, digits, or hyphens, and have at most 64 characters. IDs are unique within their collection.
@@ -397,7 +401,7 @@ roles:
 | `roles.<role>.effort` | Yes | None | Non-empty string, passed verbatim as OpenCode's `--variant`, naming a variant the agent provides without a repository: built-in or provider-defined, never one defined only in a repository's `opencode.json` |
 | `roles.<role>.agent` | No | `opencode` | A key of `agents` |
 
-The two roles are configured and used independently: each is required only by the command that reads it, and a configuration declaring neither is valid. `tevu run` is the reader of `roles.grader`, calling it once per case whose task declares a graded check; see [Graded checks](#graded-checks). They stay separate settings rather than one shared model because a model grading or drafting for its own family tends to favor it. The same model may serve a model role and a model entry; tevu does not forbid using one model for both.
+The two roles are configured and used independently: each is required only by the command that reads it, and a configuration declaring neither is valid. `tevu run` is the reader of `roles.grader`, calling it once per case whose task declares a graded check; see [Graded checks](#graded-checks). `tevu task add` is the reader of `roles.criteria`, calling it at most once per task and only for a task with a reference solution; no command requires it, and without it the setup interview asks for acceptance criteria and a Definition of Done by hand. They stay separate settings rather than one shared model because a model grading or drafting for its own family tends to favor it. The same model may serve a model role and a model entry; tevu does not forbid using one model for both.
 
 A model role's provider credential belongs in its agent block's `secrets`, not in the role itself; every case agent of that block receives the same credential, so a role on a provider no model entry uses exposes its credential to every benchmarked case agent of that agent. Neither the loader nor `tevu validate` checks a role's credential or effort against its provider: a missing credential fails the call at run time, and an unknown effort runs at the model's default effort.
 
@@ -425,8 +429,10 @@ Each import makes one `gh issue view` call with a 30-second limit and no retries
 
 | Command | Network use |
 | --- | --- |
-| `tevu task add` | Jira and gh as described above; clone and fetch for a selected GitHub repository entry |
+| `tevu task add` | Jira and gh as described above; clone and fetch for a selected GitHub repository entry; with `roles.criteria` declared and a reference solution, one more `gh api` call for a pull-request reference's diff, and one model session to draft criteria |
 | `tevu run`, `tevu run --dry-run` | Preparation clone and fetch, only for a missing clone or commit; model sessions in `run` only |
 | `tevu validate`, `tevu assess`, `tevu report`, `tevu config example` | None; none of them runs gh |
 
 A pull-request reference answer uses this same gh setup and makes one `gh api graphql` call, also with a 30-second limit. GitHub lists at most 250 commits of a pull request; tevu records a pull request only when it can read its complete commit list.
+
+Drafting criteria from a pull-request reference makes one more `gh api` call, reading the pull request's unified diff through GitHub's diff media type, under the same 30-second limit. Drafting from a commit reference reads its diff from the repository directly, through no gh call at all.

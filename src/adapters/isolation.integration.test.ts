@@ -648,6 +648,41 @@ describe('sealed Git case materialization', () => {
   });
 });
 
+describe('diffCommit (AC-1, section 3.3.6)', () => {
+  it('returns the unified diff a commit introduces against its first parent', async () => {
+    const repositoryPath = await createBaseRepository('diff-commit-source');
+    await writeFile(join(repositoryPath, 'feature.txt'), 'feature content\n');
+    await runGit(repositoryPath, ['add', '-A']);
+    await runGit(repositoryPath, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'add feature']);
+    const commit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
+    const adapter = createGitAdapter();
+
+    const result = await adapter.diffCommit({ id: 'repo-1', path: repositoryPath }, commit);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toContain('diff --git a/feature.txt b/feature.txt');
+    expect(result.value).toContain('+feature content');
+  });
+
+  it('returns an ArtifactError for a commit with no parent', async () => {
+    const repositoryPath = await createBaseRepository('diff-commit-root');
+    const commit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
+    const adapter = createGitAdapter();
+
+    const result = await adapter.diffCommit({ id: 'repo-1', path: repositoryPath }, commit);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: 'ArtifactError',
+        operation: 'diff-reference-commit',
+        reason: expect.any(String),
+      },
+    });
+  });
+});
+
 async function createBaseRepository(name: string): Promise<string> {
   const path = join(testDirectory, name);
   await mkdir(path, { recursive: true });

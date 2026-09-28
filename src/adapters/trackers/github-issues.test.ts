@@ -333,7 +333,7 @@ describe('createGitHubIssuesAdapter gh exit codes', () => {
     {
       description: 'a truncated capture',
       stdout: buildCapture('', true),
-      expectedDetail: 'output exceeds 1048576 bytes',
+      expectedDetail: 'output exceeds 67108864 bytes',
     },
     {
       description: 'invalid JSON',
@@ -482,7 +482,7 @@ describe('createGitHubIssuesAdapter gh environment and request shape', () => {
       ]);
       expect(request.timeoutMs).toBe(30_000);
       expect(request.terminationGraceMs).toBe(3_000);
-      expect(request.maxCaptureBytes).toBe(1_048_576);
+      expect(request.maxCaptureBytes).toBe(67_108_864);
       expect(request.cancellation).toBe(cancellation);
 
       expect(request.environment.GH_TOKEN).toBe('gh-token-value');
@@ -588,6 +588,8 @@ function buildCommitNode(oid: string, parentOids: readonly string[] = []): unkno
 type PullRequestPageOverrides = {
   number?: number;
   url?: string;
+  title?: unknown;
+  body?: unknown;
   state?: unknown;
   headRefOid?: unknown;
   baseRefName?: unknown;
@@ -605,6 +607,8 @@ function buildPullRequestPage(overrides: PullRequestPageOverrides = {}): unknown
         pullRequest: {
           number: overrides.number ?? 42,
           url: overrides.url ?? 'https://github.com/octo/repo/pull/42',
+          title: overrides.title === undefined ? 'Add export button' : overrides.title,
+          body: overrides.body === undefined ? 'Users need an export button' : overrides.body,
           state: overrides.state ?? 'OPEN',
           headRefOid: overrides.headRefOid ?? HEAD_HASH,
           baseRefName: overrides.baseRefName ?? 'main',
@@ -696,6 +700,18 @@ describe('createGitHubPullRequestReader reference grammar', () => {
 
     expect(runGh).toHaveBeenCalledTimes(1);
   });
+
+  it('captures up to 67108864 bytes (E3)', async () => {
+    const runGh = vi.fn(
+      fakeRun(buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage()]) })),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    await reader.readPullRequest('octo/repo#42');
+
+    const request = vi.mocked(runGh).mock.calls[0]?.[0];
+    expect(request?.maxCaptureBytes).toBe(67_108_864);
+  });
 });
 
 describe('createGitHubPullRequestReader decoding', () => {
@@ -708,6 +724,8 @@ describe('createGitHubPullRequestReader decoding', () => {
     expect(snapshot).toEqual({
       key: 'octo/repo#42',
       url: 'https://github.com/octo/repo/pull/42',
+      title: 'Add export button',
+      body: 'Users need an export button',
       state: 'open',
       targetBranch: 'main',
       targetTip: TARGET_TIP_HASH,
@@ -717,6 +735,40 @@ describe('createGitHubPullRequestReader decoding', () => {
       commits: [{ hash: HEAD_HASH, parents: [PARENT_HASH] }],
     });
   });
+
+  it.each([
+    { field: 'title', overrides: { title: 42 } },
+    { field: 'body', overrides: { body: 42 } },
+  ])('fails field validation when $field is not a string', async ({ field, overrides }) => {
+    const runGh = fakeRun(
+      buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage(overrides)]) }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe(
+      `unexpected response from gh: field "${field}" is missing or invalid`,
+    );
+  });
+
+  it.each(['title', 'body'] as const)(
+    'fails field validation when %s is missing entirely',
+    async (field) => {
+      const page = buildPullRequestPage() as {
+        data: { repository: { pullRequest: Record<string, unknown> } };
+      };
+      delete page.data.repository.pullRequest[field];
+      const runGh = fakeRun(buildLaunchedResult({ stdout: pagesStdout([page]) }));
+      const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+      const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+      expect(error.reason).toBe(
+        `unexpected response from gh: field "${field}" is missing or invalid`,
+      );
+    },
+  );
 
   it("keeps a merged pull request's merge commit only when state is merged", async () => {
     const runGh = fakeRun(
@@ -1012,6 +1064,219 @@ describe('createGitHubPullRequestReader cancellation', () => {
     const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
 
     const result = await reader.readPullRequest('octo/repo#42');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe('CancellationError');
+    }
+  });
+});
+
+type ReadPullRequestDiffResult = TevuResult<
+  string,
+  'ReferenceResolutionError' | 'CancellationError'
+>;
+
+function expectDiffOk(result: ReadPullRequestDiffResult): string {
+  if (!result.ok) {
+    throw new Error(`expected success, got ${JSON.stringify(result.error)}`);
+  }
+  return result.value;
+}
+
+function expectDiffReferenceResolutionError(result: ReadPullRequestDiffResult): Extract<
+  ReadPullRequestDiffResult,
+  { ok: false }
+>['error'] & {
+  kind: 'ReferenceResolutionError';
+} {
+  if (result.ok) {
+    throw new Error(
+      `expected a ReferenceResolutionError, got success: ${JSON.stringify(result.value)}`,
+    );
+  }
+  if (result.error.kind !== 'ReferenceResolutionError') {
+    throw new Error(`expected a ReferenceResolutionError, got ${result.error.kind}`);
+  }
+  return result.error;
+}
+
+describe('createGitHubPullRequestReader.readPullRequestDiff (E2, section 3.3.6)', () => {
+  it('rejects a malformed reference without calling gh', async () => {
+    const runGh = vi.fn(fakeRun(buildLaunchedResult()));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectDiffReferenceResolutionError(await reader.readPullRequestDiff('octo/repo'));
+
+    expect(error.reason).toBe(
+      'reference must be OWNER/REPO#NUMBER or https://HOST/OWNER/REPO/pull/NUMBER',
+    );
+    expect(runGh).not.toHaveBeenCalled();
+  });
+
+  it('rejects an issue reference before calling gh', async () => {
+    const runGh = vi.fn(fakeRun(buildLaunchedResult()));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectDiffReferenceResolutionError(
+      await reader.readPullRequestDiff('https://github.com/octo/repo/issues/5'),
+    );
+
+    expect(error.reason).toBe('the reference points to an issue, not a pull request');
+    expect(runGh).not.toHaveBeenCalled();
+  });
+
+  it('builds the documented argv requesting the diff media type', async () => {
+    const runGh = vi.fn(
+      fakeRun(buildLaunchedResult({ stdout: buildCapture('diff --git a/x b/x') })),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    await reader.readPullRequestDiff('octo/repo#42');
+
+    expect(runGh).toHaveBeenCalledTimes(1);
+    const request = vi.mocked(runGh).mock.calls[0]?.[0];
+    expect(request?.argv).toEqual([
+      'gh',
+      'api',
+      '--hostname',
+      'github.com',
+      '-H',
+      'Accept: application/vnd.github.diff',
+      'repos/octo/repo/pulls/42',
+    ]);
+    expect(request?.timeoutMs).toBe(30_000);
+    expect(request?.terminationGraceMs).toBe(3_000);
+    expect(request?.maxCaptureBytes).toBe(67_108_864);
+  });
+
+  it('returns the stdout text on a successful read', async () => {
+    const runGh = fakeRun(buildLaunchedResult({ stdout: buildCapture('diff --git a/x b/x\n') }));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const diff = expectDiffOk(await reader.readPullRequestDiff('octo/repo#42'));
+
+    expect(diff).toBe('diff --git a/x b/x\n');
+  });
+
+  it('reports the diff as too large when the capture is truncated', async () => {
+    const runGh = fakeRun(buildLaunchedResult({ stdout: buildCapture('', true) }));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectDiffReferenceResolutionError(
+      await reader.readPullRequestDiff('octo/repo#42'),
+    );
+
+    expect(error.reason).toBe('the pull request diff exceeds 67108864 bytes');
+  });
+
+  it('reports a read failure with a stderr excerpt on exit code 1', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({ exitCode: 1, stderr: buildCapture('HTTP 406: Not Acceptable') }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectDiffReferenceResolutionError(
+      await reader.readPullRequestDiff('octo/repo#42'),
+    );
+
+    expect(error.reason).toBe(
+      'gh could not read the pull request diff (not found, no access, too large, or no connection): HTTP 406: Not Acceptable',
+    );
+  });
+
+  it('reports gh as missing when the launch failure code is ENOENT', async () => {
+    const runGh = fakeRun({ launched: false, code: 'ENOENT', reason: 'spawn gh ENOENT' });
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectDiffReferenceResolutionError(
+      await reader.readPullRequestDiff('octo/repo#42'),
+    );
+
+    expect(error.reason).toBe(
+      'GitHub CLI (gh) is not installed or not on PATH; install it from https://cli.github.com or enter a commit reference instead',
+    );
+  });
+
+  it('reports the launch failure code for any other launch failure', async () => {
+    const runGh = fakeRun({ launched: false, code: 'EACCES', reason: 'spawn gh EACCES' });
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectDiffReferenceResolutionError(
+      await reader.readPullRequestDiff('octo/repo#42'),
+    );
+
+    expect(error.reason).toBe('GitHub CLI (gh) could not be started: EACCES');
+  });
+
+  it('reports a timeout when gh does not respond within the deadline', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({ timedOut: true, exitCode: null, signal: 'SIGTERM' }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectDiffReferenceResolutionError(
+      await reader.readPullRequestDiff('octo/repo#42'),
+    );
+
+    expect(error.reason).toBe('gh did not respond within 30 seconds');
+  });
+
+  it('reports an authentication failure on exit code 4', async () => {
+    const runGh = fakeRun(buildLaunchedResult({ exitCode: 4 }));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectDiffReferenceResolutionError(
+      await reader.readPullRequestDiff('octo/repo#42'),
+    );
+
+    expect(error.reason).toBe('gh is not authenticated; run gh auth login');
+  });
+
+  it("reports gh's own cancellation exit code as a read cancellation", async () => {
+    const runGh = fakeRun(buildLaunchedResult({ exitCode: 2 }));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectDiffReferenceResolutionError(
+      await reader.readPullRequestDiff('octo/repo#42'),
+    );
+
+    expect(error.reason).toBe('read cancelled (gh exited with code 2)');
+  });
+
+  it('reports an unexpected exit code through the generic exit reason', async () => {
+    const runGh = fakeRun(buildLaunchedResult({ exitCode: 7 }));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectDiffReferenceResolutionError(
+      await reader.readPullRequestDiff('octo/repo#42'),
+    );
+
+    expect(error.reason).toBe('gh exited unexpectedly (exit code 7)');
+  });
+
+  it('returns a cancellation failure before launch without calling gh', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const runGh = vi.fn(fakeRun(buildLaunchedResult()));
+    const reader = createGitHubPullRequestReader(
+      buildDependencies({ runGh, cancellation: controller.signal }),
+    );
+
+    const result = await reader.readPullRequestDiff('octo/repo#42');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe('CancellationError');
+    }
+    expect(runGh).not.toHaveBeenCalled();
+  });
+
+  it('returns a cancellation failure when gh reports it was cancelled during the run', async () => {
+    const runGh = fakeRun(buildLaunchedResult({ cancelled: true }));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const result = await reader.readPullRequestDiff('octo/repo#42');
 
     expect(result.ok).toBe(false);
     if (!result.ok) {

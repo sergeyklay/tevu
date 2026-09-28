@@ -12,6 +12,7 @@
 import { confirm, intro, isCancel, log, note, select, text } from '@clack/prompts';
 
 import { describeManagedCloneError } from '@/application/managed-clone';
+import { describeReferenceIdentityInText } from '@/application/source-commit-in-prompt';
 import {
   AGENT_NAMES,
   DurationSchema,
@@ -26,6 +27,11 @@ import {
 
 import type { AssessableCheckSummary, AssessmentCaseContext } from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
+import type {
+  CriteriaDraft,
+  CriteriaDraftOutcome,
+  CriteriaDraftRequest,
+} from '@/application/draft-criteria';
 import type { ManagedCommitsOutcome } from '@/application/managed-clone';
 import type { ResolvedReferenceSolution } from '@/application/reference-solution';
 import type {
@@ -43,6 +49,7 @@ import type {
   JiraTrackerSettings,
   LoadConfigErrorKind,
   RepositoryDefinition,
+  TaskReference,
   TevuConfig,
   TevuError,
   TevuResult,
@@ -104,6 +111,10 @@ export type TaskWizardDependencies = {
   >;
   now: () => Date;
   redact: (textContent: string) => string;
+  /** Drafts acceptance criteria and a Definition of Done from a resolved reference solution. */
+  draftCriteria: (
+    request: Omit<CriteriaDraftRequest, 'configPath'>,
+  ) => Promise<CriteriaDraftOutcome>;
 };
 
 /** Error kinds the task wizard can return. */
@@ -456,7 +467,8 @@ async function interviewBootstrap(
   const jira = await interviewJiraSettings(io, requireJira, agentNames);
   const repositories = await interviewRepositories(io);
   const models = await interviewModels(io);
-  const grader = await interviewGraderRole(io);
+  const grader = await interviewModelRole(io, 'grader');
+  const criteria = await interviewModelRole(io, 'criteria');
   return {
     run: {
       output_dir: outputDirectory,
@@ -469,40 +481,66 @@ async function interviewBootstrap(
     ...(jira === undefined ? {} : { trackers: { jira } }),
     repositories,
     models,
-    ...(grader === undefined ? {} : { roles: { grader } }),
+    ...(criteria === undefined && grader === undefined
+      ? {}
+      : {
+          roles: {
+            ...(criteria === undefined ? {} : { criteria }),
+            ...(grader === undefined ? {} : { grader }),
+          },
+        }),
   };
 }
 
-/** Captures an optional `roles.grader` declaration during bootstrap; absent on decline. */
-async function interviewGraderRole(
+/** One role's setup-interview texts: the confirm, the credential info line, and the two follow-up questions. */
+type ModelRoleQuestionText = {
+  confirm: string;
+  credentialInfo: string;
+  modelQuestion: string;
+  effortQuestion: string;
+};
+
+const MODEL_ROLE_QUESTION_TEXT: Record<'criteria' | 'grader', ModelRoleQuestionText> = {
+  grader: {
+    confirm: 'Declare a grader model for graded checks?',
+    credentialInfo: `The grader's provider credential must be one of the secret variables of agent "${AGENT_NAMES[0]}"; every case agent of "${AGENT_NAMES[0]}" receives it too.`,
+    modelQuestion: 'Grader model (provider/model)',
+    effortQuestion: 'Grader reasoning effort (a variant the agent provides without a repository)',
+  },
+  criteria: {
+    confirm: 'Declare a criteria model to draft criteria from a reference solution?',
+    credentialInfo: `The criteria model's provider credential must be one of the secret variables of agent "${AGENT_NAMES[0]}"; every case agent of "${AGENT_NAMES[0]}" receives it too.`,
+    modelQuestion: 'Criteria model (provider/model)',
+    effortQuestion: 'Criteria reasoning effort (a variant the agent provides without a repository)',
+  },
+};
+
+/** Captures an optional `roles.<roleName>` declaration during bootstrap; absent on decline. */
+async function interviewModelRole(
   io: WizardIo,
+  roleName: 'criteria' | 'grader',
 ): Promise<{ model: `${string}/${string}`; effort: string } | undefined> {
-  const wantsGrader = await askConfirm(io, {
-    message: 'Declare a grader model for graded checks?',
-    initialValue: true,
-  });
-  if (!wantsGrader) {
+  const texts = MODEL_ROLE_QUESTION_TEXT[roleName];
+  const wantsRole = await askConfirm(io, { message: texts.confirm, initialValue: true });
+  if (!wantsRole) {
     return undefined;
   }
-  log.info(
-    `The grader's provider credential must be one of the secret variables of agent "${AGENT_NAMES[0]}"; every case agent of "${AGENT_NAMES[0]}" receives it too.`,
-    promptOptions(io),
-  );
-  const model = await askGraderModel(io);
+  log.info(texts.credentialInfo, promptOptions(io));
+  const model = await askModelRoleIdentifier(io, texts.modelQuestion);
   const effort = await askText(io, {
-    message: 'Grader reasoning effort (a variant the agent provides without a repository)',
+    message: texts.effortQuestion,
     validate: validateNonWhitespace,
   });
   return { model, effort };
 }
 
-/** Asks the grader model question, re-prompting until the answer is a valid `provider/model` identifier. */
-async function askGraderModel(io: WizardIo): Promise<`${string}/${string}`> {
+/** Asks a model-role question, re-prompting until the answer is a valid `provider/model` identifier. */
+async function askModelRoleIdentifier(
+  io: WizardIo,
+  message: string,
+): Promise<`${string}/${string}`> {
   for (;;) {
-    const value = await askText(io, {
-      message: 'Grader model (provider/model)',
-      validate: validateModel,
-    });
+    const value = await askText(io, { message, validate: validateModel });
     if (isModelIdentifier(value)) {
       return value;
     }
@@ -742,8 +780,17 @@ async function interviewTask(
       : [referencedVariableName(jiraSettings.email), referencedVariableName(jiraSettings.token)],
   );
   const excludedNames = new Set([...agentNames, ...jiraNames]);
-  const acceptance = await interviewChecks(io, 'acceptance', usedCheckIds, excludedNames);
-  const done = await interviewChecks(io, 'done', usedCheckIds, excludedNames);
+  const { acceptance, done } = await interviewCriteria(
+    io,
+    dependencies,
+    existing,
+    bootstrap,
+    resolvedReference,
+    selectedRepository,
+    description,
+    usedCheckIds,
+    excludedNames,
+  );
   const task: TaskInput = {
     id: taskId,
     title,
@@ -1186,14 +1233,31 @@ async function interviewReadiness(io: WizardIo): Promise<string[]> {
   }
 }
 
-/** Collects one check collection until it contains at least one required check. */
+/**
+ * Collects one check collection until it contains at least one required
+ * check.
+ *
+ * Starts from a copy of `drafted`; when it is non-empty, asks whether to add
+ * another check of this collection before entering today's loop, so an
+ * accepted draft with no further checks needs no additional question.
+ */
 async function interviewChecks(
   io: WizardIo,
   collection: 'acceptance' | 'done',
   usedCheckIds: Set<string>,
   excludedNames: ReadonlySet<string>,
+  drafted: CheckInput[] = [],
 ): Promise<CheckInput[]> {
-  const checks: CheckInput[] = [];
+  const checks: CheckInput[] = [...drafted];
+  if (drafted.length > 0) {
+    const wantsMore = await askConfirm(io, {
+      message: `Add another ${collection} check?`,
+      initialValue: false,
+    });
+    if (!wantsMore) {
+      return checks;
+    }
+  }
   for (;;) {
     const id = await askText(io, {
       message: `New ${collection} check ID`,
@@ -1292,6 +1356,338 @@ async function interviewCommandEvaluator(
   };
 }
 
+/** One check collection's checks, as `interviewCriteria` hands them to `interviewTask`. */
+type DraftedTaskChecks = { acceptance: CheckInput[]; done: CheckInput[] };
+
+/** The loaded configuration or the captured bootstrap answers, for a criteria-drafting request. */
+function currentConfiguration(
+  existing: TevuConfig | null,
+  bootstrap: Omit<TevuConfigInput, 'version' | 'tasks'> | undefined,
+): CriteriaDraftRequest['configuration'] {
+  if (existing !== null) {
+    return { kind: 'loaded', config: existing };
+  }
+  if (bootstrap === undefined) {
+    throw new Error(
+      'unreachable: interviewTask always provides bootstrap answers when no configuration exists',
+    );
+  }
+  return { kind: 'bootstrap', answers: bootstrap };
+}
+
+/**
+ * Runs the criteria step: without a resolved reference, or without a
+ * declared `roles.criteria`, falls through to writing both check collections
+ * by hand. With both, drafts from the reference solution, shows the
+ * mandatory draft review, and hands an accepted draft's items to the
+ * follow-on check questions as the starting checks of each collection.
+ */
+async function interviewCriteria(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+  existing: TevuConfig | null,
+  bootstrap: Omit<TevuConfigInput, 'version' | 'tasks'> | undefined,
+  resolvedReference: ResolvedReferenceSolution | undefined,
+  repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>,
+  description: string,
+  usedCheckIds: Set<string>,
+  excludedNames: ReadonlySet<string>,
+): Promise<DraftedTaskChecks> {
+  const byHand = async (): Promise<DraftedTaskChecks> => ({
+    acceptance: await interviewChecks(io, 'acceptance', usedCheckIds, excludedNames),
+    done: await interviewChecks(io, 'done', usedCheckIds, excludedNames),
+  });
+
+  if (resolvedReference === undefined) {
+    return byHand();
+  }
+  const role = existing?.roles?.criteria ?? bootstrap?.roles?.criteria;
+  if (role === undefined) {
+    log.info(
+      'roles.criteria is not declared; write the acceptance criteria and Definition of Done by hand.',
+      promptOptions(io),
+    );
+    return byHand();
+  }
+  log.step(
+    `Drafting acceptance criteria and a Definition of Done from the reference solution with roles.criteria (${role.model}, effort ${role.effort}); this starts a model session.`,
+    promptOptions(io),
+  );
+  const outcome = await dependencies.draftCriteria({
+    configuration: currentConfiguration(existing, bootstrap),
+    repository,
+    reference: resolvedReference,
+    description,
+  });
+  if (outcome.status === 'cancelled') {
+    throw new WizardCancelledError();
+  }
+  if (outcome.retainedDirectory !== null) {
+    log.warn(
+      `The criteria call directory could not be removed; it remains at "${outcome.retainedDirectory}".`,
+      promptOptions(io),
+    );
+  }
+  if (outcome.status === 'failed') {
+    log.warn(
+      dependencies.redact(
+        `Criteria draft failed: ${outcome.reason}; write the acceptance criteria and Definition of Done by hand.`,
+      ),
+      promptOptions(io),
+    );
+    return byHand();
+  }
+  const review = await reviewDraft(
+    io,
+    dependencies.redact,
+    outcome.draft,
+    resolvedReference.reference,
+  );
+  if (review === 'by-hand') {
+    return byHand();
+  }
+  const draftedAcceptance: CheckInput[] = review.acceptance.map((text, index) => ({
+    id: `acceptance-${String(index + 1)}`,
+    description: text,
+  }));
+  const draftedDone: CheckInput[] = review.done.map((text, index) => ({
+    id: `done-${String(index + 1)}`,
+    description: text,
+  }));
+  for (const check of [...draftedAcceptance, ...draftedDone]) {
+    usedCheckIds.add(check.id);
+  }
+  return {
+    acceptance: await interviewChecks(
+      io,
+      'acceptance',
+      usedCheckIds,
+      excludedNames,
+      draftedAcceptance,
+    ),
+    done: await interviewChecks(io, 'done', usedCheckIds, excludedNames, draftedDone),
+  };
+}
+
+/** Both drafted lists, in review order, once the operator accepts them. */
+type DraftReviewOutcome = { acceptance: string[]; done: string[] } | 'by-hand';
+
+/** One item's location within the draft review's two lists. */
+type DraftItemTarget = { collection: 'acceptance' | 'done'; index: number };
+
+/**
+ * Runs the mandatory draft review: the operator accepts,
+ * edits, removes, or adds items until either accepting the draft or choosing
+ * to write the criteria by hand instead. Accept stays blocked while a list is
+ * empty or an item names the reference solution; every note, log line, and
+ * select label carrying item text passes through `redact`.
+ */
+async function reviewDraft(
+  io: WizardIo,
+  redact: (textContent: string) => string,
+  draft: CriteriaDraft,
+  reference: TaskReference,
+): Promise<DraftReviewOutcome> {
+  let acceptance = [...draft.acceptance];
+  let done = [...draft.done];
+
+  for (;;) {
+    note(
+      redact(renderDraftReviewNote(acceptance, done, reference)),
+      'Drafted criteria (review required)',
+      promptOptions(io),
+    );
+    const blockingReason = firstDraftBlockingReason(acceptance, done, reference);
+    const hasItems = acceptance.length + done.length > 0;
+    const action = await askSelect<'accept' | 'edit' | 'remove' | 'add' | 'by-hand'>(io, {
+      message: 'Review the drafted criteria',
+      options: [
+        {
+          value: 'accept',
+          label: 'Accept these criteria',
+          ...(blockingReason === undefined ? {} : { disabled: true, hint: blockingReason }),
+        },
+        { value: 'edit', label: 'Edit an item', ...(hasItems ? {} : { disabled: true }) },
+        { value: 'remove', label: 'Remove an item', ...(hasItems ? {} : { disabled: true }) },
+        { value: 'add', label: 'Add an item' },
+        { value: 'by-hand', label: 'Write the criteria by hand instead' },
+      ],
+    });
+
+    if (action === 'by-hand') {
+      return 'by-hand';
+    }
+    if (action === 'accept') {
+      if (blockingReason !== undefined) {
+        log.warn(`Cannot accept yet: ${blockingReason}.`, promptOptions(io));
+        continue;
+      }
+      return { acceptance, done };
+    }
+    if (action === 'edit' || action === 'remove') {
+      const target = await selectDraftItem(io, redact, acceptance, done, action);
+      if (target === 'back') {
+        continue;
+      }
+      const lists = target.collection === 'acceptance' ? acceptance : done;
+      if (action === 'remove') {
+        const updated = lists.filter((_, index) => index !== target.index);
+        if (target.collection === 'acceptance') {
+          acceptance = updated;
+        } else {
+          done = updated;
+        }
+        continue;
+      }
+      const edited = (
+        await askText(io, {
+          message: 'Edited item',
+          initialValue: lists[target.index],
+          validate: draftItemValidator(reference),
+        })
+      ).trim();
+      const updated = lists.map((item, index) => (index === target.index ? edited : item));
+      if (target.collection === 'acceptance') {
+        acceptance = updated;
+      } else {
+        done = updated;
+      }
+      continue;
+    }
+
+    const targetCollection = await askSelect<'acceptance' | 'done' | 'back'>(io, {
+      message: 'Add the item to',
+      options: [
+        { value: 'acceptance', label: 'Acceptance criteria' },
+        { value: 'done', label: 'Definition of Done' },
+        { value: 'back', label: 'Back to the review' },
+      ],
+    });
+    if (targetCollection === 'back') {
+      continue;
+    }
+    const newItem = (
+      await askText(io, {
+        message:
+          targetCollection === 'acceptance'
+            ? 'New acceptance criterion'
+            : 'New Definition of Done item',
+        validate: draftItemValidator(reference),
+      })
+    ).trim();
+    if (targetCollection === 'acceptance') {
+      acceptance = [...acceptance, newItem];
+    } else {
+      done = [...done, newItem];
+    }
+  }
+}
+
+/** Selects one item to edit or remove, or `'back'`; every label passes through `redact`. */
+async function selectDraftItem(
+  io: WizardIo,
+  redact: (textContent: string) => string,
+  acceptance: readonly string[],
+  done: readonly string[],
+  action: 'edit' | 'remove',
+): Promise<DraftItemTarget | 'back'> {
+  const options: Option<string>[] = [
+    ...acceptance.map((text, index) => ({
+      value: `acceptance:${String(index)}`,
+      label: `Acceptance ${String(index + 1)}: ${redact(text)}`,
+    })),
+    ...done.map((text, index) => ({
+      value: `done:${String(index)}`,
+      label: `Definition of Done ${String(index + 1)}: ${redact(text)}`,
+    })),
+    { value: 'back', label: 'Back to the review' },
+  ];
+  const choice = await askSelect<string>(io, {
+    message: action === 'edit' ? 'Item to edit' : 'Item to remove',
+    options,
+  });
+  if (choice === 'back') {
+    return 'back';
+  }
+  const separatorIndex = choice.indexOf(':');
+  const collection = choice.slice(0, separatorIndex);
+  const index = Number(choice.slice(separatorIndex + 1));
+  if (collection !== 'acceptance' && collection !== 'done') {
+    throw new Error('unreachable: selectDraftItem only offers acceptance:<n> and done:<n> values');
+  }
+  return { collection, index };
+}
+
+/** The item rule shared by editing and adding: rejects whitespace-only text and text naming the reference. */
+function draftItemValidator(
+  reference: TaskReference,
+): (value: string | undefined) => string | undefined {
+  return (raw) => {
+    const value = (raw ?? '').trim();
+    if (value.length === 0) {
+      return 'a non-empty value is required';
+    }
+    const identity = describeReferenceIdentityInText(raw ?? '', reference);
+    if (identity !== undefined) {
+      return `the item names ${identity}; tevu validate rejects a task whose agent prompt contains it`;
+    }
+    return undefined;
+  };
+}
+
+/** Renders the draft review note body: the guidance line, then each list with its item lines. */
+function renderDraftReviewNote(
+  acceptance: readonly string[],
+  done: readonly string[],
+  reference: TaskReference,
+): string {
+  return [
+    "Every item reaches every benchmarked agent's prompt: keep outcomes any correct solution achieves, not details of the reference solution.",
+    '',
+    'Acceptance criteria:',
+    ...renderDraftItemLines(acceptance, reference),
+    'Definition of Done:',
+    ...renderDraftItemLines(done, reference),
+  ].join('\n');
+}
+
+function renderDraftItemLines(items: readonly string[], reference: TaskReference): string[] {
+  if (items.length === 0) {
+    return ['  (none)'];
+  }
+  return items.map((item, index) => {
+    const identity = describeReferenceIdentityInText(item, reference);
+    return `  ${String(index + 1)}. ${item}${identity === undefined ? '' : ` [names ${identity}]`}`;
+  });
+}
+
+/**
+ * The first reason `accept` stays blocked, checked in this order: an empty
+ * acceptance list, an empty Definition of Done list, then any item naming
+ * the reference solution.
+ */
+function firstDraftBlockingReason(
+  acceptance: readonly string[],
+  done: readonly string[],
+  reference: TaskReference,
+): string | undefined {
+  if (acceptance.length === 0) {
+    return 'the acceptance criteria need at least one item';
+  }
+  if (done.length === 0) {
+    return 'the Definition of Done needs at least one item';
+  }
+  const namingCount = [...acceptance, ...done].filter(
+    (item) => describeReferenceIdentityInText(item, reference) !== undefined,
+  ).length;
+  if (namingCount === 0) {
+    return undefined;
+  }
+  return namingCount === 1
+    ? '1 item names the reference solution; edit or remove it'
+    : `${String(namingCount)} items name the reference solution; edit or remove them`;
+}
+
 /** Shows the single credential-redacted review; declining cancels without a write. */
 async function reviewAndConfirm(
   io: WizardIo,
@@ -1329,6 +1725,11 @@ function renderTaskReview(input: TaskWizardInput, graderDeclared: boolean): stri
         `  agents.${name}.env: ${renderVariableList(settings.env ?? [])}`,
       ]),
     );
+    if (bootstrap.roles?.criteria !== undefined) {
+      lines.push(
+        `  roles.criteria: ${bootstrap.roles.criteria.model} (effort ${bootstrap.roles.criteria.effort})`,
+      );
+    }
     if (bootstrap.roles?.grader !== undefined) {
       lines.push(
         `  roles.grader: ${bootstrap.roles.grader.model} (effort ${bootstrap.roles.grader.effort})`,

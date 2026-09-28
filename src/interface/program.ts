@@ -17,6 +17,7 @@ import { runAssessmentWizard, runTaskWizard } from './task-wizard';
 
 import type { AssessmentCaseContext } from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
+import type { CriteriaDraftOutcome, CriteriaDraftRequest } from '@/application/draft-criteria';
 import type { ManagedCommitsOutcome, ManagedCommitsRequest } from '@/application/managed-clone';
 import type {
   ReferenceSolutionRequest,
@@ -95,6 +96,8 @@ export type ProgramOperations = {
       'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'
     >
   >;
+  /** Drafts acceptance criteria and a Definition of Done from a resolved reference solution. */
+  draftCriteria(request: CriteriaDraftRequest): Promise<CriteriaDraftOutcome>;
   prepareRepositories(
     config: TevuConfig,
     onProgress: (line: string) => void,
@@ -542,6 +545,7 @@ async function runTaskAdd(
         operations.resolveReference({ configPath: loaderPath, repository, identifier }, onProgress),
       ensureManagedCommits: (repository, revisions, onProgress) =>
         operations.ensureManagedCommits({ repository, revisions }, onProgress),
+      draftCriteria: (request) => operations.draftCriteria({ configPath: loaderPath, ...request }),
       now: dependencies.now,
       redact: dependencies.redact,
     },
