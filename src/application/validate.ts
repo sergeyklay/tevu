@@ -9,6 +9,7 @@ import {
   parseGitHubReference,
   parseGitHubRepository,
 } from '@/domain/github-reference';
+import { gradedChecksOf } from '@/evaluation/grading';
 
 import { buildEnvironmentVariableNames } from './environment-variable-names';
 import {
@@ -59,6 +60,7 @@ export async function validateConfig(
   const agents = dependencies.agents;
   const findings: ValidationFinding[] = [
     ...collectSchemaFindings(config),
+    ...collectGraderRoleFindings(config),
     ...(await collectHostFindings(dependencies)),
     ...collectEnvironmentFindings(config, dependencies),
     ...(await collectSourceFindings(config, dependencies)),
@@ -128,6 +130,29 @@ function collectSchemaFindings(config: TevuConfig): ValidationFinding[] {
       issue.path.length === 0 ? 'config' : issue.path.map((segment) => String(segment)).join('.'),
     message: issue.code === 'unrecognized_keys' ? 'Unknown configuration field' : issue.message,
   }));
+}
+
+/**
+ * Requires `roles.grader` when at least one task declares a graded check;
+ * the loader itself does not require the role, per configuration.md#model-roles.
+ */
+function collectGraderRoleFindings(config: TevuConfig): ValidationFinding[] {
+  if (config.roles?.grader !== undefined) {
+    return [];
+  }
+  const taskIds = config.tasks
+    .filter((task) => gradedChecksOf(task).length > 0)
+    .map((task) => task.id);
+  if (taskIds.length === 0) {
+    return [];
+  }
+  return [
+    {
+      severity: 'error',
+      identifier: 'roles.grader',
+      message: `graded checks need the grader role; declare roles.grader (tasks with graded checks: ${taskIds.join(', ')})`,
+    },
+  ];
 }
 
 /** Checks the local platform and that `git --version` succeeds on the parent PATH. */

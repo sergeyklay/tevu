@@ -8,7 +8,7 @@ A run contains n cases for each task/model entry pair, where n is the effective 
 | --- | --- |
 | `passed` | Every required check passed |
 | `failed` | A required check failed |
-| `pending` | Required checks still need a manual verdict |
+| `pending` | Required checks still need a manual verdict, or a required graded check is awaiting the grader, was left pending by a failed or unparseable grader call, or was graded `undetermined` |
 | `not-evaluated` | Timeout, cancellation, preparation failure, a repository setup failure, or another failure prevented eligible evaluation |
 
 Optional failed or pending checks remain visible without changing an otherwise passed outcome. Command checks pass only when they finish before their timeout with a declared success exit code.
@@ -47,6 +47,8 @@ The adapter named by a case's `agent` derives token, activity, reliability, and 
 
 Model metrics cover the root session only, not a total across child sessions. Elapsed time covers the case's agent process. Acceptance-command results are check verdicts, not additional model-quality metrics. Repository setup time and output enter no metric.
 
+The grader's own usage and cost are saved per case in `grading.json`'s `metrics` field and rendered in the report's `Grader metrics` block; they are never added to the case's own metrics, and a metric the grader call did not report is unavailable, never zero.
+
 ## Saved files
 
 Files are stored under the configured artifact directory:
@@ -62,6 +64,7 @@ Files are stored under the configured artifact directory:
     session.json
     solution.patch
     checks.json
+    grading.json
     assessment.json
     result.json
     setup-before-agent.log
@@ -78,8 +81,9 @@ Files are stored under the configured artifact directory:
 | `session.json` | Raw root-session export; only that case's agent adapter interprets it |
 | `solution.patch` | Submitted solution, captured before restore, overlay, and acceptance commands run, relative to the state `before_agent` left when the repository declares one |
 | `checks.json` | Check verdicts, timing, and evidence |
-| `assessment.json` | Current manual verdicts, revision, and replacement history |
-| Case `result.json` | Case lifecycle, process result, task outcome, metrics, check-state evidence, repository setup evidence, and evidence paths |
+| `grading.json` | Present only for a case whose task declares a graded check: the grader's identity, its raw call outcome, its own metrics, and a grade or a pending reason per graded check |
+| `assessment.json` | Current manual and grader verdicts, revision, and replacement history |
+| Case `result.json` | Case lifecycle, process result, task outcome, metrics, check-state evidence, repository setup evidence, `artifacts.grading` (the case's `grading.json` path, or `null` when the task declares no graded check), and evidence paths |
 | `setup-before-agent.log` | `before_agent`'s commands, one section each; present only when the repository declares `before_agent` and at least one command started |
 | `setup-before-checks.log` | `before_checks`'s commands, one section each; present only when the repository declares `before_checks` and at least one command started |
 
@@ -128,10 +132,10 @@ Configured credential-secret values are redacted before persistent or terminal o
 
 ## Regeneration
 
-`tevu report <run-id>` recomputes normalized results and Markdown from saved evidence and current assessments, resolving each case's metrics through the adapter registered under that case's `agent`. It does not start another model session or contact Git or an issue tracker. Unchanged source artifacts produce identical regenerated JSON and Markdown.
+`tevu report <run-id>` recomputes normalized results and Markdown from saved evidence, saved grades, and current assessments, resolving each case's metrics through the adapter registered under that case's `agent`. It reads a case's saved `grading.json` only when one exists; it never calls the grader, starts another model session, or contacts Git or an issue tracker. Unchanged source artifacts produce identical regenerated JSON and Markdown.
 
-`tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. A run whose snapshot predates that layout, or whose case results or manifest predate the current agent fields (missing `identity.agent` or `tools.agentVersions`), the current repeat fields (missing `identity.attempt` or `execution.repeat`), the current case timeout field (missing `timeoutMs` in a case identity), or a non-empty string `configPath`, is refused before either command writes anything.
+`tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. A run whose snapshot predates that layout, whose case results or manifest predate the current agent fields (missing `identity.agent` or `tools.agentVersions`), the current repeat fields (missing `identity.attempt` or `execution.repeat`), the current case timeout field (missing `timeoutMs` in a case identity), a non-empty string `configPath`, a case result's `artifacts.grading` field, or an assessment history entry's `source` discriminator, is refused before either command writes anything.
 
-Replacing an assessment retains the old verdict in history. Only current verdicts affect the outcome. Artifacts remain until the operator deletes the run directory; there is no automatic retention or upload.
+Replacing an assessment retains the old verdict in history, whether it replaces an operator's earlier verdict or a grader's; each history entry's `source` (`operator` or `grader`) records which. Only current verdicts affect the outcome. Artifacts remain until the operator deletes the run directory; there is no automatic retention or upload.
 
 The [benchmark guide](../guides/run-benchmark.md#run-and-review) covers recording verdicts and regenerating reports.

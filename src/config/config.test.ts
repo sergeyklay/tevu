@@ -1056,10 +1056,12 @@ describe('TevuConfigSchema', () => {
   });
 
   describe('roles', () => {
-    it('parses CONFIG_TEMPLATE with roles absent', () => {
+    it('parses CONFIG_TEMPLATE with roles.grader declared', () => {
       const parsed = expectOk(parseConfigText(CONFIG_TEMPLATE));
 
-      expect(parsed.roles).toBeUndefined();
+      expect(parsed.roles).toEqual({
+        grader: { model: 'openai/your-grader-model', effort: 'medium', agent: 'opencode' },
+      });
     });
 
     it('materializes roles as absent when the file declares none', () => {
@@ -1144,7 +1146,7 @@ describe('TevuConfigSchema', () => {
     });
   });
 
-  it('rejects a check with neither run nor manual', () => {
+  it('parses a check with neither run nor manual as a graded check', () => {
     const config = buildConfig({
       tasks: [
         buildTaskDefinition({
@@ -1156,9 +1158,31 @@ describe('TevuConfigSchema', () => {
       ],
     });
 
-    expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
-      'a check needs run (a command) or manual: true',
-    );
+    const parsed = expectSchemaAcceptance(config);
+    expect(parsed.tasks[0]?.checks.acceptance[0]).toEqual({
+      id: 'no-form',
+      description: 'x',
+      required: true,
+    });
+  });
+
+  it('rejects a graded check whose description holds no non-whitespace text', () => {
+    const config = buildConfig({
+      tasks: [
+        buildTaskDefinition({
+          checks: {
+            acceptance: [{ id: 'no-description', description: '   ' }],
+            done: [buildCommandCheck()],
+          },
+        }),
+      ],
+    });
+
+    expect(expectSchemaRejection(config)).toContainEqual({
+      path: 'tasks.0.checks.acceptance.0.description',
+      message:
+        'a graded check needs a description with non-whitespace text; the grader grades against it',
+    });
   });
 
   it('rejects a check with both run and manual', () => {
@@ -1191,7 +1215,7 @@ describe('TevuConfigSchema', () => {
     });
 
     expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
-      'manual must be true; omit it for a command check',
+      'manual must be true; omit it for a command check or a graded check',
     );
   });
 
@@ -3784,6 +3808,77 @@ describe('validateConfig', () => {
       const reportWithRoles = expectOk(await validateConfig(withRoles, buildFailingDependencies()));
 
       expect(reportWithRoles.findings).toEqual(reportWithoutRoles.findings);
+    });
+  });
+
+  describe('graded checks require roles.grader (P12)', () => {
+    function buildGradedTaskDefinition(overrides: Partial<TaskInput> = {}): TaskInput {
+      return buildTaskDefinition({
+        checks: {
+          acceptance: [{ id: 'csv-content', description: 'The CSV looks right.' }],
+          done: [buildManualCheck()],
+        },
+        ...overrides,
+      });
+    }
+
+    it('yields the roles.grader finding naming the task when a graded check exists without the role', async () => {
+      const config = expectSchemaAcceptance(buildConfig({ tasks: [buildGradedTaskDefinition()] }));
+      const dependencies = buildValidationDependencies();
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.valid).toBe(false);
+      expect(report.findings).toContainEqual({
+        severity: 'error',
+        identifier: 'roles.grader',
+        message:
+          'graded checks need the grader role; declare roles.grader (tasks with graded checks: write-report)',
+      });
+    });
+
+    it('names every task with a graded check, in configuration order, joined by ", "', async () => {
+      const config = expectSchemaAcceptance(
+        buildConfig({
+          tasks: [
+            buildGradedTaskDefinition({ id: 'first-task' }),
+            buildGradedTaskDefinition({ id: 'second-task' }),
+          ],
+        }),
+      );
+      const dependencies = buildValidationDependencies();
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.findings).toContainEqual({
+        severity: 'error',
+        identifier: 'roles.grader',
+        message:
+          'graded checks need the grader role; declare roles.grader (tasks with graded checks: first-task, second-task)',
+      });
+    });
+
+    it('yields no roles.grader finding when the role is declared', async () => {
+      const config = expectSchemaAcceptance(
+        buildConfig({
+          tasks: [buildGradedTaskDefinition()],
+          roles: { grader: buildModelRole() },
+        }),
+      );
+      const dependencies = buildValidationDependencies();
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.findings.map((finding) => finding.identifier)).not.toContain('roles.grader');
+    });
+
+    it('yields no roles.grader finding when no task declares a graded check', async () => {
+      const config = expectSchemaAcceptance(buildConfig());
+      const dependencies = buildValidationDependencies();
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.findings.map((finding) => finding.identifier)).not.toContain('roles.grader');
     });
   });
 });

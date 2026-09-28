@@ -5,7 +5,7 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 ## Commands
 
 - Run tests: `bun run test` (NOT `bun test`, which starts Bun's own runner on the JavaScriptCore runtime instead of Vitest on Node; from the repository root it prints an error and exits with code 1 before running any test).
-- A change is done when both `bun run typecheck` and `bun run test` pass. Vitest does not type-check.
+- A change is done when `bun run check` passes. It runs every CI gate in CI's order: formatting, lint, unused code (knip), types, tests, and build. Vitest does not type-check, and passing tests alone say nothing about the other gates.
 - Build: `bun run build` bundles `src/index.ts` with esbuild into `dist/index.js`, leaving `dependencies` external. `dist/index.js` is the only supported way to run tevu; sources do not run under plain Node.
 
 ## Gotchas

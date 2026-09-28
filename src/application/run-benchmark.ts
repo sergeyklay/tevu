@@ -17,10 +17,12 @@ import {
   orderTaskChecks,
   reduceRequiredOutcome,
 } from '@/evaluation/checks';
+import { applyGrades, gradedChecksOf } from '@/evaluation/grading';
 import { combineCaseMetrics } from '@/evaluation/metrics';
 import { compareCaseIds } from '@/evaluation/report';
 
 import { buildEnvironmentVariableNames } from './environment-variable-names';
+import { gradeCase } from './grade-case';
 import { runSetupPhase } from './repository-setup';
 import {
   describePullRequestInPrompt,
@@ -39,6 +41,7 @@ import type {
   BenchmarkMetrics,
   BenchmarkPlan,
   CaseEnvironments,
+  CaseGrading,
   CaseIdentity,
   CaseLifecycle,
   CaseResult,
@@ -196,6 +199,18 @@ export async function runBenchmark(
 ): Promise<TevuResult<RunResult, RunBenchmarkErrorKind>> {
   if (dependencies.cancellation.aborted) {
     return cancellationFailure();
+  }
+  const graderRequiredBy = plan.config.tasks.find((task) => gradedChecksOf(task).length > 0);
+  if (graderRequiredBy !== undefined && plan.config.roles?.grader === undefined) {
+    return {
+      ok: false,
+      error: {
+        kind: 'PrerequisiteError',
+        tool: 'roles.grader',
+        expected: `roles.grader declared, because task "${graderRequiredBy.id}" declares a graded check`,
+        actual: 'not declared',
+      },
+    };
   }
   const agents = dependencies.agents;
   const host = await dependencies.prerequisites.probeHost();
@@ -357,8 +372,11 @@ type ActiveCase = {
   sessionExport: AgentSessionExport | null;
   exportUnavailableReason: string | undefined;
   patchWritten: boolean;
+  patchContent: string | null;
   checks: CheckResult[];
   checksWritten: boolean;
+  grading: CaseGrading | null;
+  gradingWritten: boolean;
   overlay: OverlaySnapshot | null;
   checkState: CheckStateRecord | null;
   setup: RepositorySetup | null;
@@ -551,8 +569,11 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
     sessionExport: null,
     exportUnavailableReason: undefined,
     patchWritten: false,
+    patchContent: null,
     checks: [],
     checksWritten: false,
+    grading: null,
+    gradingWritten: false,
     overlay: entry.overlay,
     checkState: null,
     setup: entry.repository.setup ?? null,
@@ -760,6 +781,7 @@ function agentNotStartedResult(
       solutionPatch: null,
       checks: null,
       assessment: null,
+      grading: null,
       result: paths.result,
     },
     failure: { error: failure, occurredAt: run.dependencies.clock.now().toISOString() },
@@ -946,6 +968,51 @@ async function evaluateReadableCase(
     return finishCase(run, active, 'cancelled', preservedFailure);
   }
 
+  const graded = gradedChecksOf(active.task);
+  if (graded.length > 0) {
+    const patchContent = active.patchContent;
+    if (patchContent === null) {
+      throw new Error(
+        'unreachable: capturePatch already recorded active.patchContent before the grading step',
+      );
+    }
+    const outcome = await gradeCase(
+      {
+        config: run.plan.config,
+        task: active.task,
+        patch: patchContent,
+        timeoutMs: run.plan.defaultCaseTimeoutMs,
+        redact: run.dependencies.redact,
+        cancellation: active.abort.signal,
+      },
+      {
+        agents: run.agents,
+        environments: run.dependencies.environments,
+        git: run.dependencies.git,
+      },
+    );
+    if (outcome.status === 'cancelled') {
+      return finishCase(run, active, 'cancelled', preservedFailure);
+    }
+    const written = await run.dependencies.artifacts.writeGrading(caseId, outcome.grading);
+    if (!written.ok) {
+      run.state.stopScheduling = true;
+      return finishCase(run, active, 'infrastructure-failed', written.error);
+    }
+    active.grading = outcome.grading;
+    active.gradingWritten = true;
+    if (outcome.retainedDirectory !== null) {
+      run.findings.push({
+        severity: 'warning',
+        caseId,
+        message: `grader call directory could not be removed; retained at "${outcome.retainedDirectory}"`,
+      });
+    }
+    if (run.state.cancelled) {
+      return finishCase(run, active, 'cancelled', preservedFailure);
+    }
+  }
+
   return finishCase(run, active, 'completed', preservedFailure, ordered);
 }
 
@@ -970,6 +1037,7 @@ async function capturePatch(
     return { failure: written.error, storeFailure: true };
   }
   active.patchWritten = true;
+  active.patchContent = captured.value.content;
   return { failure: null, storeFailure: false };
 }
 
@@ -1009,6 +1077,7 @@ function finishCase(
   const { metrics, protocolFailure } = computeCaseMetrics(run, active);
   const preserved = failure ?? protocolFailure;
   const paths = run.dependencies.artifacts.caseArtifactPaths(caseId);
+  const gradedChecks = applyGrades(active.checks, active.grading);
   return {
     schemaVersion: 1,
     identity: active.identity,
@@ -1021,10 +1090,10 @@ function finishCase(
               id: check.definition.id,
               required: check.definition.required,
             })),
-            active.checks,
+            gradedChecks,
           )
         : 'not-evaluated',
-    checks: active.checks,
+    checks: gradedChecks,
     metrics,
     artifacts: {
       events: active.events.length > 0 ? paths.events : null,
@@ -1033,6 +1102,7 @@ function finishCase(
       solutionPatch: active.patchWritten ? paths.solutionPatch : null,
       checks: active.checksWritten ? paths.checks : null,
       assessment: null,
+      grading: active.gradingWritten ? paths.grading : null,
       result: paths.result,
     },
     failure:
@@ -1100,6 +1170,7 @@ function preparationFailureResult(
       solutionPatch: null,
       checks: null,
       assessment: null,
+      grading: null,
       result: paths.result,
     },
     failure: { error, occurredAt: run.dependencies.clock.now().toISOString() },

@@ -83,13 +83,13 @@ export function buildCheckEnvironment(
   return variables;
 }
 
-/** Projects a manual check as pending until `tevu assess` records a verdict. */
-function projectManualCheck(check: OrderedCheck): CheckResult {
+/** Projects a manual check as pending until `tevu assess` records a verdict, and a graded check as pending on the grader. */
+function projectNonCommandCheck(check: OrderedCheck): CheckResult {
   return {
     checkId: check.definition.id,
     category: check.category,
     verdict: 'pending',
-    evidence: 'awaiting manual assessment',
+    evidence: 'manual' in check.definition ? 'awaiting manual assessment' : 'awaiting the grader',
     durationMs: null,
   };
 }
@@ -110,7 +110,7 @@ export async function evaluateChecks(
       break;
     }
     if (!('run' in check.definition)) {
-      results.push(projectManualCheck(check));
+      results.push(projectNonCommandCheck(check));
       continue;
     }
     results.push(await runCommandCheck(input, check, check.definition));

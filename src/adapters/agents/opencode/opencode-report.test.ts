@@ -226,6 +226,7 @@ function buildArtifactIndex(caseId: string, present: ReadonlySet<string>): CaseR
     solutionPatch: `cases/${caseId}/solution.patch`,
     checks: `cases/${caseId}/checks.json`,
     assessment: `cases/${caseId}/assessment.json`,
+    grading: `cases/${caseId}/grading.json`,
     result: `cases/${caseId}/result.json`,
   };
   return {
@@ -235,6 +236,7 @@ function buildArtifactIndex(caseId: string, present: ReadonlySet<string>): CaseR
     solutionPatch: present.has('solutionPatch') ? paths.solutionPatch : null,
     checks: present.has('checks') ? paths.checks : null,
     assessment: present.has('assessment') ? paths.assessment : null,
+    grading: present.has('grading') ? paths.grading : null,
     result: paths.result,
   };
 }
@@ -271,6 +273,7 @@ function buildAssessmentArtifact(overrides: Partial<AssessmentArtifact> = {}): A
     ],
     history: [
       {
+        source: 'operator',
         checkId: 'dod-manual-review',
         verdict: 'failed',
         assessor: 'curator',

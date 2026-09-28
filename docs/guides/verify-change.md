@@ -10,6 +10,14 @@ bun install --frozen-lockfile
 
 Bun installs dependencies and launches scripts. Node.js executes the CLI and Vitest.
 
+## Run every check
+
+```sh
+bun run check
+```
+
+This runs the same gates as CI, in the same order: formatting, lint, unused code, types, tests, and build. A change is ready for review only when it passes. The sections below run each gate on its own.
+
 ## Check types and behavior
 
 ```sh

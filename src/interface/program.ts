@@ -313,7 +313,7 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
 
   program
     .command('assess')
-    .description('Record manual check results')
+    .description('Record manual and graded check verdicts')
     .argument('<run-id>', 'Run to assess')
     .argument('<case-id>', 'Case to assess')
     .option('--config <path>', CONFIG_OPTION_DESCRIPTION)

@@ -16,14 +16,18 @@ import { unavailableMetric } from '@/domain/types';
 
 import { planBenchmark, runBenchmark } from './run-benchmark';
 
-import type { TevuConfigInput } from '@/config/schema';
+import type { TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentAdapter,
   AgentMetrics,
   AgentRunInput,
   AgentRunResult,
+  ArtifactStore,
   CaseResult,
   Clock,
+  EnvironmentAdapter,
+  ModelCallInput,
+  ModelCallResult,
   PrerequisiteAdapter,
   ProcessResult,
   RunDependencies,
@@ -486,5 +490,398 @@ describe('runBenchmark records the task timeout in saved artifacts (AC-4)', () =
       );
       expect(storedCase.identity.timeoutMs).toBe(1_200_000);
     }
+  });
+});
+
+describe('runBenchmark grading in the case flow', () => {
+  /**
+   * Renames the schema-required `opencode` key to `fake-agent`, including
+   * `roles.grader.agent`, which the config schema materializes onto the
+   * literal `opencode` key at parse time.
+   */
+  function rekeyGradedConfigToFakeAgent(config: TevuConfig): TevuConfig {
+    const { opencode, ...otherAgents } = config.agents;
+    return {
+      ...config,
+      agents: { ...otherAgents, [FAKE_AGENT_NAME]: opencode },
+      models: config.models.map((model) => ({ ...model, agent: FAKE_AGENT_NAME })),
+      roles:
+        config.roles?.grader === undefined
+          ? config.roles
+          : { ...config.roles, grader: { ...config.roles.grader, agent: FAKE_AGENT_NAME } },
+    };
+  }
+
+  function buildGradedConfig(options: {
+    repositoryPath: string;
+    commit: string;
+    outputDirectory: string;
+    secondTask?: boolean;
+  }): TevuConfig {
+    const input: TevuConfigInput = {
+      version: 1,
+      run: {
+        output_dir: options.outputDirectory,
+        concurrency: 1,
+        timeout: '30s',
+        stop_grace: '200ms',
+      },
+      agents: { opencode: { command: 'unused-agent-command', secrets: [], env: [] } },
+      repositories: [{ id: 'repo-1', path: options.repositoryPath }],
+      models: [
+        { id: 'm1', model: 'synthetic/model-a', effort: 'fast' },
+        { id: 'm2', model: 'synthetic/model-b', effort: 'deep' },
+      ],
+      roles: { grader: { model: 'synthetic/grader-model', effort: 'high' } },
+      tasks: [
+        buildGradedTask(options.commit),
+        ...(options.secondTask ? [buildPlainTask(options.commit)] : []),
+      ],
+    };
+    return rekeyGradedConfigToFakeAgent(TevuConfigSchema.parse(input));
+  }
+
+  function buildGradedTask(commit: string): TaskInput {
+    return {
+      id: 'graded-task',
+      title: 'Graded task',
+      repo: 'repo-1',
+      base_commit: commit,
+      description: 'synthetic graded task description',
+      prompt: 'synthetic graded task prompt',
+      readiness: ['synthetic ready item'],
+      checks: {
+        acceptance: [{ id: 'csv-content', description: 'The output looks right.' }],
+        done: [
+          {
+            id: 'trivial-done',
+            description: 'always passes',
+            run: [process.execPath, '-e', 'process.exit(0);'],
+            timeout: '10s',
+            exit_codes: [0],
+          },
+        ],
+      },
+    };
+  }
+
+  function buildPlainTask(commit: string): TaskInput {
+    return {
+      id: 'plain-task',
+      title: 'Plain task',
+      repo: 'repo-1',
+      base_commit: commit,
+      description: 'synthetic plain task description',
+      prompt: 'synthetic plain task prompt',
+      readiness: ['synthetic ready item'],
+      checks: {
+        acceptance: [
+          {
+            id: 'trivial-acceptance',
+            description: 'always passes',
+            run: [process.execPath, '-e', 'process.exit(0);'],
+            timeout: '10s',
+            exit_codes: [0],
+          },
+        ],
+        done: [
+          {
+            id: 'trivial-done-2',
+            description: 'always passes',
+            run: [process.execPath, '-e', 'process.exit(0);'],
+            timeout: '10s',
+            exit_codes: [0],
+          },
+        ],
+      },
+    };
+  }
+
+  /** A minimal fake `AgentAdapter` whose `run` performs no worktree edits; `callModel` is injected per test. */
+  function buildGradingFakeAgentAdapter(
+    callModelCalls: ModelCallInput[],
+    callModelImpl: (
+      input: ModelCallInput,
+    ) => Promise<TevuResult<ModelCallResult, TevuError['kind']>>,
+  ): AgentAdapter {
+    return {
+      async probe() {
+        return {
+          ok: true,
+          value: {
+            executable: 'fake-agent',
+            detectedVersion: null,
+            capabilities: [],
+            isolation: { denyOutsideWorktree: 'available' },
+          },
+        };
+      },
+      async run(input: AgentRunInput): Promise<TevuResult<AgentRunResult, never>> {
+        const value: AgentRunResult = {
+          process: buildProcessResult(),
+          sessionId: 'session-1',
+          parseFindings: [],
+        };
+        input.onProcess?.(value);
+        return { ok: true, value } as TevuResult<AgentRunResult, never>;
+      },
+      async exportSession() {
+        return { ok: true, value: {} };
+      },
+      normalizeMetrics() {
+        return {
+          ok: true,
+          value: unavailableAgentMetrics('integration test: metrics not measured'),
+        };
+      },
+      async callModel(input) {
+        callModelCalls.push(input);
+        return callModelImpl(input);
+      },
+    } as AgentAdapter;
+  }
+
+  function buildGradingDependencies(
+    config: TevuConfig,
+    agent: AgentAdapter,
+    testDir: string,
+    options: {
+      environments?: EnvironmentAdapter;
+      artifacts?: ArtifactStore;
+      cancellation?: AbortSignal;
+    } = {},
+  ): RunDependencies {
+    const base = buildDependencies(config, agent, testDir);
+    return {
+      ...base,
+      environments: options.environments ?? base.environments,
+      artifacts: options.artifacts ?? base.artifacts,
+      cancellation: options.cancellation ?? base.cancellation,
+    };
+  }
+
+  function repliedGrade(text: string): ModelCallResult {
+    return {
+      text,
+      metrics: unavailableAgentMetrics('integration test: metrics not measured'),
+    };
+  }
+
+  it('calls the grader exactly once for the case whose task declares a graded check, and never for the plain task', async () => {
+    const repository = await createSyntheticRepository(testDirectory);
+    const config = buildGradedConfig({
+      repositoryPath: repository.path,
+      commit: repository.commit,
+      outputDirectory: join(testDirectory, 'artifacts'),
+      secondTask: true,
+    });
+    const callModelCalls: ModelCallInput[] = [];
+    const agent = buildGradingFakeAgentAdapter(callModelCalls, async () => ({
+      ok: true,
+      value: repliedGrade(
+        '{"grades":[{"check":"csv-content","verdict":"passed","rationale":"ok"}]}',
+      ),
+    }));
+    const dependencies = buildGradingDependencies(config, agent, testDirectory);
+
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+
+    const run = unwrapOk(result);
+    // Two model entries each run the graded task once, so the grader is
+    // called once per graded case; the plain task never triggers it.
+    expect(callModelCalls).toHaveLength(2);
+    expect(callModelCalls.every((call) => call.role === 'grader')).toBe(true);
+    const gradedCaseM1 = caseResultOf(run, 'graded-task--m1--1');
+    const gradedCaseM2 = caseResultOf(run, 'graded-task--m2--1');
+    expect(gradedCaseM1.artifacts.grading).not.toBeNull();
+    expect(gradedCaseM2.artifacts.grading).not.toBeNull();
+    expect(gradedCaseM1.checks.find((check) => check.checkId === 'csv-content')?.verdict).toBe(
+      'passed',
+    );
+    const plainCaseM1 = caseResultOf(run, 'plain-task--m1--1');
+    const plainCaseM2 = caseResultOf(run, 'plain-task--m2--1');
+    expect(plainCaseM1.artifacts.grading).toBeNull();
+    expect(plainCaseM2.artifacts.grading).toBeNull();
+  });
+
+  it('ends the case cancelled with no grading.json when the run is cancelled during the grader call', async () => {
+    const repository = await createSyntheticRepository(testDirectory);
+    const config = buildGradedConfig({
+      repositoryPath: repository.path,
+      commit: repository.commit,
+      outputDirectory: join(testDirectory, 'artifacts'),
+    });
+    const cancelController = new AbortController();
+    const callModelCalls: ModelCallInput[] = [];
+    const agent = buildGradingFakeAgentAdapter(callModelCalls, async () => {
+      cancelController.abort();
+      return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
+    });
+    const dependencies = buildGradingDependencies(config, agent, testDirectory, {
+      cancellation: cancelController.signal,
+    });
+
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+
+    const run = unwrapOk(result);
+    const gradedCase = caseResultOf(run, 'graded-task--m1--1');
+    expect(gradedCase.lifecycle).toBe('cancelled');
+    expect(gradedCase.artifacts.grading).toBeNull();
+    expect(
+      existsSync(
+        join(
+          config.run.output_dir,
+          run.manifest.runId,
+          'cases',
+          'graded-task--m1--1',
+          'grading.json',
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it('ends the case infrastructure-failed and stops scheduling later cases when writeGrading fails', async () => {
+    const repository = await createSyntheticRepository(testDirectory);
+    const config: TevuConfig = {
+      ...buildGradedConfig({
+        repositoryPath: repository.path,
+        commit: repository.commit,
+        outputDirectory: join(testDirectory, 'artifacts'),
+      }),
+      run: {
+        output_dir: join(testDirectory, 'artifacts'),
+        concurrency: 1,
+        repeat: 2,
+        timeout: '30s',
+        stop_grace: '200ms',
+      },
+    };
+    const callModelCalls: ModelCallInput[] = [];
+    const agent = buildGradingFakeAgentAdapter(callModelCalls, async () => ({
+      ok: true,
+      value: repliedGrade(
+        '{"grades":[{"check":"csv-content","verdict":"passed","rationale":"ok"}]}',
+      ),
+    }));
+    const baseDependencies = buildDependencies(config, agent, testDirectory);
+    const failingArtifacts: ArtifactStore = new Proxy(baseDependencies.artifacts, {
+      get(target, property) {
+        if (property === 'writeGrading') {
+          return async () => ({
+            ok: false,
+            error: {
+              kind: 'ArtifactError',
+              operation: 'write-grading',
+              reason: 'synthetic write failure',
+            },
+          });
+        }
+        return Reflect.get(target, property) as unknown;
+      },
+    });
+    const dependencies = buildGradingDependencies(config, agent, testDirectory, {
+      artifacts: failingArtifacts,
+    });
+
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+
+    const run = unwrapOk(result);
+    const firstCase = caseResultOf(run, 'graded-task--m1--1');
+    expect(firstCase.lifecycle).toBe('infrastructure-failed');
+    expect(firstCase.failure?.error).toEqual({
+      kind: 'ArtifactError',
+      operation: 'write-grading',
+      reason: 'synthetic write failure',
+    });
+    expect(
+      run.cases.find((entry) => entry.identity.caseId === 'graded-task--m1--2'),
+    ).toBeUndefined();
+    expect(
+      run.findings.some(
+        (finding) =>
+          finding.caseId === 'graded-task--m1--2' &&
+          finding.message === 'case was not started because an artifact failure stopped scheduling',
+      ),
+    ).toBe(true);
+  });
+
+  it('leaves the case outcome pending when a required graded check is left pending by an unparseable reply, and the run exits 2', async () => {
+    const repository = await createSyntheticRepository(testDirectory);
+    const config = buildGradedConfig({
+      repositoryPath: repository.path,
+      commit: repository.commit,
+      outputDirectory: join(testDirectory, 'artifacts'),
+    });
+    const callModelCalls: ModelCallInput[] = [];
+    const agent = buildGradingFakeAgentAdapter(callModelCalls, async () => ({
+      ok: true,
+      value: repliedGrade('not valid json'),
+    }));
+    const dependencies = buildGradingDependencies(config, agent, testDirectory);
+
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+
+    const run = unwrapOk(result);
+    const gradedCase = caseResultOf(run, 'graded-task--m1--1');
+    expect(gradedCase.lifecycle).toBe('completed');
+    expect(gradedCase.outcome).toBe('pending');
+    expect(run.exitCode).toBe(2);
+  });
+
+  it('records a warning finding naming the retained grader call directory when its removal fails', async () => {
+    const repository = await createSyntheticRepository(testDirectory);
+    const config = buildGradedConfig({
+      repositoryPath: repository.path,
+      commit: repository.commit,
+      outputDirectory: join(testDirectory, 'artifacts'),
+    });
+    const callModelCalls: ModelCallInput[] = [];
+    const agent = buildGradingFakeAgentAdapter(callModelCalls, async () => ({
+      ok: true,
+      value: repliedGrade(
+        '{"grades":[{"check":"csv-content","verdict":"passed","rationale":"ok"}]}',
+      ),
+    }));
+    const realEnvironments = createEnvironmentAdapter();
+    const environmentsWithFailingDispose: EnvironmentAdapter = {
+      ...realEnvironments,
+      async createModelCallEnvironment(snapshot, agentVariables) {
+        const created = await realEnvironments.createModelCallEnvironment(snapshot, agentVariables);
+        if (!created.ok) {
+          return created;
+        }
+        return {
+          ok: true,
+          value: {
+            ...created.value,
+            dispose: async () => ({
+              ok: false,
+              error: {
+                kind: 'ArtifactError',
+                operation: 'dispose-model-call-environment',
+                reason: 'synthetic dispose failure',
+              },
+            }),
+          },
+        };
+      },
+    };
+    const dependencies = buildGradingDependencies(config, agent, testDirectory, {
+      environments: environmentsWithFailingDispose,
+    });
+
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+
+    const run = unwrapOk(result);
+    const gradedCase = caseResultOf(run, 'graded-task--m1--1');
+    expect(gradedCase.artifacts.grading).not.toBeNull();
+    expect(
+      run.findings.some(
+        (finding) =>
+          finding.severity === 'warning' &&
+          finding.caseId === 'graded-task--m1--1' &&
+          finding.message.startsWith('grader call directory could not be removed; retained at "'),
+      ),
+    ).toBe(true);
   });
 });

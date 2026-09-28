@@ -19,7 +19,8 @@
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "knip": "knip"
+    "knip": "knip",
+    "check": "bun run format:check && bun run lint && bun run knip && bun run typecheck && bun run test && bun run build"
   },
   "engines": {
     "node": ">=24 <25"

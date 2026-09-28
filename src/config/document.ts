@@ -40,6 +40,9 @@ export function renderConfigDocument(
     ['run', buildRunNode(config.run, guard)],
     ['agents', buildAgentsNode(config.agents, guard)],
   ];
+  if (config.roles !== undefined) {
+    entries.push(['roles', buildRolesNode(config.roles, guard)]);
+  }
   if (config.trackers !== undefined) {
     entries.push(['trackers', buildTrackersNode(config.trackers, guard)]);
   }
@@ -212,6 +215,29 @@ function buildAgentSettingsNode(
   }
   if (settings.env !== undefined && settings.env.length > 0) {
     node.env = settings.env.map((name) => guard.redact(name));
+  }
+  return node;
+}
+
+/** Renders `roles` in fixed `criteria`, `grader` key order, each present only when declared. */
+function buildRolesNode(
+  roles: NonNullable<TevuConfigInput['roles']>,
+  guard: GuardedRedactor,
+): Record<string, unknown> {
+  const node: Record<string, unknown> = {};
+  for (const roleName of ['criteria', 'grader'] as const) {
+    const role = roles[roleName];
+    if (role === undefined) {
+      continue;
+    }
+    const roleNode: Record<string, unknown> = {
+      model: guard.redact(role.model),
+      effort: guard.redact(role.effort),
+    };
+    if (role.agent !== undefined) {
+      roleNode.agent = guard.redact(role.agent);
+    }
+    node[roleName] = roleNode;
   }
   return node;
 }

@@ -12,6 +12,7 @@
 
 import { decodeRunConfig } from '@/config/run-snapshot';
 import { reduceRequiredOutcome } from '@/evaluation/checks';
+import { applyGrades } from '@/evaluation/grading';
 import { combineCaseMetrics } from '@/evaluation/metrics';
 import { buildReport } from '@/evaluation/report';
 
@@ -29,6 +30,11 @@ import type {
   CaseResult,
   CheckRecord,
   CheckResult,
+  GradeRecord,
+  GraderIdentity,
+  GradingArtifact,
+  ReplacedGraderVerdict,
+  ReplacedOperatorVerdict,
   ReportResult,
   RunResult,
   TaskRecord,
@@ -37,21 +43,82 @@ import type {
   ValidationFinding,
 } from '@/domain/types';
 
-/** One manual check of the assessed case, in configuration order. */
-export type ManualCheckSummary = {
+/** One assessable check of the assessed case, in configuration order: manual, or graded with its saved grade. */
+export type AssessableCheckSummary = {
   checkId: string;
   category: 'acceptance' | 'definition-of-done';
   description: string;
   required: boolean;
-};
+} & (
+  | { evaluator: 'manual' }
+  | { evaluator: 'grader'; grade: GradeRecord | null; grader: GraderIdentity | null }
+);
 
-/** Pre-read display context for one case's manual assessment. */
+/** Pre-read display context for one case's assessment. */
 export type AssessmentCaseContext = {
-  /** Every manual check of the case's task, in configuration order. */
-  manualChecks: ManualCheckSummary[];
+  /** Every manual or graded check of the case's task, in configuration order. */
+  checks: AssessableCheckSummary[];
   /** Current assessment records; replaced ones live in artifact history, not here. */
   existing: AssessmentRecord[];
 };
+
+/** Holds when a preserved check is assessable: manual, or graded. */
+function isAssessableCheck(
+  check: CheckRecord,
+): check is CheckRecord & { evaluator: 'manual' | 'grader' } {
+  return check.evaluator === 'manual' || check.evaluator === 'grader';
+}
+
+/** Projects assessable check definitions and a case's saved grading into display/decision summaries. */
+function buildAssessableChecks(
+  definitions: readonly (CheckRecord & { evaluator: 'manual' | 'grader' })[],
+  grading: GradingArtifact | null,
+): AssessableCheckSummary[] {
+  const gradeByCheckId = new Map((grading?.grades ?? []).map((grade) => [grade.checkId, grade]));
+  return definitions.map((check) => {
+    if (check.evaluator === 'manual') {
+      return {
+        checkId: check.id,
+        category: check.category,
+        description: check.description,
+        required: check.required,
+        evaluator: 'manual',
+      };
+    }
+    return {
+      checkId: check.id,
+      category: check.category,
+      description: check.description,
+      required: check.required,
+      evaluator: 'grader',
+      grade: gradeByCheckId.get(check.id) ?? null,
+      grader: grading?.grader ?? null,
+    };
+  });
+}
+
+/**
+ * A check's existing verdict: its current operator record, or, without one, a
+ * `passed`/`failed` grade. A check with neither is pending.
+ */
+function existingVerdictOf(
+  check: AssessableCheckSummary,
+  currentByCheck: ReadonlyMap<string, AssessmentRecord>,
+): { verdict: 'passed' | 'failed'; source: 'operator' | 'grader' } | undefined {
+  const operatorRecord = currentByCheck.get(check.checkId);
+  if (operatorRecord !== undefined) {
+    return { verdict: operatorRecord.verdict, source: 'operator' };
+  }
+  if (
+    check.evaluator === 'grader' &&
+    check.grade !== null &&
+    check.grade.status === 'graded' &&
+    check.grade.verdict !== 'undetermined'
+  ) {
+    return { verdict: check.grade.verdict, source: 'grader' };
+  }
+  return undefined;
+}
 
 /** Error kinds the manual assessment contract declares. */
 type AssessCaseErrorKind =
@@ -120,13 +187,13 @@ export async function assessCase(
       `preserved configuration for run "${input.runId}" does not define task "${identity.taskId}"`,
     );
   }
-  const manualChecks = task.checks.filter((check) => check.evaluator === 'manual');
-  if (manualChecks.length === 0) {
+  const assessableDefinitions = task.checks.filter(isAssessableCheck);
+  if (assessableDefinitions.length === 0) {
     return configValidationFailure([
       {
         severity: 'error',
         identifier: input.caseId,
-        message: `case "${input.caseId}" has no manual checks; there is nothing to assess`,
+        message: `case "${input.caseId}" has no manual or graded checks; there is nothing to assess`,
       },
     ]);
   }
@@ -143,6 +210,15 @@ export async function assessCase(
       },
     ]);
   }
+  let grading: GradingArtifact | null = null;
+  if (storedCase.value.artifacts.grading !== null) {
+    const read = await store.readGrading(input.runId, input.caseId);
+    if (!read.ok) {
+      return read;
+    }
+    grading = read.value;
+  }
+  const checks = buildAssessableChecks(assessableDefinitions, grading);
 
   const lock = await store.acquireAssessmentLock(input.runId, input.caseId);
   if (!lock.ok) {
@@ -156,7 +232,7 @@ export async function assessCase(
   const currentByCheck = new Map(
     (existing.value?.current ?? []).map((record) => [record.checkId, record]),
   );
-  const findings = validateAssessmentInput(input, manualChecks, currentByCheck);
+  const findings = validateAssessmentInput(input, checks, currentByCheck);
   if (findings.length > 0) {
     return releaseAndReturn(lock.value, configValidationFailure(findings));
   }
@@ -164,7 +240,7 @@ export async function assessCase(
     return releaseAndReturn(lock.value, cancellationFailure());
   }
 
-  const next = buildNextAssessment(input, manualChecks, existing.value);
+  const next = buildNextAssessment(input, checks, currentByCheck, existing.value);
   const committed = await store.replaceAssessment(next);
   if (!committed.ok) {
     return releaseAndReturn(lock.value, committed);
@@ -236,19 +312,25 @@ export async function readAssessmentContext(
       `task "${identity.taskId}" is missing from the preserved run configuration`,
     );
   }
-  const manualChecks: ManualCheckSummary[] = task.checks
-    .filter((check) => check.evaluator === 'manual')
-    .map((check) => ({
-      checkId: check.id,
-      category: check.category,
-      description: check.description,
-      required: check.required,
-    }));
+  const assessableDefinitions = task.checks.filter(isAssessableCheck);
+  const caseResult = await store.readCaseResult(runId, caseId);
+  if (!caseResult.ok) {
+    return caseResult;
+  }
+  let grading: GradingArtifact | null = null;
+  if (caseResult.value.artifacts.grading !== null) {
+    const read = await store.readGrading(runId, caseId);
+    if (!read.ok) {
+      return read;
+    }
+    grading = read.value;
+  }
+  const checks = buildAssessableChecks(assessableDefinitions, grading);
   const assessment = await store.readAssessment(runId, caseId);
   if (!assessment.ok) {
     return assessment;
   }
-  return { ok: true, value: { manualChecks, existing: assessment.value?.current ?? [] } };
+  return { ok: true, value: { checks, existing: assessment.value?.current ?? [] } };
 }
 
 /**
@@ -298,6 +380,7 @@ async function rebuildRunDerived(
 
   const cases: CaseResult[] = [];
   const assessments: AssessmentArtifact[] = [];
+  const gradings: GradingArtifact[] = [];
   for (const cached of stored.value.cases) {
     const rebuilt = await rebuildCaseResult(
       runId,
@@ -316,6 +399,9 @@ async function rebuildRunDerived(
     cases.push(rebuilt.value.result);
     if (rebuilt.value.assessment !== null) {
       assessments.push(rebuilt.value.assessment);
+    }
+    if (rebuilt.value.grading !== null) {
+      gradings.push(rebuilt.value.grading);
     }
   }
 
@@ -338,6 +424,7 @@ async function rebuildRunDerived(
     models: decoded.value.models,
     repositories: decoded.value.repositories,
     assessments,
+    gradings,
   });
   const written = await store.writeReport(runId, report);
   if (!written.ok) {
@@ -354,7 +441,10 @@ async function rebuildCaseResult(
   store: ArtifactStore,
   agents: AgentRegistry,
 ): Promise<
-  TevuResult<{ result: CaseResult; assessment: AssessmentArtifact | null }, RebuildReportErrorKind>
+  TevuResult<
+    { result: CaseResult; assessment: AssessmentArtifact | null; grading: GradingArtifact | null },
+    RebuildReportErrorKind
+  >
 > {
   const cached = await store.readCaseResult(runId, caseId);
   if (!cached.ok) {
@@ -394,6 +484,14 @@ async function rebuildCaseResult(
     }
     checks = read.value;
   }
+  let grading: GradingArtifact | null = null;
+  if (source.artifacts.grading !== null) {
+    const read = await store.readGrading(runId, caseId);
+    if (!read.ok) {
+      return read;
+    }
+    grading = read.value;
+  }
   const assessment = await store.readAssessment(runId, caseId);
   if (!assessment.ok) {
     return assessment;
@@ -416,7 +514,7 @@ async function rebuildCaseResult(
   if (!normalized.ok) {
     return normalized;
   }
-  const derivedChecks = applyCurrentAssessments(checks, assessment.value);
+  const derivedChecks = applyCurrentAssessments(applyGrades(checks, grading), assessment.value);
   const paths = store.caseArtifactPaths(caseId);
   const result: CaseResult = {
     ...source,
@@ -435,7 +533,7 @@ async function rebuildCaseResult(
       assessment: assessment.value !== null ? paths.assessment : null,
     },
   };
-  return { ok: true, value: { result, assessment: assessment.value } };
+  return { ok: true, value: { result, assessment: assessment.value, grading } };
 }
 
 /**
@@ -467,7 +565,7 @@ function applyCurrentAssessments(
 /** Aggregates every defect of one assessment invocation into findings. */
 function validateAssessmentInput(
   input: AssessmentInput,
-  manualChecks: readonly CheckRecord[],
+  checks: readonly AssessableCheckSummary[],
   currentByCheck: ReadonlyMap<string, AssessmentRecord>,
 ): ValidationFinding[] {
   const findings: ValidationFinding[] = [];
@@ -478,7 +576,7 @@ function validateAssessmentInput(
       message: 'assessedAt must be a parseable timestamp supplied by the caller',
     });
   }
-  const manualCheckIds = new Set(manualChecks.map((check) => check.id));
+  const checksById = new Map(checks.map((check) => [check.checkId, check]));
   const decided = new Set<string>();
   for (const decision of input.decisions) {
     if (decided.has(decision.checkId)) {
@@ -490,11 +588,12 @@ function validateAssessmentInput(
       continue;
     }
     decided.add(decision.checkId);
-    if (!manualCheckIds.has(decision.checkId)) {
+    const check = checksById.get(decision.checkId);
+    if (check === undefined) {
       findings.push({
         severity: 'error',
         identifier: decision.checkId,
-        message: `check "${decision.checkId}" is not a manual check of this case`,
+        message: `check "${decision.checkId}" is not a manual or graded check of this case`,
       });
       continue;
     }
@@ -512,15 +611,18 @@ function validateAssessmentInput(
         message: 'a failed verdict requires a non-empty note',
       });
     }
-    const prior = currentByCheck.get(decision.checkId);
-    if (prior !== undefined && !decision.replaceExisting) {
+    const existing = existingVerdictOf(check, currentByCheck);
+    if (existing !== undefined && !decision.replaceExisting) {
       findings.push({
         severity: 'error',
         identifier: decision.checkId,
-        message: `check "${decision.checkId}" is already assessed; replacement must be selected and confirmed`,
+        message:
+          existing.source === 'operator'
+            ? `check "${decision.checkId}" is already assessed; replacement must be selected and confirmed`
+            : `check "${decision.checkId}" has a grader verdict; replacement must be selected and confirmed`,
       });
     }
-    if (prior === undefined && decision.replaceExisting) {
+    if (existing === undefined && decision.replaceExisting) {
       findings.push({
         severity: 'error',
         identifier: decision.checkId,
@@ -528,13 +630,15 @@ function validateAssessmentInput(
       });
     }
   }
-  for (const check of manualChecks) {
-    const checkId = check.id;
-    if (!currentByCheck.has(checkId) && !decided.has(checkId)) {
+  for (const check of checks) {
+    if (existingVerdictOf(check, currentByCheck) === undefined && !decided.has(check.checkId)) {
       findings.push({
         severity: 'error',
-        identifier: checkId,
-        message: `pending manual check "${checkId}" has no decision; every pending manual check must be assessed`,
+        identifier: check.checkId,
+        message:
+          check.evaluator === 'grader'
+            ? `pending graded check "${check.checkId}" has no decision; every pending graded check must be assessed`
+            : `pending manual check "${check.checkId}" has no decision; every pending manual check must be assessed`,
       });
     }
   }
@@ -542,7 +646,8 @@ function validateAssessmentInput(
     findings.push({
       severity: 'error',
       identifier: input.caseId,
-      message: 'every manual check is already assessed and no replacement was selected',
+      message:
+        'every manual and graded check already has a verdict and no replacement was selected',
     });
   }
   return findings;
@@ -550,32 +655,49 @@ function validateAssessmentInput(
 
 /**
  * Builds the next assessment revision in configuration order: new decisions
- * install fresh records, replaced prior records move to history stamped with
- * `replacedAt`, and unreplaced existing records are retained unchanged.
+ * install fresh records, a replaced prior operator record moves to history
+ * stamped `source: 'operator'`, a replaced grade-derived verdict moves to
+ * history stamped `source: 'grader'`, and unreplaced existing records are
+ * retained unchanged.
  */
 function buildNextAssessment(
   input: AssessmentInput,
-  manualChecks: readonly CheckRecord[],
+  checks: readonly AssessableCheckSummary[],
+  currentByCheck: ReadonlyMap<string, AssessmentRecord>,
   existing: AssessmentArtifact | null,
 ): AssessmentArtifact {
   const decisionsByCheck = new Map(input.decisions.map((decision) => [decision.checkId, decision]));
-  const currentByCheck = new Map(
-    (existing?.current ?? []).map((record) => [record.checkId, record]),
-  );
   const current: AssessmentRecord[] = [];
-  const history = [...(existing?.history ?? [])];
-  for (const check of manualChecks) {
-    const checkId = check.id;
+  const history: Array<ReplacedOperatorVerdict | ReplacedGraderVerdict> = [
+    ...(existing?.history ?? []),
+  ];
+  for (const check of checks) {
+    const checkId = check.checkId;
     const decision = decisionsByCheck.get(checkId);
-    const prior = currentByCheck.get(checkId);
+    const priorOperatorRecord = currentByCheck.get(checkId);
     if (decision === undefined) {
-      if (prior !== undefined) {
-        current.push(prior);
+      if (priorOperatorRecord !== undefined) {
+        current.push(priorOperatorRecord);
       }
       continue;
     }
-    if (prior !== undefined) {
-      history.push({ ...prior, replacedAt: input.assessedAt });
+    if (priorOperatorRecord !== undefined) {
+      history.push({ ...priorOperatorRecord, source: 'operator', replacedAt: input.assessedAt });
+    } else if (
+      check.evaluator === 'grader' &&
+      check.grade !== null &&
+      check.grade.status === 'graded' &&
+      check.grade.verdict !== 'undetermined' &&
+      check.grader !== null
+    ) {
+      history.push({
+        source: 'grader',
+        checkId,
+        verdict: check.grade.verdict,
+        rationale: check.grade.rationale,
+        grader: check.grader,
+        replacedAt: input.assessedAt,
+      });
     }
     current.push({
       checkId,

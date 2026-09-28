@@ -286,6 +286,7 @@ function createRecordingArtifactStore(): {
     solutionPatch: `${caseId}/solution.patch`,
     checks: `${caseId}/checks.json`,
     assessment: `${caseId}/assessment.json`,
+    grading: `${caseId}/grading.json`,
     result: `${caseId}/result.json`,
     setupBeforeAgent: `${caseId}/setup-before-agent.log`,
     setupBeforeChecks: `${caseId}/setup-before-checks.log`,
@@ -313,6 +314,9 @@ function createRecordingArtifactStore(): {
       return { ok: true, value: undefined };
     },
     async writeChecks() {
+      return { ok: true, value: undefined };
+    },
+    async writeGrading() {
       return { ok: true, value: undefined };
     },
     async finalizeCase(result) {
@@ -345,6 +349,9 @@ function createRecordingArtifactStore(): {
     },
     async readChecks() {
       return { ok: true, value: [] };
+    },
+    async readGrading() {
+      throw new Error('not used in this test');
     },
     async readAssessment() {
       return { ok: true, value: null };

@@ -18,6 +18,7 @@
           "checkId": "dod-manual-review",
           "note": "needs rework",
           "replacedAt": "2026-09-23T01:00:00.000Z",
+          "source": "operator",
           "verdict": "failed"
         }
       ],
@@ -69,6 +70,7 @@
         "checks": "cases/task-1--alpha--1/checks.json",
         "diagnostics": "cases/task-1--alpha--1/stderr.log",
         "events": "cases/task-1--alpha--1/events.jsonl",
+        "grading": null,
         "result": "cases/task-1--alpha--1/result.json",
         "sessionExport": "cases/task-1--alpha--1/session.json",
         "solutionPatch": "cases/task-1--alpha--1/solution.patch"
@@ -236,6 +238,7 @@
         "checks": "cases/task-1--beta--1/checks.json",
         "diagnostics": "cases/task-1--beta--1/stderr.log",
         "events": "cases/task-1--beta--1/events.jsonl",
+        "grading": null,
         "result": "cases/task-1--beta--1/result.json",
         "sessionExport": null,
         "solutionPatch": null
@@ -398,6 +401,7 @@
         "checks": null,
         "diagnostics": null,
         "events": null,
+        "grading": null,
         "result": "cases/task-2--alpha--1/result.json",
         "sessionExport": null,
         "solutionPatch": null
@@ -553,6 +557,8 @@
       "severity": "warning"
     }
   ],
+  "graders": [],
+  "gradings": [],
   "manifest": {
     "cases": [
       {

@@ -18,7 +18,7 @@ import { renderConfigDocument } from '@/config/document';
 import { loadConfig } from '@/config/load';
 import { decodeRunConfig } from '@/config/run-snapshot';
 import { TevuConfigSchema } from '@/config/schema';
-import { unavailableBenchmarkMetrics } from '@/domain/types';
+import { unavailableAgentMetrics, unavailableBenchmarkMetrics } from '@/domain/types';
 
 import {
   buildCheckEnvironment,
@@ -50,6 +50,8 @@ import type {
   EvaluatorProcessAdapter,
   EvaluatorProcessRequest,
   EvaluatorProcessResult,
+  GraderIdentity,
+  GradingArtifact,
   ProcessResult,
   RepositoryDefinition,
   RunFinding,
@@ -327,6 +329,7 @@ function buildArtifactIndex(caseId: string, present: ReadonlySet<string>): CaseR
     solutionPatch: `cases/${caseId}/solution.patch`,
     checks: `cases/${caseId}/checks.json`,
     assessment: `cases/${caseId}/assessment.json`,
+    grading: `cases/${caseId}/grading.json`,
     result: `cases/${caseId}/result.json`,
   };
   return {
@@ -336,6 +339,7 @@ function buildArtifactIndex(caseId: string, present: ReadonlySet<string>): CaseR
     solutionPatch: present.has('solutionPatch') ? paths.solutionPatch : null,
     checks: present.has('checks') ? paths.checks : null,
     assessment: present.has('assessment') ? paths.assessment : null,
+    grading: present.has('grading') ? paths.grading : null,
     result: paths.result,
   };
 }
@@ -372,6 +376,7 @@ function buildAssessmentArtifact(overrides: Partial<AssessmentArtifact> = {}): A
     ],
     history: [
       {
+        source: 'operator',
         checkId: 'dod-manual-review',
         verdict: 'failed',
         assessor: 'curator',
@@ -1478,7 +1483,7 @@ describe('unavailableBenchmarkMetrics', () => {
 });
 
 const GOLDEN_NORMALIZED_JSON =
-  '{\n  "assessments": [],\n  "capabilities": {},\n  "cases": [\n    {\n      "artifacts": {\n        "assessment": null,\n        "checks": null,\n        "diagnostics": null,\n        "events": null,\n        "result": "cases/task-1--alpha--1/result.json",\n        "sessionExport": null,\n        "solutionPatch": null\n      },\n      "checks": [],\n      "failure": null,\n      "identity": {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-1--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-1",\n        "timeoutMs": 1000\n      },\n      "lifecycle": "completed",\n      "metrics": {\n        "apiCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "apiErrors": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "cacheReadTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cacheWriteTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cost": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "USD",\n          "value": null\n        },\n        "elapsed": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "case",\n          "unit": "millisecond",\n          "value": null\n        },\n        "inputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "outputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "reasoningTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "skillCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "toolCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "turns": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        }\n      },\n      "outcome": "passed",\n      "process": {\n        "durationMs": 1500,\n        "endedAt": "2026-09-23T00:00:01.500Z",\n        "exitCode": 0,\n        "signal": null,\n        "startedAt": "2026-09-23T00:00:00.000Z",\n        "terminationStage": "none"\n      },\n      "schemaVersion": 1\n    },\n    {\n      "artifacts": {\n        "assessment": null,\n        "checks": null,\n        "diagnostics": null,\n        "events": null,\n        "result": "cases/task-2--alpha--1/result.json",\n        "sessionExport": null,\n        "solutionPatch": null\n      },\n      "checks": [],\n      "failure": null,\n      "identity": {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-2--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-2",\n        "timeoutMs": 1000\n      },\n      "lifecycle": "completed",\n      "metrics": {\n        "apiCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "apiErrors": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "cacheReadTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cacheWriteTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cost": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "USD",\n          "value": null\n        },\n        "elapsed": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "case",\n          "unit": "millisecond",\n          "value": null\n        },\n        "inputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "outputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "reasoningTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "skillCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "toolCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "turns": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        }\n      },\n      "outcome": "passed",\n      "process": {\n        "durationMs": 1500,\n        "endedAt": "2026-09-23T00:00:01.500Z",\n        "exitCode": 0,\n        "signal": null,\n        "startedAt": "2026-09-23T00:00:00.000Z",\n        "terminationStage": "none"\n      },\n      "schemaVersion": 1\n    }\n  ],\n  "exitCode": 0,\n  "findings": [],\n  "manifest": {\n    "cases": [\n      {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-1--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-1",\n        "timeoutMs": 1000\n      },\n      {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-2--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-2",\n        "timeoutMs": 1000\n      }\n    ],\n    "completedAt": "2026-01-01T00:05:00.000Z",\n    "configDigest": "sha256-golden-digest",\n    "configPath": "/synthetic/tevu.yaml",\n    "execution": {\n      "caseTimeoutMs": 1000,\n      "concurrency": 1,\n      "repeat": {\n        "source": "config",\n        "value": 1\n      }\n    },\n    "host": {\n      "nodeVersion": "v24.21.0",\n      "platform": "linux"\n    },\n    "runId": "20260101t000000z-golden",\n    "schemaVersion": 1,\n    "startedAt": "2026-01-01T00:00:00.000Z",\n    "tools": {\n      "agentVersions": {\n        "opencode": null\n      },\n      "gitVersion": "git version 2.45.0"\n    }\n  },\n  "models": [],\n  "pairs": [\n    {\n      "allPassed": true,\n      "modelId": "alpha",\n      "outcomes": {\n        "failed": 0,\n        "not-evaluated": 0,\n        "passed": 1,\n        "pending": 0\n      },\n      "passedOfPlanned": "1/1",\n      "planned": 1,\n      "taskId": "task-1"\n    },\n    {\n      "allPassed": true,\n      "modelId": "alpha",\n      "outcomes": {\n        "failed": 0,\n        "not-evaluated": 0,\n        "passed": 1,\n        "pending": 0\n      },\n      "passedOfPlanned": "1/1",\n      "planned": 1,\n      "taskId": "task-2"\n    }\n  ],\n  "repositories": [],\n  "schemaVersion": 1,\n  "tasks": [\n    {\n      "checks": [\n        {\n          "category": "acceptance",\n          "description": "acceptance command exits zero",\n          "evaluator": "command",\n          "id": "acc-acceptance-command",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "manual Definition of Done review",\n          "evaluator": "manual",\n          "id": "dod-manual-review",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "optional manual polish review",\n          "evaluator": "manual",\n          "id": "man-optional-polish",\n          "required": false\n        }\n      ],\n      "description": "synthetic task description for the welcome route",\n      "id": "task-1",\n      "repositoryId": "repo-1",\n      "source": {\n        "kind": "manual",\n        "reference": null,\n        "title": "Synthetic welcome-route task"\n      },\n      "startCommit": "0123456789abcdef0123456789abcdef01234567"\n    },\n    {\n      "checks": [\n        {\n          "category": "acceptance",\n          "description": "acceptance command exits zero",\n          "evaluator": "command",\n          "id": "acc-acceptance-command",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "manual Definition of Done review",\n          "evaluator": "manual",\n          "id": "dod-manual-review",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "optional manual polish review",\n          "evaluator": "manual",\n          "id": "man-optional-polish",\n          "required": false\n        }\n      ],\n      "description": "synthetic task description for the welcome route",\n      "id": "task-2",\n      "repositoryId": "repo-1",\n      "source": {\n        "issueKey": "TEVU-999",\n        "issueUrl": "https://jira.example.com/browse/TEVU-999",\n        "kind": "jira-cloud"\n      },\n      "startCommit": "0123456789abcdef0123456789abcdef01234567"\n    }\n  ]\n}\n';
+  '{\n  "assessments": [],\n  "capabilities": {},\n  "cases": [\n    {\n      "artifacts": {\n        "assessment": null,\n        "checks": null,\n        "diagnostics": null,\n        "events": null,\n        "grading": null,\n        "result": "cases/task-1--alpha--1/result.json",\n        "sessionExport": null,\n        "solutionPatch": null\n      },\n      "checks": [],\n      "failure": null,\n      "identity": {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-1--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-1",\n        "timeoutMs": 1000\n      },\n      "lifecycle": "completed",\n      "metrics": {\n        "apiCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "apiErrors": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "cacheReadTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cacheWriteTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cost": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "USD",\n          "value": null\n        },\n        "elapsed": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "case",\n          "unit": "millisecond",\n          "value": null\n        },\n        "inputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "outputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "reasoningTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "skillCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "toolCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "turns": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        }\n      },\n      "outcome": "passed",\n      "process": {\n        "durationMs": 1500,\n        "endedAt": "2026-09-23T00:00:01.500Z",\n        "exitCode": 0,\n        "signal": null,\n        "startedAt": "2026-09-23T00:00:00.000Z",\n        "terminationStage": "none"\n      },\n      "schemaVersion": 1\n    },\n    {\n      "artifacts": {\n        "assessment": null,\n        "checks": null,\n        "diagnostics": null,\n        "events": null,\n        "grading": null,\n        "result": "cases/task-2--alpha--1/result.json",\n        "sessionExport": null,\n        "solutionPatch": null\n      },\n      "checks": [],\n      "failure": null,\n      "identity": {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-2--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-2",\n        "timeoutMs": 1000\n      },\n      "lifecycle": "completed",\n      "metrics": {\n        "apiCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "apiErrors": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "cacheReadTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cacheWriteTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cost": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "USD",\n          "value": null\n        },\n        "elapsed": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "case",\n          "unit": "millisecond",\n          "value": null\n        },\n        "inputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "outputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "reasoningTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "skillCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "toolCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "turns": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        }\n      },\n      "outcome": "passed",\n      "process": {\n        "durationMs": 1500,\n        "endedAt": "2026-09-23T00:00:01.500Z",\n        "exitCode": 0,\n        "signal": null,\n        "startedAt": "2026-09-23T00:00:00.000Z",\n        "terminationStage": "none"\n      },\n      "schemaVersion": 1\n    }\n  ],\n  "exitCode": 0,\n  "findings": [],\n  "graders": [],\n  "gradings": [],\n  "manifest": {\n    "cases": [\n      {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-1--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-1",\n        "timeoutMs": 1000\n      },\n      {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-2--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-2",\n        "timeoutMs": 1000\n      }\n    ],\n    "completedAt": "2026-01-01T00:05:00.000Z",\n    "configDigest": "sha256-golden-digest",\n    "configPath": "/synthetic/tevu.yaml",\n    "execution": {\n      "caseTimeoutMs": 1000,\n      "concurrency": 1,\n      "repeat": {\n        "source": "config",\n        "value": 1\n      }\n    },\n    "host": {\n      "nodeVersion": "v24.21.0",\n      "platform": "linux"\n    },\n    "runId": "20260101t000000z-golden",\n    "schemaVersion": 1,\n    "startedAt": "2026-01-01T00:00:00.000Z",\n    "tools": {\n      "agentVersions": {\n        "opencode": null\n      },\n      "gitVersion": "git version 2.45.0"\n    }\n  },\n  "models": [],\n  "pairs": [\n    {\n      "allPassed": true,\n      "modelId": "alpha",\n      "outcomes": {\n        "failed": 0,\n        "not-evaluated": 0,\n        "passed": 1,\n        "pending": 0\n      },\n      "passedOfPlanned": "1/1",\n      "planned": 1,\n      "taskId": "task-1"\n    },\n    {\n      "allPassed": true,\n      "modelId": "alpha",\n      "outcomes": {\n        "failed": 0,\n        "not-evaluated": 0,\n        "passed": 1,\n        "pending": 0\n      },\n      "passedOfPlanned": "1/1",\n      "planned": 1,\n      "taskId": "task-2"\n    }\n  ],\n  "repositories": [],\n  "schemaVersion": 1,\n  "tasks": [\n    {\n      "checks": [\n        {\n          "category": "acceptance",\n          "description": "acceptance command exits zero",\n          "evaluator": "command",\n          "id": "acc-acceptance-command",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "manual Definition of Done review",\n          "evaluator": "manual",\n          "id": "dod-manual-review",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "optional manual polish review",\n          "evaluator": "manual",\n          "id": "man-optional-polish",\n          "required": false\n        }\n      ],\n      "description": "synthetic task description for the welcome route",\n      "id": "task-1",\n      "repositoryId": "repo-1",\n      "source": {\n        "kind": "manual",\n        "reference": null,\n        "title": "Synthetic welcome-route task"\n      },\n      "startCommit": "0123456789abcdef0123456789abcdef01234567"\n    },\n    {\n      "checks": [\n        {\n          "category": "acceptance",\n          "description": "acceptance command exits zero",\n          "evaluator": "command",\n          "id": "acc-acceptance-command",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "manual Definition of Done review",\n          "evaluator": "manual",\n          "id": "dod-manual-review",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "optional manual polish review",\n          "evaluator": "manual",\n          "id": "man-optional-polish",\n          "required": false\n        }\n      ],\n      "description": "synthetic task description for the welcome route",\n      "id": "task-2",\n      "repositoryId": "repo-1",\n      "source": {\n        "issueKey": "TEVU-999",\n        "issueUrl": "https://jira.example.com/browse/TEVU-999",\n        "kind": "jira-cloud"\n      },\n      "startCommit": "0123456789abcdef0123456789abcdef01234567"\n    }\n  ]\n}\n';
 
 const GOLDEN_MARKDOWN =
   '# tevu run 20260101t000000z-golden\n\n> **Sensitive data:** the tevu configuration file and this artifact directory can contain\n> sensitive private repository, task, Jira, model-output, and evaluator data. They rely on\n> host filesystem access controls.\n>\n> **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,\n> later Git history, host agent state, and benchmark artifacts from normal discovery.\n> It does not claim that a model with shell access cannot probe arbitrary host paths.\n\n## Run\n\n- Configuration digest: `sha256-golden-digest`\n- Started: 2026-01-01T00:00:00.000Z\n- Completed: 2026-01-01T00:05:00.000Z\n- Host: linux, Node.js v24.21.0, Git git version 2.45.0\n- Agent "opencode" version (detected provenance only): not detected\n- Agent "opencode" isolation control (deny outside worktree): not probed\n- Concurrency: 1\n- Case timeout: 1000ms\n- Repeat: 1 (source: config)\n- Run exit code: 0\n\n## Task task-1\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: manual — Synthetic welcome-route task\n\nPair summary:\n\n| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |\n|---|---|---|---|---|---|---|---|\n| alpha | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |\n\n| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|---|\n| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-1--alpha--1\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-1--alpha--1/result.json](cases/task-1--alpha--1/result.json)\n\n## Task task-2\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: Jira snapshot — [TEVU-999](https://jira.example.com/browse/TEVU-999)\n\nPair summary:\n\n| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |\n|---|---|---|---|---|---|---|---|\n| alpha | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |\n\n| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|---|\n| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-2--alpha--1\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-2--alpha--1/result.json](cases/task-2--alpha--1/result.json)\n\n---\n\nTask outcome, runtime failure, and run exit status are reported independently.\nCommand check output is configured acceptance evidence, not an additional model-quality metric.\nNo composite score or winner is computed.\n';
@@ -1503,6 +1508,7 @@ describe('deterministic report regeneration', () => {
       models: decoded.value.models,
       repositories: decoded.value.repositories,
       assessments: [records.assessment],
+      gradings: [],
     };
     const reordered = {
       run,
@@ -1511,6 +1517,7 @@ describe('deterministic report regeneration', () => {
       models: [...decoded.value.models].reverse(),
       repositories: [...decoded.value.repositories].reverse(),
       assessments: [records.assessment],
+      gradings: [],
     };
 
     const model = buildNormalizedRun(input);
@@ -1578,6 +1585,7 @@ describe('deterministic report regeneration', () => {
       models: [],
       repositories: [],
       assessments: [],
+      gradings: [],
     };
 
     const result = buildReport(input);
@@ -1622,6 +1630,7 @@ describe('deterministic report regeneration', () => {
       models: [],
       repositories: [],
       assessments: [],
+      gradings: [],
     };
 
     const result = buildReport(input);
@@ -1669,6 +1678,7 @@ describe('deterministic report regeneration', () => {
       models: [],
       repositories: [],
       assessments: [],
+      gradings: [],
     };
 
     const model = buildNormalizedRun(input);
@@ -1725,6 +1735,7 @@ describe('deterministic report regeneration', () => {
       models: [],
       repositories: [],
       assessments: [],
+      gradings: [],
     };
 
     const model = buildNormalizedRun(input);
@@ -1767,6 +1778,7 @@ describe('deterministic report regeneration', () => {
       models: [],
       repositories: [],
       assessments: [],
+      gradings: [],
     });
     const identities = [
       buildCaseIdentity({ caseId: 'task-a--alpha--1', taskId: 'task-a', timeoutMs: 3000 }),
@@ -1811,6 +1823,7 @@ describe('deterministic report regeneration', () => {
       models: [],
       repositories: [],
       assessments: [],
+      gradings: [],
     };
 
     const markdown = buildReport(input).markdown;
@@ -2398,6 +2411,7 @@ describe('assessCase locking, revision, and recovery', () => {
       });
       expect(assessment.value.history).toHaveLength(2);
       expect(assessment.value.history[1]).toEqual({
+        source: 'operator',
         checkId: 'dod-manual-review',
         verdict: 'passed',
         assessor: 'curator',
@@ -2930,6 +2944,695 @@ describe('credential-secret redaction at serialization boundaries', () => {
       expect(loaded.value.run.stop_grace).toBe('1s');
       expect(loaded.value.run.concurrency).toBe(2);
       expect(loaded.value.version).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+function buildGrader(overrides: Partial<GraderIdentity> = {}): GraderIdentity {
+  return { model: 'openai/grader-model', effort: 'high', agent: AGENT_NAME, ...overrides };
+}
+
+function buildGradingArtifact(overrides: Partial<GradingArtifact> = {}): GradingArtifact {
+  return {
+    schemaVersion: 1,
+    runId: '20260923t000000z-grading',
+    caseId: 'task-1--alpha--1',
+    grader: buildGrader(),
+    call: { status: 'replied', reply: '{"grades":[]}' },
+    metrics: unavailableAgentMetrics('unused in this fixture'),
+    grades: [],
+    ...overrides,
+  };
+}
+
+function buildGradingManifest(caseIds: readonly string[]): RunManifest {
+  return {
+    schemaVersion: 1,
+    runId: '20260923t000000z-grading',
+    configDigest: 'sha256-grading-digest',
+    configPath: '/synthetic/tevu.yaml',
+    startedAt: '2026-09-23T00:00:00.000Z',
+    completedAt: '2026-09-23T00:05:00.000Z',
+    host: { platform: 'linux', nodeVersion: 'v24.21.0' },
+    tools: { gitVersion: 'git version 2.45.0', agentVersions: { [AGENT_NAME]: null } },
+    execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 1, source: 'config' } },
+    cases: caseIds.map((caseId) => buildCaseIdentity({ caseId })),
+  };
+}
+
+describe('grading rendered in the report', () => {
+  function buildGradedTaskRecord(overrides: Partial<TaskRecord> = {}): TaskRecord {
+    return buildTaskRecord({
+      checks: [
+        buildCheckRecord({
+          id: 'csv-content',
+          description: 'escapes every value correctly',
+          evaluator: 'grader',
+        }),
+      ],
+      ...overrides,
+    });
+  }
+
+  it('renders the grader run-section line, one grade line per check, and the separate Grader metrics block', () => {
+    const graderCase = buildCaseResult({
+      checks: [
+        buildCheckResult({
+          checkId: 'csv-content',
+          verdict: 'passed',
+          evidence: `graded passed by ${buildGrader().model} (effort high, agent ${AGENT_NAME}): lines 1-4 add escaping`,
+        }),
+      ],
+      artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'grading'])),
+    });
+    const grading = buildGradingArtifact({
+      grades: [
+        {
+          checkId: 'csv-content',
+          category: 'acceptance',
+          status: 'graded',
+          verdict: 'passed',
+          rationale: 'lines 1-4 add escaping',
+        },
+      ],
+    });
+    const input: ReportInput = {
+      run: {
+        schemaVersion: 1,
+        manifest: buildGradingManifest(['task-1--alpha--1']),
+        cases: [graderCase],
+        findings: [],
+        exitCode: 0,
+      },
+      capabilities: {},
+      tasks: [buildGradedTaskRecord()],
+      models: [],
+      repositories: [],
+      assessments: [],
+      gradings: [grading],
+    };
+
+    const markdown = buildReport(input).markdown;
+
+    expect(markdown).toContain('- Grader: openai/grader-model (effort high, agent fake-agent)');
+    expect(markdown).toContain('Grades by openai/grader-model (effort high, agent fake-agent):');
+    expect(markdown).toContain('- csv-content: passed. lines 1-4 add escaping');
+    expect(markdown).toContain(
+      'Grader metrics (separate from the agent metrics above; never added to them):',
+    );
+    expect(markdown).toContain(
+      '- Grading: [cases/task-1--alpha--1/grading.json](cases/task-1--alpha--1/grading.json)',
+    );
+  });
+
+  it('renders the shared-model-entry note only when the grader model equals a benchmarked model entry exactly', () => {
+    const buildInput = (models: ReportInput['models']): ReportInput => ({
+      run: {
+        schemaVersion: 1,
+        manifest: buildGradingManifest(['task-1--alpha--1']),
+        cases: [
+          buildCaseResult({
+            artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'grading'])),
+          }),
+        ],
+        findings: [],
+        exitCode: 0,
+      },
+      capabilities: {},
+      tasks: [buildGradedTaskRecord()],
+      models,
+      repositories: [],
+      assessments: [],
+      gradings: [buildGradingArtifact()],
+    });
+
+    const withSharedEntry = buildReport(
+      buildInput([{ id: 'benched-grader', model: 'openai/grader-model', effort: 'medium' }]),
+    ).markdown;
+    const withoutSharedEntry = buildReport(
+      buildInput([{ id: 'other-model', model: 'openai/other-model', effort: 'medium' }]),
+    ).markdown;
+
+    expect(withSharedEntry).toContain(
+      'Grader model openai/grader-model is also benchmarked as model entry benched-grader (informational; tevu does not forbid it)',
+    );
+    expect(withoutSharedEntry).not.toContain('is also benchmarked as model entry');
+  });
+
+  it("renders a pending grade's reason and moves the check onto the Pending graded checks line", () => {
+    const pendingCase = buildCaseResult({
+      outcome: 'pending',
+      checks: [
+        buildCheckResult({
+          checkId: 'csv-content',
+          verdict: 'pending',
+          evidence:
+            'not graded: the grader call failed: ModelCallError (timed-out): run process did not finish within 30000ms',
+          durationMs: null,
+        }),
+      ],
+      artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'grading'])),
+    });
+    const grading = buildGradingArtifact({
+      call: {
+        status: 'no-reply',
+        reason:
+          'the grader call failed: ModelCallError (timed-out): run process did not finish within 30000ms',
+      },
+      grades: [
+        {
+          checkId: 'csv-content',
+          category: 'acceptance',
+          status: 'pending',
+          reason:
+            'the grader call failed: ModelCallError (timed-out): run process did not finish within 30000ms',
+        },
+      ],
+    });
+    const input: ReportInput = {
+      run: {
+        schemaVersion: 1,
+        manifest: buildGradingManifest(['task-1--alpha--1']),
+        cases: [pendingCase],
+        findings: [],
+        exitCode: 2,
+      },
+      capabilities: {},
+      tasks: [buildGradedTaskRecord()],
+      models: [],
+      repositories: [],
+      assessments: [],
+      gradings: [grading],
+    };
+
+    const markdown = buildReport(input).markdown;
+
+    expect(markdown).toContain('- Grader call: no reply. the grader call failed');
+    expect(markdown).toContain('- csv-content: not graded. the grader call failed');
+    expect(markdown).toContain('Pending graded checks: csv-content.');
+    expect(markdown).not.toContain('Pending manual checks:');
+  });
+
+  it('keeps case metrics and grader metrics in separate blocks, sharing no field, and reports a costless grader export as unavailable with its reason', () => {
+    const caseResult = buildCaseResult({
+      metrics: {
+        ...unavailableBenchmarkMetrics('unused'),
+        cost: {
+          value: 1.23,
+          unit: 'USD',
+          availability: { status: 'available', source: 'root-session export' },
+          scope: 'root-session',
+        },
+      },
+      checks: [buildCheckResult({ checkId: 'csv-content' })],
+      artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'grading'])),
+    });
+    const grading = buildGradingArtifact({
+      metrics: {
+        ...unavailableAgentMetrics('field "cost" is absent in export message "msg-1"'),
+      },
+      grades: [
+        {
+          checkId: 'csv-content',
+          category: 'acceptance',
+          status: 'graded',
+          verdict: 'passed',
+          rationale: 'ok',
+        },
+      ],
+    });
+    const input: ReportInput = {
+      run: {
+        schemaVersion: 1,
+        manifest: buildGradingManifest(['task-1--alpha--1']),
+        cases: [caseResult],
+        findings: [],
+        exitCode: 0,
+      },
+      capabilities: {},
+      tasks: [buildGradedTaskRecord()],
+      models: [],
+      repositories: [],
+      assessments: [],
+      gradings: [grading],
+    };
+
+    const markdown = buildReport(input).markdown;
+    const metricsIndex = markdown.indexOf('Metrics:');
+    const gradesIndex = markdown.indexOf('Grades by');
+    const graderMetricsIndex = markdown.indexOf('Grader metrics');
+
+    expect(metricsIndex).toBeGreaterThan(-1);
+    expect(gradesIndex).toBeGreaterThan(metricsIndex);
+    expect(graderMetricsIndex).toBeGreaterThan(gradesIndex);
+    expect(markdown).toContain('- cost: 1.23 USD (root-session, source: root-session export)');
+    expect(markdown).toContain(
+      '- cost: unavailable: field "cost" is absent in export message "msg-1"',
+    );
+  });
+});
+
+describe('grading and report regeneration stay byte-identical (P7)', () => {
+  async function createGradedSyntheticRun(root: string): Promise<{
+    runId: string;
+    store: ReturnType<typeof createArtifactStore>;
+  }> {
+    const runId = '20260923t000000z-grading-regen';
+    const store = createArtifactStore({
+      artifactsDirectory: join(root, 'artifacts'),
+      redact: (text) => text,
+    });
+    const config = rekeyToFakeAgent(buildSyntheticConfig());
+    const configWithGrader: TevuConfig = {
+      ...config,
+      roles: { grader: buildGrader() },
+    };
+    const manifest = buildManifest(runId, configWithGrader, buildCapabilityReport(), [
+      'task-1--alpha--1',
+    ]);
+    const started = await store.startRun(manifest);
+    if (!started.ok) {
+      throw new Error(`startRun failed: ${JSON.stringify(started.error)}`);
+    }
+    const caseResult = buildCaseResult({
+      checks: [
+        buildCheckResult({
+          checkId: 'acc-acceptance-command',
+          evidence: `graded passed by ${buildGrader().model} (effort high, agent ${AGENT_NAME}): ok`,
+        }),
+      ],
+      artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'checks', 'grading'])),
+    });
+    await writeChecksOrThrow(store, 'task-1--alpha--1', caseResult.checks);
+    const gradingWrite = await store.writeGrading(
+      'task-1--alpha--1',
+      buildGradingArtifact({
+        runId,
+        grades: [
+          {
+            checkId: 'acc-acceptance-command',
+            category: 'acceptance',
+            status: 'graded',
+            verdict: 'passed',
+            rationale: 'ok',
+          },
+        ],
+      }),
+    );
+    if (!gradingWrite.ok) {
+      throw new Error(`writeGrading failed: ${JSON.stringify(gradingWrite.error)}`);
+    }
+    const finalized = await store.finalizeCase(caseResult);
+    if (!finalized.ok) {
+      throw new Error(`finalizeCase failed: ${JSON.stringify(finalized.error)}`);
+    }
+    const run: RunResult = {
+      schemaVersion: 1,
+      manifest,
+      cases: [caseResult],
+      findings: [],
+      exitCode: 0,
+    };
+    const runFinalized = await store.finalizeRun(run);
+    if (!runFinalized.ok) {
+      throw new Error(`finalizeRun failed: ${JSON.stringify(runFinalized.error)}`);
+    }
+    return { runId, store };
+  }
+
+  it('regenerates byte-identical output across two runs, and reads only saved grades: rebuildReport calls no AgentAdapter method other than normalizeMetrics', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-eval-grading-regen-'));
+    try {
+      const { runId, store } = await createGradedSyntheticRun(root);
+
+      const first = await rebuildReport(runId, store, AGENTS_REGISTRY);
+      expect(first.ok).toBe(true);
+      const second = await rebuildReport(runId, store, AGENTS_REGISTRY);
+      expect(second.ok).toBe(true);
+      if (!first.ok || !second.ok) return;
+
+      expect(second.value.normalizedJson).toBe(first.value.normalizedJson);
+      expect(second.value.markdown).toBe(first.value.markdown);
+      expect(first.value.markdown).toContain('Grades by openai/grader-model');
+      expect(first.value.markdown).toContain(
+        '- Grader: openai/grader-model (effort high, agent fake-agent)',
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('assessCase for graded checks (P9)', () => {
+  function buildGradedAssessmentConfig(): TevuConfig {
+    const input: TevuConfigInput = {
+      version: 1,
+      run: {
+        output_dir: '/tevu-synthetic/artifacts',
+        concurrency: 1,
+        timeout: '60s',
+        stop_grace: '1s',
+      },
+      agents: { opencode: { command: '/synthetic/opencode', secrets: [], env: [] } },
+      repositories: [buildRepository()],
+      models: [buildModel(), buildModel({ id: 'beta', effort: 'effort-low' })],
+      roles: { grader: { model: 'openai/grader-model', effort: 'high' } },
+      tasks: [
+        {
+          id: 'graded-assess-task',
+          title: 'Graded assessment task',
+          repo: 'repo-1',
+          base_commit: '0123456789abcdef0123456789abcdef01234567',
+          description: 'synthetic graded assessment task',
+          prompt: 'synthetic graded assessment prompt',
+          readiness: ['synthetic ready item'],
+          checks: {
+            acceptance: [{ id: 'graded-check', description: 'The criterion holds.' }],
+            done: [buildCheckDefinition({ id: 'trivial-done' })],
+          },
+        },
+      ],
+    };
+    return rekeyToFakeAgent(TevuConfigSchema.parse(input));
+  }
+
+  type GradeScenario = 'passed' | 'failed' | 'undetermined' | 'pending' | 'none';
+
+  async function createGradedAssessmentRun(
+    root: string,
+    scenario: GradeScenario,
+  ): Promise<{
+    runId: string;
+    store: ReturnType<typeof createArtifactStore>;
+    grader: GraderIdentity;
+  }> {
+    const runId = `20260923t000000z-assess-${scenario}`;
+    const store = createArtifactStore({
+      artifactsDirectory: join(root, 'artifacts'),
+      redact: (text) => text,
+    });
+    const config = buildGradedAssessmentConfig();
+    const capabilities = buildCapabilityReport();
+    const manifest = buildManifest(runId, config, capabilities, ['graded-assess-task--alpha--1']);
+    const started = await store.startRun(manifest);
+    if (!started.ok) {
+      throw new Error(`startRun failed: ${JSON.stringify(started.error)}`);
+    }
+    const grader = buildGrader();
+    const hasGrading = scenario !== 'none';
+    const checks = [
+      buildCheckResult({
+        checkId: 'graded-check',
+        verdict: scenario === 'passed' ? 'passed' : scenario === 'failed' ? 'failed' : 'pending',
+        evidence: 'synthetic evidence',
+        durationMs: scenario === 'passed' || scenario === 'failed' ? 12 : null,
+      }),
+      buildCheckResult({ checkId: 'trivial-done', category: 'definition-of-done' }),
+    ];
+    await writeChecksOrThrow(store, 'graded-assess-task--alpha--1', checks);
+    if (hasGrading) {
+      const grade: GradingArtifact['grades'][number] =
+        scenario === 'pending'
+          ? {
+              checkId: 'graded-check',
+              category: 'acceptance',
+              status: 'pending',
+              reason: 'the grader call failed',
+            }
+          : {
+              checkId: 'graded-check',
+              category: 'acceptance',
+              status: 'graded',
+              verdict: scenario,
+              rationale: 'rationale text',
+            };
+      const gradingWrite = await store.writeGrading('graded-assess-task--alpha--1', {
+        grader,
+        call: { status: 'replied', reply: '{"grades":[]}' },
+        metrics: unavailableAgentMetrics('unused in this fixture'),
+        grades: [grade],
+      });
+      if (!gradingWrite.ok) {
+        throw new Error(`writeGrading failed: ${JSON.stringify(gradingWrite.error)}`);
+      }
+    }
+    const caseResult = buildCaseResult({
+      identity: buildCaseIdentity({
+        caseId: 'graded-assess-task--alpha--1',
+        taskId: 'graded-assess-task',
+      }),
+      checks,
+      artifacts: buildArtifactIndex(
+        'graded-assess-task--alpha--1',
+        new Set(hasGrading ? ['result', 'checks', 'grading'] : ['result', 'checks']),
+      ),
+    });
+    const finalized = await store.finalizeCase(caseResult);
+    if (!finalized.ok) {
+      throw new Error(`finalizeCase failed: ${JSON.stringify(finalized.error)}`);
+    }
+    const run: RunResult = {
+      schemaVersion: 1,
+      manifest,
+      cases: [caseResult],
+      findings: [],
+      exitCode: 2,
+    };
+    const runFinalized = await store.finalizeRun(run);
+    if (!runFinalized.ok) {
+      throw new Error(`finalizeRun failed: ${JSON.stringify(runFinalized.error)}`);
+    }
+    return { runId, store, grader };
+  }
+
+  it("keeps the grader's verdict in history when an operator replaces a passed grade with no prior operator record", async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-eval-assess-graded-passed-'));
+    try {
+      const { runId, store, grader } = await createGradedAssessmentRun(root, 'passed');
+
+      const assessed = await assessCase(
+        {
+          runId,
+          caseId: 'graded-assess-task--alpha--1',
+          decisions: [
+            {
+              checkId: 'graded-check',
+              verdict: 'failed',
+              assessor: 'curator',
+              note: 'overridden after review',
+              replaceExisting: true,
+            },
+          ],
+          assessedAt: '2026-09-23T02:00:00.000Z',
+        },
+        store,
+        AGENTS_REGISTRY,
+      );
+
+      expect(assessed.ok).toBe(true);
+      const assessment = await store.readAssessment(runId, 'graded-assess-task--alpha--1');
+      expect(assessment.ok).toBe(true);
+      if (!assessment.ok || assessment.value === null) return;
+      expect(assessment.value.history).toEqual([
+        {
+          source: 'grader',
+          checkId: 'graded-check',
+          verdict: 'passed',
+          rationale: 'rationale text',
+          grader,
+          replacedAt: '2026-09-23T02:00:00.000Z',
+        },
+      ]);
+      expect(assessment.value.current).toEqual([
+        {
+          checkId: 'graded-check',
+          verdict: 'failed',
+          assessor: 'curator',
+          note: 'overridden after review',
+          assessedAt: '2026-09-23T02:00:00.000Z',
+        },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each<{ scenario: GradeScenario }>([
+    { scenario: 'undetermined' },
+    { scenario: 'pending' },
+    { scenario: 'none' },
+  ])(
+    'rejects replaceExisting: true with "has no existing assessment to replace" when the grade is $scenario',
+    async ({ scenario }) => {
+      const root = await mkdtemp(join(tmpdir(), `tevu-eval-assess-graded-${scenario}-reject-`));
+      try {
+        const { runId, store } = await createGradedAssessmentRun(root, scenario);
+
+        const attempted = await assessCase(
+          {
+            runId,
+            caseId: 'graded-assess-task--alpha--1',
+            decisions: [
+              {
+                checkId: 'graded-check',
+                verdict: 'passed',
+                assessor: 'curator',
+                note: 'confirmed',
+                replaceExisting: true,
+              },
+            ],
+            assessedAt: '2026-09-23T02:00:00.000Z',
+          },
+          store,
+          AGENTS_REGISTRY,
+        );
+
+        expect(attempted.ok).toBe(false);
+        if (attempted.ok || attempted.error.kind !== 'ConfigValidationError') {
+          throw new Error(`expected ConfigValidationError, got ${JSON.stringify(attempted)}`);
+        }
+        expect(attempted.error.findings).toContainEqual({
+          severity: 'error',
+          identifier: 'graded-check',
+          message: 'check "graded-check" has no existing assessment to replace',
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each<{ scenario: GradeScenario }>([
+    { scenario: 'undetermined' },
+    { scenario: 'pending' },
+    { scenario: 'none' },
+  ])(
+    'records a decision with replaceExisting: false and adds no history entry when the grade is $scenario',
+    async ({ scenario }) => {
+      const root = await mkdtemp(join(tmpdir(), `tevu-eval-assess-graded-${scenario}-accept-`));
+      try {
+        const { runId, store } = await createGradedAssessmentRun(root, scenario);
+
+        const assessed = await assessCase(
+          {
+            runId,
+            caseId: 'graded-assess-task--alpha--1',
+            decisions: [
+              {
+                checkId: 'graded-check',
+                verdict: 'passed',
+                assessor: 'curator',
+                note: 'confirmed',
+                replaceExisting: false,
+              },
+            ],
+            assessedAt: '2026-09-23T02:00:00.000Z',
+          },
+          store,
+          AGENTS_REGISTRY,
+        );
+
+        expect(assessed.ok).toBe(true);
+        const assessment = await store.readAssessment(runId, 'graded-assess-task--alpha--1');
+        expect(assessment.ok).toBe(true);
+        if (!assessment.ok || assessment.value === null) return;
+        expect(assessment.value.history).toEqual([]);
+        expect(assessment.value.current).toEqual([
+          {
+            checkId: 'graded-check',
+            verdict: 'passed',
+            assessor: 'curator',
+            note: 'confirmed',
+            assessedAt: '2026-09-23T02:00:00.000Z',
+          },
+        ]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('requires every pending graded check to be decided, and rejects an operator record replacement without confirmation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-eval-assess-graded-pending-required-'));
+    try {
+      const { runId, store } = await createGradedAssessmentRun(root, 'pending');
+
+      const noDecision = await assessCase(
+        {
+          runId,
+          caseId: 'graded-assess-task--alpha--1',
+          decisions: [],
+          assessedAt: '2026-09-23T02:00:00.000Z',
+        },
+        store,
+        AGENTS_REGISTRY,
+      );
+      expect(noDecision.ok).toBe(false);
+      if (noDecision.ok || noDecision.error.kind !== 'ConfigValidationError') {
+        throw new Error(`expected ConfigValidationError, got ${JSON.stringify(noDecision)}`);
+      }
+      expect(noDecision.error.findings).toContainEqual({
+        severity: 'error',
+        identifier: 'graded-check',
+        message:
+          'pending graded check "graded-check" has no decision; every pending graded check must be assessed',
+      });
+
+      const first = await assessCase(
+        {
+          runId,
+          caseId: 'graded-assess-task--alpha--1',
+          decisions: [
+            {
+              checkId: 'graded-check',
+              verdict: 'passed',
+              assessor: 'curator',
+              note: 'confirmed',
+              replaceExisting: false,
+            },
+          ],
+          assessedAt: '2026-09-23T02:00:00.000Z',
+        },
+        store,
+        AGENTS_REGISTRY,
+      );
+      expect(first.ok).toBe(true);
+
+      const unconfirmedReplacement = await assessCase(
+        {
+          runId,
+          caseId: 'graded-assess-task--alpha--1',
+          decisions: [
+            {
+              checkId: 'graded-check',
+              verdict: 'failed',
+              assessor: 'curator-2',
+              note: 're-reviewed',
+              replaceExisting: false,
+            },
+          ],
+          assessedAt: '2026-09-23T03:00:00.000Z',
+        },
+        store,
+        AGENTS_REGISTRY,
+      );
+      expect(unconfirmedReplacement.ok).toBe(false);
+      if (
+        unconfirmedReplacement.ok ||
+        unconfirmedReplacement.error.kind !== 'ConfigValidationError'
+      ) {
+        throw new Error(
+          `expected ConfigValidationError, got ${JSON.stringify(unconfirmedReplacement)}`,
+        );
+      }
+      expect(unconfirmedReplacement.error.findings).toContainEqual({
+        severity: 'error',
+        identifier: 'graded-check',
+        message:
+          'check "graded-check" is already assessed; replacement must be selected and confirmed',
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
