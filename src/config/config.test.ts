@@ -9,6 +9,7 @@ import { createConfigStore } from '@/adapters/artifact-store';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
 import { createTask } from '@/application/create-task';
 import { validateConfig } from '@/application/validate';
+import { GH_CREDENTIAL_ENVIRONMENT_VARIABLES } from '@/domain/github-cli';
 
 import { renderConfigDocument } from './document';
 import {
@@ -39,11 +40,14 @@ import type { TaskDependencies, TaskWizardInput } from '@/application/create-tas
 import type {
   AgentAdapter,
   AgentCapabilityReport,
+  CaseExecutableAdapter,
+  CaseExecutableProbeRequest,
   ConfigStore,
   EnvironmentAdapter,
   GitWorkspaceAdapter,
   PrerequisiteAdapter,
   RepositoryDefinition,
+  TaskDefinition,
   TevuConfig,
   TevuError,
   TevuResult,
@@ -388,6 +392,18 @@ function buildEnvironments(overrides: Partial<EnvironmentAdapter> = {}): Environ
   };
 }
 
+function buildFakeCaseExecutablesAdapter(
+  overrides: Partial<CaseExecutableAdapter> = {},
+): CaseExecutableAdapter {
+  return {
+    probe: vi.fn(async () => ({
+      ok: true as const,
+      value: { verdict: { verdict: 'runs' as const } },
+    })),
+    ...overrides,
+  };
+}
+
 function buildValidationDependencies(
   overrides: Partial<ValidationDependencies> = {},
 ): ValidationDependencies {
@@ -399,6 +415,7 @@ function buildValidationDependencies(
     environments: buildEnvironments(),
     prerequisites: buildPrerequisites(),
     clones: { inspectClone: vi.fn(async () => 'repository' as const) },
+    caseExecutables: buildFakeCaseExecutablesAdapter(),
     ...overrides,
   };
 }
@@ -4010,6 +4027,520 @@ describe('validateConfig', () => {
       const report = expectOk(await validateConfig(config, dependencies));
 
       expect(report.findings.map((finding) => finding.identifier)).not.toContain('roles.grader');
+    });
+  });
+});
+
+describe('the case-executable stage of validateConfig', () => {
+  function expectedCaseExecutableMessage(params: {
+    executable: string;
+    resolved: string;
+    failure: string;
+    declared: string;
+  }): string {
+    return (
+      `"${params.executable}"${params.resolved} exits 0 for --version in tevu's environment, ` +
+      `secrets withheld, but ${params.failure} in a case environment, which has its own HOME and ` +
+      `XDG directories and receives from tevu's environment only PATH and the variables declared ` +
+      `in ${params.declared}: if it reads another variable, declare that variable there; if it is, ` +
+      `or runs through, a version-manager shim, put the real executable's directory before the ` +
+      `shim directory on PATH when starting tevu`
+    );
+  }
+
+  it('skips the whole stage, calling probe zero times, when a required environment variable is missing', async () => {
+    const dependencies = buildValidationDependencies({
+      prerequisites: buildPrerequisites({ hasEnvironmentVariable: vi.fn(() => false) }),
+    });
+    const config = expectSchemaAcceptance(
+      buildConfig({ agents: buildAgents({ env: ['OC_VAR'] }) }),
+    );
+
+    await validateConfig(config, dependencies);
+
+    expect(dependencies.caseExecutables.probe).not.toHaveBeenCalled();
+  });
+
+  it('probes once per distinct probe key, skipping a relative-path executable, an unnamed repository, and non-command checks, and reports a parent-only key at every location sharing it', async () => {
+    const pathRepository = buildRepository({
+      id: 'path-repo',
+      path: '/tmp/tevu/path-repo',
+      setup: {
+        before_agent: [['nested/tool'], ['setup-tool', 'arg']],
+        timeout: '1m',
+        env: ['SETUP_ENV'],
+      },
+    });
+    const githubRepository = {
+      id: 'github-repo',
+      github: 'octo/app',
+      path: '/cache/tevu/repositories/github.com/octo/app.git',
+      setup: { before_agent: [['setup-tool']], timeout: '1m', env: ['SETUP_ENV'] },
+    } as unknown as RepositoryDefinition;
+    const unusedRepository = buildRepository({
+      id: 'unused-repo',
+      path: '/tmp/tevu/unused-repo',
+      setup: { before_agent: [['ghost-tool']], timeout: '1m', env: [] },
+    });
+    const taskPath = buildTaskDefinition({
+      id: 'task-path',
+      repo: 'path-repo',
+      checks: {
+        acceptance: [
+          buildCommandCheck({ id: 'check-path', run: ['setup-tool', 'arg2'], env: ['SETUP_ENV'] }),
+        ],
+        done: [
+          buildManualCheck({ id: 'manual-done' }),
+          { id: 'graded-done', description: 'graded' },
+        ],
+      },
+    });
+    const taskGithub = buildTaskDefinition({
+      id: 'task-github',
+      repo: 'github-repo',
+      checks: {
+        acceptance: [
+          buildCommandCheck({ id: 'check-github', run: ['setup-tool'], env: ['SETUP_ENV'] }),
+        ],
+        done: [buildManualCheck({ id: 'manual-done-2' })],
+      },
+    });
+    const withheldNames = [...GH_CREDENTIAL_ENVIRONMENT_VARIABLES, 'AGENT_SECRET'];
+    const probe = vi.fn(async (request: CaseExecutableProbeRequest) =>
+      request.executable === 'setup-tool' && request.workingDirectory === pathRepository.path
+        ? {
+            ok: true as const,
+            value: {
+              verdict: {
+                verdict: 'parent-only' as const,
+                resolvedPath: null,
+                replicaFailure: { kind: 'exited' as const, exitCode: 1 },
+              },
+            },
+          }
+        : { ok: true as const, value: { verdict: { verdict: 'runs' as const } } },
+    );
+    const dependencies = buildValidationDependencies({
+      environments: buildEnvironments({
+        snapshotParent: vi.fn(() => ({
+          ok: true as const,
+          value: {
+            path: '/usr/bin:/bin',
+            agentValues: { AGENT_SECRET: 'agent-secret-value', AGENT_ENV: 'agent-env-value' },
+            ordinaryEvaluatorValues: { SETUP_ENV: 'setup-env-value' },
+            secretValues: ['agent-secret-value'],
+          },
+        })),
+      }),
+      // The GitHub entry's base commit needs to resolve so the source stage
+      // adds no finding unrelated to the case-executable stage under test.
+      git: buildFullGit({
+        resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) => ({
+          kind: 'found' as const,
+          commit,
+        })),
+      }),
+      caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
+    });
+    // `githubRepository` carries both `path` and `github`, the materialized
+    // shape `loadConfig` produces; `expectSchemaAcceptance` parses the file
+    // shape directly, so it is spliced in afterward rather than parsed.
+    const config: TevuConfig = {
+      ...expectSchemaAcceptance(
+        buildConfig({
+          agents: buildAgents({ secrets: ['AGENT_SECRET'], env: ['AGENT_ENV'] }),
+          repositories: [pathRepository, unusedRepository],
+          tasks: [taskPath],
+          roles: { grader: buildModelRole() },
+        }),
+      ),
+      repositories: [pathRepository, githubRepository, unusedRepository],
+      tasks: [taskPath, taskGithub] as unknown as TaskDefinition[],
+    };
+
+    const report = expectOk(await validateConfig(config, dependencies));
+
+    expect(dependencies.environments.snapshotParent).toHaveBeenCalledOnce();
+    expect(probe).toHaveBeenCalledTimes(3);
+    expect(report.findings.filter((finding) => finding.severity === 'error')).toEqual([
+      {
+        severity: 'error',
+        identifier: 'repositories.path-repo.setup.before_agent.1',
+        message: expectedCaseExecutableMessage({
+          executable: 'setup-tool',
+          resolved: '',
+          failure: 'exits with code 1',
+          declared: 'repositories.path-repo.setup.env',
+        }),
+      },
+      {
+        severity: 'error',
+        identifier: 'tasks.task-path.checks.acceptance.check-path.run',
+        message: expectedCaseExecutableMessage({
+          executable: 'setup-tool',
+          resolved: '',
+          failure: 'exits with code 1',
+          declared: 'tasks.task-path.checks.acceptance.check-path.env',
+        }),
+      },
+    ]);
+
+    const requests = probe.mock.calls.map(([request]) => request);
+    const agentRequest = requests.find((request) => request.executable === 'opencode');
+    expect(agentRequest).not.toHaveProperty('workingDirectory');
+    expect(agentRequest).toMatchObject({
+      additions: { AGENT_SECRET: 'agent-secret-value', AGENT_ENV: 'agent-env-value' },
+    });
+    expect(new Set(agentRequest?.withheldNames)).toEqual(new Set(withheldNames));
+
+    const pathRequest = requests.find(
+      (request) => request.executable === 'setup-tool' && 'workingDirectory' in request,
+    );
+    expect(pathRequest).toMatchObject({
+      workingDirectory: pathRepository.path,
+      additions: { SETUP_ENV: 'setup-env-value' },
+    });
+    expect(new Set(pathRequest?.withheldNames)).toEqual(new Set(withheldNames));
+
+    const githubRequest = requests.find(
+      (request) => request.executable === 'setup-tool' && !('workingDirectory' in request),
+    );
+    expect(githubRequest).not.toHaveProperty('workingDirectory');
+    expect(githubRequest).toMatchObject({
+      additions: { SETUP_ENV: 'setup-env-value' },
+    });
+    expect(new Set(githubRequest?.withheldNames)).toEqual(new Set(withheldNames));
+  });
+
+  it('stops probing after the first PrerequisiteError and reports it exactly once', async () => {
+    const probe = vi.fn(async () => ({
+      ok: false as const,
+      error: {
+        kind: 'PrerequisiteError' as const,
+        tool: 'case-executable',
+        expected: 'a new probe directory under /tmp',
+        actual: 'ENOSPC',
+      },
+    }));
+    const dependencies = buildValidationDependencies({
+      caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
+    });
+
+    const report = expectOk(
+      await validateConfig(expectSchemaAcceptance(buildConfig()), dependencies),
+    );
+
+    expect(report.valid).toBe(false);
+    expect(
+      report.findings.filter((finding) => finding.identifier === 'prerequisites.case-executable'),
+    ).toEqual([
+      {
+        severity: 'error',
+        identifier: 'prerequisites.case-executable',
+        message: 'expected a new probe directory under /tmp, actual ENOSPC',
+      },
+    ]);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {
+      label: 'a resolved path different from the configured executable',
+      resolvedPath: '/usr/local/bin/opencode',
+      resolved: ' (/usr/local/bin/opencode)',
+      replicaFailure: { kind: 'exited' as const, exitCode: 126 },
+      failure: 'exits with code 126',
+    },
+    {
+      label: 'a resolved path equal to the configured executable',
+      resolvedPath: 'opencode',
+      resolved: '',
+      replicaFailure: { kind: 'exited' as const, exitCode: 1 },
+      failure: 'exits with code 1',
+    },
+    {
+      label: 'no resolved path and a signal',
+      resolvedPath: null,
+      resolved: '',
+      replicaFailure: { kind: 'signaled' as const, signal: 'SIGSEGV' },
+      failure: 'is terminated by signal SIGSEGV',
+    },
+    {
+      label: 'a launch failure with a Node.js error code',
+      resolvedPath: null,
+      resolved: '',
+      replicaFailure: { kind: 'not-started' as const, code: 'ENOENT' },
+      failure: 'cannot be started (ENOENT)',
+    },
+    {
+      label: 'a launch failure without an error code',
+      resolvedPath: null,
+      resolved: '',
+      replicaFailure: { kind: 'not-started' as const, code: null },
+      failure: 'cannot be started',
+    },
+  ])(
+    'renders the fixed parent-only template exactly for $label',
+    async ({ resolvedPath, resolved, replicaFailure, failure }) => {
+      const probe = vi.fn(async () => ({
+        ok: true as const,
+        value: { verdict: { verdict: 'parent-only' as const, resolvedPath, replicaFailure } },
+      }));
+      const dependencies = buildValidationDependencies({
+        caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
+      });
+
+      const report = expectOk(
+        await validateConfig(expectSchemaAcceptance(buildConfig()), dependencies),
+      );
+
+      expect(report.findings).toContainEqual({
+        severity: 'error',
+        identifier: 'agents.opencode.command',
+        message: expectedCaseExecutableMessage({
+          executable: 'opencode',
+          resolved,
+          failure,
+          declared: 'agents.opencode.secrets and agents.opencode.env',
+        }),
+      });
+    },
+  );
+
+  it('never lets an addition value reach a finding, only the executable and the resolved PATH entry', async () => {
+    const dependencies = buildValidationDependencies({
+      environments: buildEnvironments({
+        snapshotParent: vi.fn(() => ({
+          ok: true as const,
+          value: {
+            path: '/usr/bin:/bin',
+            agentValues: { AGENT_SECRET_VALUE: 'sensitive-secret-9f2' },
+            ordinaryEvaluatorValues: {},
+            secretValues: ['sensitive-secret-9f2'],
+          },
+        })),
+      }),
+      caseExecutables: buildFakeCaseExecutablesAdapter({
+        probe: vi.fn(async () => ({
+          ok: true as const,
+          value: {
+            verdict: {
+              verdict: 'parent-only' as const,
+              resolvedPath: '/usr/local/bin/opencode',
+              replicaFailure: { kind: 'exited' as const, exitCode: 1 },
+            },
+          },
+        })),
+      }),
+    });
+    const config = expectSchemaAcceptance(
+      buildConfig({ agents: buildAgents({ secrets: ['AGENT_SECRET_VALUE'] }) }),
+    );
+
+    const report = expectOk(await validateConfig(config, dependencies));
+
+    const messages = report.findings.map((finding) => finding.message).join('\n');
+    expect(messages).not.toContain('sensitive-secret-9f2');
+    expect(messages).toContain('/usr/local/bin/opencode');
+  });
+
+  describe('directory-snapshot warnings', () => {
+    function buildRepositoryConfig(): TevuConfigInput {
+      return buildConfig({
+        repositories: [
+          buildRepository({ setup: { before_agent: [['tool']], timeout: '1m', env: [] } }),
+        ],
+      });
+    }
+
+    it('caps a change warning at the first 10 paths and counts the rest', async () => {
+      const added = Array.from(
+        { length: 12 },
+        (_unused, index) => `p${String(index).padStart(2, '0')}`,
+      );
+      const probe = vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          verdict: { verdict: 'runs' as const },
+          changes: { runs: [{ run: 'replica' as const, added, modified: [], removed: [] }] },
+        },
+      }));
+      const dependencies = buildValidationDependencies({
+        caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
+      });
+
+      const report = expectOk(
+        await validateConfig(expectSchemaAcceptance(buildRepositoryConfig()), dependencies),
+      );
+
+      expect(report.findings).toContainEqual({
+        severity: 'warning',
+        identifier: 'repositories.sample-repo.setup.before_agent.0',
+        message:
+          'files in "/tmp/tevu/sample-repo" changed while "tool" was running with --version in ' +
+          'a case environment: added p00, p01, p02, p03, p04, p05, p06, p07, p08, p09; +2 more; ' +
+          'tevu did not revert them',
+      });
+    });
+
+    it('reports the could-not-check warning, and only that warning, when a directory snapshot fails', async () => {
+      const probe = vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          verdict: { verdict: 'runs' as const },
+          changes: {
+            runs: [{ run: 'replica' as const, added: [], modified: [], removed: [] }],
+            failure: 'git status exited with code 128',
+          },
+        },
+      }));
+      const dependencies = buildValidationDependencies({
+        caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
+      });
+
+      const report = expectOk(
+        await validateConfig(expectSchemaAcceptance(buildRepositoryConfig()), dependencies),
+      );
+
+      expect(
+        report.findings.filter(
+          (finding) => finding.identifier === 'repositories.sample-repo.setup.before_agent.0',
+        ),
+      ).toEqual([
+        {
+          severity: 'warning',
+          identifier: 'repositories.sample-repo.setup.before_agent.0',
+          message:
+            'could not check whether files in "/tmp/tevu/sample-repo" changed while "tool" was ' +
+            'running with --version: git status exited with code 128',
+        },
+      ]);
+    });
+
+    it('reports a change warning only at the first location sharing a probe key', async () => {
+      const probe = vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          verdict: { verdict: 'runs' as const },
+          changes: {
+            runs: [{ run: 'replica' as const, added: ['file.txt'], modified: [], removed: [] }],
+          },
+        },
+      }));
+      const dependencies = buildValidationDependencies({
+        caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
+      });
+      const repository = buildRepository({
+        setup: { before_agent: [['tool']], timeout: '1m', env: [] },
+      });
+      const config = expectSchemaAcceptance(
+        buildConfig({
+          repositories: [repository],
+          tasks: [
+            buildTaskDefinition({
+              checks: {
+                acceptance: [buildCommandCheck({ id: 'reuses-tool', run: ['tool'], env: [] })],
+                done: [buildManualCheck({ id: 'manual-done' })],
+              },
+            }),
+          ],
+        }),
+      );
+
+      const report = expectOk(await validateConfig(config, dependencies));
+
+      expect(report.findings.filter((finding) => finding.severity === 'warning')).toEqual([
+        {
+          severity: 'warning',
+          identifier: 'repositories.sample-repo.setup.before_agent.0',
+          message:
+            'files in "/tmp/tevu/sample-repo" changed while "tool" was running with --version in ' +
+            'a case environment: added file.txt; tevu did not revert them',
+        },
+      ]);
+      // Once for the shared "tool" key (before_agent.0 and the acceptance
+      // check), once more for the agent's own, distinct probe key.
+      expect(probe).toHaveBeenCalledTimes(2);
+    });
+
+    it("orders a location's change warnings before its parent-only error", async () => {
+      const probe = vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          verdict: {
+            verdict: 'parent-only' as const,
+            resolvedPath: null,
+            replicaFailure: { kind: 'exited' as const, exitCode: 1 },
+          },
+          changes: {
+            runs: [{ run: 'replica' as const, added: ['file.txt'], modified: [], removed: [] }],
+          },
+        },
+      }));
+      const dependencies = buildValidationDependencies({
+        caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
+      });
+
+      const report = expectOk(
+        await validateConfig(expectSchemaAcceptance(buildRepositoryConfig()), dependencies),
+      );
+
+      const atLocation = report.findings.filter(
+        (finding) => finding.identifier === 'repositories.sample-repo.setup.before_agent.0',
+      );
+      expect(atLocation.map((finding) => finding.severity)).toEqual(['warning', 'error']);
+    });
+
+    it('escapes a control character in a changed path', async () => {
+      const probe = vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          verdict: { verdict: 'runs' as const },
+          changes: {
+            runs: [
+              { run: 'replica' as const, added: ['line\none.txt'], modified: [], removed: [] },
+            ],
+          },
+        },
+      }));
+      const dependencies = buildValidationDependencies({
+        caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
+      });
+
+      const report = expectOk(
+        await validateConfig(expectSchemaAcceptance(buildRepositoryConfig()), dependencies),
+      );
+
+      expect(report.findings).toContainEqual({
+        severity: 'warning',
+        identifier: 'repositories.sample-repo.setup.before_agent.0',
+        message:
+          'files in "/tmp/tevu/sample-repo" changed while "tool" was running with --version in ' +
+          'a case environment: added line\\u000aone.txt; tevu did not revert them',
+      });
+    });
+
+    it('stays valid when every finding the stage produces is a warning', async () => {
+      const probe = vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          verdict: { verdict: 'runs' as const },
+          changes: {
+            runs: [{ run: 'replica' as const, added: ['file.txt'], modified: [], removed: [] }],
+          },
+        },
+      }));
+      const dependencies = buildValidationDependencies({
+        caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
+      });
+
+      const report = expectOk(
+        await validateConfig(expectSchemaAcceptance(buildRepositoryConfig()), dependencies),
+      );
+
+      expect(report.findings.length).toBeGreaterThan(0);
+      expect(report.findings.every((finding) => finding.severity === 'warning')).toBe(true);
+      expect(report.valid).toBe(true);
     });
   });
 });

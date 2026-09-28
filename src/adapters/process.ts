@@ -8,17 +8,23 @@
  */
 
 import { Buffer } from 'node:buffer';
-import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, lstat, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { execa } from 'execa';
 
 import { describeCause } from '@/domain/describe-cause';
+import { ISOLATED_GIT_SETTINGS } from '@/domain/git-environment';
 import { redactDecodedValue } from '@/domain/redaction';
 
 import type {
   CaseEnvironments,
+  CaseExecutableAdapter,
+  CaseExecutableProbe,
+  CaseExecutableProbeRequest,
+  CaseExecutableVerdict,
   CaseWorkspace,
   EnvironmentAdapter,
   EnvironmentVariableNames,
@@ -39,6 +45,7 @@ import type {
   SecretRedactor,
   TerminationStage,
   TevuResult,
+  WorkingDirectoryChanges,
 } from '@/domain/types';
 
 /** Chunk-safe redactor holding back partial secret prefixes across chunk boundaries. */
@@ -51,6 +58,10 @@ const REDACTION_MASK = '[REDACTED]';
 const DEFAULT_MAX_CAPTURE_BYTES = 64 * 1024;
 const FIXED_LOCALE = 'C.UTF-8';
 const PROBE_TIMEOUT_MS = 10_000;
+/** Matches OpenCode's private grace period so a case executable and an agent are torn down alike. */
+const CASE_EXECUTABLE_TERMINATION_GRACE_MS = 2_000;
+/** Above this many `git status` entries a directory snapshot is treated as unreadable rather than scanned in full. */
+const DIRECTORY_SNAPSHOT_ENTRY_LIMIT = 10_000;
 
 /**
  * Creates a whole-text redactor replacing every non-empty secret value with
@@ -472,6 +483,500 @@ export function createPrerequisiteAdapter(): PrerequisiteAdapter {
         );
       }
     },
+  };
+}
+
+/**
+ * Creates the case-executable probe adapter: for each request, starts
+ * `[executable, "--version"]` once in a replica of its case environment and,
+ * only when that run does not exit 0 before the time limit, once more in
+ * tevu's own environment (the withheld names omitted), so a shim that only
+ * resolves through the operator's home is reported rather than run inside a
+ * case. When the request carries a working directory, also compares its Git
+ * status before and after each run and reports what changed there, without
+ * ever reverting it.
+ */
+export function createCaseExecutableAdapter(): CaseExecutableAdapter {
+  return {
+    async probe(
+      request: CaseExecutableProbeRequest,
+    ): Promise<TevuResult<CaseExecutableProbe, 'PrerequisiteError'>> {
+      let root: string;
+      try {
+        root = await mkdtemp(join(tmpdir(), 'tevu-probe-'));
+      } catch (cause) {
+        return newProbeDirectoryError(cause);
+      }
+
+      let outcome: TevuResult<CaseExecutableProbe, 'PrerequisiteError'>;
+      try {
+        outcome = { ok: true, value: await runCaseExecutableProbe(request, root) };
+      } catch (cause) {
+        outcome = newProbeDirectoryError(cause);
+      }
+
+      try {
+        await rm(root, { recursive: true, force: true });
+      } catch (cause) {
+        // Overrides any verdict, changes, or earlier error of this same call:
+        // a retained probe directory is itself a prerequisite failure.
+        return prerequisiteError(
+          'case-executable',
+          `probe directory ${root} removed`,
+          describeCause(cause),
+        );
+      }
+      return outcome;
+    },
+  };
+}
+
+function newProbeDirectoryError(
+  cause: unknown,
+): TevuResult<CaseExecutableProbe, 'PrerequisiteError'> {
+  return prerequisiteError(
+    'case-executable',
+    `a new probe directory under ${tmpdir()}`,
+    describeCause(cause),
+  );
+}
+
+async function runCaseExecutableProbe(
+  request: CaseExecutableProbeRequest,
+  root: string,
+): Promise<CaseExecutableProbe> {
+  const watcher =
+    request.workingDirectory === undefined
+      ? undefined
+      : createDirectorySnapshotWatcher(request.workingDirectory);
+  const work = request.workingDirectory ?? (await createEmptyProbeWorkDirectory(root));
+  if (watcher !== undefined) {
+    await watcher.start();
+  }
+
+  const base = await createEnvironmentBase(join(root, 'env'), request.path);
+  const replica = buildReplicaEnvironment(base.variables, request.additions);
+  const argv: [string, ...string[]] = [request.executable, '--version'];
+
+  const replicaResult = await runManagedProcess({
+    argv,
+    cwd: work,
+    environment: replica,
+    timeoutMs: PROBE_TIMEOUT_MS,
+    terminationGraceMs: CASE_EXECUTABLE_TERMINATION_GRACE_MS,
+  });
+  if (watcher !== undefined) {
+    await watcher.afterRun('replica');
+  }
+
+  if (exitedZero(replicaResult)) {
+    return withChanges({ verdict: 'runs' }, watcher);
+  }
+  if (replicaResult.launched && replicaResult.timedOut) {
+    // The replica may still be downloading a toolchain into its empty home;
+    // a case with a longer limit could finish where this probe cannot.
+    return withChanges({ verdict: 'undetermined' }, watcher);
+  }
+
+  const parentResult = await runManagedProcess({
+    argv,
+    cwd: work,
+    environment: buildParentEnvironment(request.withheldNames),
+    timeoutMs: PROBE_TIMEOUT_MS,
+    terminationGraceMs: CASE_EXECUTABLE_TERMINATION_GRACE_MS,
+  });
+  if (watcher !== undefined) {
+    await watcher.afterRun('parent');
+  }
+
+  if (exitedZero(parentResult)) {
+    return withChanges(
+      {
+        verdict: 'parent-only',
+        resolvedPath: await resolveOnPath(request.executable, request.path),
+        replicaFailure: failureOf(replicaResult),
+      },
+      watcher,
+    );
+  }
+  return withChanges({ verdict: 'undetermined' }, watcher);
+}
+
+function withChanges(
+  verdict: CaseExecutableVerdict,
+  watcher: DirectorySnapshotWatcher | undefined,
+): CaseExecutableProbe {
+  return watcher === undefined ? { verdict } : { verdict, changes: watcher.changes };
+}
+
+async function createEmptyProbeWorkDirectory(root: string): Promise<string> {
+  const work = join(root, 'work');
+  await mkdir(work);
+  return work;
+}
+
+function buildReplicaEnvironment(
+  base: Readonly<Record<string, string>>,
+  additions: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const replica: Record<string, string> = { ...base };
+  for (const [name, value] of Object.entries(additions)) {
+    if (!(name in replica)) {
+      replica[name] = value;
+    }
+  }
+  return replica;
+}
+
+/** Every defined `process.env` entry except the names a case never gives an evaluator or setup command. */
+function buildParentEnvironment(withheldNames: readonly string[]): Record<string, string> {
+  const withheld = new Set(withheldNames);
+  const parent: Record<string, string> = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== undefined && !withheld.has(name)) {
+      parent[name] = value;
+    }
+  }
+  return parent;
+}
+
+function exitedZero(result: ManagedProcessResult): boolean {
+  return result.launched && !result.timedOut && result.exitCode === 0;
+}
+
+/**
+ * Reduces a settled, non-zero replica outcome to the shape a `parent-only`
+ * finding carries; never reads process output.
+ */
+function failureOf(result: ManagedProcessResult):
+  | { kind: 'exited'; exitCode: number }
+  | { kind: 'signaled'; signal: string }
+  | {
+      kind: 'not-started';
+      code: string | null;
+    } {
+  if (!result.launched) {
+    return { kind: 'not-started', code: result.code ?? null };
+  }
+  if (result.exitCode !== null) {
+    return { kind: 'exited', exitCode: result.exitCode };
+  }
+  return { kind: 'signaled', signal: result.signal ?? 'unknown' };
+}
+
+/**
+ * Resolves a bare executable name against one PATH the way a shell would,
+ * without following the target of a matched symbolic link: an absolute-path
+ * `executable` resolves to itself, and a `stat`/`access` failure on a
+ * candidate just skips that PATH entry rather than failing the lookup.
+ */
+async function resolveOnPath(executable: string, path: string): Promise<string | null> {
+  if (executable.startsWith('/')) {
+    return executable;
+  }
+  for (const entry of path.split(':')) {
+    if (entry.length === 0 || !entry.startsWith('/')) {
+      continue;
+    }
+    const candidate = join(entry, executable);
+    try {
+      const info = await stat(candidate);
+      if (!info.isFile()) {
+        continue;
+      }
+      await access(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/** Explicit replacement environment for a directory snapshot's git commands, isolated from the operator's own configuration. */
+function caseExecutableGitEnvironment(): Record<string, string> {
+  const environment: Record<string, string> = {
+    PATH: process.env.PATH ?? '',
+    ...ISOLATED_GIT_SETTINGS,
+  };
+  const home = process.env.HOME;
+  if (home !== undefined) {
+    environment.HOME = home;
+  }
+  return environment;
+}
+
+/**
+ * Runs one git command for a directory snapshot with stdout captured as raw
+ * bytes, so a byte-exact path survives even when it is not valid UTF-8.
+ *
+ * `label` names the command in a failure reason (`rev-parse --show-prefix`
+ * or `status`), never the full argument list, so a failure reason never
+ * exposes an isolation flag such as `core.fsmonitor=false`.
+ */
+async function runCaseExecutableGit(
+  work: string,
+  args: readonly string[],
+  label: string,
+): Promise<{ ok: true; stdout: Buffer } | { ok: false; reason: string }> {
+  try {
+    const result = await execa('git', [...args], {
+      cwd: work,
+      env: caseExecutableGitEnvironment(),
+      extendEnv: false,
+      stdin: 'ignore',
+      encoding: 'buffer',
+      reject: false,
+      timeout: PROBE_TIMEOUT_MS,
+    });
+    if (result.timedOut) {
+      return { ok: false, reason: `git ${label} did not finish within 10 s` };
+    }
+    if (typeof result.exitCode === 'number') {
+      return result.exitCode === 0
+        ? { ok: true, stdout: Buffer.from(result.stdout) }
+        : { ok: false, reason: `git ${label} exited with code ${result.exitCode}` };
+    }
+    if (typeof result.signal === 'string') {
+      return { ok: false, reason: `git ${label} was terminated by signal ${result.signal}` };
+    }
+    return { ok: false, reason: `git ${label} could not be started` };
+  } catch {
+    return { ok: false, reason: `git ${label} could not be started` };
+  }
+}
+
+/** One path's type, size, and modification and status-change times; absence is a distinct, comparable state. */
+type PathFingerprint = { mode: number; size: number; mtimeNs: bigint; ctimeNs: bigint };
+
+/**
+ * One moment's Git status for a working directory: every path it lists, and
+ * the `lstat` state of each of those paths plus every path a caller carries
+ * forward from an earlier snapshot.
+ */
+type DirectorySnapshot = {
+  listed: Map<string, 'tracked' | 'untracked'>;
+  states: Map<string, PathFingerprint | 'absent'>;
+};
+
+/**
+ * Reads one moment's Git status of `work` and the `lstat` state of every path
+ * it lists plus every `carried` path, so a path that stops being listed
+ * (because it was deleted) can still be recognized as removed. Path keys are
+ * raw bytes stored as a Latin-1 string, which round-trips every byte value
+ * exactly and so stays safe to use for lookup and comparison even when a
+ * path is not valid UTF-8.
+ */
+async function directorySnapshot(
+  work: string,
+  prefix: Buffer,
+  carried: readonly string[],
+): Promise<{ ok: true; value: DirectorySnapshot } | { ok: false; reason: string }> {
+  const status = await runCaseExecutableGit(
+    work,
+    [
+      '-c',
+      'core.fsmonitor=false',
+      'status',
+      '--porcelain=v1',
+      '-z',
+      '--untracked-files=all',
+      '--no-renames',
+      '--',
+      '.',
+    ],
+    'status',
+  );
+  if (!status.ok) {
+    return status;
+  }
+  const entries = splitOnNulByte(status.stdout).filter((entry) => entry.length > 0);
+  if (entries.length > DIRECTORY_SNAPSHOT_ENTRY_LIMIT) {
+    return { ok: false, reason: 'git status listed more than 10000 paths' };
+  }
+
+  const listed = new Map<string, 'tracked' | 'untracked'>();
+  for (const entry of entries) {
+    if (entry.length < 4 || !startsWithBytes(entry.subarray(3), prefix)) {
+      return { ok: false, reason: 'git status printed an unreadable entry' };
+    }
+    const key = entry.subarray(3 + prefix.length).toString('latin1');
+    const statusCode = entry.subarray(0, 2).toString('latin1');
+    listed.set(key, statusCode === '??' ? 'untracked' : 'tracked');
+  }
+
+  const states = new Map<string, PathFingerprint | 'absent'>();
+  for (const key of new Set([...listed.keys(), ...carried])) {
+    const target = Buffer.concat([
+      Buffer.from(work, 'utf8'),
+      Buffer.from('/', 'utf8'),
+      Buffer.from(key, 'latin1'),
+    ]);
+    try {
+      const info = await lstat(target, { bigint: true });
+      states.set(key, {
+        mode: Number(info.mode),
+        size: Number(info.size),
+        mtimeNs: info.mtimeNs,
+        ctimeNs: info.ctimeNs,
+      });
+    } catch (cause) {
+      const code = describeErrorCode(cause);
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        states.set(key, 'absent');
+      } else {
+        return { ok: false, reason: `a listed path could not be inspected (${code ?? 'unknown'})` };
+      }
+    }
+  }
+  return { ok: true, value: { listed, states } };
+}
+
+function splitOnNulByte(buffer: Buffer): Buffer[] {
+  const parts: Buffer[] = [];
+  let start = 0;
+  for (let index = 0; index < buffer.length; index += 1) {
+    if (buffer[index] === 0) {
+      parts.push(buffer.subarray(start, index));
+      start = index + 1;
+    }
+  }
+  if (start < buffer.length) {
+    parts.push(buffer.subarray(start));
+  }
+  return parts;
+}
+
+function startsWithBytes(bytes: Buffer, prefix: Buffer): boolean {
+  return bytes.length >= prefix.length && bytes.subarray(0, prefix.length).equals(prefix);
+}
+
+/** Decodes a Latin-1 path key back to the text a finding shows, an invalid UTF-8 sequence becoming U+FFFD. */
+function decodeRawPathKey(key: string): string {
+  return Buffer.from(key, 'latin1').toString('utf8');
+}
+
+/**
+ * Classifies every path either snapshot listed against the fixed-point table
+ * of what "listed" and "lstat" combine to mean: none, added, modified, or
+ * removed.
+ */
+function classifyDirectorySnapshots(
+  previous: DirectorySnapshot,
+  current: DirectorySnapshot,
+): { added: string[]; modified: string[]; removed: string[] } {
+  const added: string[] = [];
+  const modified: string[] = [];
+  const removed: string[] = [];
+  for (const path of new Set([...previous.listed.keys(), ...current.listed.keys()])) {
+    const change = classifyDirectorySnapshotPath(previous, current, path);
+    if (change === 'added') {
+      added.push(path);
+    } else if (change === 'modified') {
+      modified.push(path);
+    } else if (change === 'removed') {
+      removed.push(path);
+    }
+  }
+  return { added, modified, removed };
+}
+
+function classifyDirectorySnapshotPath(
+  previous: DirectorySnapshot,
+  current: DirectorySnapshot,
+  path: string,
+): 'none' | 'added' | 'modified' | 'removed' {
+  if (previous.listed.has(path)) {
+    const before = previous.states.get(path);
+    const after = current.states.get(path);
+    if (before === undefined || before === 'absent') {
+      return after === undefined || after === 'absent' ? 'none' : 'added';
+    }
+    if (after === undefined || after === 'absent') {
+      return 'removed';
+    }
+    return fingerprintsEqual(before, after) ? 'none' : 'modified';
+  }
+  // Not listed before: current.states has an entry only because `path` is
+  // one of current.listed's own keys, since it cannot have been carried
+  // forward from a snapshot that never listed it.
+  const after = current.states.get(path);
+  if (after === undefined || after === 'absent') {
+    return 'removed';
+  }
+  return current.listed.get(path) === 'untracked' ? 'added' : 'modified';
+}
+
+function fingerprintsEqual(a: PathFingerprint, b: PathFingerprint): boolean {
+  return (
+    a.mode === b.mode && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs
+  );
+}
+
+type DirectorySnapshotWatcher = {
+  start(): Promise<void>;
+  afterRun(run: 'replica' | 'parent'): Promise<void>;
+  changes: WorkingDirectoryChanges;
+};
+
+/**
+ * Takes a directory snapshot before and after each run of one probe and
+ * accumulates the difference as `changes`, never touching a file itself.
+ * Every method after the first failure is a no-op, so `changes.failure`
+ * always names the first snapshot that could not be taken.
+ */
+function createDirectorySnapshotWatcher(work: string): DirectorySnapshotWatcher {
+  const changes: WorkingDirectoryChanges = { runs: [] };
+  let prefix: Buffer | undefined;
+  let previous: DirectorySnapshot | undefined;
+
+  const fail = (reason: string): void => {
+    changes.failure ??= reason;
+  };
+
+  return {
+    async start(): Promise<void> {
+      const prefixResult = await runCaseExecutableGit(
+        work,
+        ['rev-parse', '--show-prefix'],
+        'rev-parse --show-prefix',
+      );
+      if (!prefixResult.ok) {
+        fail(prefixResult.reason);
+        return;
+      }
+      const bytes = prefixResult.stdout;
+      prefix =
+        bytes.length > 0 && bytes[bytes.length - 1] === 0x0a
+          ? bytes.subarray(0, bytes.length - 1)
+          : bytes;
+      const snapshot = await directorySnapshot(work, prefix, []);
+      if (!snapshot.ok) {
+        fail(snapshot.reason);
+        return;
+      }
+      previous = snapshot.value;
+    },
+    async afterRun(run: 'replica' | 'parent'): Promise<void> {
+      if (changes.failure !== undefined || previous === undefined || prefix === undefined) {
+        return;
+      }
+      const snapshot = await directorySnapshot(work, prefix, [...previous.listed.keys()]);
+      if (!snapshot.ok) {
+        fail(snapshot.reason);
+        return;
+      }
+      const current = snapshot.value;
+      const diff = classifyDirectorySnapshots(previous, current);
+      changes.runs.push({
+        run,
+        added: diff.added.sort().map(decodeRawPathKey),
+        modified: diff.modified.sort().map(decodeRawPathKey),
+        removed: diff.removed.sort().map(decodeRawPathKey),
+      });
+      previous = current;
+    },
+    changes,
   };
 }
 

@@ -19,6 +19,7 @@ import { createArtifactStore, createConfigStore } from '@/adapters/artifact-stor
 import { createGitWorkspaceAdapter, createSourceValidator } from '@/adapters/git';
 import { createManagedCloneAdapter } from '@/adapters/managed-clone';
 import {
+  createCaseExecutableAdapter,
   createEnvironmentAdapter,
   createEvaluatorProcessAdapter,
   createPrerequisiteAdapter,
@@ -87,6 +88,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
   const registry = createSecretRegistry();
   const clock: Clock = { now: () => new Date() };
   const prerequisites = createPrerequisiteAdapter();
+  const caseExecutables = createCaseExecutableAdapter();
   const configStore = createConfigStore({ redact: registry.redact });
   const environments = wrapEnvironmentAdapter(createEnvironmentAdapter(), registry);
   const cloneRoot = resolveManagedCloneRoot({
@@ -236,6 +238,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
         environments,
         prerequisites,
         clones: { inspectClone: clones.inspectClone },
+        caseExecutables,
       }),
     planBenchmark,
     executeBenchmark: async (plan, hooks) => {
