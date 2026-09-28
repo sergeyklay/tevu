@@ -274,7 +274,7 @@ interface ManualCheck {
 }
 
 /** A graded check's resolved shape: graded by `roles.grader` against its description. */
-export interface GradedCheck {
+interface GradedCheck {
   id: string;
   description: string;
   required: boolean;
@@ -906,7 +906,7 @@ export type GradeRecord =
   | { checkId: string; category: CheckCategory; status: 'pending'; reason: string };
 
 /** The grader call's raw outcome: the reply text as returned, or that no reply was usable. */
-export type GraderCallRecord =
+type GraderCallRecord =
   { status: 'replied'; reply: string } | { status: 'no-reply'; reason: string };
 
 /** One case's grading: the grader identity, its raw call outcome, its own metrics, and every graded check's grade. */
