@@ -4,6 +4,7 @@ import {
   repositoryInputOf,
   TevuConfigSchema,
 } from '@/config/schema';
+import { GH_CREDENTIAL_ENVIRONMENT_VARIABLES } from '@/domain/github-cli';
 import {
   formatGitHubRepository,
   parseGitHubReference,
@@ -21,6 +22,9 @@ import { buildTaskPrompt } from './task-prompt';
 
 import type {
   AgentCapabilityReport,
+  CaseExecutableAdapter,
+  CaseExecutableVerdict,
+  ParentEnvironmentSnapshot,
   RepositoryDefinition,
   SourceValidation,
   TaskDefinition,
@@ -30,6 +34,7 @@ import type {
   ValidationDependencies,
   ValidationFinding,
   ValidationReport,
+  WorkingDirectoryChanges,
 } from '@/domain/types';
 
 /** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
@@ -58,17 +63,17 @@ export async function validateConfig(
   dependencies: ValidationDependencies,
 ): Promise<TevuResult<ValidationReport, ValidateConfigErrorKind>> {
   const agents = dependencies.agents;
+  const environmentResult = collectEnvironmentFindings(config, dependencies);
   const findings: ValidationFinding[] = [
     ...collectSchemaFindings(config),
     ...collectGraderRoleFindings(config),
     ...(await collectHostFindings(dependencies)),
-    ...collectEnvironmentFindings(config, dependencies),
+    ...environmentResult.findings,
     ...(await collectSourceFindings(config, dependencies)),
     ...(await collectOverlayFindings(config, dependencies)),
     ...(await collectArtifactFindings(config, dependencies)),
   ];
 
-  const capabilities: Record<string, AgentCapabilityReport> = {};
   const probeNames = agentNamesInUse(config);
   const probeNamesSeen = new Set(probeNames);
   for (const role of Object.values(config.roles ?? {})) {
@@ -77,7 +82,27 @@ export async function validateConfig(
       probeNames.push(role.agent);
     }
   }
+
+  let reportedAgents: ReadonlySet<string> = new Set();
+  if (environmentResult.snapshot !== undefined) {
+    const caseExecutableResult = await collectCaseExecutableFindings(
+      config,
+      environmentResult.snapshot,
+      probeNames,
+      dependencies.caseExecutables,
+    );
+    findings.push(...caseExecutableResult.findings);
+    reportedAgents = caseExecutableResult.reportedAgents;
+  }
+
+  const capabilities: Record<string, AgentCapabilityReport> = {};
   for (const name of probeNames) {
+    if (reportedAgents.has(name)) {
+      // Its case-executable finding already names the same failing command;
+      // probing its capabilities would either repeat that failure or pass
+      // while every case using it still fails.
+      continue;
+    }
     const adapter = agents.get(name);
     if (adapter === undefined) {
       findings.push({
@@ -163,11 +188,17 @@ async function collectHostFindings(
   return host.ok ? [] : [prerequisiteFinding(host.error)];
 }
 
-/** Checks configured variable presence by name, plus the non-empty parent PATH. */
+/**
+ * Checks configured variable presence by name, plus the non-empty parent
+ * PATH, and takes the run's one parent-environment snapshot.
+ *
+ * `snapshot` is present exactly when `findings` is empty, so the
+ * case-executable stage can reuse it without a second `snapshotParent` call.
+ */
 function collectEnvironmentFindings(
   config: TevuConfig,
   dependencies: ValidationDependencies,
-): ValidationFinding[] {
+): { findings: ValidationFinding[]; snapshot?: ParentEnvironmentSnapshot } {
   const findings: ValidationFinding[] = [];
   const names = new Set<string>();
   for (const settings of Object.values(config.agents)) {
@@ -188,17 +219,322 @@ function collectEnvironmentFindings(
     }
   }
   // snapshotParent also rejects missing variables, which are already reported
-  // by name above; it runs only for its non-empty parent PATH check and the
-  // snapshot values stay in memory, so nothing is retained or exposed.
-  if (findings.length === 0) {
-    const snapshot = dependencies.environments.snapshotParent(
-      buildEnvironmentVariableNames(config),
-    );
-    if (!snapshot.ok) {
-      findings.push(prerequisiteFinding(snapshot.error));
+  // by name above; it runs only for its non-empty parent PATH check here.
+  if (findings.length > 0) {
+    return { findings };
+  }
+  const snapshot = dependencies.environments.snapshotParent(buildEnvironmentVariableNames(config));
+  if (!snapshot.ok) {
+    return { findings: [prerequisiteFinding(snapshot.error)] };
+  }
+  return { findings: [], snapshot: snapshot.value };
+}
+
+/** One case executable to probe, as `collectCaseExecutableFindings` derives it from configuration. */
+type CaseExecutableLocation = {
+  identifier: string;
+  executable: string;
+  additions: Readonly<Record<string, string>>;
+  /** A path entry's directory; absent for an agent location and a GitHub entry's location. */
+  workingDirectory?: string;
+  /** Names of the fields that added this executable's `additions`, for the finding message. */
+  declared: string;
+  /** Set only for an agent location, so its case-executable error can also skip that agent's capability probe. */
+  agentName?: string;
+};
+
+/**
+ * Orders every case executable `tevu validate` probes before any case
+ * starts: each in-use agent's command, then each named repository's setup
+ * commands, then each task's command checks.
+ */
+function buildCaseExecutableLocations(
+  config: TevuConfig,
+  snapshot: ParentEnvironmentSnapshot,
+  agentNames: readonly string[],
+): CaseExecutableLocation[] {
+  const locations: CaseExecutableLocation[] = [];
+
+  for (const name of agentNames) {
+    const settings = config.agents[name];
+    if (settings === undefined) {
+      continue;
+    }
+    locations.push({
+      identifier: `agents.${name}.command`,
+      executable: settings.command,
+      additions: pickValues(snapshot.agentValues, [...settings.secrets, ...settings.env]),
+      declared: `agents.${name}.secrets and agents.${name}.env`,
+      agentName: name,
+    });
+  }
+
+  const namedRepositoryIds = new Set(config.tasks.map((task) => task.repo));
+  for (const repository of config.repositories) {
+    if (!namedRepositoryIds.has(repository.id)) {
+      continue;
+    }
+    const workingDirectory = repository.github === undefined ? repository.path : undefined;
+    for (const phase of ['before_agent', 'before_checks'] as const) {
+      (repository.setup?.[phase] ?? []).forEach((command, index) => {
+        locations.push({
+          identifier: `repositories.${repository.id}.setup.${phase}.${index}`,
+          executable: command[0],
+          additions: pickValues(snapshot.ordinaryEvaluatorValues, repository.setup?.env ?? []),
+          ...(workingDirectory === undefined ? {} : { workingDirectory }),
+          declared: `repositories.${repository.id}.setup.env`,
+        });
+      });
     }
   }
+
+  const repositoriesById = new Map(
+    config.repositories.map((repository) => [repository.id, repository]),
+  );
+  for (const task of config.tasks) {
+    const repository = repositoriesById.get(task.repo);
+    if (repository === undefined) {
+      continue;
+    }
+    const workingDirectory = repository.github === undefined ? repository.path : undefined;
+    for (const category of ['acceptance', 'done'] as const) {
+      for (const check of task.checks[category]) {
+        if (!('run' in check)) {
+          continue;
+        }
+        locations.push({
+          identifier: `tasks.${task.id}.checks.${category}.${check.id}.run`,
+          executable: check.run[0],
+          additions: pickValues(snapshot.ordinaryEvaluatorValues, check.env),
+          ...(workingDirectory === undefined ? {} : { workingDirectory }),
+          declared: `tasks.${task.id}.checks.${category}.${check.id}.env`,
+        });
+      }
+    }
+  }
+
+  return locations;
+}
+
+function pickValues(
+  source: Readonly<Record<string, string>>,
+  names: readonly string[],
+): Readonly<Record<string, string>> {
+  const picked: Record<string, string> = {};
+  for (const name of names) {
+    const value = source[name];
+    if (value !== undefined) {
+      picked[name] = value;
+    }
+  }
+  return picked;
+}
+
+/** Every name the parent run of a case-executable probe omits even when `process.env` sets it. */
+function withheldEnvironmentVariableNames(config: TevuConfig): string[] {
+  const names = buildEnvironmentVariableNames(config);
+  const withheld = new Set<string>(GH_CREDENTIAL_ENVIRONMENT_VARIABLES);
+  for (const entry of Object.values(names.agents)) {
+    for (const name of entry.secrets) {
+      withheld.add(name);
+    }
+  }
+  if (names.jiraTokenVariable !== undefined) {
+    withheld.add(names.jiraTokenVariable);
+  }
+  return [...withheld];
+}
+
+function caseExecutableProbeKey(location: CaseExecutableLocation): string {
+  const additionNames = Object.keys(location.additions).sort().join('\0');
+  return [location.executable, location.workingDirectory ?? '', additionNames].join('\0');
+}
+
+/**
+ * Probes every case executable a resolved configuration would start, in
+ * location order and deduplicated by probe key, and reports a `parent-only`
+ * verdict as an error finding, preceded by the change and could-not-check
+ * warnings its probe's directory snapshot produced.
+ *
+ * Stops after the first probe that fails with `PrerequisiteError`, since
+ * that failure is evidence about tevu's own environment rather than about
+ * any one executable.
+ */
+async function collectCaseExecutableFindings(
+  config: TevuConfig,
+  snapshot: ParentEnvironmentSnapshot,
+  agentNames: readonly string[],
+  adapter: CaseExecutableAdapter,
+): Promise<{ findings: ValidationFinding[]; reportedAgents: ReadonlySet<string> }> {
+  const findings: ValidationFinding[] = [];
+  const reportedAgents = new Set<string>();
+  const withheldNames = withheldEnvironmentVariableNames(config);
+  const verdicts = new Map<string, CaseExecutableVerdict>();
+
+  for (const location of buildCaseExecutableLocations(config, snapshot, agentNames)) {
+    if (location.executable.includes('/') && !location.executable.startsWith('/')) {
+      continue;
+    }
+    const key = caseExecutableProbeKey(location);
+    let verdict = verdicts.get(key);
+    if (verdict === undefined) {
+      const result = await adapter.probe({
+        executable: location.executable,
+        path: snapshot.path,
+        additions: location.additions,
+        ...(location.workingDirectory === undefined
+          ? {}
+          : { workingDirectory: location.workingDirectory }),
+        withheldNames,
+      });
+      if (!result.ok) {
+        findings.push(prerequisiteFinding(result.error));
+        return { findings, reportedAgents };
+      }
+      verdict = result.value.verdict;
+      verdicts.set(key, verdict);
+      findings.push(...changeWarnings(result.value.changes, location));
+    }
+    if (verdict.verdict === 'parent-only') {
+      findings.push({
+        severity: 'error',
+        identifier: location.identifier,
+        message: formatCaseExecutableMessage(location.executable, location.declared, verdict),
+      });
+      if (location.agentName !== undefined) {
+        reportedAgents.add(location.agentName);
+      }
+    }
+  }
+
+  return { findings, reportedAgents };
+}
+
+/**
+ * Builds the one-line `parent-only` finding message: names the executable,
+ * why the replica run failed, and both remedies. Carries no process output,
+ * git output, file content, or variable value beyond the PATH entry a
+ * resolved path may add.
+ */
+function formatCaseExecutableMessage(
+  executable: string,
+  declared: string,
+  verdict: Extract<CaseExecutableVerdict, { verdict: 'parent-only' }>,
+): string {
+  const { resolvedPath, replicaFailure } = verdict;
+  const resolved = resolvedPath !== null && resolvedPath !== executable ? ` (${resolvedPath})` : '';
+  return (
+    `"${executable}"${resolved} exits 0 for --version in tevu's environment, secrets withheld, ` +
+    `but ${formatReplicaFailure(replicaFailure)} in a case environment, which has its own HOME ` +
+    `and XDG directories and receives from tevu's environment only PATH and the variables ` +
+    `declared in ${declared}: if it reads another variable, declare that variable there; if it ` +
+    `is, or runs through, a version-manager shim, put the real executable's directory before ` +
+    `the shim directory on PATH when starting tevu`
+  );
+}
+
+function formatReplicaFailure(
+  failure: Extract<CaseExecutableVerdict, { verdict: 'parent-only' }>['replicaFailure'],
+): string {
+  switch (failure.kind) {
+    case 'exited':
+      return `exits with code ${failure.exitCode}`;
+    case 'signaled':
+      return `is terminated by signal ${failure.signal}`;
+    case 'not-started':
+      return failure.code === null ? 'cannot be started' : `cannot be started (${failure.code})`;
+  }
+}
+
+/** Element type of `WorkingDirectoryChanges.runs`, named here since the domain module keeps it unexported. */
+type CaseExecutableRunChanges = WorkingDirectoryChanges['runs'][number];
+
+/**
+ * Builds the change and could-not-check warnings of a probe's directory
+ * snapshot, at the identifier of the location whose probe produced them:
+ * one change warning per run that changed a path, in run order, then one
+ * could-not-check warning when the snapshot itself failed.
+ */
+function changeWarnings(
+  changes: WorkingDirectoryChanges | undefined,
+  location: CaseExecutableLocation,
+): ValidationFinding[] {
+  const directory = location.workingDirectory;
+  if (changes === undefined || directory === undefined) {
+    return [];
+  }
+  const findings: ValidationFinding[] = [];
+  for (const entry of changes.runs) {
+    if (entry.added.length === 0 && entry.modified.length === 0 && entry.removed.length === 0) {
+      continue;
+    }
+    const environment =
+      entry.run === 'replica' ? 'a case environment' : "tevu's environment, secrets withheld";
+    findings.push({
+      severity: 'warning',
+      identifier: location.identifier,
+      message: formatChangeWarningMessage(directory, location.executable, environment, entry),
+    });
+  }
+  if (changes.failure !== undefined) {
+    findings.push({
+      severity: 'warning',
+      identifier: location.identifier,
+      message: formatCouldNotCheckMessage(directory, location.executable, changes.failure),
+    });
+  }
   return findings;
+}
+
+function formatChangeWarningMessage(
+  directory: string,
+  executable: string,
+  environment: string,
+  entry: CaseExecutableRunChanges,
+): string {
+  return (
+    `files in "${directory}" changed while "${executable}" was running with --version in ` +
+    `${environment}: ${renderChanges(entry)}; tevu did not revert them`
+  );
+}
+
+function formatCouldNotCheckMessage(directory: string, executable: string, reason: string): string {
+  return (
+    `could not check whether files in "${directory}" changed while "${executable}" was ` +
+    `running with --version: ${reason}`
+  );
+}
+
+/** Groups a run's changed paths by label, capped at the first 10 across all three lists. */
+function renderChanges(entry: CaseExecutableRunChanges): string {
+  const labeled = [
+    ...entry.added.map((path) => ({ label: 'added', path })),
+    ...entry.modified.map((path) => ({ label: 'modified', path })),
+    ...entry.removed.map((path) => ({ label: 'removed', path })),
+  ];
+  const shown = labeled.slice(0, 10);
+  const groups = (['added', 'modified', 'removed'] as const)
+    .map((label) => {
+      const paths = shown
+        .filter((item) => item.label === label)
+        .map((item) => escapeControlCharacters(item.path));
+      return paths.length === 0 ? undefined : `${label} ${paths.join(', ')}`;
+    })
+    .filter((group): group is string => group !== undefined);
+  const remaining = labeled.length - shown.length;
+  return remaining > 0 ? `${groups.join('; ')}; +${remaining} more` : groups.join('; ');
+}
+
+/** Escapes each C0 control character, DEL, and C1 control character as a JSON-style `\\uNNNN` sequence. */
+function escapeControlCharacters(path: string): string {
+  let escaped = '';
+  for (const character of path) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    const isControl =
+      codePoint <= 0x1f || codePoint === 0x7f || (codePoint >= 0x80 && codePoint <= 0x9f);
+    escaped += isControl ? `\\u${codePoint.toString(16).padStart(4, '0')}` : character;
+  }
+  return escaped;
 }
 
 /**

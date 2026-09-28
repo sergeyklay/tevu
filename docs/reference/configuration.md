@@ -258,7 +258,7 @@ The `## GitHub issues` section below covers the gh setup a pull-request referenc
 
 ### Source trees
 
-Every configured source repository, a local path or a managed GitHub clone, is read-only to every case. Each case receives a sealed repository with one synthetic root commit containing the tracked tree at `base_commit`. Dirty and untracked source-worktree files are excluded. tevu writes only to a managed clone, and only before cases start: cloning or fetching for `tevu task add` or `tevu run` finishes before the first case is sealed, never while a case runs.
+Every configured source repository, a local path or a managed GitHub clone, is read-only to every case. Each case receives a sealed repository with one synthetic root commit containing the tracked tree at `base_commit`. Dirty and untracked source-worktree files are excluded. tevu itself writes only to a managed clone, and only before cases start: cloning or fetching for `tevu task add` or `tevu run` finishes before the first case is sealed, never while a case runs. `tevu validate` also starts a path entry's case executables inside that entry's directory; tevu warns about a file that changes there and never reverts it, and never writes there itself; see [Case executables](#case-executables).
 
 The case contains no source remotes, later history, tags, stashes, or shared object database. Sibling cases have separate Git metadata and writable directories. The original repository and commit identity are retained separately from the synthetic commit.
 
@@ -342,7 +342,7 @@ A `github` entry names a repository on `github.com` or a GitHub Enterprise Serve
 
 tevu keeps one bare clone per lowercased `<host>/<owner>/<repo>`, shared by every entry and configuration that names it, at `<root>/<host>/<owner>/<repo>.git` under the managed-clone root: `$XDG_CACHE_HOME/tevu/repositories` when `XDG_CACHE_HOME` is set, non-empty, and absolute, otherwise `$HOME/.cache/tevu/repositories` under the same test, otherwise there is no root and every command that would need one reports a finding naming the unset variable. The clone holds full history, no `--depth` and no `--filter`, because sealing borrows objects through a temporary alternates link and the reference-solution ancestry checks walk history; its local configuration sets `gc.auto=0` and `maintenance.auto=false` so a concurrent fetch never drops an object or pack a reader needs, and it carries no `credential` configuration key. Deleting the managed-clone root is always safe: the next command that needs a clone creates it again.
 
-`tevu task add` clones a newly selected GitHub entry immediately and fetches its base-commit and reference-solution answers as they are typed. `tevu run` and `tevu run --dry-run` clone or fetch, once per GitHub entry a task names, before validation: first each entry's tasks' base commits, then each task's reference-solution commits, only for whatever `tevu validate`'s own commit resolution would not already find locally. `tevu validate`, `tevu assess`, `tevu report`, and `tevu config example` never clone, fetch, or otherwise reach the network; a missing clone or a commit absent from it is reported as a validation finding naming the command that fixes it, covered in [Tasks](#tasks) and [Reference solution](#reference-solution).
+`tevu task add` clones a newly selected GitHub entry immediately and fetches its base-commit and reference-solution answers as they are typed. `tevu run` and `tevu run --dry-run` clone or fetch, once per GitHub entry a task names, before validation: first each entry's tasks' base commits, then each task's reference-solution commits, only for whatever `tevu validate`'s own commit resolution would not already find locally. `tevu validate`, `tevu assess`, `tevu report`, and `tevu config example` never themselves clone, fetch, or otherwise reach the network; a missing clone or a commit absent from it is reported as a validation finding naming the command that fixes it, covered in [Tasks](#tasks) and [Reference solution](#reference-solution). A case executable `tevu validate` starts may still reach the network on its own; see [Case executables](#case-executables).
 
 A clone or fetch holds a `mkdir` lock directory (the clone's own path with `.lock` appended) for its duration, across processes; the lock never waits and is never removed automatically, so a command that finds one already present fails, naming the lock path, whether another tevu command is updating the clone or the lock is stale and needs the operator to remove it.
 
@@ -376,6 +376,29 @@ No other parent variables are inherited. Sequential checks and setup commands re
 Agent processes receive the same fixed variable names with their own per-case home, state, and temporary directories, plus the variables declared in `agents.opencode.secrets` and `agents.opencode.env`. Host agent sessions, global configuration, caches, and login stores are not copied.
 
 A model call's agent process receives the same treatment: the case agent variables of its agent block's `secrets` and `env`, with its own home, state, and temporary directories, and an empty Git repository as its working directory, all removed after the call. See [Model roles](#model-roles).
+
+### Case executables
+
+A case executable is the first element of a command a case would start: an agent's `command`, the first element of each `setup.before_agent` and `setup.before_checks` command, and the first element of each command check's `run`. `tevu validate` probes every case executable before any case starts; `tevu run` and `tevu run --dry-run` run the same check as part of validation, also before any case starts.
+
+For each case executable, tevu starts `<executable> --version` once in a replica of its case environment, and, only when that run does not exit 0 before a 10-second limit, once more in tevu's own environment with the withheld names removed.
+
+| Replica run | Parent run | Result |
+| --- | --- | --- |
+| Exits 0 before the limit | Not started | The executable runs; nothing is reported |
+| Reaches the 10-second limit | Not started | Undetermined; nothing is reported, since the executable may be downloading a toolchain into its empty home and a case with a longer limit could still finish |
+| Fails to exit 0 | Exits 0 before the limit | The executable runs only in tevu's own environment; an error finding names it |
+| Fails to exit 0 | Any other outcome | Undetermined; nothing is reported |
+
+Both runs share one working directory: a path entry's own directory for its setup commands and its tasks' command checks, and a new empty directory for the agent command and for a GitHub entry's commands.
+
+The parent run omits these names even when tevu's own environment sets them: every configured agent's `secrets` names, the variable `trackers.jira.token` references, and `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN`. It still gives the executable every other variable of tevu's own environment, the operator's HOME included, so a started executable may use the network, write files, or install the toolchain a version file names, on its own, in a path entry's directory or elsewhere.
+
+tevu does not judge a case executable that is a relative path containing a `/`, since it resolves inside a case worktree that does not exist during validation; one whose `--version` does not exit 0 in the parent run from its working directory, including a tool with no `--version` option, a version selected only by a version file inside a GitHub entry's repository or, for the agent command, inside a repository; a replica run that reaches the 10-second limit; or a command the agent or a case executable starts itself.
+
+An error finding appears at `agents.<name>.command`, `repositories.<repo-id>.setup.<phase>.<index>`, or `tasks.<task-id>.checks.<collection>.<check-id>.run`, and makes the configuration invalid. Its message names the executable, why the replica run failed, and two remedies: declare the variable it reads, if a case does not already give it one; or, for a version-manager shim, start tevu with the real executable's directory before the shim directory on PATH.
+
+In a path entry's directory, tevu compares the files Git reports as changed or untracked before and after each run, by type, permissions, size, and modification and status-change times. A run that changed one draws a warning naming the executable and up to 10 changed paths plus a count of the rest, worded as a change made while the executable was running, because the operator or another program may edit the directory at the same time; tevu never reverts, restores, or removes such a change. A failed comparison draws a warning saying the check could not be made. Neither warning makes the configuration invalid or stops `tevu run`. The comparison does not see an ignored file, the Git directory, or a write outside the working directory, such as a toolchain installed under the operator's home.
 
 ## Model roles
 
@@ -431,7 +454,7 @@ Each import makes one `gh issue view` call with a 30-second limit and no retries
 | --- | --- |
 | `tevu task add` | Jira and gh as described above; clone and fetch for a selected GitHub repository entry; with `roles.criteria` declared and a reference solution, one more `gh api` call for a pull-request reference's diff, and one model session to draft criteria |
 | `tevu run`, `tevu run --dry-run` | Preparation clone and fetch, only for a missing clone or commit; model sessions in `run` only |
-| `tevu validate`, `tevu assess`, `tevu report`, `tevu config example` | None; none of them runs gh |
+| `tevu validate`, `tevu assess`, `tevu report`, `tevu config example` | None from these commands themselves; `tevu validate` starts `gh` locally with `--version` only, when `gh` is a case executable (see [Case executables](#case-executables)) |
 
 A pull-request reference answer uses this same gh setup and makes one `gh api graphql` call, also with a 30-second limit. GitHub lists at most 250 commits of a pull request; tevu records a pull request only when it can read its complete commit list.
 
