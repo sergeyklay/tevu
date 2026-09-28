@@ -229,6 +229,12 @@ function buildDirectEditAgent(): AgentAdapter {
     async probe() {
       return { ok: true, value: buildAgentCapabilityReport() };
     },
+    async readProviders() {
+      return { ok: true, value: { agent: 'opencode', configurationFiles: [], findings: [] } };
+    },
+    async listModels() {
+      return { outcome: 'listed', models: [] };
+    },
     async run(input) {
       const worktree = input.worktreeDirectory;
       const setupOutput = await readFile(join(worktree, 'generated/setup-output.txt'), 'utf8');
@@ -424,6 +430,7 @@ describe('repository setup orchestration end to end (AC-1, P7)', () => {
       clock: buildClock(),
       generateRunId: () => 'run-setup-it',
       configDigest: () => 'digest-synthetic',
+      textDigest: () => 'digest-file-synthetic',
       redact: (text) => text,
       cancellation: new AbortController().signal,
     };

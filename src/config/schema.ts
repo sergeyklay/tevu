@@ -178,6 +178,48 @@ function checkUniqueStrings(
   });
 }
 
+/** One provider entry `agents.<agentName>.providers` may copy from the operator's OpenCode configuration. */
+const ProviderEntrySchema = z.strictObject({
+  id: z.string(),
+  api_key: VariableNameSchema.optional(),
+});
+
+const PROVIDER_ID_MESSAGE = 'provider id must be non-empty and contain no "/"';
+
+/** Checks each provider entry's `id` grammar and uniqueness, and that a set `api_key` is a declared secret. */
+function checkProviderEntries(
+  providers: readonly { id: string; api_key?: string }[],
+  secretNames: ReadonlySet<string>,
+  ctx: z.RefinementCtx,
+  agentName: string,
+): void {
+  const seenIds = new Set<string>();
+  providers.forEach((provider, index) => {
+    if (provider.id.length === 0 || provider.id.includes('/')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['providers', index, 'id'],
+        message: PROVIDER_ID_MESSAGE,
+      });
+    }
+    if (seenIds.has(provider.id)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['providers', index, 'id'],
+        message: `duplicate provider id "${provider.id}"`,
+      });
+    }
+    seenIds.add(provider.id);
+    if (provider.api_key !== undefined && !secretNames.has(provider.api_key)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['providers', index, 'api_key'],
+        message: `api_key "${provider.api_key}" must be listed in agents.${agentName}.secrets`,
+      });
+    }
+  });
+}
+
 /** Schema of one `agents.<agentName>` block; `agentName` appears only in validation messages. */
 export function agentSettingsSchema(agentName: string) {
   return z
@@ -185,6 +227,7 @@ export function agentSettingsSchema(agentName: string) {
       command: z.string().min(1),
       secrets: z.array(VariableNameSchema).default([]),
       env: z.array(VariableNameSchema).default([]),
+      providers: z.array(ProviderEntrySchema).default([]),
     })
     .superRefine((value, ctx) => {
       checkNoFixedNames(value.secrets, ctx, ['secrets']);
@@ -201,6 +244,7 @@ export function agentSettingsSchema(agentName: string) {
           });
         }
       });
+      checkProviderEntries(value.providers, secretNames, ctx, agentName);
     });
 }
 

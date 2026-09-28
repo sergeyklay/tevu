@@ -148,12 +148,24 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       [
         'opencode',
         createOpenCodeAdapter(
-          { agent: 'opencode', executable: config.agents.opencode.command },
+          {
+            agent: 'opencode',
+            executable: config.agents.opencode.command,
+            providers: config.agents.opencode.providers,
+            declaredVariables: {
+              secrets: config.agents.opencode.secrets,
+              env: config.agents.opencode.env,
+            },
+          },
           {
             runProcess: runManagedProcess,
             secrets,
             probeEnvironment: { PATH: process.env['PATH'] ?? '' },
             probeDirectory: process.cwd(),
+            operatorDirectories: {
+              home: process.env['HOME'],
+              xdgConfigHome: process.env['XDG_CONFIG_HOME'],
+            },
           },
         ),
       ],
@@ -264,6 +276,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
             return runId;
           },
           configDigest: (config) => sha256Hex(canonicalConfigSerialization(config)),
+          textDigest: sha256Hex,
           redact: registry.redact,
           cancellation: hooks.cancellation,
           onLifecycle: hooks.onLifecycle,
@@ -365,10 +378,10 @@ function wrapEnvironmentAdapter(
       }
       return snapshot;
     },
-    createCaseEnvironments: (workspace, snapshot, names, agent) =>
-      adapter.createCaseEnvironments(workspace, snapshot, names, agent),
-    createModelCallEnvironment: (snapshot, agentVariables) =>
-      adapter.createModelCallEnvironment(snapshot, agentVariables),
+    createCaseEnvironments: (workspace, snapshot, names, agent, configurationFiles) =>
+      adapter.createCaseEnvironments(workspace, snapshot, names, agent, configurationFiles),
+    createModelCallEnvironment: (snapshot, agentVariables, configurationFiles) =>
+      adapter.createModelCallEnvironment(snapshot, agentVariables, configurationFiles),
   };
 }
 

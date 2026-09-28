@@ -1,12 +1,21 @@
 // @vitest-environment node
 
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import process from 'node:process';
 import { Readable, Writable } from 'node:stream';
 import { setImmediate } from 'node:timers/promises';
-import { describe, expect, it } from 'vitest';
+import { execa } from 'execa';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { TevuConfigSchema } from '@/config/schema';
 import { runProgram } from '@/interface/program';
 
 import { composeProgramDependencies, ignoreClosedReader } from './index';
+
+import type { TevuConfigInput } from '@/config/schema';
 
 function writeError(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`write ${code}`), { code, syscall: 'write' });
@@ -54,5 +63,243 @@ describe('closed output reader', () => {
     ignoreClosedReader(stdout);
 
     expect(() => stdout.emit('error', writeError('ENOSPC'))).toThrow('write ENOSPC');
+  });
+});
+
+const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
+
+async function runGit(cwd: string, args: readonly string[]): Promise<string> {
+  const result = await execa('git', [...args], {
+    cwd,
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_TERMINAL_PROMPT: '0',
+    },
+    stdin: 'ignore',
+  });
+  return typeof result.stdout === 'string' ? result.stdout : '';
+}
+
+async function createSourceRepository(directory: string): Promise<string> {
+  await mkdir(directory, { recursive: true });
+  await runGit(directory, ['init', '--quiet', '-b', 'main']);
+  await writeFile(join(directory, 'README.md'), 'synthetic\n');
+  await runGit(directory, ['add', '-A']);
+  await runGit(directory, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'base']);
+  return (await runGit(directory, ['rev-parse', 'HEAD'])).trim();
+}
+
+/**
+ * A fake `opencode`-shaped executable answering every probe invocation, the
+ * models listing (from its own written `opencode.json`), and one trivial
+ * `run`/`export` pair, so `runBenchmark` can complete a real case through the
+ * composition root without a real coding agent.
+ */
+const FAKE_OPENCODE_SCRIPT = `#!/usr/bin/env node
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+const args = process.argv.slice(2);
+if (args[0] === '--version') { console.log('1.0.0-composition-fake'); process.exit(0); }
+if (args[0] === '--help') { console.log('usage: composition-fake <command>'); process.exit(0); }
+if (args[0] === 'run' && args[1] === '--help') {
+  console.log('usage: opencode run --format json --model <model> --variant <variant>');
+  process.exit(0);
+}
+if (args[0] === 'export' && args[1] === '--help') {
+  console.log('usage: opencode export <session-id>');
+  process.exit(0);
+}
+if (args[0] === 'models' && args[1] === '--help') {
+  console.log('usage: opencode models');
+  process.exit(0);
+}
+if (args[0] === 'models') {
+  const configPath = join(process.env.XDG_CONFIG_HOME ?? '', 'opencode', 'opencode.json');
+  let doc = {};
+  try { doc = JSON.parse(readFileSync(configPath, 'utf8')); } catch { /* no config written */ }
+  const providers = doc && typeof doc === 'object' && doc.provider ? Object.keys(doc.provider) : [];
+  for (const id of providers) {
+    console.log(\`\${id}/synthetic-model-a\`);
+    console.log(\`\${id}/synthetic-model-b\`);
+  }
+  process.exit(0);
+}
+if (args[0] === 'run') {
+  console.log(JSON.stringify({ type: 'step_start', timestamp: 1, sessionID: 'ses-composition-1', part: { id: 'prt-1', sessionID: 'ses-composition-1', messageID: 'msg-1', type: 'step-start' } }));
+  process.exit(0);
+}
+if (args[0] === 'export') {
+  const requested = args[1] ?? '';
+  console.log(JSON.stringify({ info: { id: requested }, messages: [] }));
+  process.exit(0);
+}
+process.exit(3);
+`;
+
+describe('composeProgramDependencies wires providers into the real OpenCode adapter (AC-1)', () => {
+  let testDirectory: string;
+  let savedHome: string | undefined;
+  let savedXdgConfigHome: string | undefined;
+  let savedAcmeKey: string | undefined;
+
+  beforeEach(async () => {
+    testDirectory = await mkdtemp(join(tmpdir(), 'tevu-index-it-'));
+    savedHome = process.env['HOME'];
+    savedXdgConfigHome = process.env['XDG_CONFIG_HOME'];
+    savedAcmeKey = process.env['ACME_KEY'];
+  });
+
+  afterEach(async () => {
+    if (savedHome === undefined) {
+      delete process.env['HOME'];
+    } else {
+      process.env['HOME'] = savedHome;
+    }
+    if (savedXdgConfigHome === undefined) {
+      delete process.env['XDG_CONFIG_HOME'];
+    } else {
+      process.env['XDG_CONFIG_HOME'] = savedXdgConfigHome;
+    }
+    if (savedAcmeKey === undefined) {
+      delete process.env['ACME_KEY'];
+    } else {
+      process.env['ACME_KEY'] = savedAcmeKey;
+    }
+    await rm(testDirectory, { recursive: true, force: true });
+  });
+
+  async function writeFakeExecutable(): Promise<string> {
+    const filePath = join(testDirectory, 'fake-opencode.mjs');
+    await writeFile(filePath, FAKE_OPENCODE_SCRIPT, { mode: 0o755 });
+    return filePath;
+  }
+
+  /** Points `XDG_CONFIG_HOME` at a fresh operator fixture naming one provider, `acme`. */
+  async function writeOperatorFixture(): Promise<void> {
+    const operatorDirectory = join(testDirectory, 'operator-config');
+    await mkdir(join(operatorDirectory, 'opencode'), { recursive: true });
+    await writeFile(
+      join(operatorDirectory, 'opencode', 'opencode.json'),
+      JSON.stringify({
+        provider: {
+          acme: { baseURL: 'https://acme.example.test', options: { apiKey: 'placeholder' } },
+        },
+      }),
+    );
+    delete process.env['HOME'];
+    process.env['XDG_CONFIG_HOME'] = operatorDirectory;
+    process.env['ACME_KEY'] = 'synthetic-acme-secret-value';
+  }
+
+  function buildConfigInput(options: {
+    executable: string;
+    repositoryPath: string;
+    baseCommit: string;
+    outputDirectory: string;
+  }): TevuConfigInput {
+    return {
+      version: 1,
+      run: {
+        output_dir: options.outputDirectory,
+        concurrency: 1,
+        timeout: '30s',
+        stop_grace: '500ms',
+      },
+      agents: {
+        opencode: {
+          command: options.executable,
+          secrets: ['ACME_KEY'],
+          env: [],
+          providers: [{ id: 'acme', api_key: 'ACME_KEY' }],
+        },
+      },
+      repositories: [{ id: 'repo-1', path: options.repositoryPath }],
+      models: [
+        { id: 'alpha', model: 'acme/synthetic-model-a', effort: 'high' },
+        { id: 'beta', model: 'acme/synthetic-model-b', effort: 'high' },
+      ],
+      tasks: [
+        {
+          id: 'task-1',
+          title: 'Composition root task',
+          repo: 'repo-1',
+          base_commit: options.baseCommit,
+          description: 'synthetic task description',
+          prompt: 'synthetic task prompt',
+          readiness: ['synthetic ready item'],
+          checks: {
+            acceptance: [{ id: 'manual-1', description: 'Manual review', manual: true }],
+            done: [{ id: 'manual-done', description: 'Manual review', manual: true }],
+          },
+        },
+      ],
+    };
+  }
+
+  it('threads agents.opencode.providers, its declared secrets, and the operator directories into validateConfig, with no host secret or sibling state ever copied', async () => {
+    const executable = await writeFakeExecutable();
+    await writeOperatorFixture();
+    const repositoryPath = join(testDirectory, 'repo');
+    const baseCommit = await createSourceRepository(repositoryPath);
+    const config = TevuConfigSchema.parse(
+      buildConfigInput({
+        executable,
+        repositoryPath,
+        baseCommit,
+        outputDirectory: join(testDirectory, 'artifacts'),
+      }),
+    );
+    const dependencies = composeProgramDependencies();
+
+    const outcome = await dependencies.operations.validateConfig(config);
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const providerFindings = outcome.value.findings.filter((finding) =>
+      finding.identifier.startsWith('agents.opencode.providers'),
+    );
+    expect(providerFindings).toEqual([]);
+    const modelFindings = outcome.value.findings.filter((finding) =>
+      finding.identifier.startsWith('models.'),
+    );
+    expect(modelFindings).toEqual([]);
+    expect(outcome.value.valid).toBe(true);
+  });
+
+  it("passes the real SHA-256 digest function as executeBenchmark's textDigest", async () => {
+    const executable = await writeFakeExecutable();
+    await writeOperatorFixture();
+    const repositoryPath = join(testDirectory, 'repo');
+    const baseCommit = await createSourceRepository(repositoryPath);
+    const config = TevuConfigSchema.parse(
+      buildConfigInput({
+        executable,
+        repositoryPath,
+        baseCommit,
+        outputDirectory: join(testDirectory, 'artifacts'),
+      }),
+    );
+    const dependencies = composeProgramDependencies();
+    const plan = dependencies.operations.planBenchmark(config, join(testDirectory, 'tevu.yaml'));
+
+    const result = await dependencies.operations.executeBenchmark(plan, {
+      cancellation: new AbortController().signal,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const written = result.value.manifest.tools.agentConfigurationFiles['opencode'];
+    expect(written).toHaveLength(1);
+    const expectedDocument = {
+      provider: {
+        acme: { baseURL: 'https://acme.example.test', options: { apiKey: '{env:ACME_KEY}' } },
+      },
+    };
+    const expectedText = `${JSON.stringify(expectedDocument, null, 2)}\n`;
+    const expectedDigest = createHash('sha256').update(expectedText, 'utf8').digest('hex');
+    expect(written?.[0]).toEqual({ path: 'opencode/opencode.json', sha256: expectedDigest });
   });
 });

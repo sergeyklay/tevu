@@ -249,6 +249,12 @@ function buildFakeAgentAdapter(
         },
       };
     },
+    async readProviders() {
+      return { ok: true, value: { agent: 'fake-agent', configurationFiles: [], findings: [] } };
+    },
+    async listModels() {
+      return { outcome: 'listed', models: [] };
+    },
     async run(input: AgentRunInput): Promise<TevuResult<AgentRunResult, never>> {
       capture.prompt = input.prompt;
       capture.overlayFilePresentDuringRun = existsSync(
@@ -334,6 +340,7 @@ function buildDependencies(
     clock,
     generateRunId: () => 'run-tamper-proof-it',
     configDigest: () => 'digest-tamper-proof-it',
+    textDigest: () => 'digest-file-tamper-proof-it',
     redact: (text) => text,
     cancellation: new AbortController().signal,
   };
@@ -493,6 +500,88 @@ describe('runBenchmark records the task timeout in saved artifacts (AC-4)', () =
   });
 });
 
+describe('runBenchmark providers (AC-1, D10, D11)', () => {
+  it('reads providers exactly once before startRun, delivers the same files to every case, and records their digest in run.json', async () => {
+    const repository = await createSyntheticRepository(testDirectory);
+    const overlayDirectory = await createOverlayDirectory(testDirectory);
+    const config = buildConfig({
+      repositoryPath: repository.path,
+      commit: repository.commit,
+      overlayDirectory,
+      outputDirectory: join(testDirectory, 'artifacts'),
+    });
+    const providerFileText = '{"provider":{"acme":{"baseURL":"https://acme.example.test"}}}\n';
+    const configurationFiles = [{ relativePath: 'opencode/opencode.json', text: providerFileText }];
+    const capture: FakeAgentCapture = { prompt: '', overlayFilePresentDuringRun: true };
+    const baseAgent = buildFakeAgentAdapter(capture, overlayDirectory);
+    let readProvidersCalls = 0;
+    const timeline: string[] = [];
+    const receivedConfigTexts: Array<string | null> = [];
+    const agent: AgentAdapter = {
+      ...baseAgent,
+      async readProviders() {
+        readProvidersCalls += 1;
+        timeline.push('readProviders');
+        return { ok: true, value: { agent: FAKE_AGENT_NAME, configurationFiles, findings: [] } };
+      },
+      async run(input) {
+        const configPath = join(
+          input.environment.variables.XDG_CONFIG_HOME ?? '',
+          'opencode',
+          'opencode.json',
+        );
+        receivedConfigTexts.push(
+          existsSync(configPath) ? await readFile(configPath, 'utf8') : null,
+        );
+        return baseAgent.run(input);
+      },
+    };
+    const dependencies = buildDependencies(config, agent, testDirectory);
+    dependencies.textDigest = (text) => sha256Hex(text);
+    const realStartRun = dependencies.artifacts.startRun.bind(dependencies.artifacts);
+    dependencies.artifacts.startRun = async (manifest) => {
+      timeline.push('startRun');
+      return realStartRun(manifest);
+    };
+
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+
+    const run = unwrapOk(result);
+    expect(run.cases).toHaveLength(2);
+    expect(readProvidersCalls).toBe(1);
+    expect(timeline.indexOf('readProviders')).toBeLessThan(timeline.indexOf('startRun'));
+    expect(receivedConfigTexts).toEqual([providerFileText, providerFileText]);
+    expect(run.manifest.tools.agentConfigurationFiles).toEqual({
+      [FAKE_AGENT_NAME]: [{ path: 'opencode/opencode.json', sha256: sha256Hex(providerFileText) }],
+    });
+    const storedManifest = unwrapOk(
+      await dependencies.artifacts.readRunManifest(run.manifest.runId),
+    );
+    expect(storedManifest.tools.agentConfigurationFiles).toEqual(
+      run.manifest.tools.agentConfigurationFiles,
+    );
+  });
+
+  it('records an empty array in run.json for an agent whose block names no provider', async () => {
+    const repository = await createSyntheticRepository(testDirectory);
+    const overlayDirectory = await createOverlayDirectory(testDirectory);
+    const config = buildConfig({
+      repositoryPath: repository.path,
+      commit: repository.commit,
+      overlayDirectory,
+      outputDirectory: join(testDirectory, 'artifacts'),
+    });
+    const capture: FakeAgentCapture = { prompt: '', overlayFilePresentDuringRun: true };
+    const agent = buildFakeAgentAdapter(capture, overlayDirectory);
+    const dependencies = buildDependencies(config, agent, testDirectory);
+
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+
+    const run = unwrapOk(result);
+    expect(run.manifest.tools.agentConfigurationFiles).toEqual({ [FAKE_AGENT_NAME]: [] });
+  });
+});
+
 describe('runBenchmark grading in the case flow', () => {
   /**
    * Renames the schema-required `opencode` key to `fake-agent`, including
@@ -615,6 +704,12 @@ describe('runBenchmark grading in the case flow', () => {
             isolation: { denyOutsideWorktree: 'available' },
           },
         };
+      },
+      async readProviders() {
+        return { ok: true, value: { agent: 'fake-agent', configurationFiles: [], findings: [] } };
+      },
+      async listModels() {
+        return { outcome: 'listed', models: [] };
       },
       async run(input: AgentRunInput): Promise<TevuResult<AgentRunResult, never>> {
         const value: AgentRunResult = {
@@ -845,8 +940,12 @@ describe('runBenchmark grading in the case flow', () => {
     const realEnvironments = createEnvironmentAdapter();
     const environmentsWithFailingDispose: EnvironmentAdapter = {
       ...realEnvironments,
-      async createModelCallEnvironment(snapshot, agentVariables) {
-        const created = await realEnvironments.createModelCallEnvironment(snapshot, agentVariables);
+      async createModelCallEnvironment(snapshot, agentVariables, configurationFiles) {
+        const created = await realEnvironments.createModelCallEnvironment(
+          snapshot,
+          agentVariables,
+          configurationFiles,
+        );
         if (!created.ok) {
           return created;
         }

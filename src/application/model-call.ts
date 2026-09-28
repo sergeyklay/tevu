@@ -16,6 +16,7 @@ import type {
   ModelCallDependencies,
   ModelRoleCallRequest,
   ModelRoleCallResult,
+  ProviderSnapshot,
   TevuError,
   TevuResult,
 } from '@/domain/types';
@@ -130,6 +131,17 @@ export async function callModelRole(
     return probe;
   }
 
+  let providers: ProviderSnapshot;
+  if (request.providers !== undefined) {
+    providers = request.providers;
+  } else {
+    const read = await adapter.readProviders();
+    if (!read.ok) {
+      return read;
+    }
+    providers = read.value;
+  }
+
   if (request.cancellation.aborted) {
     return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
   }
@@ -137,6 +149,7 @@ export async function callModelRole(
   const environmentResult = await dependencies.environments.createModelCallEnvironment(
     snapshot.value,
     agentVariables,
+    providers.configurationFiles,
   );
   if (!environmentResult.ok) {
     return environmentResult;

@@ -30,6 +30,9 @@ agents:
     secrets:                      # passed to the agent, redacted from every artifact
       - OPENAI_API_KEY
     env: []                       # ordinary variables passed to the agent as-is
+    # providers:                  # copied from your OpenCode configuration into every case
+    #   - id: your-proxy          # a key of "provider" there
+    #     api_key: OPENAI_API_KEY # optional; one of the secrets above, used as its API key
 
 # --- Trackers ---------------------------------------------------------------
 # Used once, by \`tevu task add --jira\` or \`--github\`, to import an issue.

@@ -44,6 +44,9 @@ agents:
     secrets:                      # passed to the agent, redacted from every artifact
       - OPENAI_API_KEY
     env: []                       # ordinary variables passed to the agent as-is
+    # providers:                  # copied from your OpenCode configuration into every case
+    #   - id: your-proxy          # a key of "provider" there
+    #     api_key: OPENAI_API_KEY # optional; one of the secrets above, used as its API key
 
 # --- Trackers ---------------------------------------------------------------
 # Used once, by `tevu task add --jira` or `--github`, to import an issue.
@@ -155,6 +158,7 @@ tasks:
 | `agents.opencode.command` | Non-empty executable name or path; no agent-version constraint is accepted |
 | `agents.opencode.secrets` | Variable names passed to the agent and redacted from every artifact; default `[]` |
 | `agents.opencode.env` | Variable names passed to the agent as-is; default `[]` |
+| `agents.opencode.providers` | Providers copied from the operator's OpenCode global configuration into every case agent and model call of this agent; default `[]`; see [Agent providers](#agent-providers) |
 | `trackers.jira` | Optional Jira Cloud connection settings |
 | `repositories` | At least one entry, each `{id, path}` (a local repository) or `{id, github}` (a GitHub repository tevu clones itself), optionally carrying `setup`; see [GitHub repositories](#github-repositories) |
 | `models` | At least two `{id, model, effort, agent}` entries |
@@ -165,7 +169,7 @@ Paths resolve relative to the configuration file. Resolution uses the directory 
 
 A block keyed by an adapter kind (`agents.opencode`, `trackers.jira`) holds that adapter's settings only, so a new agent or tracker adds a block and changes nothing else. `opencode` is the only configured agent today, so `models[].agent` and `roles.<role>.agent` both default to it; a configuration with more than one agent must set `agent` explicitly to a configured agent key.
 
-A model entry is one model/effort combination. `model` uses `provider/model` syntax and `effort` is non-empty. `effort` reaches OpenCode verbatim as its `--variant` argument, so it must name a reasoning-effort variant that the agent supports, either a built-in one or one defined in an `opencode.json` tracked at the task's `base_commit`. Different model entries may share the same `model`. The provider determines which model identifiers and efforts are supported.
+A model entry is one model/effort combination. `model` uses `provider/model` syntax and `effort` is non-empty. `effort` reaches OpenCode verbatim as its `--variant` argument, so it must name a reasoning-effort variant that the agent supports, either a built-in one or one defined in an `opencode.json` tracked at the task's `base_commit`. Different model entries may share the same `model`. The provider determines which model identifiers and efforts are supported; `tevu validate` checks that the agent resolves each entry's model, covered under [Model resolution](#model-resolution).
 
 ## Value grammars
 
@@ -373,7 +377,7 @@ A check's `env` names ordinary variables available to that command only. A name 
 
 No other parent variables are inherited. Sequential checks and setup commands reuse these directories. Evaluator home, state, and temporary directories are separate from the agent's directories.
 
-Agent processes receive the same fixed variable names with their own per-case home, state, and temporary directories, plus the variables declared in `agents.opencode.secrets` and `agents.opencode.env`. Host agent sessions, global configuration, caches, and login stores are not copied.
+Agent processes receive the same fixed variable names with their own per-case home, state, and temporary directories, plus the variables declared in `agents.opencode.secrets` and `agents.opencode.env`. Host agent sessions, global configuration, caches, and login stores are not copied, except the provider definitions `agents.opencode.providers` names; see [Agent providers](#agent-providers).
 
 A model call's agent process receives the same treatment: the case agent variables of its agent block's `secrets` and `env`, with its own home, state, and temporary directories, and an empty Git repository as its working directory, all removed after the call. See [Model roles](#model-roles).
 
@@ -399,6 +403,43 @@ tevu does not judge a case executable that is a relative path containing a `/`, 
 An error finding appears at `agents.<name>.command`, `repositories.<repo-id>.setup.<phase>.<index>`, or `tasks.<task-id>.checks.<collection>.<check-id>.run`, and makes the configuration invalid. Its message names the executable, why the replica run failed, and two remedies: declare the variable it reads, if a case does not already give it one; or, for a version-manager shim, start tevu with the real executable's directory before the shim directory on PATH.
 
 In a path entry's directory, tevu compares the files Git reports as changed or untracked before and after each run, by type, permissions, size, and modification and status-change times. A run that changed one draws a warning naming the executable and up to 10 changed paths plus a count of the rest, worded as a change made while the executable was running, because the operator or another program may edit the directory at the same time; tevu never reverts, restores, or removes such a change. A failed comparison draws a warning saying the check could not be made. Neither warning makes the configuration invalid or stops `tevu run`. The comparison does not see an ignored file, the Git directory, or a write outside the working directory, such as a toolchain installed under the operator's home.
+
+## Agent providers
+
+`agents.opencode.providers` names providers the operator's own OpenCode global configuration defines, so a case agent and a model call can reach a model that provider serves without a hand-written configuration file.
+
+| Field | Required | Default | Allowed values |
+| --- | --- | --- | --- |
+| `providers` | No | `[]` | A list of provider entries; IDs unique within the list |
+| `providers[].id` | Yes | None | Non-empty string without `/`: a key of the `provider` map in the operator's OpenCode global configuration |
+| `providers[].api_key` | No | Absent | A variable name listed in the same block's `secrets`, written as the provider's API key |
+
+```yaml
+agents:
+  opencode:
+    command: opencode
+    secrets:
+      - ACME_KEY
+    providers:
+      - id: acme-proxy
+        api_key: ACME_KEY
+```
+
+tevu reads the operator's OpenCode global configuration directory the same way OpenCode itself resolves it: `$XDG_CONFIG_HOME/opencode` when `XDG_CONFIG_HOME` is set, non-empty, and absolute; otherwise `$HOME/.config/opencode`. Inside it, `config.json`, `opencode.json`, and `opencode.jsonc` all load, in that order, each later file's values winning over the earlier ones (objects merge, arrays and scalars replace). Only the named IDs' definitions are read; every other file content, instructions, MCP servers, permissions, plugins, agents, commands, skills, and the login store, is never read or copied.
+
+The definitions tevu collects become the entire content of `opencode/opencode.json` under the case agent's own global configuration (its `XDG_CONFIG_HOME`), one file holding exactly `{"provider": {...}}` with the named IDs. Because this sits in the case agent's own global configuration rather than its project configuration, a task's tracked `opencode.json` still overrides it. tevu reads the operator's providers once per `tevu validate` invocation, once per run before the run directory exists (shared by every case and grader call of that run), and once per model call outside a run; an edit to the operator's configuration made afterward reaches no case or call already using that reading.
+
+Every copied definition is checked before it reaches a case. A value at a key named `apiKey`, or a string value at a key whose name reads as a credential (matching OpenCode's own secret-masking pattern: `apiKey`, `secret`, a key ending in `token`, `authorization`, or `cookie`, `credential`, or `privateKey`), must be exactly one `{env:NAME}` reference naming a variable listed in `secrets`; the host value is never copied. Every header value under `options.headers` must hold at least one `{env:NAME}` reference, and a credential-named header's references must all name a `secrets` variable. No value anywhere may hold a `{file:...}` reference: tevu copies no host file into a case. An ordinary (non-credential) reference must name a variable listed in `secrets` or `env`; the definition's own root `env` list, which tells OpenCode which variable holds the key, must name only `secrets` variables, never `env`. `providers[].api_key`, when set, replaces the definition's `options.apiKey` with a reference to the named variable, discarding the host value without reading it. Every other value, a literal `baseURL`, a model option, or a credential under a key name none of the above matches, is copied as written and reaches the case agent unredacted, so such a credential belongs in a `secrets` variable rather than the operator's configuration.
+
+A definition that checks cleanly but references no `secrets` variable draws a warning naming the provider: tevu cannot tell a provider that needs no key from one whose key sits in the OpenCode login store, which it never copies. Set `api_key` when the key is in the login store; a provider that genuinely needs no key can ignore the warning.
+
+`run.json` records the SHA-256 of every configuration file tevu writes into an agent's homes, never the file's text; see [Results](results.md#run-manifest).
+
+### Model resolution
+
+`tevu validate` lists every model the agent resolves, in an environment built like a case agent's own (its own home, the agent's declared variables, the copied providers, and an empty Git repository as working directory), without starting a model session, then reports every model entry and declared role whose model is not among them, by the entry or role's identifier, before any case starts. An unresolved model entry is always an error; an unresolved `roles.grader` is an error only when a configured task declares a graded check, a warning otherwise; an unresolved `roles.criteria` is always a warning. `tevu run` and `tevu run --dry-run` run this same check through their own `tevu validate` call.
+
+A provider only a task's tracked `opencode.json` defines, or that it disables, is not visible to this check, since the check's environment holds an empty Git repository rather than the task's own tree. A model entry or role that depends on such a provider is reported as unresolved even though the case itself would see it; define the provider in `agents.opencode.providers` too, or accept that this configuration is not supported by `tevu validate`.
 
 ## Model roles
 
@@ -426,7 +467,7 @@ roles:
 
 The two roles are configured and used independently: each is required only by the command that reads it, and a configuration declaring neither is valid. `tevu run` is the reader of `roles.grader`, calling it once per case whose task declares a graded check; see [Graded checks](#graded-checks). `tevu task add` is the reader of `roles.criteria`, calling it at most once per task and only for a task with a reference solution; no command requires it, and without it the setup interview asks for acceptance criteria and a Definition of Done by hand. They stay separate settings rather than one shared model because a model grading or drafting for its own family tends to favor it. The same model may serve a model role and a model entry; tevu does not forbid using one model for both.
 
-A model role's provider credential belongs in its agent block's `secrets`, not in the role itself; every case agent of that block receives the same credential, so a role on a provider no model entry uses exposes its credential to every benchmarked case agent of that agent. Neither the loader nor `tevu validate` checks a role's credential or effort against its provider: a missing credential fails the call at run time, and an unknown effort runs at the model's default effort.
+A model role's provider credential belongs in its agent block's `secrets`, not in the role itself; every case agent of that block receives the same credential, so a role on a provider no model entry uses exposes its credential to every benchmarked case agent of that agent. `tevu validate` checks that the agent resolves a role's model, covered under [Model resolution](#model-resolution): an unresolved `roles.grader` is an error when a configured task declares a graded check, a warning otherwise, and an unresolved `roles.criteria` is always a warning. Neither the loader nor `tevu validate` checks a role's credential value or its effort against its provider: a missing credential fails the call at run time, and an unknown effort runs at the model's default effort.
 
 `tevu validate` probes each distinct agent a model entry or a model role names, once per agent, the same way it probes a model entry's agent: variable presence and the agent capabilities the call needs, without starting a model session. See the [isolation explanation](../concepts/isolation.md#model-calls-get-no-task-repository) for how a model call's environment differs from a case agent's.
 

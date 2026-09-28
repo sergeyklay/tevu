@@ -57,6 +57,10 @@ if (args[0] === "export" && args[1] === "--help") {
   console.log("usage: opencode export <session-id>");
   process.exit(0);
 }
+if (args[0] === "models" && args[1] === "--help") {
+  console.log("usage: opencode models");
+  process.exit(0);
+}
 `;
 
 function renderRunSection(behavior: RunBehavior): string {
@@ -172,6 +176,7 @@ function buildConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
         command: 'unused-fake-opencode-command',
         secrets: [SECRET_VARIABLE_NAME],
         env: [],
+        providers: [],
       },
     },
     repositories: [],
@@ -235,9 +240,10 @@ async function draftWithFakeAgent(
     secrets: buildSecretRedactor([SECRET_VALUE]),
     probeEnvironment: { PATH: process.env['PATH'] ?? '' },
     probeDirectory: process.cwd(),
+    operatorDirectories: { home: undefined, xdgConfigHome: undefined },
   };
   const adapter: AgentAdapter = createOpenCodeAdapter(
-    { agent: 'opencode', executable },
+    { agent: 'opencode', executable, providers: [], declaredVariables: { secrets: [], env: [] } },
     dependencies,
   );
   const config = options.config ?? buildConfig();
