@@ -10,13 +10,14 @@ import type {
   GitWorkspaceAdapter,
   RepositoryDefinition,
   TaskDefinition,
+  TaskReference,
   TevuConfig,
   TevuResult,
   ValidationFinding,
 } from '@/domain/types';
 
 /** Error kinds task creation can produce. */
-type CreateTaskErrorKind =
+export type CreateTaskErrorKind =
   | 'ConfigParseError'
   | 'ConfigValidationError'
   | 'ConfigReadError'
@@ -96,32 +97,11 @@ export async function createTask(
   }
   const repository = matched.value;
 
-  const configDirectory = path.dirname(path.resolve(input.configPath));
-  const directory = resolveRepositoryPath(
-    repository,
-    configDirectory,
-    dependencies.managedCloneRoot,
-  );
-  if (directory === undefined) {
-    return validationFailure([
-      {
-        severity: 'error',
-        identifier: `repositories.${repository.id}.github`,
-        message:
-          'a GitHub repository entry needs XDG_CACHE_HOME or HOME set to an absolute path for its managed clone',
-      },
-    ]);
+  const located = locateRepository(repository, input.configPath, dependencies.managedCloneRoot);
+  if (!located.ok) {
+    return located;
   }
-  const resolvedRepository: RepositoryDefinition = {
-    id: repository.id,
-    path: directory,
-    ...(repository.github === undefined ? {} : { github: repository.github }),
-  };
-  const resolvedBase = await resolveTaskBaseCommit(
-    input.task,
-    resolvedRepository,
-    dependencies.git,
-  );
+  const resolvedBase = await resolveTaskBaseCommit(input.task, located.value, dependencies.git);
   if (!resolvedBase.ok) {
     return { ok: false, error: { ...resolvedBase.error, taskId: input.task.id } };
   }
@@ -185,6 +165,71 @@ export async function createTask(
 }
 
 /**
+ * Checks that a base-commit answer would pin at the write: the repository
+ * directory resolves, `validateSource` finds exactly one commit whose tree is
+ * accepted, or a pull-request reference's full-hash base is not yet in the
+ * repository and stays as typed.
+ *
+ * Reads no configuration and writes nothing. A `SourceMaterializationError`
+ * carries the repository ID in `taskId`.
+ */
+export async function inspectTaskBaseCommit(
+  request: {
+    configPath: string;
+    repository: RepositoryCandidate;
+    baseCommit: string;
+    reference?: TaskReference;
+  },
+  dependencies: Pick<TaskDependencies, 'git' | 'managedCloneRoot'>,
+): Promise<TevuResult<void, 'SourceMaterializationError' | 'ConfigValidationError'>> {
+  const { configPath, repository, baseCommit, reference } = request;
+  const located = locateRepository(repository, configPath, dependencies.managedCloneRoot);
+  if (!located.ok) {
+    return located;
+  }
+  const resolved = await resolveTaskBaseCommit(
+    { base_commit: baseCommit, ...(reference === undefined ? {} : { reference }) },
+    located.value,
+    dependencies.git,
+  );
+  if (!resolved.ok) {
+    return { ok: false, error: { ...resolved.error, taskId: repository.id } };
+  }
+  return { ok: true, value: undefined };
+}
+
+/** Resolves a repository candidate to its directory; a GitHub entry with no managed-clone root is a finding. */
+function locateRepository(
+  repository: RepositoryCandidate,
+  configPath: string,
+  managedCloneRoot: string | undefined,
+): TevuResult<RepositoryDefinition, 'ConfigValidationError'> {
+  const directory = resolveRepositoryPath(
+    repository,
+    path.dirname(path.resolve(configPath)),
+    managedCloneRoot,
+  );
+  if (directory === undefined) {
+    return validationFailure([
+      {
+        severity: 'error',
+        identifier: `repositories.${repository.id}.github`,
+        message:
+          'a GitHub repository entry needs XDG_CACHE_HOME or HOME set to an absolute path for its managed clone',
+      },
+    ]);
+  }
+  return {
+    ok: true,
+    value: {
+      id: repository.id,
+      path: directory,
+      ...(repository.github === undefined ? {} : { github: repository.github }),
+    },
+  };
+}
+
+/**
  * Reads the existing configuration or starts from the captured bootstrap
  * answers. An existing configuration is authoritative even when bootstrap
  * answers were captured, so a file that appeared after the wizard started is
@@ -236,7 +281,7 @@ async function loadBaseDocument(
  * unchanged, since it only has to exist locally before a run.
  */
 async function resolveTaskBaseCommit(
-  task: TaskInput,
+  task: Pick<TaskInput, 'base_commit' | 'reference'>,
   repository: RepositoryDefinition,
   git: Pick<GitWorkspaceAdapter, 'validateSource' | 'resolveCommit'>,
 ): Promise<TevuResult<string, 'SourceMaterializationError'>> {

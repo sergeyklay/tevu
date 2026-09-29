@@ -501,7 +501,7 @@ function flowStyleFinding(key: string): TevuResult<never, 'ConfigValidationError
         {
           severity: 'error',
           identifier: key,
-          message: `task add appends only to a block-style list; rewrite ${key} in block style and run task add again`,
+          message: `task add appends only to a block-style list; rewrite ${key} in block style`,
         },
       ],
     },

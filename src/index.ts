@@ -33,18 +33,19 @@ import {
 } from '@/adapters/trackers/github-issues';
 import { createJiraCloudAdapter } from '@/adapters/trackers/jira-cloud';
 import { assessCase, readAssessmentContext, rebuildReport } from '@/application/assess';
-import { createTask } from '@/application/create-task';
+import { createTask, inspectTaskBaseCommit } from '@/application/create-task';
 import { draftCriteria } from '@/application/draft-criteria';
 import { ensureManagedCommits, prepareManagedRepositories } from '@/application/managed-clone';
 import { checkModelAccess, inspectModelProvider, probeAgent } from '@/application/model-access';
 import { resolveReferenceSolution } from '@/application/reference-solution';
 import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
 import { validateConfig } from '@/application/validate';
-import { canonicalConfigSerialization, loadConfig } from '@/config/load';
+import { canonicalConfigSerialization, checkRepositoryPlacement, loadConfig } from '@/config/load';
 import { locateConfig, managedCloneRoot as resolveManagedCloneRoot } from '@/config/locate';
 import { referencedVariableName } from '@/config/schema';
 import { GH_CREDENTIAL_ENVIRONMENT_VARIABLES } from '@/domain/github-cli';
 import { runProgram } from '@/interface/program';
+import { createWaitInterrupt } from '@/interface/wait-interrupt';
 
 import type { JiraCloudSettings } from '@/adapters/trackers/jira-cloud';
 import type { ManagedCloneDependencies } from '@/application/managed-clone';
@@ -60,12 +61,15 @@ import type {
   TevuResult,
 } from '@/domain/types';
 import type { ProgramDependencies, ProgramIo, ProgramOperations } from '@/interface/program';
+import type { WaitInterrupt } from '@/interface/wait-interrupt';
 import type { Writable } from 'node:stream';
 
 /** Optional overrides for composing the production dependency graph. */
 export type CompositionOptions = {
   io?: ProgramIo;
   cancellation?: AbortSignal;
+  /** Defaults to a fresh instance that no signal handler feeds. */
+  waitInterrupt?: WaitInterrupt;
 };
 
 /** Grows as configurations and run-level snapshots reveal secret values, so every sink redacts coherently. */
@@ -252,6 +256,13 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       checkModelAccess({ configPath, agent, model }, modelAccess()),
     prepareRepositories: (config, onProgress) =>
       prepareManagedRepositories(config, managedCloneDependencies(onProgress)),
+    inspectBaseCommit: (configPath, repository, baseCommit, reference) =>
+      inspectTaskBaseCommit(
+        { configPath, repository, baseCommit, ...(reference === undefined ? {} : { reference }) },
+        { git: createSourceValidator(), managedCloneRoot: cloneRoot },
+      ),
+    checkRepositoryPlacement: (configPath, outputDirectory, repositories) =>
+      checkRepositoryPlacement({ outputDirectory, repositories }, configPath, cloneRoot),
     createTask: (input) =>
       createTask(input, {
         configStore,
@@ -315,26 +326,42 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
     now: () => new Date(),
     redact: registry.redact,
     cancellation,
+    waitInterrupt: options.waitInterrupt ?? createWaitInterrupt(),
   };
 }
 
 /**
  * Runs the `tevu` executable: wires interrupt signals to graceful bounded
- * cancellation, composes
- * the production dependencies, and returns the mapped exit code.
+ * cancellation, composes the production dependencies, and returns the mapped
+ * exit code.
+ *
+ * SIGINT is offered to the open `task add` wait first and aborts the command
+ * signal only when no wait takes it; SIGTERM aborts at once. Repeated
+ * interrupts share the same bounded process-group cancellation.
  */
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const controller = new AbortController();
-  const onInterrupt = createInterruptHandler(controller);
+  const waitInterrupt = createWaitInterrupt();
+  const onSigint = (): void => {
+    if (!waitInterrupt.take()) {
+      controller.abort();
+    }
+  };
+  const onSigterm = (): void => {
+    controller.abort();
+  };
   ignoreClosedReader(process.stdout);
   ignoreClosedReader(process.stderr);
-  process.on('SIGINT', onInterrupt);
-  process.on('SIGTERM', onInterrupt);
+  process.on('SIGINT', onSigint);
+  process.on('SIGTERM', onSigterm);
   try {
-    return await runProgram(argv, composeProgramDependencies({ cancellation: controller.signal }));
+    return await runProgram(
+      argv,
+      composeProgramDependencies({ cancellation: controller.signal, waitInterrupt }),
+    );
   } finally {
-    process.off('SIGINT', onInterrupt);
-    process.off('SIGTERM', onInterrupt);
+    process.off('SIGINT', onSigint);
+    process.off('SIGTERM', onSigterm);
   }
 }
 
@@ -349,13 +376,6 @@ export function ignoreClosedReader(stream: Writable): void {
       throw error;
     }
   });
-}
-
-/** Repeated interrupts share the same bounded process-group cancellation. */
-function createInterruptHandler(controller: AbortController): () => void {
-  return () => {
-    controller.abort();
-  };
 }
 
 function createSecretRegistry(): SecretRegistry {

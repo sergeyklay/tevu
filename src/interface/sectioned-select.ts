@@ -145,14 +145,7 @@ export async function sectionedSelect(
     }
   });
 
-  const settled = prompt.prompt();
-  const stopFollowing = statusLine.follow(output);
-  let result: string | typeof CANCEL_SYMBOL | undefined;
-  try {
-    result = await settled;
-  } finally {
-    stopFollowing();
-  }
+  const result = await prompt.prompt();
   if (escaped) {
     return back.value;
   }

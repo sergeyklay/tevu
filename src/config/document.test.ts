@@ -547,8 +547,7 @@ describe('appendToConfigText', () => {
           {
             severity: 'error',
             identifier: 'tasks',
-            message:
-              'task add appends only to a block-style list; rewrite tasks in block style and run task add again',
+            message: 'task add appends only to a block-style list; rewrite tasks in block style',
           },
         ],
       },
@@ -573,7 +572,7 @@ describe('appendToConfigText', () => {
             severity: 'error',
             identifier: 'repositories',
             message:
-              'task add appends only to a block-style list; rewrite repositories in block style and run task add again',
+              'task add appends only to a block-style list; rewrite repositories in block style',
           },
         ],
       },

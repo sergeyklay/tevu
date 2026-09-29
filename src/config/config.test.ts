@@ -14,6 +14,7 @@ import { GH_CREDENTIAL_ENVIRONMENT_VARIABLES } from '@/domain/github-cli';
 import { renderConfigDocument } from './document';
 import {
   canonicalConfigSerialization,
+  checkRepositoryPlacement,
   loadConfig,
   parseConfigText,
   resolveBootstrapModelCallConfig,
@@ -2435,6 +2436,28 @@ describe('loadConfig', () => {
       ]);
     });
 
+    it('reports the placement findings before the overlay findings', async () => {
+      const root = join(tempDirectory, 'cache');
+      const configPath = await writeConfigFile(
+        githubRepositoryConfigYaml({
+          outputDirectory: './runs',
+          github: 'octo/app',
+          command: 'opencode',
+          extraRepositories: '  - id: local-repo\n    path: ./cache\n',
+        }).replace('    checks:\n', '    checks:\n      overlay: ./cache/hidden-checks\n'),
+      );
+
+      const error = expectFailure(
+        await loadConfig(configPath, configStore, root),
+        'ConfigValidationError',
+      );
+
+      expect(error.findings.map(({ identifier }) => identifier)).toEqual([
+        'repositories.local-repo.path',
+        'tasks.write-report.checks.overlay',
+      ]);
+    });
+
     it('does not flag a path entry overlapping the managed-clone root directory when no GitHub entry is present', async () => {
       const root = join(tempDirectory, 'cache');
       const configPath = await writeConfigFile(
@@ -2474,6 +2497,169 @@ describe('loadConfig', () => {
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
     expect(loaded.value).toBe(rendered.value);
+  });
+});
+
+describe('checkRepositoryPlacement', () => {
+  const GITHUB_APP = { id: 'app', github: 'octo/app', path: 'github.com/octo/app.git' };
+  let tempDirectory: string;
+  let configPath: string;
+
+  beforeEach(async () => {
+    tempDirectory = await fs.mkdtemp(join(tmpdir(), 'tevu-placement-'));
+    configPath = join(tempDirectory, 'tevu.yaml');
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDirectory, { recursive: true, force: true });
+  });
+
+  it('returns no findings for a relative output directory beside path entries outside it', async () => {
+    const findings = await checkRepositoryPlacement(
+      { outputDirectory: 'runs', repositories: [{ id: 'app', path: './repo' }] },
+      configPath,
+      undefined,
+    );
+
+    expect(findings).toEqual([]);
+  });
+
+  it('returns no findings for a GitHub entry when a managed-clone root exists', async () => {
+    const findings = await checkRepositoryPlacement(
+      { outputDirectory: 'runs', repositories: [GITHUB_APP] },
+      configPath,
+      join(tempDirectory, 'cache'),
+    );
+
+    expect(findings).toEqual([]);
+  });
+
+  it('resolves a relative output directory against the configuration file directory', async () => {
+    const findings = await checkRepositoryPlacement(
+      { outputDirectory: 'runs', repositories: [{ id: 'app', path: './runs/repo' }] },
+      configPath,
+      undefined,
+    );
+
+    expect(findings).toEqual([
+      {
+        severity: 'error',
+        identifier: 'repositories.app.path',
+        message: 'repository "app" overlaps the run output directory after real-path resolution',
+      },
+    ]);
+  });
+
+  it('reports an output directory inside a path entry under run.output_dir', async () => {
+    const findings = await checkRepositoryPlacement(
+      { outputDirectory: './repo/runs', repositories: [{ id: 'app', path: './repo' }] },
+      configPath,
+      undefined,
+    );
+
+    expect(findings).toEqual([
+      {
+        severity: 'error',
+        identifier: 'run.output_dir',
+        message: 'run.output_dir must be outside repository "app" after real-path resolution',
+      },
+    ]);
+  });
+
+  it('accepts an absolute output directory', async () => {
+    const findings = await checkRepositoryPlacement(
+      {
+        outputDirectory: join(tempDirectory, 'repo', 'runs'),
+        repositories: [{ id: 'app', path: './repo' }],
+      },
+      configPath,
+      undefined,
+    );
+
+    expect(findings.map(({ identifier }) => identifier)).toEqual(['run.output_dir']);
+  });
+
+  it('reports a GitHub entry without a managed-clone root under its github identifier', async () => {
+    const findings = await checkRepositoryPlacement(
+      { outputDirectory: 'runs', repositories: [GITHUB_APP] },
+      configPath,
+      undefined,
+    );
+
+    expect(findings).toEqual([
+      {
+        severity: 'error',
+        identifier: 'repositories.app.github',
+        message:
+          'a GitHub repository entry needs XDG_CACHE_HOME or HOME set to an absolute path for its managed clone',
+      },
+    ]);
+  });
+
+  it('flags a path entry that equals the managed-clone root beside a GitHub entry', async () => {
+    const root = join(tempDirectory, 'cache');
+
+    const findings = await checkRepositoryPlacement(
+      {
+        outputDirectory: 'runs',
+        repositories: [GITHUB_APP, { id: 'local', path: './cache' }],
+      },
+      configPath,
+      root,
+    );
+
+    expect(findings).toEqual([
+      {
+        severity: 'error',
+        identifier: 'repositories.local.path',
+        message: `repository "local" overlaps the managed-clone directory "${root}" after real-path resolution`,
+      },
+    ]);
+  });
+
+  it('does not flag a path entry on the managed-clone root when no GitHub entry is present', async () => {
+    const findings = await checkRepositoryPlacement(
+      { outputDirectory: 'runs', repositories: [{ id: 'local', path: './cache' }] },
+      configPath,
+      join(tempDirectory, 'cache'),
+    );
+
+    expect(findings).toEqual([]);
+  });
+
+  it('reports the missing root first, then the output separation finding', async () => {
+    const findings = await checkRepositoryPlacement(
+      {
+        outputDirectory: 'runs',
+        repositories: [GITHUB_APP, { id: 'local', path: './runs/repo' }],
+      },
+      configPath,
+      undefined,
+    );
+
+    expect(findings.map(({ identifier }) => identifier)).toEqual([
+      'repositories.app.github',
+      'repositories.local.path',
+    ]);
+  });
+
+  it('reports the output separation findings before the managed-clone overlap findings', async () => {
+    const root = join(tempDirectory, 'cache');
+
+    const findings = await checkRepositoryPlacement(
+      {
+        outputDirectory: 'cache',
+        repositories: [GITHUB_APP, { id: 'local', path: './cache' }],
+      },
+      configPath,
+      root,
+    );
+
+    expect(findings.map(({ identifier }) => identifier)).toEqual([
+      'repositories.app.github',
+      'run.output_dir',
+      'repositories.local.path',
+    ]);
   });
 });
 

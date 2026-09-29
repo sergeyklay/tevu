@@ -629,13 +629,11 @@ describe('sectionedSelect with an unheaded section', () => {
 });
 
 describe('sectionedSelect status line', () => {
-  const MESSAGE = 'Saved';
-
   function screenOf(output: FakeOutput): ReturnType<typeof replayScreen> {
     return replayScreen(output.text);
   }
 
-  it('shows the key hint under the open frame while no message is shown', () => {
+  it('shows the key hint under the open frame', () => {
     const { output } = start();
 
     const screen = screenOf(output);
@@ -644,63 +642,11 @@ describe('sectionedSelect status line', () => {
     expect(screen.cursorRow).toBe(screen.rows.length - 1);
   });
 
-  it('draws the message as the last row of the first frame when one is already shown', () => {
-    const statusLine = createStatusLine();
-    statusLine.show(MESSAGE);
-
-    const { output } = start({ statusLine });
-
-    expect(screenOf(output).rows.at(-2)).toBe(`  ${MESSAGE}`);
-  });
-
-  it('rewrites only the reserved row when a message appears and again when it clears', async () => {
-    const statusLine = createStatusLine();
-    const { output } = start({ statusLine });
-    const before = screenOf(output);
-
-    const message = statusLine.show(MESSAGE);
-    const shown = screenOf(output);
-    message.clear();
-    const cleared = screenOf(output);
-
-    const rowIndex = before.cursorRow - 1;
-    expect(before.rows[rowIndex]).toBe(IDLE_ROW);
-    expect(shown.rows[rowIndex]).toBe(`  ${MESSAGE}`);
-    expect(shown.rows.filter((_, index) => index !== rowIndex)).toEqual(
-      before.rows.filter((_, index) => index !== rowIndex),
-    );
-    expect(shown.cursorRow).toBe(before.cursorRow);
-    expect(cleared.rows).toEqual(before.rows);
-    expect(cleared.cursorRow).toBe(before.cursorRow);
-  });
-
-  it('redraws the row when a newer message replaces the shown one', () => {
-    const statusLine = createStatusLine();
-    const { output } = start({ statusLine });
-    statusLine.show(MESSAGE);
-
-    statusLine.show('Retrying');
-
-    expect(screenOf(output).rows.at(-2)).toBe('  Retrying');
-  });
-
-  it('dims the message with SGR 2 and SGR 22 when color is on', () => {
-    vi.stubEnv('FORCE_COLOR', '1');
-    const statusLine = createStatusLine();
-    const { output } = start({ statusLine });
-
-    statusLine.show(MESSAGE);
-
-    expect(screenOf(output).rows.at(-2)).toBe(`  ${ESC}[2m${MESSAGE}${ESC}[22m`);
-  });
-
   it.each([
     { name: 'Enter', presses: [ENTER] },
     { name: 'Ctrl-C', presses: [CTRL_C] },
   ])('leaves no status line row under the final frame after $name', async ({ presses }) => {
-    const statusLine = createStatusLine();
-    const { input, output, result } = start({ statusLine });
-    statusLine.show(MESSAGE);
+    const { input, output, result } = start();
 
     press(input, ...presses);
     await result;
@@ -709,13 +655,11 @@ describe('sectionedSelect status line', () => {
     expect(screen.cursorRow).toBe(screen.rows.length - 1);
     expect(screen.rows.at(-1)).toBe('');
     expect(screen.rows.at(-2)).not.toBe('');
-    expect(screen.rows.join('\n')).not.toContain(MESSAGE);
+    expect(screen.rows.join('\n')).not.toContain(IDLE_ROW.trim());
   });
 
   it('leaves no status line row under the final frame after Escape', async () => {
-    const statusLine = createStatusLine();
-    const { input, output, result } = start({ statusLine });
-    statusLine.show(MESSAGE);
+    const { input, output, result } = start();
 
     input.push(ESC);
     await result;
@@ -724,22 +668,7 @@ describe('sectionedSelect status line', () => {
     expect(screen.cursorRow).toBe(screen.rows.length - 1);
     expect(screen.rows.at(-1)).toBe('');
     expect(screen.rows.at(-2)).toBe(bar('Back to the review'));
-    expect(screen.rows.join('\n')).not.toContain(MESSAGE);
-  });
-
-  it('stops redrawing on later message changes once the prompt settled', async () => {
-    const statusLine = createStatusLine();
-    const { input, output, result } = start({ statusLine });
-    press(input, ENTER);
-    await result;
-    const written = output.chunks.length;
-    const resized = vi.fn();
-    output.on('resize', resized);
-
-    statusLine.show(MESSAGE);
-
-    expect(output.chunks).toHaveLength(written);
-    expect(resized).not.toHaveBeenCalled();
+    expect(screen.rows.join('\n')).not.toContain(IDLE_ROW.trim());
   });
 });
 
