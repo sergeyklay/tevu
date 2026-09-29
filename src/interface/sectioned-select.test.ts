@@ -15,7 +15,10 @@ import {
 } from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { replayScreen } from './__fixtures__/terminal.fixtures';
 import { renderSectionedSelect, sectionedSelect } from './sectioned-select';
+import { createStatusLine } from './status-line';
+import { text } from './wizard-prompts';
 
 type Options = Parameters<typeof sectionedSelect>[0];
 type Sections = Options['sections'];
@@ -137,6 +140,7 @@ function renderRaw(
     back: BACK,
     output: createStreams(size).output,
     state: 'active',
+    statusRow: '',
     ...frame,
   });
 }
@@ -154,9 +158,14 @@ function start(overrides: Partial<Options> = {}): {
     back: BACK,
     input,
     output,
+    statusLine: createStatusLine(),
     ...overrides,
   });
   return { input, output, result, writtenSince: (mark) => output.text.slice(mark) };
+}
+
+async function flush(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 function press(input: Readable, ...presses: readonly Press[]): void {
@@ -436,7 +445,7 @@ describe('sectionedSelect cancel', () => {
   it('draws the initial frame as the first frame before any key', () => {
     const { output } = start();
 
-    expect(stripVTControlCharacters(output.text)).toBe(EDIT_FRAME.join('\n'));
+    expect(stripVTControlCharacters(output.text)).toBe(`${EDIT_FRAME.join('\n')}\n`);
   });
 });
 
@@ -559,23 +568,54 @@ describe('sectionedSelect with an unheaded section', () => {
       { name: 'Ctrl-C', presses: [CTRL_C] },
       { name: 'Down, Ctrl-C', presses: [DOWN, CTRL_C] },
     ])(
-      'writes the same bytes and resolves the same value as select for $name',
+      'draws the screens of select plus one reserved row and resolves the same value for $name',
       async ({ presses }) => {
         const ours = createStreams();
         const stock = createStreams();
-
+        const settled = { ours: false, stock: false };
         const oursResult = sectionedSelect({
           message: 'Add to',
           sections: buildAddToSections(),
           back: BACK,
+          statusLine: createStatusLine(),
           ...ours,
+        }).then((value) => {
+          settled.ours = true;
+          return value;
         });
-        press(ours.input, ...presses);
-        const stockResult = select({ message: 'Add to', options: stockOptions, ...stock });
-        press(stock.input, ...presses);
+        const stockResult = select({ message: 'Add to', options: stockOptions, ...stock }).then(
+          (value) => {
+            settled.stock = true;
+            return value;
+          },
+        );
+        const expectSameScreens = (label: string): void => {
+          const oursScreen = replayScreen(ours.output.text);
+          const stockScreen = replayScreen(stock.output.text);
+          expect(stockScreen.rows.join('\n'), label).toContain('Add to');
+          expect(settled.ours, label).toBe(settled.stock);
+          if (settled.stock) {
+            expect(oursScreen, label).toEqual(stockScreen);
+            return;
+          }
+          expect(oursScreen.rows, label).toEqual([
+            ...stockScreen.rows.slice(0, stockScreen.cursorRow),
+            '',
+            ...stockScreen.rows.slice(stockScreen.cursorRow),
+          ]);
+          expect(oursScreen.cursorRow, label).toBe(stockScreen.cursorRow + 1);
+        };
+
+        await flush();
+        expectSameScreens('first frame');
+        for (const [index, keypress] of presses.entries()) {
+          press(ours.input, keypress);
+          press(stock.input, keypress);
+          await flush();
+          expectSameScreens(`after key ${String(index + 1)}`);
+        }
         const [oursValue, stockValue] = await Promise.all([oursResult, stockResult]);
 
-        expect(ours.output.text).toBe(stock.output.text);
         if (isCancel(stockValue)) {
           expect(isCancel(oursValue)).toBe(true);
         } else {
@@ -583,5 +623,175 @@ describe('sectionedSelect with an unheaded section', () => {
         }
       },
     );
+  });
+});
+
+describe('sectionedSelect status line', () => {
+  const MESSAGE = 'Saved';
+
+  function screenOf(output: FakeOutput): ReturnType<typeof replayScreen> {
+    return replayScreen(output.text);
+  }
+
+  it('reserves an empty row under the open frame while no message is shown', () => {
+    const { output } = start();
+
+    const screen = screenOf(output);
+
+    expect(screen.rows).toEqual([...EDIT_FRAME, '']);
+    expect(screen.cursorRow).toBe(screen.rows.length - 1);
+  });
+
+  it('draws the message as the last row of the first frame when one is already shown', () => {
+    const statusLine = createStatusLine();
+    statusLine.show(MESSAGE);
+
+    const { output } = start({ statusLine });
+
+    expect(screenOf(output).rows.at(-2)).toBe(`  ${MESSAGE}`);
+  });
+
+  it('rewrites only the reserved row when a message appears and again when it clears', async () => {
+    const statusLine = createStatusLine();
+    const { output } = start({ statusLine });
+    const before = screenOf(output);
+
+    const message = statusLine.show(MESSAGE);
+    const shown = screenOf(output);
+    message.clear();
+    const cleared = screenOf(output);
+
+    const rowIndex = before.cursorRow - 1;
+    expect(before.rows[rowIndex]).toBe('');
+    expect(shown.rows[rowIndex]).toBe(`  ${MESSAGE}`);
+    expect(shown.rows.filter((_, index) => index !== rowIndex)).toEqual(
+      before.rows.filter((_, index) => index !== rowIndex),
+    );
+    expect(shown.cursorRow).toBe(before.cursorRow);
+    expect(cleared.rows).toEqual(before.rows);
+    expect(cleared.cursorRow).toBe(before.cursorRow);
+  });
+
+  it('redraws the row when a newer message replaces the shown one', () => {
+    const statusLine = createStatusLine();
+    const { output } = start({ statusLine });
+    statusLine.show(MESSAGE);
+
+    statusLine.show('Retrying');
+
+    expect(screenOf(output).rows.at(-2)).toBe('  Retrying');
+  });
+
+  it('dims the message with SGR 2 and SGR 22 when color is on', () => {
+    vi.stubEnv('FORCE_COLOR', '1');
+    const statusLine = createStatusLine();
+    const { output } = start({ statusLine });
+
+    statusLine.show(MESSAGE);
+
+    expect(screenOf(output).rows.at(-2)).toBe(`  ${ESC}[2m${MESSAGE}${ESC}[22m`);
+  });
+
+  it.each([
+    { name: 'Enter', presses: [ENTER] },
+    { name: 'Ctrl-C', presses: [CTRL_C] },
+  ])('leaves no status line row under the final frame after $name', async ({ presses }) => {
+    const statusLine = createStatusLine();
+    const { input, output, result } = start({ statusLine });
+    statusLine.show(MESSAGE);
+
+    press(input, ...presses);
+    await result;
+
+    const screen = screenOf(output);
+    expect(screen.cursorRow).toBe(screen.rows.length - 1);
+    expect(screen.rows.at(-1)).toBe('');
+    expect(screen.rows.at(-2)).not.toBe('');
+    expect(screen.rows.join('\n')).not.toContain(MESSAGE);
+  });
+
+  it('leaves no status line row under the final frame after Escape', async () => {
+    const statusLine = createStatusLine();
+    const { input, output, result } = start({ statusLine });
+    statusLine.show(MESSAGE);
+
+    input.push(ESC);
+    await result;
+
+    const screen = screenOf(output);
+    expect(screen.cursorRow).toBe(screen.rows.length - 1);
+    expect(screen.rows.at(-1)).toBe('');
+    expect(screen.rows.at(-2)).toBe(bar('Back to the review'));
+    expect(screen.rows.join('\n')).not.toContain(MESSAGE);
+  });
+
+  it('stops redrawing on later message changes once the prompt settled', async () => {
+    const statusLine = createStatusLine();
+    const { input, output, result } = start({ statusLine });
+    press(input, ENTER);
+    await result;
+    const written = output.chunks.length;
+    const resized = vi.fn();
+    output.on('resize', resized);
+
+    statusLine.show(MESSAGE);
+
+    expect(output.chunks).toHaveLength(written);
+    expect(resized).not.toHaveBeenCalled();
+  });
+});
+
+describe('sectionedSelect status line on a short terminal', () => {
+  const sections = buildItemSections(
+    ['A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8'],
+    ['D1', 'D2'],
+  );
+
+  it.each([
+    { name: 'the top of the list', focused: 'acceptance:0' },
+    { name: 'a cursor scrolled to the end', focused: 'done:0' },
+  ])('draws the frame of a terminal one row shorter plus the row for $name', ({ focused }) => {
+    const withRow = renderRaw({ sections, focused, statusRow: '\n' }, { columns: 80, rows: 10 });
+    const shorter = renderRaw({ sections, focused }, { columns: 80, rows: 9 });
+    const sameRows = renderRaw({ sections, focused }, { columns: 80, rows: 10 });
+
+    expect(withRow).toBe(`${shorter}\n`);
+    expect(withRow).not.toBe(`${sameRows}\n`);
+  });
+
+  it('draws the row after the frame it draws today when it is a lone newline', () => {
+    const frame = renderRaw({ focused: 'acceptance:0', statusRow: '\n' });
+
+    expect(frame).toBe(`${renderRaw({ focused: 'acceptance:0' })}\n`);
+  });
+
+  it.each(['submit', 'cancel'] as const)(
+    'appends the given row to the %s frame unchanged',
+    (state) => {
+      const frame = renderRaw({ state, focused: 'acceptance:0', statusRow: '<row>' });
+
+      expect(frame).toBe(`${renderRaw({ state, focused: 'acceptance:0' })}<row>`);
+    },
+  );
+});
+
+describe('sectionedSelect after an exit prompt from the wizard prompts', () => {
+  it.each([
+    { name: 'submits', presses: [ENTER] },
+    { name: 'is cancelled by Ctrl-C', presses: [CTRL_C] },
+  ])('resolves back on one Escape once a text prompt $name', async ({ presses }) => {
+    const exit = createStreams();
+    const exitResult = text({
+      message: 'Output directory',
+      ...exit,
+      statusLine: createStatusLine(),
+    });
+    press(exit.input, ...presses);
+    await exitResult;
+    const { input, result } = start();
+
+    input.push(ESC);
+
+    expect(await result).toBe('back');
   });
 });

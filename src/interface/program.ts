@@ -14,6 +14,7 @@ import { describeManagedCloneError } from '@/application/managed-clone';
 import { agentNamesInUse, MAX_REPEAT, RepeatSchema } from '@/config/schema';
 import { CONFIG_TEMPLATE } from '@/config/template';
 
+import { createStatusLine } from './status-line';
 import { runAssessmentWizard, runTaskWizard } from './task-wizard';
 
 import type { AssessmentCaseContext } from '@/application/assess';
@@ -544,7 +545,11 @@ async function runTaskAdd(
       githubIssueReference: options.github,
     },
     {
-      io: { input: dependencies.io.stdin, output: dependencies.io.stdout },
+      io: {
+        input: dependencies.io.stdin,
+        output: dependencies.io.stdout,
+        statusLine: createStatusLine(),
+      },
       cancellation: dependencies.cancellation,
       readConfig: async (): Promise<
         TevuResult<TevuConfig | null, LoadConfigErrorKind | 'PrerequisiteError'>
@@ -714,7 +719,11 @@ async function runAssess(
   const wizard = await runAssessmentWizard(
     { runId, caseId },
     {
-      io: { input: dependencies.io.stdin, output: dependencies.io.stdout },
+      io: {
+        input: dependencies.io.stdin,
+        output: dependencies.io.stdout,
+        statusLine: createStatusLine(),
+      },
       readCaseContext: () => operations.readAssessmentContext(config, runId, caseId),
       now: dependencies.now,
       redact: dependencies.redact,

@@ -19,6 +19,7 @@ import {
   symbolBar,
 } from '@clack/prompts';
 
+import type { StatusLineDisplay } from './status-line';
 import type { State } from '@clack/core';
 import type { CANCEL_SYMBOL } from '@clack/prompts';
 import type { Readable, Writable } from 'node:stream';
@@ -38,6 +39,8 @@ type SectionedSelectOptions = {
   output: Writable;
   /** Aborting it resolves the cancel value, as for `select` from @clack/prompts. */
   signal?: AbortSignal;
+  /** Drawn as the last row of every open frame. */
+  statusLine: StatusLineDisplay;
 };
 
 type Row = {
@@ -49,7 +52,7 @@ type Row = {
 
 /**
  * Draws one frame of the prompt for `state`, with `focused` naming the value
- * of the option under the cursor.
+ * of the option under the cursor and `statusRow` closing the frame.
  *
  * Has no side effect; the frame depends only on its argument, the output's
  * column and row counts, and the color settings `styleText` reads.
@@ -58,9 +61,10 @@ export function renderSectionedSelect(
   frame: Pick<SectionedSelectOptions, 'message' | 'sections' | 'back' | 'output'> & {
     state: State;
     focused: string;
+    statusRow: string;
   },
 ): string {
-  const { message, sections, back, output, state, focused } = frame;
+  const { message, sections, back, output, state, focused, statusRow } = frame;
   const rows = buildRows(sections, back);
   const cursor = Math.max(
     rows.findIndex((row) => row.kind === 'option' && row.value === focused),
@@ -77,11 +81,11 @@ export function renderSectionedSelect(
   const guide = `${styleText('gray', S_BAR)}  `;
 
   if (state === 'submit') {
-    return `${header}${wrapTextWithPrefix(output, styleText('dim', label, { stream: output }), guide)}`;
+    return `${header}${wrapTextWithPrefix(output, styleText('dim', label, { stream: output }), guide)}${statusRow}`;
   }
   if (state === 'cancel') {
     const struck = styleText(['strikethrough', 'dim'], label, { stream: output });
-    return `${header}${wrapTextWithPrefix(output, struck, guide)}\n${styleText('gray', S_BAR)}`;
+    return `${header}${wrapTextWithPrefix(output, struck, guide)}\n${styleText('gray', S_BAR)}${statusRow}`;
   }
 
   const prefix = `${styleText('cyan', S_BAR)}  `;
@@ -91,10 +95,10 @@ export function renderSectionedSelect(
     cursor,
     options: rows,
     columnPadding: prefix.length,
-    rowPadding: header.split('\n').length + footer.length + 1,
+    rowPadding: header.split('\n').length + footer.length + 1 + (statusRow.split('\n').length - 1),
     style: (row, isActive) => styleRow(row, isActive, output),
   });
-  return `${header}${prefix}${body.join(`\n${prefix}`)}\n${footer.join('\n')}\n`;
+  return `${header}${prefix}${body.join(`\n${prefix}`)}\n${footer.join('\n')}\n${statusRow}`;
 }
 
 /**
@@ -110,7 +114,7 @@ export function renderSectionedSelect(
 export async function sectionedSelect(
   options: SectionedSelectOptions,
 ): Promise<string | typeof CANCEL_SYMBOL> {
-  const { message, sections, back, input, output, signal } = options;
+  const { message, sections, back, input, output, signal, statusLine } = options;
   let escaped = false;
 
   const prompt = new SelectPrompt<Row>({
@@ -119,13 +123,15 @@ export async function sectionedSelect(
     output,
     ...(signal === undefined ? {} : { signal }),
     render() {
+      const drawnState = escaped ? 'submit' : this.state;
       return renderSectionedSelect({
         message,
         sections,
         back,
         output,
-        state: escaped ? 'submit' : this.state,
+        state: drawnState,
         focused: escaped ? back.value : (this.options[this.cursor]?.value ?? back.value),
+        statusRow: statusLine.row(drawnState, output),
       });
     },
   });
@@ -137,7 +143,14 @@ export async function sectionedSelect(
     }
   });
 
-  const result = await prompt.prompt();
+  const settled = prompt.prompt();
+  const stopFollowing = statusLine.follow(output);
+  let result: string | typeof CANCEL_SYMBOL | undefined;
+  try {
+    result = await settled;
+  } finally {
+    stopFollowing();
+  }
   if (escaped) {
     return back.value;
   }
