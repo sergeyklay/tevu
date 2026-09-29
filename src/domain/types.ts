@@ -100,11 +100,14 @@ export type TevuError =
   | { kind: 'ReferenceResolutionError'; reason: string }
   | {
       kind: 'ManagedCloneError';
-      operation: 'clone' | 'fetch';
+      operation: ManagedCloneOperation;
       /** Display form of the repository contacted for this operation. */
       repository: string;
       reason: string;
     };
+
+/** The git operation a `ManagedCloneError` reports on. */
+export type ManagedCloneOperation = 'clone' | 'fetch' | 'ls-remote';
 
 /** Where a run's effective repeat came from: the configuration (set or defaulted) or `tevu run --repeat`. */
 type RepeatSource = 'config' | 'cli';
@@ -245,6 +248,10 @@ export interface ManagedCloneAdapter {
   /** Fetches every branch and tag of `repository`, force-updating `refs/heads/*` and `refs/tags/*`. */
   fetchBranchesAndTags(
     directory: string,
+    repository: ParsedGitHubRepository,
+  ): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>>;
+  /** Reads `repository`'s HEAD from the remote without writing anything, proving it exists and is readable. */
+  checkRemote(
     repository: ParsedGitHubRepository,
   ): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>>;
 }

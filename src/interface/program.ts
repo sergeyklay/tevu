@@ -30,6 +30,7 @@ import type {
   ReferenceSolutionRequest,
   ResolvedReferenceSolution,
 } from '@/application/reference-solution';
+import type { ParsedGitHubRepository } from '@/domain/github-reference';
 import type {
   AgentCapabilityReport,
   AssessmentInput,
@@ -103,6 +104,14 @@ export type ProgramOperations = {
       'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'
     >
   >;
+  /** Reads a GitHub repository's HEAD from its remote, proving it exists and is readable. */
+  checkGitHubRepository(
+    repository: ParsedGitHubRepository,
+  ): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>>;
+  /** Reports whether `repositoryPath`, resolved against the configuration file's directory, lies in a Git repository. */
+  isGitRepository(configPath: string, repositoryPath: string): Promise<boolean>;
+  /** The names in `names` that are not set in tevu's own environment. */
+  unsetVariables(names: readonly string[]): string[];
   /** Drafts acceptance criteria and a Definition of Done from a resolved reference solution. */
   draftCriteria(request: CriteriaDraftRequest): Promise<CriteriaDraftOutcome>;
   /** Runs the agent's capability probe for `command`, resolved against the configuration file's directory. */
@@ -575,6 +584,9 @@ async function runTaskAdd(
         operations.resolveReference({ configPath: loaderPath, repository, identifier }, onProgress),
       ensureManagedCommits: (repository, revisions, onProgress) =>
         operations.ensureManagedCommits({ repository, revisions }, onProgress),
+      checkGitHubRepository: operations.checkGitHubRepository,
+      isGitRepository: (repositoryPath) => operations.isGitRepository(loaderPath, repositoryPath),
+      isVariableSet: (name) => operations.unsetVariables([name]).length === 0,
       draftCriteria: (request) => operations.draftCriteria({ configPath: loaderPath, ...request }),
       probeAgent: (command) => operations.probeAgent(loaderPath, command),
       inspectModelProvider: (agent, model) =>

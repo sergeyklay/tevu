@@ -185,6 +185,8 @@ async function choose(
   return result;
 }
 
+const IDLE_ROW = '  Esc to go back · Ctrl-C to exit';
+
 const EDIT_FRAME = activeFrame('Item to edit', [
   'Acceptance Criteria',
   active('A1'),
@@ -445,7 +447,7 @@ describe('sectionedSelect cancel', () => {
   it('draws the initial frame as the first frame before any key', () => {
     const { output } = start();
 
-    expect(stripVTControlCharacters(output.text)).toBe(`${EDIT_FRAME.join('\n')}\n`);
+    expect(stripVTControlCharacters(output.text)).toBe(`${EDIT_FRAME.join('\n')}${IDLE_ROW}\n`);
   });
 });
 
@@ -600,7 +602,7 @@ describe('sectionedSelect with an unheaded section', () => {
           }
           expect(oursScreen.rows, label).toEqual([
             ...stockScreen.rows.slice(0, stockScreen.cursorRow),
-            '',
+            level === '1' ? `  ${ESC}[2m${IDLE_ROW.trimStart()}${ESC}[22m` : IDLE_ROW,
             ...stockScreen.rows.slice(stockScreen.cursorRow),
           ]);
           expect(oursScreen.cursorRow, label).toBe(stockScreen.cursorRow + 1);
@@ -633,12 +635,12 @@ describe('sectionedSelect status line', () => {
     return replayScreen(output.text);
   }
 
-  it('reserves an empty row under the open frame while no message is shown', () => {
+  it('shows the key hint under the open frame while no message is shown', () => {
     const { output } = start();
 
     const screen = screenOf(output);
 
-    expect(screen.rows).toEqual([...EDIT_FRAME, '']);
+    expect(screen.rows).toEqual([...EDIT_FRAME.slice(0, -1), IDLE_ROW, '']);
     expect(screen.cursorRow).toBe(screen.rows.length - 1);
   });
 
@@ -662,7 +664,7 @@ describe('sectionedSelect status line', () => {
     const cleared = screenOf(output);
 
     const rowIndex = before.cursorRow - 1;
-    expect(before.rows[rowIndex]).toBe('');
+    expect(before.rows[rowIndex]).toBe(IDLE_ROW);
     expect(shown.rows[rowIndex]).toBe(`  ${MESSAGE}`);
     expect(shown.rows.filter((_, index) => index !== rowIndex)).toEqual(
       before.rows.filter((_, index) => index !== rowIndex),

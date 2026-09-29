@@ -126,6 +126,35 @@ function buildDependencies(
 
 describe('managed-clone adapter integration (real git, fake gh on PATH)', () => {
   it(
+    'reads an existing remote and reports a missing one as an ls-remote failure',
+    async () => {
+      await commitFile(remoteDirectory, 'a.txt', 'commit A');
+      const options = {
+        runProcess: runManagedProcess,
+        parentEnvironment: {
+          ...process.env,
+          PATH: `${ghBinDirectory}:${process.env['PATH'] ?? ''}`,
+        },
+        secretValues: () => [],
+        cancellation: new AbortController().signal,
+      };
+      const existing = createManagedCloneAdapter({ ...options, remoteUrl: () => remoteDirectory });
+      const missing = createManagedCloneAdapter({
+        ...options,
+        remoteUrl: () => join(root, 'missing'),
+      });
+
+      expect(
+        await existing.checkRemote({ host: 'github.com', owner: 'octo', repo: 'app' }),
+      ).toEqual({ ok: true, value: undefined });
+      expect(
+        await missing.checkRemote({ host: 'github.com', owner: 'octo', repo: 'app' }),
+      ).toMatchObject({ ok: false, error: { kind: 'ManagedCloneError', operation: 'ls-remote' } });
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
     'clones on first use and fetches only the missing commit on a later use (AC-16, properties 2 and 3)',
     async () => {
       const commitA = await commitFile(remoteDirectory, 'a.txt', 'commit A');

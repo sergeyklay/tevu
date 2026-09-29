@@ -82,6 +82,12 @@ export function createSourceValidator(): Pick<
   return { validateSource, resolveCommit: resolveCommitInRepository };
 }
 
+/** Reports whether `directory` lies in a Git repository; a missing directory does not. */
+export async function isGitRepository(directory: string): Promise<boolean> {
+  const outcome = await runGit(directory, ['rev-parse', '--git-dir']);
+  return outcome.exitCode === 0;
+}
+
 function resolveCommitInRepository(
   repository: RepositoryDefinition,
   reference: string,

@@ -43,6 +43,8 @@ type SectionedSelectOptions = {
   statusLine: StatusLineDisplay;
 };
 
+const BACK_HINT = 'Esc to go back · Ctrl-C to exit';
+
 type Row = {
   kind: 'heading' | 'blank' | 'option';
   value: string;
@@ -131,7 +133,7 @@ export async function sectionedSelect(
         output,
         state: drawnState,
         focused: escaped ? back.value : (this.options[this.cursor]?.value ?? back.value),
-        statusRow: statusLine.row(drawnState, output),
+        statusRow: statusLine.row(drawnState, output, BACK_HINT),
       });
     },
   });

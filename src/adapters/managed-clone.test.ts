@@ -76,6 +76,10 @@ function isGitFetchCall(request: ManagedProcessRequest): boolean {
   return request.argv[0] === 'git' && request.argv.includes('fetch');
 }
 
+function isGitLsRemoteCall(request: ManagedProcessRequest): boolean {
+  return request.argv[0] === 'git' && request.argv.includes('ls-remote');
+}
+
 /**
  * A scripted `ManagedProcessRunner`: every call is recorded, and each
  * recognized subcommand answers with a per-test override or the given
@@ -87,6 +91,7 @@ function buildRunProcess(
     ghVersion?: ManagedProcessResult;
     gitClone?: ManagedProcessResult;
     gitFetch?: ManagedProcessResult;
+    gitLsRemote?: ManagedProcessResult;
     absoluteGitDir?: ManagedProcessResult;
   } = {},
 ): ManagedProcessRunner {
@@ -102,6 +107,9 @@ function buildRunProcess(
     }
     if (isGitFetchCall(request)) {
       return overrides.gitFetch ?? launched({ exitCode: 0 });
+    }
+    if (isGitLsRemoteCall(request)) {
+      return overrides.gitLsRemote ?? launched({ exitCode: 0 });
     }
     if (isAbsoluteGitDirCall(request)) {
       return overrides.absoluteGitDir ?? launched({ exitCode: 1 });
@@ -455,6 +463,63 @@ describe('createManagedCloneAdapter', () => {
         .mocked(runProcess)
         .mock.calls.filter(([request]) => isGhVersionCall(request));
       expect(ghCalls).toHaveLength(1);
+    });
+  });
+
+  describe('checkRemote', () => {
+    it('probes gh and reads HEAD with the four helper arguments for the contacted host', async () => {
+      const runProcess = buildRunProcess();
+      const adapter = createManagedCloneAdapter(
+        buildOptions({ runProcess, remoteUrl: () => 'https://github.com/octo/app.git' }),
+      );
+
+      const result = await adapter.checkRemote(REPOSITORY);
+
+      expect(result).toEqual({ ok: true, value: undefined });
+      const argvs = vi.mocked(runProcess).mock.calls.map(([request]) => request.argv);
+      expect(argvs).toEqual([
+        ['gh', '--version'],
+        ['git', ...HELPER_ARGS, 'ls-remote', '--quiet', 'https://github.com/octo/app.git', 'HEAD'],
+      ]);
+    });
+
+    it('reports a failed read as an ls-remote ManagedCloneError carrying the git message', async () => {
+      const runProcess = buildRunProcess({
+        gitLsRemote: launched({
+          exitCode: 128,
+          stderr: {
+            text: "fatal: repository 'https://github.com/octo/app.git/' not found\n",
+            totalBytes: 60,
+            truncated: false,
+          },
+        }),
+      });
+      const adapter = createManagedCloneAdapter(buildOptions({ runProcess }));
+
+      const result = await adapter.checkRemote(REPOSITORY);
+
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          kind: 'ManagedCloneError',
+          operation: 'ls-remote',
+          repository: 'github.com/octo/app',
+          reason: expect.stringMatching(/^git ls-remote exited with code 128: .*not found/),
+        },
+      });
+    });
+
+    it('fails a repository whose host fails the host rule without starting a process', async () => {
+      const runProcess = buildRunProcess();
+      const adapter = createManagedCloneAdapter(buildOptions({ runProcess }));
+
+      const result = await adapter.checkRemote({ host: 'gh;ost', owner: 'octo', repo: 'app' });
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: { kind: 'ManagedCloneError', operation: 'ls-remote' },
+      });
+      expect(runProcess).not.toHaveBeenCalled();
     });
   });
 

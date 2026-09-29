@@ -12,6 +12,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildTerminal, replayScreen } from './__fixtures__/terminal.fixtures';
+import { ESCAPE_EXIT_HINT } from './escape-exit';
 import { createStatusLine } from './status-line';
 import { confirm, select, text } from './wizard-prompts';
 
@@ -64,8 +65,12 @@ const CTRL_C: Press = ['\u0003', { name: 'c', ctrl: true, sequence: '\u0003' }];
 const ESCAPE: Press = [ESC, { name: 'escape', sequence: ESC }];
 
 const COLORS = [
-  { level: '1', shown: `  ${ESC}[2m${ESCAPE_MESSAGE}${ESC}[22m` },
-  { level: '0', shown: `  ${ESCAPE_MESSAGE}` },
+  {
+    level: '1',
+    shown: `  ${ESC}[2m${ESCAPE_MESSAGE}${ESC}[22m`,
+    idle: `  ${ESC}[2m${ESCAPE_EXIT_HINT}${ESC}[22m`,
+  },
+  { level: '0', shown: `  ${ESCAPE_MESSAGE}`, idle: `  ${ESCAPE_EXIT_HINT}` },
 ];
 
 const SELECT_OPTIONS: Option<string>[] = [
@@ -238,6 +243,7 @@ async function startStock(kind: Kind, steps: readonly Step[]): Promise<Running> 
 function expectFrameMatchesStock(
   label: string,
   message: string,
+  idleRow: string,
   ours: { screen: ReturnType<typeof replayScreen>; settled: boolean },
   stock: { screen: ReturnType<typeof replayScreen>; settled: boolean },
 ): void {
@@ -251,10 +257,15 @@ function expectFrameMatchesStock(
   expect(ours.settled, label).toBe(false);
   expect(ours.screen.rows, label).toEqual([
     ...stock.screen.rows.slice(0, stock.screen.cursorRow),
-    '',
+    idleRow,
     ...stock.screen.rows.slice(stock.screen.cursorRow),
   ]);
   expect(ours.screen.cursorRow, label).toBe(stock.screen.cursorRow + 1);
+}
+
+/** The status line row an exit prompt draws on `terminal` while no message is shown, without its newline. */
+function idleRowOn(terminal: Terminal): string {
+  return createStatusLine().row('active', terminal.output, ESCAPE_EXIT_HINT).slice(0, -1);
 }
 
 async function expectMatchesStock(
@@ -273,6 +284,7 @@ async function expectMatchesStock(
     expectFrameMatchesStock(
       label,
       subject.message,
+      idleRowOn(oursTerminal),
       { screen: replayScreen(tamper(oursTerminal.output.text)), settled: ours.state.settled },
       { screen: replayScreen(stockTerminal.output.text), settled: stock.state.settled },
     );
@@ -344,9 +356,9 @@ describe('the stock comparison', () => {
     ).rejects.toThrow();
   });
 
-  it('fails for a port that leaves a byte in the reserved row', async () => {
+  it('fails for a port that draws other text in the reserved row', async () => {
     await expect(
-      expectMatchesStock(typed!, (bytes) => bytes.replace(`${S_BAR_END}\n\n`, `${S_BAR_END}\n \n`)),
+      expectMatchesStock(typed!, (bytes) => bytes.replace(ESCAPE_EXIT_HINT, 'Esc to exit')),
     ).rejects.toThrow();
   });
 });
@@ -375,9 +387,10 @@ describe('select list window', () => {
       track(stockAtSameRows, statusLine, stockSelect({ ...options, ...stockAtSameRows }));
       await flush();
 
-      expect(ours.output.text).toBe(`${stock.output.text}\n`);
+      const idleRow = `  ${ESCAPE_EXIT_HINT}\n`;
+      expect(ours.output.text).toBe(`${stock.output.text}${idleRow}`);
       expect(ours.output.text).toContain('...');
-      expect(ours.output.text).not.toBe(`${stockAtSameRows.output.text}\n`);
+      expect(ours.output.text).not.toBe(`${stockAtSameRows.output.text}${idleRow}`);
     },
   );
 });
@@ -387,7 +400,7 @@ describe.each(KINDS)('$name prompt Escape', (kind) => {
     vi.useFakeTimers();
   });
 
-  describe.each(COLORS)('under FORCE_COLOR=$level', ({ level, shown }) => {
+  describe.each(COLORS)('under FORCE_COLOR=$level', ({ level, shown, idle }) => {
     beforeEach(() => {
       vi.stubEnv('FORCE_COLOR', level);
     });
@@ -402,7 +415,7 @@ describe.each(KINDS)('$name prompt Escape', (kind) => {
 
       const rowIndex = before.cursorRow - 1;
       expect(running.state.settled).toBe(false);
-      expect(before.rows[rowIndex]).toBe('');
+      expect(before.rows[rowIndex]).toBe(idle);
       expect(after.rows[rowIndex]).toBe(shown);
       expect(after.rows).toHaveLength(before.rows.length);
       expect(after.cursorRow).toBe(before.cursorRow);

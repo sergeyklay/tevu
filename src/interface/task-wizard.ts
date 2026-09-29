@@ -54,6 +54,7 @@ import type {
   TaskInput,
   TevuConfigInput,
 } from '@/config/schema';
+import type { ParsedGitHubRepository } from '@/domain/github-reference';
 import type {
   AgentCapabilityReport,
   AgentProviderSetting,
@@ -134,6 +135,14 @@ export type TaskWizardDependencies = {
   >;
   now: () => Date;
   redact: (textContent: string) => string;
+  /** Reads a GitHub repository's HEAD from its remote, proving it exists and is readable. */
+  checkGitHubRepository: (
+    repository: ParsedGitHubRepository,
+  ) => Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>>;
+  /** Reports whether a local repository answer, resolved against the configuration file's directory, lies in a Git repository. */
+  isGitRepository: (repositoryPath: string) => Promise<boolean>;
+  /** Reports whether a variable is set in this terminal. */
+  isVariableSet: (name: string) => boolean;
   /** Drafts acceptance criteria and a Definition of Done from a resolved reference solution. */
   draftCriteria: (
     request: Omit<CriteriaDraftRequest, 'configPath'>,
@@ -555,11 +564,12 @@ async function interviewBootstrap(
   });
   const command = await askAgentCommand(io, dependencies);
   const takenNames = new Set<string>();
-  const secrets = await askVariableNames(io, 'Secret variable names', takenNames);
-  const env = await askVariableNames(io, 'Non-secret variable names', takenNames);
+  const { isVariableSet } = dependencies;
+  const secrets = await askVariableNames(io, 'Secret variable names', takenNames, isVariableSet);
+  const env = await askVariableNames(io, 'Non-secret variable names', takenNames, isVariableSet);
   const agentNames = new Set([...secrets, ...env]);
-  const jira = await interviewJiraSettings(io, requireJira, agentNames);
-  const repositories = await interviewRepositories(io);
+  const jira = await interviewJiraSettings(io, requireJira, agentNames, isVariableSet);
+  const repositories = await interviewRepositories(io, dependencies);
   const checkState: ModelCheckState = {
     agent: { command, secrets, env, providers: [] },
     keys: new Map(),
@@ -770,7 +780,10 @@ async function checkRound(
       }
       const isKeyUnknown = definition.keyVariables.length === 0 || definition.apiKey === 'value';
       if (isKeyUnknown && !state.keys.has(provider)) {
-        state.keys.set(provider, await askKeyVariable(io, state, provider, undefined));
+        state.keys.set(
+          provider,
+          await askKeyVariable(io, dependencies, state, provider, undefined),
+        );
       }
     }
     const key = state.keys.get(provider) ?? '';
@@ -826,7 +839,13 @@ async function checkRound(
     if (definition.defined || hasAskedKey) {
       return { kind: 'not-listed', model };
     }
-    const answer = await askKeyVariable(io, state, provider, state.keys.get(provider));
+    const answer = await askKeyVariable(
+      io,
+      dependencies,
+      state,
+      provider,
+      state.keys.get(provider),
+    );
     state.keys.set(provider, answer);
     hasAskedKey = true;
     if (answer === '') {
@@ -856,11 +875,12 @@ function declareSecret(state: ModelCheckState, candidate: MutableAgentDraft, nam
 /** Asks the variable that holds a provider's API key; empty when the operator names none. */
 async function askKeyVariable(
   io: WizardIo,
+  dependencies: TaskWizardDependencies,
   state: ModelCheckState,
   provider: string,
   previous: string | undefined,
 ): Promise<string> {
-  const validateName = validateVariableName(new Set(state.agent.env));
+  const validateName = validateVariableName(new Set(state.agent.env), dependencies.isVariableSet);
   return askDefaultedText(io, {
     message: `API key variable for ${provider}`,
     defaultValue: '',
@@ -933,8 +953,9 @@ async function askVariableNames(
   io: WizardIo,
   message: string,
   takenNames: Set<string>,
+  isVariableSet: (name: string) => boolean,
 ): Promise<string[]> {
-  const validateName = validateVariableName(takenNames);
+  const validateName = validateVariableName(takenNames, isVariableSet);
   const answer = await askDefaultedText(io, {
     message,
     defaultValue: '',
@@ -966,6 +987,7 @@ async function interviewJiraSettings(
   io: WizardIo,
   requireJira: boolean,
   agentNames: ReadonlySet<string>,
+  isVariableSet: (name: string) => boolean,
 ): Promise<JiraTrackerSettings | undefined> {
   const wantsJira =
     requireJira ||
@@ -977,14 +999,15 @@ async function interviewJiraSettings(
     return undefined;
   }
   const validateCredentialName = (raw: string | undefined): string | undefined => {
-    const grammar = validateVariableNameGrammar(raw ?? '');
+    const name = raw ?? '';
+    const grammar = validateVariableNameGrammar(name);
     if (grammar !== undefined) {
       return grammar;
     }
-    if (agentNames.has(raw ?? '')) {
+    if (agentNames.has(name)) {
       return 'Jira credential variables must not also be passed to the agent';
     }
-    return undefined;
+    return isVariableSet(name) ? undefined : unsetVariableProblem(name);
   };
   const url = await askText(io, {
     message: 'Jira site URL',
@@ -1002,11 +1025,14 @@ async function interviewJiraSettings(
 }
 
 /** Collects at least one source repository during bootstrap. */
-async function interviewRepositories(io: WizardIo): Promise<RepositoryInput[]> {
+async function interviewRepositories(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+): Promise<RepositoryInput[]> {
   const repositories: RepositoryInput[] = [];
   const usedIds = new Set<string>();
   do {
-    const entry = await interviewRepositoryEntry(io, usedIds);
+    const entry = await interviewRepositoryEntry(io, dependencies, usedIds);
     usedIds.add(entry.id);
     repositories.push(entry);
   } while (await askConfirm(io, { message: 'Add another repository?', initialValue: false }));
@@ -1024,6 +1050,7 @@ async function interviewRepositories(io: WizardIo): Promise<RepositoryInput[]> {
  */
 async function interviewRepositoryEntry(
   io: WizardIo,
+  dependencies: TaskWizardDependencies,
   usedIds: ReadonlySet<string>,
 ): Promise<RepositoryDefinition> {
   const id = await askText(io, {
@@ -1038,32 +1065,74 @@ async function interviewRepositoryEntry(
     ],
   });
   if (source === 'path') {
-    const path = await askText(io, {
-      message: 'Local path',
-      validate: validateNonWhitespace,
-    });
-    return { id, path };
+    return { id, path: await askLocalRepositoryPath(io, dependencies) };
   }
-  const github = await askGitHubRepository(io);
+  const github = await askGitHubRepository(io, dependencies);
   return { id, path: managedCloneLocation(github), github: github.text };
 }
 
-/** Asks a GitHub repository answer, re-prompting with the grammar message until it parses. */
+/** Asks a local repository path, re-asking with the refused answer filled in until it lies in a Git repository. */
+async function askLocalRepositoryPath(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+): Promise<string> {
+  let answer = await askText(io, { message: 'Local path', validate: validateNonWhitespace });
+  for (;;) {
+    const path = answer;
+    if (await runWait(io, `Checking ${path}`, () => dependencies.isGitRepository(path))) {
+      return path;
+    }
+    warnLines(io, dependencies.redact, {
+      headline: `${path} isn't a Git repository.`,
+      next: 'Fix the path below. Press Enter to retry, or Ctrl-C to cancel.',
+    });
+    answer = await askText(io, {
+      message: 'Local path',
+      initialValue: path,
+      validate: validateNonWhitespace,
+    });
+  }
+}
+
+/**
+ * Asks a GitHub repository answer, re-prompting with the grammar message until
+ * it parses, then reads it from its remote, re-asking with the refused answer
+ * filled in until the read succeeds.
+ */
 async function askGitHubRepository(
   io: WizardIo,
-): Promise<{ host: string; owner: string; repo: string; text: string }> {
-  const text = (
-    await askText(io, {
-      message: 'GitHub repository',
-      validate: (value) =>
-        parseGitHubRepository((value ?? '').trim()) === null ? GITHUB_GRAMMAR_MESSAGE : undefined,
-    })
-  ).trim();
-  const parsed = parseGitHubRepository(text);
-  if (parsed === null) {
-    throw new Error('unreachable: askText only returns a value its validate callback accepted');
+  dependencies: TaskWizardDependencies,
+): Promise<ParsedGitHubRepository & { text: string }> {
+  let initialValue: string | undefined;
+  for (;;) {
+    const text = (
+      await askText(io, {
+        message: 'GitHub repository',
+        ...(initialValue === undefined ? {} : { initialValue }),
+        validate: (value) =>
+          parseGitHubRepository((value ?? '').trim()) === null ? GITHUB_GRAMMAR_MESSAGE : undefined,
+      })
+    ).trim();
+    const parsed = parseGitHubRepository(text);
+    if (parsed === null) {
+      throw new Error('unreachable: askText only returns a value its validate callback accepted');
+    }
+    const checked = await runWait(io, `Checking ${text}`, () =>
+      dependencies.checkGitHubRepository(parsed),
+    );
+    if (checked.ok) {
+      return { ...parsed, text };
+    }
+    if (checked.error.kind === 'CancellationError') {
+      throw new WizardCancelledError();
+    }
+    warnLines(io, dependencies.redact, {
+      headline: `Can't read ${text} from GitHub.`,
+      details: [describeManagedCloneError(checked.error)],
+      next: 'Fix the repository below. Press Enter to retry, or Ctrl-C to cancel.',
+    });
+    initialValue = text;
   }
-  return { ...parsed, text };
 }
 
 /** Collects at least two model entries during bootstrap. */
@@ -1165,7 +1234,10 @@ async function interviewTask(
       ? []
       : [referencedVariableName(jiraSettings.email), referencedVariableName(jiraSettings.token)],
   );
-  const excludedNames = new Set([...agentNames, ...jiraNames]);
+  const validateCheckVariables = validateCheckVariableList(
+    new Set([...agentNames, ...jiraNames]),
+    dependencies.isVariableSet,
+  );
   const { acceptance, done } = await interviewCriteria(
     io,
     dependencies,
@@ -1177,7 +1249,7 @@ async function interviewTask(
     prompt,
     description,
     usedCheckIds,
-    excludedNames,
+    validateCheckVariables,
     existing?.run.check_timeout ?? bootstrap?.run.check_timeout,
   );
   const task: TaskInput = {
@@ -1316,6 +1388,7 @@ async function interviewImportedSource(
 /** Picks the task repository from configured entries or captures a new one. */
 async function interviewRepositorySelection(
   io: WizardIo,
+  dependencies: TaskWizardDependencies,
   // Accepts both a resolved `TevuConfig`'s repositories and a bootstrap
   // interview's, which never carry `setup`; only `id`, `path`, and `github` are read.
   repositories: readonly Pick<RepositoryInput, 'id' | 'path' | 'github'>[],
@@ -1337,6 +1410,7 @@ async function interviewRepositorySelection(
   }
   const entry = await interviewRepositoryEntry(
     io,
+    dependencies,
     new Set(repositories.map((repository) => repository.id)),
   );
   return { repo: entry.id, newRepository: entry };
@@ -1373,7 +1447,7 @@ async function selectTaskRepository(
   selectedRepository: Pick<RepositoryInput, 'id' | 'path' | 'github'>;
 }> {
   for (;;) {
-    const selection = await interviewRepositorySelection(io, repositories);
+    const selection = await interviewRepositorySelection(io, dependencies, repositories);
     const selectedRepository = resolveSelectedRepository(
       repositories,
       selection.repo,
@@ -1633,7 +1707,7 @@ async function interviewChecks(
   io: WizardIo,
   collection: 'acceptance' | 'done',
   usedCheckIds: Set<string>,
-  excludedNames: ReadonlySet<string>,
+  validateCheckVariables: TextValidator,
   checkTimeout: string | undefined,
   drafted: CheckInput[] = [],
 ): Promise<CheckInput[]> {
@@ -1680,7 +1754,7 @@ async function interviewChecks(
           : {
               id,
               description,
-              ...(await interviewCommandEvaluator(io, excludedNames, checkTimeout)),
+              ...(await interviewCommandEvaluator(io, validateCheckVariables, checkTimeout)),
               ...(required ? {} : { required }),
             };
     usedCheckIds.add(id);
@@ -1706,7 +1780,7 @@ async function interviewChecks(
  */
 async function interviewCommandEvaluator(
   io: WizardIo,
-  excludedNames: ReadonlySet<string>,
+  validateCheckVariables: TextValidator,
   checkTimeout: string | undefined,
 ): Promise<Pick<CheckInput, 'run' | 'timeout' | 'exit_codes' | 'env'>> {
   const run = await askText(io, { message: 'Command', validate: validateNonWhitespace });
@@ -1733,7 +1807,7 @@ async function interviewCommandEvaluator(
     message: 'Check variables',
     defaultValue: '',
     placeholder: 'none',
-    validate: validateCheckVariableList(excludedNames),
+    validate: validateCheckVariables,
   });
   const env = splitNames(envText);
   return {
@@ -1781,12 +1855,18 @@ async function interviewCriteria(
   prompt: string,
   description: string,
   usedCheckIds: Set<string>,
-  excludedNames: ReadonlySet<string>,
+  validateCheckVariables: TextValidator,
   checkTimeout: string | undefined,
 ): Promise<DraftedTaskChecks> {
   const byHand = async (): Promise<DraftedTaskChecks> => ({
-    acceptance: await interviewChecks(io, 'acceptance', usedCheckIds, excludedNames, checkTimeout),
-    done: await interviewChecks(io, 'done', usedCheckIds, excludedNames, checkTimeout),
+    acceptance: await interviewChecks(
+      io,
+      'acceptance',
+      usedCheckIds,
+      validateCheckVariables,
+      checkTimeout,
+    ),
+    done: await interviewChecks(io, 'done', usedCheckIds, validateCheckVariables, checkTimeout),
   });
 
   if (resolvedReference === undefined) {
@@ -1847,11 +1927,18 @@ async function interviewCriteria(
       io,
       'acceptance',
       usedCheckIds,
-      excludedNames,
+      validateCheckVariables,
       checkTimeout,
       draftedAcceptance,
     ),
-    done: await interviewChecks(io, 'done', usedCheckIds, excludedNames, checkTimeout, draftedDone),
+    done: await interviewChecks(
+      io,
+      'done',
+      usedCheckIds,
+      validateCheckVariables,
+      checkTimeout,
+      draftedDone,
+    ),
   };
 }
 
@@ -2515,6 +2602,8 @@ async function askNote(io: WizardIo, verdict: 'passed' | 'failed'): Promise<stri
   });
 }
 
+type TextValidator = (value: string | undefined) => string | undefined;
+
 function validateNonWhitespace(value: string | undefined): string | undefined {
   return (value ?? '').trim().length === 0 ? 'a non-empty value is required' : undefined;
 }
@@ -2571,9 +2660,14 @@ function isFixedEnvironmentName(name: string): boolean {
   return FIXED_ENVIRONMENT_NAMES.has(name) || name.startsWith('XDG_');
 }
 
+function unsetVariableProblem(name: string): string {
+  return `"${name}" isn't set in this terminal`;
+}
+
 function validateVariableName(
   takenNames: ReadonlySet<string>,
-): (value: string | undefined) => string | undefined {
+  isVariableSet: (name: string) => boolean,
+): TextValidator {
   return (raw) => {
     const value = raw ?? '';
     const grammar = validateVariableNameGrammar(value);
@@ -2586,13 +2680,14 @@ function validateVariableName(
     if (takenNames.has(value)) {
       return `"${value}" is already configured`;
     }
-    return undefined;
+    return isVariableSet(value) ? undefined : unsetVariableProblem(value);
   };
 }
 
 function validateCheckVariableList(
   excludedNames: ReadonlySet<string>,
-): (value: string | undefined) => string | undefined {
+  isVariableSet: (name: string) => boolean,
+): TextValidator {
   return (raw) => {
     const names = splitNames(raw ?? '');
     const seen = new Set<string>();
@@ -2609,6 +2704,9 @@ function validateCheckVariableList(
       }
       if (seen.has(name)) {
         return `"${name}" is listed more than once`;
+      }
+      if (!isVariableSet(name)) {
+        return unsetVariableProblem(name);
       }
       seen.add(name);
     }

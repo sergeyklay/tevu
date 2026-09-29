@@ -2,6 +2,9 @@ import type { StatusLine } from './status-line';
 
 const ESCAPE_MESSAGE = 'Press Esc again to exit';
 
+/** The status line's idle text at a prompt where Escape pressed twice exits. */
+export const ESCAPE_EXIT_HINT = 'Esc twice or Ctrl-C to exit';
+
 // Matches the window of Claude Code's double-press guard.
 const ESCAPE_WINDOW_MS = 800;
 

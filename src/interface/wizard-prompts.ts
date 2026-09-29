@@ -22,7 +22,7 @@ import {
   symbolBar,
 } from '@clack/prompts';
 
-import { createEscapeExit } from './escape-exit';
+import { createEscapeExit, ESCAPE_EXIT_HINT } from './escape-exit';
 
 import type { StatusLine, StatusLineDisplay } from './status-line';
 import type { Prompt, State } from '@clack/core';
@@ -75,7 +75,7 @@ export async function text(
           : styleText(['inverse', 'hidden'], '_');
       const typed = this.userInput ? this.userInputWithCursor : placeholderCell;
       const answer = this.value ?? '';
-      return `${textFrame(this.state, title, typed, answer, this.error)}${statusLine.row(this.state, output)}`;
+      return `${textFrame(this.state, title, typed, answer, this.error)}${statusLine.row(this.state, output, ESCAPE_EXIT_HINT)}`;
     },
   });
   return openExitPrompt('text', prompt, output, statusLine);
@@ -111,7 +111,7 @@ export async function confirm(
         `${symbol(this.state)}  `,
       )}\n`;
       const answer = this.value ? 'Yes' : 'No';
-      return `${confirmFrame(this.state, title, answer, this.value === true)}${statusLine.row(this.state, output)}`;
+      return `${confirmFrame(this.state, title, answer, this.value === true)}${statusLine.row(this.state, output, ESCAPE_EXIT_HINT)}`;
     },
   });
   return openExitPrompt('confirm', prompt, output, statusLine);
@@ -150,7 +150,7 @@ export async function select<Value extends string>(
         `${symbolBar(this.state) ?? ''}  `,
         `${symbol(this.state)}  `,
       )}\n`;
-      const row = statusLine.row(this.state, output);
+      const row = statusLine.row(this.state, output, ESCAPE_EXIT_HINT);
       const chosen = this.options[this.cursor];
       const guide = `${styleText('gray', S_BAR)}  `;
       if (this.state === 'submit') {

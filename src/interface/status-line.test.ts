@@ -7,6 +7,8 @@ import { createStatusLine } from './status-line';
 
 const ESC = '\u001b';
 const SHOWN = 'Press Esc again to exit';
+const IDLE = 'Esc twice or Ctrl-C to exit';
+const IDLE_ROW = `  ${IDLE}\n`;
 
 function createOutput(): Writable {
   return new Writable({
@@ -26,11 +28,11 @@ afterEach(() => {
 
 describe('createStatusLine row', () => {
   it.each(['initial', 'active', 'error', 'validating'] as const)(
-    'is a lone newline in the %s state while no message is shown',
+    'shows the idle text in the %s state while no message is shown',
     (state) => {
       const statusLine = createStatusLine();
 
-      expect(statusLine.row(state, createOutput())).toBe('\n');
+      expect(statusLine.row(state, createOutput(), IDLE)).toBe(IDLE_ROW);
     },
   );
 
@@ -40,9 +42,9 @@ describe('createStatusLine row', () => {
       const statusLine = createStatusLine();
       const output = createOutput();
 
-      const idle = statusLine.row(state, output);
+      const idle = statusLine.row(state, output, IDLE);
       statusLine.show(SHOWN);
-      const showing = statusLine.row(state, output);
+      const showing = statusLine.row(state, output, IDLE);
 
       expect(idle).toBe('');
       expect(showing).toBe('');
@@ -55,7 +57,7 @@ describe('createStatusLine row', () => {
       const statusLine = createStatusLine();
       statusLine.show(SHOWN);
 
-      expect(statusLine.row(state, createOutput())).toBe(`  ${SHOWN}\n`);
+      expect(statusLine.row(state, createOutput(), IDLE)).toBe(`  ${SHOWN}\n`);
     },
   );
 
@@ -64,14 +66,14 @@ describe('createStatusLine row', () => {
     const statusLine = createStatusLine();
     statusLine.show(SHOWN);
 
-    expect(statusLine.row('active', createOutput())).toBe(`  ${ESC}[2m${SHOWN}${ESC}[22m\n`);
+    expect(statusLine.row('active', createOutput(), IDLE)).toBe(`  ${ESC}[2m${SHOWN}${ESC}[22m\n`);
   });
 
-  it('draws no character for the reserved row with color on', () => {
+  it('dims the idle text like a message with color on', () => {
     vi.stubEnv('FORCE_COLOR', '1');
     const statusLine = createStatusLine();
 
-    expect(statusLine.row('active', createOutput())).toBe('\n');
+    expect(statusLine.row('active', createOutput(), IDLE)).toBe(`  ${ESC}[2m${IDLE}${ESC}[22m\n`);
   });
 });
 
@@ -83,7 +85,7 @@ describe('createStatusLine show', () => {
     statusLine.show('first');
     statusLine.show('second');
 
-    expect(statusLine.row('active', output)).toBe('  second\n');
+    expect(statusLine.row('active', output, IDLE)).toBe('  second\n');
   });
 
   it('keeps the newer message when the replaced handle clears', () => {
@@ -94,20 +96,20 @@ describe('createStatusLine show', () => {
 
     older.clear();
 
-    expect(statusLine.row('active', output)).toBe('  second\n');
+    expect(statusLine.row('active', output, IDLE)).toBe('  second\n');
   });
 
-  it('empties the row when the shown handle clears', () => {
+  it('brings the idle text back when the shown handle clears', () => {
     const statusLine = createStatusLine();
     const output = createOutput();
     const message = statusLine.show(SHOWN);
 
     message.clear();
 
-    expect(statusLine.row('active', output)).toBe('\n');
+    expect(statusLine.row('active', output, IDLE)).toBe(IDLE_ROW);
   });
 
-  it('does not bring a replaced message back when the newer one clears', () => {
+  it('shows the idle text, not a replaced message, when the newer one clears', () => {
     const statusLine = createStatusLine();
     const output = createOutput();
     statusLine.show('first');
@@ -115,7 +117,7 @@ describe('createStatusLine show', () => {
 
     newer.clear();
 
-    expect(statusLine.row('active', output)).toBe('\n');
+    expect(statusLine.row('active', output, IDLE)).toBe(IDLE_ROW);
   });
 
   it('does nothing when a handle that already cleared clears again after a newer message', () => {
@@ -127,7 +129,7 @@ describe('createStatusLine show', () => {
 
     first.clear();
 
-    expect(statusLine.row('active', output)).toBe('  second\n');
+    expect(statusLine.row('active', output, IDLE)).toBe('  second\n');
   });
 });
 
@@ -149,14 +151,14 @@ describe('createStatusLine follow', () => {
     const output = createOutput();
     const rowsSeen: string[] = [];
     output.on('resize', () => {
-      rowsSeen.push(statusLine.row('active', output));
+      rowsSeen.push(statusLine.row('active', output, IDLE));
     });
     statusLine.follow(output);
 
     const message = statusLine.show(SHOWN);
     message.clear();
 
-    expect(rowsSeen).toEqual([`  ${SHOWN}\n`, '\n']);
+    expect(rowsSeen).toEqual([`  ${SHOWN}\n`, IDLE_ROW]);
   });
 
   it('emits resize once when a shown handle clears', () => {

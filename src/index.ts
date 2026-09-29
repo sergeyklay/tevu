@@ -16,7 +16,7 @@ import { pathToFileURL } from 'node:url';
 
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createArtifactStore, createConfigStore } from '@/adapters/artifact-store';
-import { createGitWorkspaceAdapter, createSourceValidator } from '@/adapters/git';
+import { createGitWorkspaceAdapter, createSourceValidator, isGitRepository } from '@/adapters/git';
 import { createManagedCloneAdapter } from '@/adapters/managed-clone';
 import {
   createCaseExecutableAdapter,
@@ -230,6 +230,10 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       resolveReferenceSolution(request, { ...managedCloneDependencies(onProgress), pullRequests }),
     ensureManagedCommits: (request, onProgress) =>
       ensureManagedCommits(request, managedCloneDependencies(onProgress)),
+    checkGitHubRepository: (repository) => clones.checkRemote(repository),
+    isGitRepository: (configPath, repositoryPath) =>
+      isGitRepository(path.resolve(path.dirname(path.resolve(configPath)), repositoryPath)),
+    unsetVariables: (names) => environments.unsetVariables(names),
     draftCriteria: (request) =>
       draftCriteria(request, {
         agentsFor,

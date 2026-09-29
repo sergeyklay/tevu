@@ -36,6 +36,7 @@ function buildManagedCloneAdapter(
     clone: vi.fn(async () => ({ ok: true as const, value: undefined })),
     fetchCommits: vi.fn(async () => ({ ok: true as const, value: undefined })),
     fetchBranchesAndTags: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    checkRemote: vi.fn(async () => ({ ok: true as const, value: undefined })),
     ...overrides,
   };
 }

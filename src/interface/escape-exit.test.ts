@@ -3,11 +3,12 @@
 import { Writable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createEscapeExit } from './escape-exit';
+import { createEscapeExit, ESCAPE_EXIT_HINT } from './escape-exit';
 import { createStatusLine } from './status-line';
 
 const MESSAGE = 'Press Esc again to exit';
 const SHOWN_ROW = `  ${MESSAGE}\n`;
+const IDLE_ROW = `  ${ESCAPE_EXIT_HINT}\n`;
 
 function setup(): { statusLine: ReturnType<typeof createStatusLine>; row: () => string } {
   const statusLine = createStatusLine();
@@ -16,7 +17,7 @@ function setup(): { statusLine: ReturnType<typeof createStatusLine>; row: () => 
       callback();
     },
   });
-  return { statusLine, row: () => statusLine.row('active', output) };
+  return { statusLine, row: () => statusLine.row('active', output, ESCAPE_EXIT_HINT) };
 }
 
 beforeEach(() => {
@@ -84,7 +85,7 @@ describe('createEscapeExit', () => {
     const emptied = row();
     const press = escapeExit.press();
 
-    expect(emptied).toBe('\n');
+    expect(emptied).toBe(IDLE_ROW);
     expect(press).toBe('first');
     expect(row()).toBe(SHOWN_ROW);
   });
@@ -112,7 +113,7 @@ describe('createEscapeExit', () => {
       escapeExit.dispose();
 
       expect(vi.getTimerCount()).toBe(0);
-      expect(row()).toBe('\n');
+      expect(row()).toBe(IDLE_ROW);
     });
 
     it('clears the confirmation after the second press', () => {
@@ -123,7 +124,7 @@ describe('createEscapeExit', () => {
 
       escapeExit.dispose();
 
-      expect(row()).toBe('\n');
+      expect(row()).toBe(IDLE_ROW);
     });
 
     it('changes nothing when the window is closed', () => {
@@ -136,7 +137,7 @@ describe('createEscapeExit', () => {
 
       escapeExit.dispose();
 
-      expect(row()).toBe('\n');
+      expect(row()).toBe(IDLE_ROW);
       expect(resize).not.toHaveBeenCalled();
     });
 
