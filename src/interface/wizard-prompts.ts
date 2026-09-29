@@ -1,7 +1,7 @@
 /**
  * The `text`, `confirm`, and `select` prompts of the wizards: the frames
- * `@clack/prompts` draws, plus the status line row, with Escape ignored so
- * that only Ctrl-C cancels.
+ * `@clack/prompts` draws, plus the status line row, with Escape and Ctrl-C
+ * each asking for a second press before they cancel.
  *
  * Clack builds each frame inside a closure it does not expose, so the frames
  * are ported here; entry points are {@link text}, {@link confirm}, and
@@ -9,10 +9,9 @@
  */
 
 import { styleText } from 'node:util';
-import { ConfirmPrompt, SelectPrompt, settings, TextPrompt, wrapTextWithPrefix } from '@clack/core';
+import { ConfirmPrompt, SelectPrompt, TextPrompt, wrapTextWithPrefix } from '@clack/core';
 import {
   formatInstructionFooter,
-  isCancel,
   limitOptions,
   S_BAR,
   S_BAR_END,
@@ -23,7 +22,15 @@ import {
   symbolBar,
 } from '@clack/prompts';
 
-import type { StatusLineDisplay } from './status-line';
+import {
+  createExitPresses,
+  EXIT_HINT,
+  exitKeyOf,
+  keepReadingAfterCtrlC,
+  suspendCancelAliases,
+} from './exit-press';
+
+import type { StatusLine, StatusLineDisplay } from './status-line';
 import type { Prompt, State } from '@clack/core';
 import type { CANCEL_SYMBOL, Option } from '@clack/prompts';
 import type { Readable, Writable } from 'node:stream';
@@ -33,18 +40,15 @@ type WizardPromptContext = {
   output: Writable;
   /** Aborting it resolves the cancel value, as for the same-named function from @clack/prompts. */
   signal?: AbortSignal;
-  statusLine: StatusLineDisplay;
+  statusLine: StatusLine & StatusLineDisplay;
 };
-
-const IDLE_HINT = 'Ctrl-C to exit';
 
 /**
  * Asks for a line of text and resolves it, drawing the status line row under
  * every open frame.
  *
- * Ctrl-C and an aborted `signal` resolve the cancel value that `isCancel` from
- * `@clack/prompts` accepts, after `onCancel` receives the text typed so far;
- * Escape is ignored.
+ * A second Escape or Ctrl-C within the window and an aborted `signal` resolve
+ * the cancel value that `isCancel` from `@clack/prompts` accepts.
  *
  * @throws {Error} If the prompt settles without a value, which cannot happen
  *   because `TextPrompt` finalizes to a string.
@@ -56,12 +60,9 @@ export async function text(
     defaultValue?: string;
     initialValue?: string;
     validate?: (value: string | undefined) => string | undefined;
-    /** Called once with the typed text when the prompt settles cancelled, not on submit. */
-    onCancel?: (typed: string) => void;
   },
 ): Promise<string | typeof CANCEL_SYMBOL> {
-  const { message, placeholder, defaultValue, initialValue, validate, statusLine, onCancel } =
-    options;
+  const { message, placeholder, defaultValue, initialValue, validate, statusLine } = options;
   const { input, output, signal } = options;
 
   const prompt = new TextPrompt({
@@ -80,22 +81,18 @@ export async function text(
           : styleText(['inverse', 'hidden'], '_');
       const typed = this.userInput ? this.userInputWithCursor : placeholderCell;
       const answer = this.value ?? '';
-      return `${textFrame(this.state, title, typed, answer, this.error)}${statusLine.row(this.state, output, IDLE_HINT)}`;
+      return `${textFrame(this.state, title, typed, answer, this.error)}${statusLine.row(this.state, output, EXIT_HINT)}`;
     },
   });
-  const value = await openExitPrompt('text', prompt);
-  if (isCancel(value)) {
-    onCancel?.(prompt.userInput);
-  }
-  return value;
+  return openExitPrompt('text', prompt, output, statusLine);
 }
 
 /**
  * Asks a yes/no question and resolves the answer, drawing the status line row
  * under every open frame.
  *
- * `Yes` and `No` show side by side; `y` and `n` submit. Ctrl-C and an aborted
- * `signal` resolve the cancel value; Escape is ignored.
+ * `Yes` and `No` show side by side; `y` and `n` submit. A second Escape or
+ * Ctrl-C within the window and an aborted `signal` resolve the cancel value.
  *
  * @throws {Error} If the prompt settles without a value, which cannot happen
  *   because `ConfirmPrompt` always holds a boolean.
@@ -120,18 +117,19 @@ export async function confirm(
         `${symbol(this.state)}  `,
       )}\n`;
       const answer = this.value ? 'Yes' : 'No';
-      return `${confirmFrame(this.state, title, answer, this.value === true)}${statusLine.row(this.state, output, IDLE_HINT)}`;
+      return `${confirmFrame(this.state, title, answer, this.value === true)}${statusLine.row(this.state, output, EXIT_HINT)}`;
     },
   });
-  return openExitPrompt('confirm', prompt);
+  return openExitPrompt('confirm', prompt, output, statusLine);
 }
 
 /**
  * Asks the operator to pick one option and resolves its `value`, drawing the
  * status line row under every open frame.
  *
- * The row counts against the terminal rows the option list may use. Ctrl-C and
- * an aborted `signal` resolve the cancel value; Escape is ignored.
+ * The row counts against the terminal rows the option list may use. A second
+ * Escape or Ctrl-C within the window and an aborted `signal` resolve the
+ * cancel value.
  *
  * @throws {Error} If the prompt settles without a value, which cannot happen
  *   while the caller passes at least one option.
@@ -158,7 +156,7 @@ export async function select<Value extends string>(
         `${symbolBar(this.state) ?? ''}  `,
         `${symbol(this.state)}  `,
       )}\n`;
-      const row = statusLine.row(this.state, output, IDLE_HINT);
+      const row = statusLine.row(this.state, output, EXIT_HINT);
       const chosen = this.options[this.cursor];
       const guide = `${styleText('gray', S_BAR)}  `;
       if (this.state === 'submit') {
@@ -183,27 +181,41 @@ export async function select<Value extends string>(
       return `${title}${prefix}${list.join(`\n${prefix}`)}\n${footer.join('\n')}\n${row}`;
     },
   });
-  return openExitPrompt('select', prompt);
+  return openExitPrompt('select', prompt, output, statusLine);
 }
 
 /**
- * Runs `prompt` with Escape ignored: Clack's `escape` alias is removed while
- * the prompt is open and restored on every way it settles.
+ * Runs `prompt` with Escape and Ctrl-C routed through the exit window and the
+ * status line followed for as long as the prompt is open.
  */
 async function openExitPrompt<Value>(
   kind: string,
   prompt: Prompt<Value>,
+  output: Writable,
+  statusLine: StatusLine & StatusLineDisplay,
 ): Promise<Value | typeof CANCEL_SYMBOL> {
-  const previousAlias = settings.aliases.get('escape');
-  // With the alias, Clack cancels on Escape, and at `confirm` it flips the answer first.
-  settings.aliases.delete('escape');
+  const exitPresses = createExitPresses(statusLine);
+  prompt.on('key', (char, key) => {
+    const exitKey = exitKeyOf(char, key);
+    if (exitKey !== undefined && exitPresses.press(exitKey) === 'second') {
+      prompt.state = 'cancel';
+    }
+  });
+  // With the aliases, Clack cancels once the `key` listener returns, and at `confirm` Escape flips the answer first.
+  const restoreAliases = suspendCancelAliases(['escape', 'ctrl-c']);
   let value: Value | typeof CANCEL_SYMBOL | undefined;
   try {
-    value = await prompt.prompt();
-  } finally {
-    if (previousAlias !== undefined) {
-      settings.aliases.set('escape', previousAlias);
+    const settled = prompt.prompt();
+    keepReadingAfterCtrlC(prompt);
+    const stopFollowing = statusLine.follow(output);
+    try {
+      value = await settled;
+    } finally {
+      stopFollowing();
     }
+  } finally {
+    exitPresses.dispose();
+    restoreAliases();
   }
   if (value === undefined) {
     throw new Error(`unreachable: ${kind} prompt settled without a value`);

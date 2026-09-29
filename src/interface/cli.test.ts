@@ -2656,7 +2656,7 @@ describe('tevu CLI', () => {
 
     it('bootstraps the configuration before the first task question and cancels without a write', async () => {
       const operations = createOperations({ configExists: vi.fn(async () => false) });
-      scriptAnswers(...BOOTSTRAP_ANSWERS, clack.CANCEL, true);
+      scriptAnswers(...BOOTSTRAP_ANSWERS, clack.CANCEL);
 
       const { code, err } = await runCli(['task', 'add'], { operations });
 
@@ -2665,7 +2665,6 @@ describe('tevu CLI', () => {
       expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
         'tevu task add',
         ...BOOTSTRAP_PROMPTS,
-        EXIT_QUESTION_NEW_FILE,
       ]);
       expect(vi.mocked(operations.configExists)).toHaveBeenCalledExactlyOnceWith('tevu.yaml');
       expect(operations.loadConfig).not.toHaveBeenCalled();
@@ -2693,7 +2692,6 @@ describe('tevu CLI', () => {
         { invalid: 'bad repo' },
         'octo/app',
         clack.CANCEL,
-        true,
       );
 
       const { code } = await runCli(['task', 'add'], { operations });
@@ -2706,7 +2704,6 @@ describe('tevu CLI', () => {
         'GitHub repository',
         'GitHub repository',
         'Add another repository?',
-        EXIT_QUESTION_NEW_FILE,
       ]);
       expect(clack.state.rejections).toEqual([
         { kind: 'text', message: 'GitHub repository', reason: GITHUB_GRAMMAR_MESSAGE },
@@ -2741,7 +2738,6 @@ describe('tevu CLI', () => {
         'octo/missing',
         'octo/app',
         clack.CANCEL,
-        true,
       );
 
       const { code } = await runCli(['task', 'add'], { operations });
@@ -2761,7 +2757,7 @@ describe('tevu CLI', () => {
           .map((prompt) => prompt.initialValue),
       ).toEqual([undefined, 'octo/missing']);
       expect(checkGitHubRepository).toHaveBeenCalledTimes(2);
-      expect(clack.state.prompts.at(-2)?.message).toBe('Add another repository?');
+      expect(clack.state.prompts.at(-1)?.message).toBe('Add another repository?');
     });
 
     it('cancels without saving when the GitHub repository read is cancelled', async () => {
@@ -2790,7 +2786,7 @@ describe('tevu CLI', () => {
         configExists: vi.fn(async () => false),
         isGitRepository,
       });
-      scriptAnswers(...BOOTSTRAP_ANSWERS.slice(0, 12), '../repos/alpha-fixed', clack.CANCEL, true);
+      scriptAnswers(...BOOTSTRAP_ANSWERS.slice(0, 12), '../repos/alpha-fixed', clack.CANCEL);
 
       const { code } = await runCli(['task', 'add'], { operations });
 
@@ -2811,7 +2807,7 @@ describe('tevu CLI', () => {
         ['tevu.yaml', '../repos/alpha'],
         ['tevu.yaml', '../repos/alpha-fixed'],
       ]);
-      expect(clack.state.prompts.at(-2)?.message).toBe('Add another repository?');
+      expect(clack.state.prompts.at(-1)?.message).toBe('Add another repository?');
     });
 
     it('rejects Jira credential variables not set in this terminal and asks again', async () => {
@@ -2825,7 +2821,6 @@ describe('tevu CLI', () => {
         { invalid: 'UNSET_TOKEN' },
         'JIRA_TOKEN',
         clack.CANCEL,
-        true,
       );
 
       const { code } = await runCli(['task', 'add'], { operations });
@@ -3031,7 +3026,6 @@ describe('tevu CLI', () => {
         { invalid: 'not-a-model' },
         'openai/grader-model',
         clack.CANCEL,
-        true,
       );
 
       const { code } = await runCli(['task', 'add'], { operations });
@@ -3043,7 +3037,6 @@ describe('tevu CLI', () => {
         'Grader model',
         'Grader model',
         'Grader effort',
-        EXIT_QUESTION_NEW_FILE,
       ]);
       expect(clack.state.rejections).toEqual([
         { kind: 'text', message: 'Grader model', reason: 'model must be "<provider>/<model>"' },
@@ -3957,7 +3950,7 @@ describe('tevu CLI', () => {
         },
       ])('rejects $description', async ({ answers, rejection }) => {
         const operations = createOperations({ configExists: vi.fn(async () => false) });
-        scriptAnswers(...BOOTSTRAP_ANSWERS.slice(0, 6), ...answers, clack.CANCEL, true);
+        scriptAnswers(...BOOTSTRAP_ANSWERS.slice(0, 6), ...answers, clack.CANCEL);
 
         const { code } = await runCli(['task', 'add'], { operations });
 
@@ -4121,7 +4114,7 @@ describe('tevu CLI', () => {
         const operations = createOperations({
           loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
         });
-        scriptAnswers(clack.CANCEL, true);
+        scriptAnswers(clack.CANCEL);
 
         await runCli(['task', 'add'], { operations });
 
@@ -4327,7 +4320,7 @@ describe('tevu CLI', () => {
 
       it('prints the Ctrl-C hint as the first line after the intro', async () => {
         const operations = createOperations();
-        scriptAnswers(clack.CANCEL, true);
+        scriptAnswers(clack.CANCEL);
 
         await runCli(['task', 'add'], { operations });
 
@@ -4394,58 +4387,25 @@ describe('tevu CLI', () => {
     });
 
     describe('the exit question', () => {
-      const EXIT_QUESTION_NEW_FILE_WITH_DRAFT =
-        'Exit without saving? Every answer so far is lost, including the criteria draft, and tevu.yaml is not created.';
-
-      const BOOTSTRAP_THROUGH_DRAFT_REVIEW = [
-        ...BOOTSTRAP_ANSWERS,
-        false,
-        true,
-        'openai/criteria-model',
-        'high',
-        'manual',
-        'alpha',
-        'HEAD~3',
-        '',
-        'task-2',
-        'Add an export button',
-        'Export the current view as CSV.',
-        'Implement CSV export for the current view.',
-        'Repository is readable',
-        false,
-      ];
-
       function exitPrompts(): typeof clack.state.prompts {
         return clack.state.prompts.filter((prompt) => prompt.message.startsWith('Exit without'));
       }
 
       it.each([
         {
-          name: 'an existing file and no criteria draft',
+          name: 'an existing file',
           exists: true,
-          answers: [clack.CANCEL],
+          answers: [...taskInterviewAnswers('repo-1'), false],
           expected: EXIT_QUESTION,
         },
         {
-          name: 'a file that is not created and no criteria draft',
+          name: 'a file that is not created',
           exists: false,
-          answers: [clack.CANCEL],
+          answers: fullSetupAnswers().slice(0, -1).concat(false),
           expected: EXIT_QUESTION_NEW_FILE,
         },
-        {
-          name: 'an existing file and a criteria draft',
-          exists: true,
-          answers: [...READY_ANSWERS, clack.CANCEL],
-          expected: EXIT_QUESTION_WITH_DRAFT,
-        },
-        {
-          name: 'a file that is not created and a criteria draft',
-          exists: false,
-          answers: [...BOOTSTRAP_THROUGH_DRAFT_REVIEW, clack.CANCEL],
-          expected: EXIT_QUESTION_NEW_FILE_WITH_DRAFT,
-        },
       ])('asks with No selected for $name', async ({ exists, answers, expected }) => {
-        const operations = criteriaOperations({ configExists: vi.fn(async () => exists) });
+        const operations = createOperations({ configExists: vi.fn(async () => exists) });
         scriptAnswers(...answers, true);
 
         const { code } = await runCli(['task', 'add'], { operations });
@@ -4459,7 +4419,7 @@ describe('tevu CLI', () => {
 
       it('names the path exactly as the wizard received it', async () => {
         const operations = createOperations();
-        scriptAnswers(clack.CANCEL, true);
+        scriptAnswers(...taskInterviewAnswers('repo-1'), false, true);
 
         await runCli(['task', 'add', '--config', 'suites/tevu.yaml'], { operations });
 
@@ -4468,93 +4428,29 @@ describe('tevu CLI', () => {
         ]);
       });
 
-      it.each([
-        { kind: 'select', at: 0 },
-        { kind: 'text', at: 3 },
-        { kind: 'confirm', at: 9 },
-      ])(
-        'asks the same $kind question again after No, then completes as without the Ctrl-C',
-        async ({ kind, at }) => {
-          const script = [...taskInterviewAnswers('repo-1'), true];
-          const baselinePrompts = await drawnPrompts(script);
-          const operations = createOperations();
-          scriptAnswers(...script.slice(0, at), clack.CANCEL, false, ...script.slice(at));
-
-          const { code } = await runCli(['task', 'add'], { operations });
-
-          const question = baselinePrompts[at + 1];
-          expect(question?.kind).toBe(kind);
-          expect(code).toBe(0);
-          expect(clack.state.prompts.slice(at + 1, at + 4)).toEqual([
-            question,
-            expect.objectContaining({ message: EXIT_QUESTION }),
-            question,
-          ]);
-          expect(clack.state.cancels).toEqual([]);
-          expect(operations.createTask).toHaveBeenCalledOnce();
-        },
-      );
-
-      it.each([
-        { answer: 'Yes', script: true },
-        { answer: 'Ctrl-C', script: clack.CANCEL },
-      ])('ends with one cancel line, exit 130, and no write on $answer', async ({ script }) => {
+      it('ends with one cancel line, exit 130, and no write on Ctrl-C at the exit question', async () => {
         const operations = createOperations();
-        scriptAnswers(clack.CANCEL, script);
+        scriptAnswers(...taskInterviewAnswers('repo-1'), false, clack.CANCEL);
 
         const { code, err } = await runCli(['task', 'add'], { operations });
 
         expect(code).toBe(130);
         expect(err).toEqual([]);
         expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
-        expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
-          'tevu task add',
-          'Task source',
-          EXIT_QUESTION,
-        ]);
+        expect(clack.state.prompts.at(-1)?.message).toBe(EXIT_QUESTION);
         expectNoWrites(operations);
       });
 
-      it('opens a text question again with the text typed before Ctrl-C after No', async () => {
+      it('ends at a cancelled question with exit 130 and no exit question', async () => {
         const operations = createOperations();
-        scriptAnswers(
-          ...taskInterviewAnswers('repo-1').slice(0, 4),
-          clack.cancelTyped('task-'),
-          false,
-          ...taskInterviewAnswers('repo-1').slice(4),
-          true,
-        );
+        scriptAnswers(clack.CANCEL);
 
         const { code } = await runCli(['task', 'add'], { operations });
 
-        const taskIdPrompts = clack.state.prompts.filter((prompt) => prompt.message === 'Task ID');
-        expect(code).toBe(0);
-        expect(taskIdPrompts.map((prompt) => prompt.initialValue)).toEqual([undefined, 'task-']);
-        expect(requireCreateTaskCall(operations).task.id).toBe('task-2');
-      });
-
-      it('opens a text question again with its own initial value when nothing was typed', async () => {
-        const operations = createOperations();
-        scriptAnswers(
-          'github',
-          'octo/repo#42',
-          'repo-1',
-          '',
-          'abc123',
-          'task-2',
-          clack.cancelTyped(''),
-          false,
-          ...taskInterviewAnswers('repo-1').slice(5),
-          true,
-        );
-
-        await runCli(['task', 'add'], { operations });
-
-        const titlePrompts = clack.state.prompts.filter((prompt) => prompt.message === 'Title');
-        expect(titlePrompts.map((prompt) => prompt.initialValue)).toEqual([
-          'Add an export button',
-          'Add an export button',
-        ]);
+        expect(code).toBe(130);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(exitPrompts()).toEqual([]);
+        expectNoWrites(operations);
       });
     });
 
@@ -5786,7 +5682,7 @@ describe('tevu CLI', () => {
       it('ends cancelled on Ctrl-C at the Save question after a failed save', async () => {
         const createTask = failsThenSaves(artifactError('write-config', 'disk full'));
         const operations = createOperations({ createTask });
-        scriptAnswers(...taskInterviewAnswers('repo-1'), true, clack.CANCEL, true);
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true, clack.CANCEL);
 
         const { code, err } = await runCli(['task', 'add'], { operations });
 
@@ -6603,7 +6499,7 @@ describe('tevu CLI', () => {
             .mockResolvedValueOnce({ ok: false, error })
             .mockResolvedValue({ ok: true, value: buildCapabilityReport() });
           const operations = operationsWithModelCheck({ probeAgent });
-          scriptAnswers(...setupAnswers({ command: ['nope', 'opencode'] }), clack.CANCEL, true);
+          scriptAnswers(...setupAnswers({ command: ['nope', 'opencode'] }), clack.CANCEL);
 
           await runCli(['task', 'add'], { operations });
 
@@ -7363,7 +7259,7 @@ describe('tevu CLI', () => {
             retainedDirectory: null,
           })),
         });
-        scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL, true);
+        scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL);
 
         await runCli(['task', 'add'], { operations });
 
@@ -7511,7 +7407,7 @@ describe('tevu CLI', () => {
             retainedDirectory: null,
           })),
         });
-        scriptAnswers(...READY_ANSWERS, clack.CANCEL, true);
+        scriptAnswers(...READY_ANSWERS, clack.CANCEL);
 
         await runCli(['task', 'add'], { operations });
 
@@ -7582,7 +7478,7 @@ describe('tevu CLI', () => {
           })),
           draftCriteria,
         });
-        scriptAnswers(...READY_ANSWERS, clack.CANCEL, true);
+        scriptAnswers(...READY_ANSWERS, clack.CANCEL);
 
         const { code, err } = await runCli(['task', 'add'], { operations });
 
@@ -7917,7 +7813,7 @@ describe('tevu CLI', () => {
 
       it('asks Item to edit and Item to remove through the sectioned select with headed sections and back to the review', async () => {
         const operations = operationsDrafting({ acceptance: ['A1', 'A2'], done: ['D1'] });
-        scriptAnswers(...READY_ANSWERS, 'edit', 'back', 'remove', 'back', clack.CANCEL, true);
+        scriptAnswers(...READY_ANSWERS, 'edit', 'back', 'remove', 'back', clack.CANCEL);
         const expectedSections = [
           {
             heading: 'Acceptance Criteria',
@@ -7945,7 +7841,7 @@ describe('tevu CLI', () => {
 
       it('labels an item with its redacted text at Item to edit', async () => {
         const operations = operationsDrafting({ acceptance: ['uses SECRET-X'], done: [] });
-        scriptAnswers(...READY_ANSWERS, 'edit', 'back', clack.CANCEL, true);
+        scriptAnswers(...READY_ANSWERS, 'edit', 'back', clack.CANCEL);
 
         await runCli(['task', 'add'], {
           operations,
@@ -7991,7 +7887,7 @@ describe('tevu CLI', () => {
 
       it('cancels the wizard when the item select is cancelled with Ctrl-C at Item to edit', async () => {
         const operations = operationsDrafting({ acceptance: ['A1'], done: ['D1'] });
-        scriptAnswers(...READY_ANSWERS, 'edit', clack.CANCEL, true);
+        scriptAnswers(...READY_ANSWERS, 'edit', clack.CANCEL);
 
         const { code } = await runCli(['task', 'add'], { operations });
 
@@ -8002,7 +7898,7 @@ describe('tevu CLI', () => {
 
       it('passes an empty options array for a list with no items to Item to edit', async () => {
         const operations = operationsDrafting({ acceptance: [], done: ['D1'] });
-        scriptAnswers(...READY_ANSWERS, 'edit', 'back', clack.CANCEL, true);
+        scriptAnswers(...READY_ANSWERS, 'edit', 'back', clack.CANCEL);
 
         await runCli(['task', 'add'], { operations });
 
@@ -8048,7 +7944,7 @@ describe('tevu CLI', () => {
 
       it('Ctrl-C at Item to remove cancels', async () => {
         const operations = operationsDrafting({ acceptance: ['A1', 'A2'], done: ['D1'] });
-        scriptAnswers(...READY_ANSWERS, 'edit', clack.ESCAPE, 'remove', clack.CANCEL, true);
+        scriptAnswers(...READY_ANSWERS, 'edit', clack.ESCAPE, 'remove', clack.CANCEL);
 
         const { code } = await runCli(['task', 'add'], { operations });
 
@@ -8060,7 +7956,7 @@ describe('tevu CLI', () => {
       it('lays out the Drafted criteria note with a blank line before Definition of Done', async () => {
         vi.stubEnv('FORCE_COLOR', '0');
         const operations = operationsDrafting({ acceptance: ['A1'], done: ['D1'] });
-        scriptAnswers(...READY_ANSWERS, clack.CANCEL, true);
+        scriptAnswers(...READY_ANSWERS, clack.CANCEL);
 
         await runCli(['task', 'add'], { operations });
 
@@ -8078,7 +7974,7 @@ describe('tevu CLI', () => {
       it('wraps each heading of the Drafted criteria note in bold under color', async () => {
         vi.stubEnv('FORCE_COLOR', '1');
         const operations = operationsDrafting({ acceptance: ['A1'], done: ['D1'] });
-        scriptAnswers(...READY_ANSWERS, clack.CANCEL, true);
+        scriptAnswers(...READY_ANSWERS, clack.CANCEL);
 
         await runCli(['task', 'add'], { operations });
 
@@ -8155,7 +8051,7 @@ describe('tevu CLI', () => {
 
       it('Ctrl-C at Add to cancels', async () => {
         const operations = operationsDrafting({ acceptance: ['A1'], done: ['D1'] });
-        scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL, true);
+        scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL);
 
         const { code } = await runCli(['task', 'add'], { operations });
 
@@ -8872,17 +8768,17 @@ describe('tevu CLI', () => {
         })),
       });
 
-      scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL, true);
+      scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL);
       await runCli(['task', 'add'], { operations });
       const first = takeStatusLines();
-      scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL, true);
+      scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL);
       await runCli(['task', 'add'], { operations });
       const second = takeStatusLines();
 
       expect(first.messages).toContain('Add to');
       expect(first.messages.length).toBeGreaterThan(READY_ANSWERS.length);
       expect(first.distinct).toHaveLength(1);
-      expect(first.distinct[0]).toEqual(expect.objectContaining({ row: expect.any(Function) }));
+      expect(first.distinct[0]).toEqual(expect.objectContaining({ show: expect.any(Function) }));
       expect(second.messages).toEqual(first.messages);
       expect(second.distinct).toHaveLength(1);
       expect(second.distinct[0]).not.toBe(first.distinct[0]);
@@ -8915,7 +8811,7 @@ describe('tevu CLI', () => {
       expect(first.messages).toContain('Assessor name');
       expect(first.messages.length).toBeGreaterThan(2);
       expect(first.distinct).toHaveLength(1);
-      expect(first.distinct[0]).toEqual(expect.objectContaining({ row: expect.any(Function) }));
+      expect(first.distinct[0]).toEqual(expect.objectContaining({ show: expect.any(Function) }));
       expect(second.distinct).toHaveLength(1);
       expect(second.distinct[0]).not.toBe(first.distinct[0]);
     });

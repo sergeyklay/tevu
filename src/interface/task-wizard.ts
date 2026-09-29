@@ -34,7 +34,7 @@ import { renderTevuError } from './render-error';
 import { sectionedSelect } from './sectioned-select';
 import { confirm, select, text } from './wizard-prompts';
 
-import type { StatusLineDisplay } from './status-line';
+import type { StatusLine, StatusLineDisplay } from './status-line';
 import type { WaitInterrupt } from './wait-interrupt';
 import type { AssessableCheckSummary, AssessmentCaseContext } from '@/application/assess';
 import type { CreateTaskErrorKind, TaskWizardInput } from '@/application/create-task';
@@ -82,16 +82,15 @@ import type { Readable, Writable } from 'node:stream';
 /**
  * Interactive streams the wizards prompt on; both must be TTYs. A `signal`
  * makes every question resolve as cancelled once it aborts. The members after
- * `statusLine` are set by `runTaskWizard` only, so `tevu assess` keeps its
- * immediate Ctrl-C.
+ * `statusLine` are set by `runTaskWizard` only.
  */
 type WizardIo = {
   input: Readable & { isTTY?: boolean };
   output: Writable & { isTTY?: boolean };
   signal?: AbortSignal;
   /** Drawn under every open question of this wizard run. */
-  statusLine: StatusLineDisplay;
-  /** Words the exit question; absent, Ctrl-C at a question ends the wizard at once. */
+  statusLine: StatusLine & StatusLineDisplay;
+  /** Words the exit question asked after a wait took a SIGINT and at a declined save. */
   exitQuestion?: () => string;
   /** Lets each wait take the first SIGINT instead of the command signal. */
   waitInterrupt?: WaitInterrupt;
@@ -2846,50 +2845,19 @@ async function withPromptSignal<T>(
   }
 }
 
-/** What `ask` hands a text question when it opens again after an exit question answered `No`. */
-type QuestionRetry = {
-  /** The text typed before Ctrl-C; empty on the first opening or when nothing was typed. */
-  restoredText: string;
-  /** Receives the typed text when the question is cancelled. */
-  onCancel: (typed: string) => void;
-};
-
 /**
- * Draws one question and resolves its answer; Ctrl-C asks the exit question
- * and, on `No`, draws the same question again.
- *
- * An aborted wizard signal, or a wizard without an exit question, ends the
- * wizard at the first cancel.
+ * Draws one question and resolves its answer; a cancelled question ends the
+ * wizard, because the question itself already asked for the second press.
  */
 async function ask<T>(
   io: WizardIo,
-  open: (
-    signal: { signal?: AbortSignal },
-    retry: QuestionRetry,
-  ) => Promise<T | typeof CANCEL_SYMBOL>,
+  open: (signal: { signal?: AbortSignal }) => Promise<T | typeof CANCEL_SYMBOL>,
 ): Promise<T> {
-  let restoredText = '';
-  for (;;) {
-    let typed = '';
-    const value = await withPromptSignal(io, (signal) =>
-      open(signal, {
-        restoredText,
-        onCancel: (text) => {
-          typed = text;
-        },
-      }),
-    );
-    if (!isCancel(value)) {
-      return value;
-    }
-    if (io.signal?.aborted === true || io.exitQuestion === undefined) {
-      throw new WizardCancelledError();
-    }
-    if (await confirmExit(io)) {
-      throw new WizardCancelledError();
-    }
-    restoredText = typed;
+  const value = await withPromptSignal(io, open);
+  if (isCancel(value)) {
+    throw new WizardCancelledError();
   }
+  return value;
 }
 
 /**
@@ -2916,17 +2884,9 @@ async function askText(
     validate?: (value: string | undefined) => string | undefined;
   },
 ): Promise<string> {
-  return ask(io, (signal, { restoredText, onCancel }) => {
-    const initialValue = restoredText === '' ? options.initialValue : restoredText;
-    return text({
-      ...options,
-      ...(initialValue === undefined ? {} : { initialValue }),
-      ...promptOptions(io),
-      statusLine: io.statusLine,
-      onCancel,
-      ...signal,
-    });
-  });
+  return ask(io, (signal) =>
+    text({ ...options, ...promptOptions(io), statusLine: io.statusLine, ...signal }),
+  );
 }
 
 /**
