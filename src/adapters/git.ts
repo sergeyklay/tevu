@@ -56,7 +56,9 @@ export type GitWorkspaceAdapterOptions = {
 };
 
 const SUBMODULE_MODE = '160000';
-const LFS_POINTER_SIGNATURE = 'https://git-lfs.github.com/spec';
+const REGULAR_FILE_MODES: ReadonlySet<string> = new Set(['100644', '100755']);
+const LFS_POINTER_VERSION_LINE = 'version https://git-lfs.github.com/spec/v1';
+const LFS_POINTER_SIZE_LIMIT = 1024;
 const LFS_ATTRIBUTE = 'filter=lfs';
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{40,64}$/;
 
@@ -508,6 +510,133 @@ async function sealCase(
 
 type TreeInspection = { ok: true } | { ok: false; reason: string };
 
+// `$` without the multiline flag matches only at the end of the input, so a
+// second trailing LF fails the match.
+const LFS_POINTER_PATTERN = new RegExp(
+  `^${LFS_POINTER_VERSION_LINE.replaceAll('.', String.raw`\.`)}\n` +
+    String.raw`(?:ext-\d-[A-Za-z0-9_.-]+ sha256:[0-9a-f]{64}\n)*` +
+    String.raw`oid sha256:[0-9a-f]{64}\n` +
+    String.raw`size \d+\n$`,
+);
+
+/** Reports whether the whole blob text is a Git LFS pointer in the one encoding git-lfs writes. */
+function isLfsPointerText(content: string): boolean {
+  return LFS_POINTER_PATTERN.test(content);
+}
+
+/**
+ * Reports whether a `.gitattributes` text assigns `filter=lfs` on a non-comment
+ * line. A line Git would discard as invalid still counts when it carries the
+ * token: rejecting a broken line is the safe error.
+ */
+function configuresLfsFilter(attributes: string): boolean {
+  return attributes.split('\n').some((line) => {
+    const [pattern, ...attributeTokens] = line
+      .split(/[ \t\r]+/)
+      .filter((token) => token.length > 0);
+    if (pattern === undefined || pattern.startsWith('#')) {
+      return false;
+    }
+    return attributeTokens.some((token) => token === LFS_ATTRIBUTE);
+  });
+}
+
+type LfsPointerScan = { ok: true; pointerEntryCount: number } | { ok: false; reason: string };
+
+/**
+ * Counts the regular-file entries of `commit` whose whole blob is a Git LFS
+ * pointer. `git grep` only nominates candidates; the blob bytes decide, and
+ * only blobs under the pointer size limit are ever read.
+ */
+async function countLfsPointerEntries(
+  repositoryPath: string,
+  commit: string,
+  regularFileBlobs: ReadonlyMap<string, string>,
+): Promise<LfsPointerScan> {
+  // No `-I`: attributes Git reads outside the pinned tree would otherwise
+  // decide which blobs are searched.
+  const grep = await runGit(repositoryPath, [
+    'grep',
+    '-z',
+    '--no-color',
+    '--no-full-name',
+    '--name-only',
+    '--fixed-strings',
+    '-e',
+    LFS_POINTER_VERSION_LINE,
+    commit,
+  ]);
+  if (grep.exitCode === 1) {
+    return { ok: true, pointerEntryCount: 0 };
+  }
+  const grepFailure = { ok: false, reason: describeGitFailure('grep', grep) } as const;
+  if (grep.exitCode !== 0) {
+    return grepFailure;
+  }
+  const entries = splitNulSeparated(grep.stdout);
+  if (entries.length === 0) {
+    return grepFailure;
+  }
+
+  const prefix = `${commit}:`;
+  const candidateBlobIds: string[] = [];
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) {
+      return grepFailure;
+    }
+    const blobId = regularFileBlobs.get(entry.slice(prefix.length));
+    if (blobId === undefined) {
+      return grepFailure;
+    }
+    candidateBlobIds.push(blobId);
+  }
+  const distinctBlobIds = [...new Set(candidateBlobIds)];
+
+  const sizes = await runGit(repositoryPath, ['cat-file', '--batch-check'], {
+    stdin: `${distinctBlobIds.join('\n')}\n`,
+  });
+  const sizesFailure = {
+    ok: false,
+    reason: describeGitFailure('cat-file --batch-check', sizes),
+  } as const;
+  if (sizes.exitCode !== 0) {
+    return sizesFailure;
+  }
+  const lines = sizes.stdout.split('\n');
+  if (lines.length !== distinctBlobIds.length) {
+    return sizesFailure;
+  }
+
+  const pointerBlobIds = new Set<string>();
+  for (const [index, blobId] of distinctBlobIds.entries()) {
+    const line = lines[index];
+    const linePrefix = `${blobId} blob `;
+    if (line === undefined || !line.startsWith(linePrefix)) {
+      return sizesFailure;
+    }
+    const sizeText = line.slice(linePrefix.length);
+    if (!/^\d+$/.test(sizeText)) {
+      return sizesFailure;
+    }
+    if (Number(sizeText) >= LFS_POINTER_SIZE_LIMIT) {
+      continue;
+    }
+    const blob = await runGit(repositoryPath, ['cat-file', 'blob', blobId], {
+      keepFinalNewline: true,
+    });
+    if (blob.exitCode !== 0) {
+      return { ok: false, reason: describeGitFailure('cat-file blob', blob) };
+    }
+    if (isLfsPointerText(blob.stdout)) {
+      pointerBlobIds.add(blobId);
+    }
+  }
+  return {
+    ok: true,
+    pointerEntryCount: candidateBlobIds.filter((blobId) => pointerBlobIds.has(blobId)).length,
+  };
+}
+
 /**
  * Inspects the pinned tree for unsupported submodule (gitlink) entries, Git
  * LFS attribute configuration, and Git LFS pointer blobs. Reasons carry counts
@@ -520,15 +649,19 @@ async function inspectSourceTree(repositoryPath: string, commit: string): Promis
   }
   let submoduleCount = 0;
   const attributeFilePaths: string[] = [];
+  const regularFileBlobs = new Map<string, string>();
   for (const entry of listed.stdout.split('\0')) {
     if (entry.length === 0) {
       continue;
     }
     const tabIndex = entry.indexOf('\t');
-    const [mode] = entry.slice(0, tabIndex).split(' ');
+    const [mode, , objectId] = entry.slice(0, tabIndex).split(' ');
     const path = entry.slice(tabIndex + 1);
     if (mode === SUBMODULE_MODE) {
       submoduleCount += 1;
+    }
+    if (mode !== undefined && objectId !== undefined && REGULAR_FILE_MODES.has(mode)) {
+      regularFileBlobs.set(path, objectId);
     }
     if (basename(path) === '.gitattributes') {
       attributeFilePaths.push(path);
@@ -546,29 +679,21 @@ async function inspectSourceTree(repositoryPath: string, commit: string): Promis
     if (attributes.exitCode !== 0) {
       return { ok: false, reason: describeGitFailure('cat-file .gitattributes', attributes) };
     }
-    if (attributes.stdout.includes(LFS_ATTRIBUTE)) {
+    if (configuresLfsFilter(attributes.stdout)) {
       return { ok: false, reason: 'source tree configures unsupported Git LFS attributes' };
     }
   }
 
-  const pointers = await runGit(repositoryPath, [
-    'grep',
-    '-I',
-    '--fixed-strings',
-    '--name-only',
-    '-e',
-    LFS_POINTER_SIGNATURE,
-    commit,
-  ]);
-  if (pointers.exitCode === 0) {
-    const pointerCount = pointers.stdout.split('\n').filter((line) => line.length > 0).length;
+  const scan = await countLfsPointerEntries(repositoryPath, commit, regularFileBlobs);
+  if (!scan.ok) {
+    return { ok: false, reason: scan.reason };
+  }
+  if (scan.pointerEntryCount > 0) {
+    const { pointerEntryCount } = scan;
     return {
       ok: false,
-      reason: `source tree contains ${pointerCount} unsupported Git LFS pointer blob${pointerCount === 1 ? '' : 's'}`,
+      reason: `source tree contains ${pointerEntryCount} unsupported Git LFS pointer blob${pointerEntryCount === 1 ? '' : 's'}`,
     };
-  }
-  if (pointers.exitCode !== 1) {
-    return { ok: false, reason: describeGitFailure('grep', pointers) };
   }
   return { ok: true };
 }
