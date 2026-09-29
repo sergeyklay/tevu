@@ -52,6 +52,17 @@ import type {
   ValidationReport,
 } from '@/domain/types';
 
+type AskOptions = {
+  message: string;
+  placeholder?: string;
+  defaultValue?: string;
+  initialValue?: unknown;
+  options?: Array<{ label?: string; hint?: string; disabled?: boolean }>;
+  signal?: AbortSignal;
+  statusLine?: unknown;
+  validate?: (value: string | undefined) => string | undefined;
+};
+
 const clack = vi.hoisted(() => {
   const CANCEL = Symbol('clack-cancel');
   const ESCAPE = Symbol('clack-escape');
@@ -72,6 +83,7 @@ const clack = vi.hoisted(() => {
     outros: [] as string[],
     spinners: [] as Array<{ label: string; handleSignals: boolean | undefined }>,
     timeline: [] as string[],
+    statusLines: [] as Array<{ message: string; statusLine: unknown }>,
     sectionedSelects: [] as Array<{
       message: string;
       sections: ReadonlyArray<{
@@ -80,19 +92,6 @@ const clack = vi.hoisted(() => {
       }>;
       back: { value: string; label: string };
     }>,
-  };
-  return { CANCEL, ESCAPE, state };
-});
-
-vi.mock('@clack/prompts', () => {
-  type AskOptions = {
-    message: string;
-    placeholder?: string;
-    defaultValue?: string;
-    initialValue?: unknown;
-    options?: Array<{ label?: string; hint?: string; disabled?: boolean }>;
-    signal?: AbortSignal;
-    validate?: (value: string | undefined) => string | undefined;
   };
   const isInvalidMarker = (value: unknown): value is { invalid: string } =>
     typeof value === 'object' && value !== null && 'invalid' in value;
@@ -104,7 +103,7 @@ vi.mock('@clack/prompts', () => {
       : answer;
   const ask = async (kind: string, options: AskOptions): Promise<unknown> => {
     for (;;) {
-      clack.state.prompts.push({
+      state.prompts.push({
         kind,
         message: options.message,
         placeholder: options.placeholder,
@@ -116,15 +115,16 @@ vi.mock('@clack/prompts', () => {
           disabled: option.disabled === true,
         })),
       });
-      clack.state.timeline.push(`prompt:${options.message}`);
+      state.statusLines.push({ message: options.message, statusLine: options.statusLine });
+      state.timeline.push(`prompt:${options.message}`);
       if (isAborted(options.signal)) {
-        return clack.CANCEL;
+        return CANCEL;
       }
-      const answer = clack.state.answers.shift();
+      const answer = state.answers.shift();
       if (answer === undefined) {
         throw new Error(`no scripted answer left for ${kind}: ${options.message}`);
       }
-      if (answer === clack.ESCAPE) {
+      if (answer === ESCAPE) {
         throw new Error(
           `Escape is scripted only at sectionedSelect prompts, not at ${kind}: ${options.message}`,
         );
@@ -132,14 +132,14 @@ vi.mock('@clack/prompts', () => {
       if (isInterruption(answer)) {
         answer();
         if (isAborted(options.signal)) {
-          return clack.CANCEL;
+          return CANCEL;
         }
         continue;
       }
       if (isInvalidMarker(answer)) {
         const reason = options.validate?.(answer.invalid);
         if (reason !== undefined) {
-          clack.state.rejections.push({ kind, message: options.message, reason });
+          state.rejections.push({ kind, message: options.message, reason });
           continue;
         }
         return applyDefault(kind, options, answer.invalid);
@@ -147,15 +147,16 @@ vi.mock('@clack/prompts', () => {
       return applyDefault(kind, options, answer);
     }
   };
+  return { CANCEL, ESCAPE, state, ask };
+});
+
+vi.mock('@clack/prompts', () => {
   const recordLog = (kind: string, message: string): void => {
     clack.state.logs.push({ kind, message });
     clack.state.timeline.push(`log:${kind}`);
   };
   return {
-    text: (options: AskOptions) => ask('text', options),
-    confirm: (options: AskOptions) => ask('confirm', options),
-    select: (options: AskOptions) => ask('select', options),
-    multiselect: (options: AskOptions) => ask('multiselect', options),
+    multiselect: (options: AskOptions) => clack.ask('multiselect', options),
     intro: (message: string) => {
       clack.state.prompts.push({
         kind: 'intro',
@@ -199,14 +200,22 @@ vi.mock('@clack/prompts', () => {
   };
 });
 
+vi.mock('./wizard-prompts', () => ({
+  text: (options: AskOptions) => clack.ask('text', options),
+  confirm: (options: AskOptions) => clack.ask('confirm', options),
+  select: (options: AskOptions) => clack.ask('select', options),
+}));
+
 vi.mock('./sectioned-select', () => ({
   sectionedSelect: async (options: {
     message: string;
     sections: (typeof clack.state.sectionedSelects)[number]['sections'];
     back: { value: string; label: string };
     signal?: AbortSignal;
+    statusLine?: unknown;
   }): Promise<unknown> => {
     const isAborted = (): boolean => options.signal?.aborted === true;
+    clack.state.statusLines.push({ message: options.message, statusLine: options.statusLine });
     clack.state.sectionedSelects.push({
       message: options.message,
       sections: options.sections,
@@ -1329,6 +1338,7 @@ describe('tevu CLI', () => {
     clack.state.spinners = [];
     clack.state.timeline = [];
     clack.state.sectionedSelects = [];
+    clack.state.statusLines = [];
   });
 
   afterEach(() => {
@@ -6933,6 +6943,78 @@ describe('tevu CLI', () => {
         'Report regenerated: /tmp/[redacted]/run-1/report.md',
       ]);
       expect(out.join('')).not.toContain('hunter2');
+    });
+  });
+  describe('status line per wizard run', () => {
+    function takeStatusLines(): { messages: string[]; distinct: unknown[] } {
+      const entries = clack.state.statusLines;
+      clack.state.statusLines = [];
+      return {
+        messages: entries.map((entry) => entry.message),
+        distinct: [...new Set(entries.map((entry) => entry.statusLine))],
+      };
+    }
+
+    it('gives every prompt of one task add run the same status line and a new one to the next run', async () => {
+      const operations = createOperations({
+        loadConfig: vi.fn(async () => ({ ok: true as const, value: buildCriteriaConfig() })),
+        resolveReference: vi.fn(async () => ({
+          ok: true as const,
+          value: buildResolvedCommitReference(),
+        })),
+        draftCriteria: vi.fn(async () => ({
+          status: 'drafted' as const,
+          draft: { acceptance: ['The export is documented.'], done: ['The change is reviewed.'] },
+          retainedDirectory: null,
+        })),
+      });
+
+      scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL);
+      await runCli(['task', 'add'], { operations });
+      const first = takeStatusLines();
+      scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL);
+      await runCli(['task', 'add'], { operations });
+      const second = takeStatusLines();
+
+      expect(first.messages).toContain('Add to');
+      expect(first.messages.length).toBeGreaterThan(READY_ANSWERS.length);
+      expect(first.distinct).toHaveLength(1);
+      expect(first.distinct[0]).toEqual(expect.objectContaining({ show: expect.any(Function) }));
+      expect(second.messages).toEqual(first.messages);
+      expect(second.distinct).toHaveLength(1);
+      expect(second.distinct[0]).not.toBe(first.distinct[0]);
+    });
+
+    it('gives every prompt of one assess run the same status line and a new one to the next run', async () => {
+      const operations = createOperations({
+        readAssessmentContext: vi.fn(async () => ({
+          ok: true as const,
+          value: buildAssessmentContext({
+            checks: [
+              buildManualCheckSummary({ checkId: 'acc-1', category: 'acceptance', required: true }),
+              buildManualCheckSummary({
+                checkId: 'dod-1',
+                category: 'definition-of-done',
+                required: false,
+              }),
+            ],
+          }),
+        })),
+      });
+
+      scriptAnswers('alice', 'passed', '', 'failed', 'loader missing');
+      await runCli(['assess', 'run-1', 'case-1'], { operations });
+      const first = takeStatusLines();
+      scriptAnswers('alice', 'passed', '', 'failed', 'loader missing');
+      await runCli(['assess', 'run-1', 'case-1'], { operations });
+      const second = takeStatusLines();
+
+      expect(first.messages).toContain('Assessor name');
+      expect(first.messages.length).toBeGreaterThan(2);
+      expect(first.distinct).toHaveLength(1);
+      expect(first.distinct[0]).toEqual(expect.objectContaining({ show: expect.any(Function) }));
+      expect(second.distinct).toHaveLength(1);
+      expect(second.distinct[0]).not.toBe(first.distinct[0]);
     });
   });
 });

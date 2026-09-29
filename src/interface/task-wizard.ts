@@ -10,7 +10,7 @@
  */
 
 import { styleText } from 'node:util';
-import { cancel, confirm, intro, isCancel, log, note, select, text } from '@clack/prompts';
+import { cancel, intro, isCancel, log, note } from '@clack/prompts';
 import stdinDiscarder from 'stdin-discarder';
 import yoctoSpinner from 'yocto-spinner';
 
@@ -29,7 +29,9 @@ import {
 } from '@/domain/github-reference';
 
 import { sectionedSelect } from './sectioned-select';
+import { confirm, select, text } from './wizard-prompts';
 
+import type { StatusLine, StatusLineDisplay } from './status-line';
 import type { AssessableCheckSummary, AssessmentCaseContext } from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
 import type {
@@ -79,6 +81,8 @@ type WizardIo = {
   input: Readable & { isTTY?: boolean };
   output: Writable & { isTTY?: boolean };
   signal?: AbortSignal;
+  /** Drawn under every open question of this wizard run. */
+  statusLine: StatusLine & StatusLineDisplay;
 };
 
 /** Command-line facts the task wizard starts from. */
@@ -1991,6 +1995,7 @@ async function reviewDraft(
           ],
           back: DRAFT_REVIEW_BACK_OPTION,
           ...promptOptions(io),
+          statusLine: io.statusLine,
           ...signal,
         }),
       ),
@@ -2049,6 +2054,7 @@ async function selectDraftItem(
         ],
         back: DRAFT_REVIEW_BACK_OPTION,
         ...promptOptions(io),
+        statusLine: io.statusLine,
         ...signal,
       }),
     ),
@@ -2397,7 +2403,9 @@ async function askText(
   },
 ): Promise<string> {
   return unwrap(
-    await withPromptSignal(io, (signal) => text({ ...options, ...promptOptions(io), ...signal })),
+    await withPromptSignal(io, (signal) =>
+      text({ ...options, ...promptOptions(io), statusLine: io.statusLine, ...signal }),
+    ),
   );
 }
 
@@ -2436,7 +2444,7 @@ async function askConfirm(
 ): Promise<boolean> {
   return unwrap(
     await withPromptSignal(io, (signal) =>
-      confirm({ ...options, ...promptOptions(io), ...signal }),
+      confirm({ ...options, ...promptOptions(io), statusLine: io.statusLine, ...signal }),
     ),
   );
 }
@@ -2451,7 +2459,7 @@ async function askSelect<Value extends string>(
 ): Promise<Value> {
   return unwrap(
     await withPromptSignal(io, (signal) =>
-      select<Value>({ ...options, ...promptOptions(io), ...signal }),
+      select<Value>({ ...options, ...promptOptions(io), statusLine: io.statusLine, ...signal }),
     ),
   );
 }
