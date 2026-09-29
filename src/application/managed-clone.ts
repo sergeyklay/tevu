@@ -221,9 +221,14 @@ function referenceSource(
 export function describeManagedCloneError(
   error: Extract<TevuError, { kind: 'ManagedCloneError' }>,
 ): string {
-  return error.operation === 'clone'
-    ? `cloning ${error.repository} failed: ${error.reason}`
-    : `fetching from ${error.repository} failed: ${error.reason}`;
+  switch (error.operation) {
+    case 'clone':
+      return `cloning ${error.repository} failed: ${error.reason}`;
+    case 'fetch':
+      return `fetching from ${error.repository} failed: ${error.reason}`;
+    case 'ls-remote':
+      return `reading ${error.repository} failed: ${error.reason}`;
+  }
 }
 
 /** Distinct revisions of `revisions`, in first-appearance order, that do not resolve in `directory`. */

@@ -20,6 +20,7 @@ import type { ParsedGitHubRepository } from '@/domain/github-reference';
 import type {
   CloneState,
   ManagedCloneAdapter,
+  ManagedCloneOperation,
   ManagedProcessRunner,
   TevuResult,
 } from '@/domain/types';
@@ -44,9 +45,9 @@ type GhProbeState = { probed: boolean };
 
 /**
  * Creates the {@link ManagedCloneAdapter} implementation over the local git
- * CLI and gh. Probes gh at most once per instance, on the first `clone` or
- * `fetchCommits`/`fetchBranchesAndTags` call; `inspectClone` never probes gh
- * or contacts the network.
+ * CLI and gh. Probes gh at most once per instance, on the first `clone`,
+ * `fetchCommits`, `fetchBranchesAndTags`, or `checkRemote` call;
+ * `inspectClone` never probes gh or contacts the network.
  */
 export function createManagedCloneAdapter(
   options: ManagedCloneAdapterOptions,
@@ -59,6 +60,7 @@ export function createManagedCloneAdapter(
       fetchCommits(options, ghProbeState, directory, source, commits),
     fetchBranchesAndTags: (directory, repository) =>
       fetchBranchesAndTags(options, ghProbeState, directory, repository),
+    checkRemote: (repository) => checkRemote(options, ghProbeState, repository),
   };
 }
 
@@ -242,6 +244,35 @@ async function fetchBranchesAndTags(
   ]);
 }
 
+/** Runs one `git ls-remote` for `repository`'s HEAD, with gh as the credential helper. */
+async function checkRemote(
+  options: ManagedCloneAdapterOptions,
+  ghProbeState: GhProbeState,
+  repository: ParsedGitHubRepository,
+): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>> {
+  const display = formatGitHubRepository(repository);
+  if (!isPlainHost(repository.host)) {
+    return managedCloneFailure('ls-remote', display, hostRuleReason(repository.host));
+  }
+  if (options.cancellation.aborted) {
+    return cancellationFailure();
+  }
+  const probed = await probeGh(options, ghProbeState, 'ls-remote', display);
+  if (!probed.ok) {
+    return probed;
+  }
+  const remote = (options.remoteUrl ?? defaultRemoteUrl)(repository);
+  const listed = await runGitForOperation(
+    options,
+    tmpdir(),
+    [...credentialHelperArgs(repository.host), 'ls-remote', '--quiet', remote, 'HEAD'],
+    'ls-remote',
+    display,
+    repository.host,
+  );
+  return listed.ok ? { ok: true, value: undefined } : listed;
+}
+
 /** Shared fetch plumbing: lock, gh probe, one `git fetch` with the given refspecs, then release. */
 async function withLockedFetch(
   options: ManagedCloneAdapterOptions,
@@ -279,11 +310,11 @@ async function withLockedFetch(
   }
 }
 
-/** Runs `gh --version` at most once per adapter instance, before the first clone or fetch. */
+/** Runs `gh --version` at most once per adapter instance, before the first network git command. */
 async function probeGh(
   options: ManagedCloneAdapterOptions,
   state: GhProbeState,
-  operation: 'clone' | 'fetch',
+  operation: ManagedCloneOperation,
   display: string,
 ): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>> {
   if (state.probed) {
@@ -333,14 +364,14 @@ async function probeGh(
 }
 
 /**
- * Runs one `git clone` or `git fetch` invocation and interprets its outcome
+ * Runs one network git invocation and interprets its outcome
  * into a `ManagedCloneError`, or the trimmed stdout on success.
  */
 async function runGitForOperation(
   options: ManagedCloneAdapterOptions,
   cwd: string,
   args: readonly string[],
-  operation: 'clone' | 'fetch',
+  operation: ManagedCloneOperation,
   display: string,
   host: string,
 ): Promise<TevuResult<string, 'ManagedCloneError' | 'CancellationError'>> {
@@ -445,7 +476,7 @@ async function nearestExistingAncestor(target: string): Promise<string> {
 
 async function acquireLock(
   lockPath: string,
-  operation: 'clone' | 'fetch',
+  operation: ManagedCloneOperation,
   display: string,
 ): Promise<TevuResult<void, 'ManagedCloneError'>> {
   try {
@@ -526,7 +557,7 @@ function isErrnoCode(cause: unknown, code: string): boolean {
 }
 
 function managedCloneFailure(
-  operation: 'clone' | 'fetch',
+  operation: ManagedCloneOperation,
   repository: string,
   reason: string,
 ): TevuResult<never, 'ManagedCloneError'> {

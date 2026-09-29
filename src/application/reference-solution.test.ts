@@ -34,7 +34,13 @@ function failingManagedCloneAdapter(): ManagedCloneAdapter {
   const fail = (): never => {
     throw new Error('unexpected managed-clone call for a path repository');
   };
-  return { inspectClone: fail, clone: fail, fetchCommits: fail, fetchBranchesAndTags: fail };
+  return {
+    inspectClone: fail,
+    clone: fail,
+    fetchCommits: fail,
+    fetchBranchesAndTags: fail,
+    checkRemote: fail,
+  };
 }
 
 function buildDependencies(
@@ -520,6 +526,7 @@ function buildOkManagedCloneAdapter(
     clone: vi.fn(async () => ({ ok: true as const, value: undefined })),
     fetchCommits: vi.fn(async () => ({ ok: true as const, value: undefined })),
     fetchBranchesAndTags: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    checkRemote: vi.fn(async () => ({ ok: true as const, value: undefined })),
     ...overrides,
   };
 }

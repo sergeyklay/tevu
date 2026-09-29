@@ -633,7 +633,18 @@ function failingManagedCloneAdapter(): ManagedCloneAdapter {
   const fail = (): never => {
     throw new Error('unexpected managed-clone call for a path repository');
   };
-  return { inspectClone: fail, clone: fail, fetchCommits: fail, fetchBranchesAndTags: fail };
+  return {
+    inspectClone: fail,
+    clone: fail,
+    fetchCommits: fail,
+    fetchBranchesAndTags: fail,
+    checkRemote: fail,
+  };
+}
+
+/** Reports every name starting with `UNSET_` as unset in tevu's environment. */
+function unsetPrefixedVariables(names: readonly string[]): string[] {
+  return names.filter((name) => name.startsWith('UNSET_'));
 }
 
 function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOperations {
@@ -651,6 +662,9 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
     ensureManagedCommits: vi.fn(async () => {
       throw new Error('ensureManagedCommits should not be called without a scripted GitHub entry');
     }),
+    checkGitHubRepository: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    isGitRepository: vi.fn(async () => true),
+    unsetVariables: vi.fn(unsetPrefixedVariables),
     draftCriteria: vi.fn(async () => {
       throw new Error(
         'draftCriteria should not be called without a resolved reference and a declared criteria role',
@@ -2610,6 +2624,136 @@ describe('tevu CLI', () => {
       expect(clack.state.rejections).toEqual([
         { kind: 'text', message: 'GitHub repository', reason: GITHUB_GRAMMAR_MESSAGE },
       ]);
+      expect(operations.checkGitHubRepository).toHaveBeenCalledExactlyOnceWith({
+        host: 'github.com',
+        owner: 'octo',
+        repo: 'app',
+      });
+    });
+
+    it('warns and asks the GitHub repository again, filled in, when it cannot be read', async () => {
+      const checkGitHubRepository = vi
+        .fn<ProgramOperations['checkGitHubRepository']>()
+        .mockResolvedValueOnce({
+          ok: false,
+          error: {
+            kind: 'ManagedCloneError',
+            operation: 'ls-remote',
+            repository: 'github.com/octo/missing',
+            reason: 'git ls-remote exited with code 128: repository not found',
+          },
+        })
+        .mockResolvedValueOnce({ ok: true, value: undefined });
+      const operations = createOperations({
+        configExists: vi.fn(async () => false),
+        checkGitHubRepository,
+      });
+      scriptAnswers(
+        ...BOOTSTRAP_ANSWERS.slice(0, 10),
+        'github',
+        'octo/missing',
+        'octo/app',
+        clack.CANCEL,
+      );
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(130);
+      expect(clack.state.logs).toContainEqual({
+        kind: 'warn',
+        message: [
+          "Can't read octo/missing from GitHub.",
+          'reading github.com/octo/missing failed: git ls-remote exited with code 128: repository not found',
+          'Fix the repository below. Press Enter to retry, or Ctrl-C to cancel.',
+        ].join('\n'),
+      });
+      expect(
+        clack.state.prompts
+          .filter((prompt) => prompt.message === 'GitHub repository')
+          .map((prompt) => prompt.initialValue),
+      ).toEqual([undefined, 'octo/missing']);
+      expect(checkGitHubRepository).toHaveBeenCalledTimes(2);
+      expect(clack.state.prompts.at(-1)?.message).toBe('Add another repository?');
+    });
+
+    it('cancels without saving when the GitHub repository read is cancelled', async () => {
+      const operations = createOperations({
+        configExists: vi.fn(async () => false),
+        checkGitHubRepository: vi.fn(async () => ({
+          ok: false as const,
+          error: { kind: 'CancellationError' as const, activeCaseIds: [] },
+        })),
+      });
+      scriptAnswers(...BOOTSTRAP_ANSWERS.slice(0, 10), 'github', 'octo/app');
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(130);
+      expect(operations.createTask).not.toHaveBeenCalled();
+      expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+    });
+
+    it('warns and asks the local path again, filled in, until it lies in a Git repository', async () => {
+      const isGitRepository = vi
+        .fn<ProgramOperations['isGitRepository']>()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      const operations = createOperations({
+        configExists: vi.fn(async () => false),
+        isGitRepository,
+      });
+      scriptAnswers(...BOOTSTRAP_ANSWERS.slice(0, 12), '../repos/alpha-fixed', clack.CANCEL);
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(130);
+      expect(clack.state.logs).toContainEqual({
+        kind: 'warn',
+        message: [
+          "../repos/alpha isn't a Git repository.",
+          'Fix the path below. Press Enter to retry, or Ctrl-C to cancel.',
+        ].join('\n'),
+      });
+      expect(
+        clack.state.prompts
+          .filter((prompt) => prompt.message === 'Local path')
+          .map((prompt) => prompt.initialValue),
+      ).toEqual([undefined, '../repos/alpha']);
+      expect(isGitRepository.mock.calls).toEqual([
+        ['tevu.yaml', '../repos/alpha'],
+        ['tevu.yaml', '../repos/alpha-fixed'],
+      ]);
+      expect(clack.state.prompts.at(-1)?.message).toBe('Add another repository?');
+    });
+
+    it('rejects Jira credential variables not set in this terminal and asks again', async () => {
+      const operations = createOperations({ configExists: vi.fn(async () => false) });
+      scriptAnswers(
+        ...BOOTSTRAP_ANSWERS.slice(0, 8),
+        true,
+        'https://example.atlassian.net',
+        { invalid: 'UNSET_EMAIL' },
+        'JIRA_EMAIL',
+        { invalid: 'UNSET_TOKEN' },
+        'JIRA_TOKEN',
+        clack.CANCEL,
+      );
+
+      const { code } = await runCli(['task', 'add'], { operations });
+
+      expect(code).toBe(130);
+      expect(clack.state.rejections).toEqual([
+        {
+          kind: 'text',
+          message: 'Jira email variable',
+          reason: `"UNSET_EMAIL" isn't set in this terminal`,
+        },
+        {
+          kind: 'text',
+          message: 'Jira token variable',
+          reason: `"UNSET_TOKEN" isn't set in this terminal`,
+        },
+      ]);
     });
 
     it('re-asks the Repository select on a ManagedCloneError, keeping every earlier answer (AC-9)', async () => {
@@ -3695,6 +3839,22 @@ describe('tevu CLI', () => {
           },
         },
         {
+          description: 'a secret name not set in this terminal',
+          answers: [{ invalid: 'KEY_A UNSET_B' }, 'KEY_A', ''],
+          rejection: {
+            message: 'Secret variable names',
+            reason: `"UNSET_B" isn't set in this terminal`,
+          },
+        },
+        {
+          description: 'a non-secret name not set in this terminal',
+          answers: ['', { invalid: 'UNSET_PLAIN' }, 'PLAIN'],
+          rejection: {
+            message: 'Non-secret variable names',
+            reason: `"UNSET_PLAIN" isn't set in this terminal`,
+          },
+        },
+        {
           description: 'a name the isolation contract fixes',
           answers: [{ invalid: 'PATH' }, '', ''],
           rejection: {
@@ -3951,6 +4111,30 @@ describe('tevu CLI', () => {
         ]);
         expect(requireCreateTaskCall(operations).task.checks.acceptance[0]).toMatchObject({
           run: 'npm test',
+        });
+      });
+
+      it('rejects a check variable not set in this terminal and asks again', async () => {
+        const operations = createOperations();
+        scriptAnswers(
+          ...taskAnswersWithAcceptanceCheck(
+            'repo-1',
+            commandCheckAnswers({ variables: [{ invalid: 'CHECK_A UNSET_B' }, 'CHECK_A'] }),
+          ),
+          true,
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.rejections).toEqual([
+          {
+            kind: 'text',
+            message: 'Check variables',
+            reason: `"UNSET_B" isn't set in this terminal`,
+          },
+        ]);
+        expect(requireCreateTaskCall(operations).task.checks.acceptance[0]).toMatchObject({
+          env: ['CHECK_A'],
         });
       });
     });
@@ -4901,6 +5085,11 @@ describe('tevu CLI', () => {
           name: 'a Jira credential variable',
           answer: 'JIRA_TOKEN',
           reason: 'Jira credential variables must not also be passed to the agent',
+        },
+        {
+          name: 'a variable not set in this terminal',
+          answer: 'UNSET_KEY',
+          reason: `"UNSET_KEY" isn't set in this terminal`,
         },
       ])('rejects $name as the key variable and asks again', async ({ answer, reason }) => {
         const operations = operationsWithModelCheck({

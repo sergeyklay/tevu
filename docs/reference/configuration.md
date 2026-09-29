@@ -497,7 +497,7 @@ Each import makes one `gh issue view` call with a 30-second limit and no retries
 
 | Command | Network use |
 | --- | --- |
-| `tevu task add` | Jira and gh as described above; clone and fetch for a selected GitHub repository entry; with `roles.criteria` declared and a reference solution, one more `gh api` call for a pull-request reference's diff, and one model session to draft criteria |
+| `tevu task add` | Jira and gh as described above; clone and fetch for a selected GitHub repository entry; with `roles.criteria` declared and a reference solution, one more `gh api` call for a pull-request reference's diff, and one model session to draft criteria; a `git ls-remote` for each GitHub repository answer |
 | `tevu run`, `tevu run --dry-run` | Preparation clone and fetch, only for a missing clone or commit; model sessions in `run` only |
 | `tevu validate`, `tevu assess`, `tevu report`, `tevu config example` | None from these commands themselves; `tevu validate` starts `gh` locally with `--version` only, when `gh` is a case executable (see [Case executables](#case-executables)) |
 
