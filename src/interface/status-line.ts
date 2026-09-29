@@ -17,8 +17,8 @@ export type StatusLine = {
 
 /** The status line as an open prompt sees it. */
 export type StatusLineDisplay = {
-  /** The status line's row for a frame drawn in `state`. */
-  row(state: State, output: Writable): string;
+  /** The status line's row for a frame drawn in `state`; `idleText` shows while no message is shown. */
+  row(state: State, output: Writable, idleText: string): string;
   /** Redraws the Clack prompt open on `output` after each message change until the returned function runs. */
   follow(output: Writable): () => void;
 };
@@ -59,14 +59,11 @@ export function createStatusLine(): StatusLine & StatusLineDisplay {
       notifyFollowers();
       return message.handle;
     },
-    row(state, output) {
+    row(state, output, idleText) {
       if (state === 'submit' || state === 'cancel') {
         return '';
       }
-      if (shown === undefined) {
-        return '\n';
-      }
-      return `  ${styleText('dim', shown.text, { stream: output })}\n`;
+      return `  ${styleText('dim', shown?.text ?? idleText, { stream: output })}\n`;
     },
     follow(output) {
       // Clack's Prompt.prompt() redraws on its output's `resize` event and offers no public redraw.
