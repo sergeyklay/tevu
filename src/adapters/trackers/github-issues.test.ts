@@ -588,8 +588,6 @@ function buildCommitNode(oid: string, parentOids: readonly string[] = []): unkno
 type PullRequestPageOverrides = {
   number?: number;
   url?: string;
-  title?: unknown;
-  body?: unknown;
   state?: unknown;
   headRefOid?: unknown;
   baseRefName?: unknown;
@@ -607,8 +605,6 @@ function buildPullRequestPage(overrides: PullRequestPageOverrides = {}): unknown
         pullRequest: {
           number: overrides.number ?? 42,
           url: overrides.url ?? 'https://github.com/octo/repo/pull/42',
-          title: overrides.title === undefined ? 'Add export button' : overrides.title,
-          body: overrides.body === undefined ? 'Users need an export button' : overrides.body,
           state: overrides.state ?? 'OPEN',
           headRefOid: overrides.headRefOid ?? HEAD_HASH,
           baseRefName: overrides.baseRefName ?? 'main',
@@ -690,6 +686,21 @@ describe('createGitHubPullRequestReader reference grammar', () => {
     expect(request?.argv.some((token) => token.startsWith('query='))).toBe(true);
   });
 
+  it('does not select the pull request title or body in the query', async () => {
+    const runGh = vi.fn(
+      fakeRun(buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage()]) })),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    await reader.readPullRequest('octo/repo#42');
+
+    const query = vi
+      .mocked(runGh)
+      .mock.calls[0]?.[0].argv.find((token) => token.startsWith('query='));
+    expect(query).toBeDefined();
+    expect(query).not.toMatch(/\b(title|body)\b/);
+  });
+
   it('calls runGh at most once per read', async () => {
     const runGh = vi.fn(
       fakeRun(buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage()]) })),
@@ -724,8 +735,6 @@ describe('createGitHubPullRequestReader decoding', () => {
     expect(snapshot).toEqual({
       key: 'octo/repo#42',
       url: 'https://github.com/octo/repo/pull/42',
-      title: 'Add export button',
-      body: 'Users need an export button',
       state: 'open',
       targetBranch: 'main',
       targetTip: TARGET_TIP_HASH,
@@ -736,39 +745,26 @@ describe('createGitHubPullRequestReader decoding', () => {
     });
   });
 
-  it.each([
-    { field: 'title', overrides: { title: 42 } },
-    { field: 'body', overrides: { body: 42 } },
-  ])('fails field validation when $field is not a string', async ({ field, overrides }) => {
-    const runGh = fakeRun(
-      buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage(overrides)]) }),
-    );
+  it('decodes a page without a title or body into a snapshot holding exactly the fields the reference needs', async () => {
+    const runGh = fakeRun(buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage()]) }));
     const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
 
-    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+    const snapshot = expectPullRequestOk(await reader.readPullRequest('octo/repo#42'));
 
-    expect(error.reason).toBe(
-      `unexpected response from gh: field "${field}" is missing or invalid`,
+    expect(Object.keys(snapshot).sort()).toEqual(
+      [
+        'key',
+        'url',
+        'state',
+        'targetBranch',
+        'targetTip',
+        'headCommit',
+        'mergeCommit',
+        'mergeability',
+        'commits',
+      ].sort(),
     );
   });
-
-  it.each(['title', 'body'] as const)(
-    'fails field validation when %s is missing entirely',
-    async (field) => {
-      const page = buildPullRequestPage() as {
-        data: { repository: { pullRequest: Record<string, unknown> } };
-      };
-      delete page.data.repository.pullRequest[field];
-      const runGh = fakeRun(buildLaunchedResult({ stdout: pagesStdout([page]) }));
-      const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
-
-      const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
-
-      expect(error.reason).toBe(
-        `unexpected response from gh: field "${field}" is missing or invalid`,
-      );
-    },
-  );
 
   it("keeps a merged pull request's merge commit only when state is merged", async () => {
     const runGh = fakeRun(
