@@ -595,6 +595,9 @@ function createHarness(config: TevuConfig) {
       }
       return { ok: true, value: { agent: 'fake-agent', configurationFiles: [], findings: [] } };
     },
+    async inspectOperatorProvider() {
+      return { ok: true, value: { defined: false } };
+    },
     async listModels() {
       return { outcome: 'listed', models: [] };
     },
@@ -802,6 +805,9 @@ function createHarness(config: TevuConfig) {
         return { ok: false, error: environmentState.snapshotParentError };
       }
       return { ok: true, value: environmentState.snapshotValue };
+    },
+    unsetVariables() {
+      return [];
     },
     async createCaseEnvironments(workspace, snapshot) {
       timeline.push(`environments:${workspace.caseId}`);

@@ -16,10 +16,11 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import process from 'node:process';
 import { execa } from 'execa';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createCaseExecutableAdapter,
+  createEnvironmentAdapter,
   createPrerequisiteAdapter,
   runManagedProcess,
 } from './process';
@@ -760,5 +761,31 @@ describe('createCaseExecutableAdapter', () => {
         });
       });
     });
+  });
+});
+
+describe('createEnvironmentAdapter unsetVariables', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('returns the unset names in input order and skips a set name and an empty one', () => {
+    vi.stubEnv('TEVU_TEST_SET', 'value');
+    vi.stubEnv('TEVU_TEST_EMPTY', '');
+    vi.stubEnv('TEVU_TEST_UNSET_B', undefined);
+    vi.stubEnv('TEVU_TEST_UNSET_A', undefined);
+
+    const unset = createEnvironmentAdapter().unsetVariables([
+      'TEVU_TEST_UNSET_B',
+      'TEVU_TEST_SET',
+      'TEVU_TEST_UNSET_A',
+      'TEVU_TEST_EMPTY',
+    ]);
+
+    expect(unset).toEqual(['TEVU_TEST_UNSET_B', 'TEVU_TEST_UNSET_A']);
+  });
+
+  it('returns nothing for no names', () => {
+    expect(createEnvironmentAdapter().unsetVariables([])).toEqual([]);
   });
 });

@@ -12,10 +12,16 @@
 import { durationMs } from '@/config/schema';
 
 import type {
+  AgentAdapter,
+  AgentConfigurationFile,
+  EnvironmentAdapter,
   EnvironmentVariableNames,
+  GitWorkspaceAdapter,
   ModelCallDependencies,
+  ModelListing,
   ModelRoleCallRequest,
   ModelRoleCallResult,
+  ParentEnvironmentSnapshot,
   ProviderSnapshot,
   TevuError,
   TevuResult,
@@ -186,4 +192,60 @@ export async function callModelRole(
       retainedDirectory: removal.ok ? null : environment.rootDirectory,
     },
   };
+}
+
+/**
+ * Outcome of listing models in a new call environment. `retainedDirectory`
+ * names the environment's root only when removing it failed.
+ */
+export type CallEnvironmentListing =
+  | { prepared: true; listing: ModelListing; retainedDirectory: string | null }
+  | { prepared: false; reason: string; retainedDirectory: string | null };
+
+/**
+ * Lists the models `adapter` resolves in a new model-call environment, then
+ * removes the environment on every path. The listing runs in an empty Git
+ * repository, the only working directory it sees.
+ */
+export async function listModelsInCallEnvironment(
+  adapter: AgentAdapter,
+  setup: {
+    snapshot: ParentEnvironmentSnapshot;
+    agentVariables: { secrets: readonly string[]; env: readonly string[] };
+    configurationFiles: readonly AgentConfigurationFile[];
+    cancellation?: AbortSignal;
+  },
+  dependencies: {
+    environments: EnvironmentAdapter;
+    git: Pick<GitWorkspaceAdapter, 'initializeEmptyRepository'>;
+  },
+): Promise<CallEnvironmentListing> {
+  const created = await dependencies.environments.createModelCallEnvironment(
+    setup.snapshot,
+    setup.agentVariables,
+    setup.configurationFiles,
+  );
+  if (!created.ok) {
+    return {
+      prepared: false,
+      reason: `${created.error.operation}: ${created.error.reason}`,
+      retainedDirectory: null,
+    };
+  }
+  const environment = created.value;
+  const dispose = async (): Promise<string | null> =>
+    (await environment.dispose()).ok ? null : environment.rootDirectory;
+
+  const initialized = await dependencies.git.initializeEmptyRepository(
+    environment.workingDirectory,
+  );
+  if (!initialized.ok) {
+    return {
+      prepared: false,
+      reason: `${initialized.error.operation}: ${initialized.error.reason}`,
+      retainedDirectory: await dispose(),
+    };
+  }
+  const listing = await adapter.listModels(environment, setup.cancellation);
+  return { prepared: true, listing, retainedDirectory: await dispose() };
 }

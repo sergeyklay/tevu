@@ -276,7 +276,7 @@ const JiraTrackerSettingsSchema = z.strictObject({
   token: VariableReferenceSchema,
 });
 
-/** Field-level materialized schema mirroring `SetupCommand`; the same shape as `CommandCheck`'s `run` field. */
+/** Field-level materialized schema mirroring `SetupCommand`; the same shape as the array form of a check's `run`. */
 const SetupCommandSchema = z.tuple([z.string().min(1)], z.string());
 
 const RawRepositorySetupShape = z.strictObject({
@@ -530,10 +530,26 @@ const RestorePatternSchema = z
     'restore pattern must be relative to the repository root, without a leading / or a .. segment',
   );
 
+const CHECK_RUN_MESSAGE =
+  'run must be a non-blank command string or an array starting with a non-empty executable';
+const CheckRunStringSchema = z.string().refine((value) => value.trim().length > 0);
+
+/**
+ * A command check's `run`: a non-blank command line for `/bin/sh -c`, stored
+ * as written, or an executable followed by literal arguments. A custom check
+ * keeps every rejection to one finding at `run`, which a union would split
+ * into nested branch errors.
+ */
+const CheckRunSchema = z.custom<string | [string, ...string[]]>(
+  (value) =>
+    CheckRunStringSchema.safeParse(value).success || SetupCommandSchema.safeParse(value).success,
+  { error: CHECK_RUN_MESSAGE },
+);
+
 const RawCheckShape = z.strictObject({
   id: IdSchema,
   description: z.string(),
-  run: z.tuple([z.string().min(1)], z.string()).optional(),
+  run: CheckRunSchema.optional(),
   manual: z.boolean().optional(),
   timeout: DurationSchema.optional(),
   exit_codes: z.array(z.int()).min(1).optional(),
@@ -586,7 +602,7 @@ type PreManualCheck = { id: string; description: string; manual: true; required:
 type PreCommandCheck = {
   id: string;
   description: string;
-  run: [string, ...string[]];
+  run: string | [string, ...string[]];
   timeout?: string;
   exit_codes: number[];
   env: string[];

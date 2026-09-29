@@ -36,6 +36,7 @@ import { assessCase, readAssessmentContext, rebuildReport } from '@/application/
 import { createTask } from '@/application/create-task';
 import { draftCriteria } from '@/application/draft-criteria';
 import { ensureManagedCommits, prepareManagedRepositories } from '@/application/managed-clone';
+import { checkModelAccess, inspectModelProvider, probeAgent } from '@/application/model-access';
 import { resolveReferenceSolution } from '@/application/reference-solution';
 import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
 import { validateConfig } from '@/application/validate';
@@ -47,6 +48,7 @@ import { runProgram } from '@/interface/program';
 
 import type { JiraCloudSettings } from '@/adapters/trackers/jira-cloud';
 import type { ManagedCloneDependencies } from '@/application/managed-clone';
+import type { ModelAccessDependencies } from '@/application/model-access';
 import type {
   AgentRegistry,
   ArtifactStore,
@@ -171,6 +173,13 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       ],
     ]);
 
+  const modelAccess = (): ModelAccessDependencies => ({
+    agentsFor,
+    environments,
+    git: createGit(),
+    cancellation,
+  });
+
   const storeFor = (config: TevuConfig): ArtifactStore =>
     createArtifactStore({ artifactsDirectory: config.run.output_dir, redact: registry.redact });
 
@@ -232,6 +241,11 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
         redact: registry.redact,
         cancellation,
       }),
+    probeAgent: (configPath, command) => probeAgent({ configPath, command }, modelAccess()),
+    inspectModelProvider: (configPath, agent, model) =>
+      inspectModelProvider({ configPath, agent, model }, modelAccess()),
+    checkModelAccess: (configPath, agent, model) =>
+      checkModelAccess({ configPath, agent, model }, modelAccess()),
     prepareRepositories: (config, onProgress) =>
       prepareManagedRepositories(config, managedCloneDependencies(onProgress)),
     createTask: (input) =>
@@ -378,6 +392,7 @@ function wrapEnvironmentAdapter(
       }
       return snapshot;
     },
+    unsetVariables: (names) => adapter.unsetVariables(names),
     createCaseEnvironments: (workspace, snapshot, names, agent, configurationFiles) =>
       adapter.createCaseEnvironments(workspace, snapshot, names, agent, configurationFiles),
     createModelCallEnvironment: (snapshot, agentVariables, configurationFiles) =>

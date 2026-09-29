@@ -252,6 +252,9 @@ function buildFakeAgentAdapter(
     async readProviders() {
       return { ok: true, value: { agent: 'fake-agent', configurationFiles: [], findings: [] } };
     },
+    async inspectOperatorProvider() {
+      return { ok: true, value: { defined: false } };
+    },
     async listModels() {
       return { outcome: 'listed', models: [] };
     },
@@ -707,6 +710,9 @@ describe('runBenchmark grading in the case flow', () => {
       },
       async readProviders() {
         return { ok: true, value: { agent: 'fake-agent', configurationFiles: [], findings: [] } };
+      },
+      async inspectOperatorProvider() {
+        return { ok: true, value: { defined: false } };
       },
       async listModels() {
         return { outcome: 'listed', models: [] };

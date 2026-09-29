@@ -15,6 +15,7 @@ import { runProgram } from '@/interface/program';
 
 import { composeProgramDependencies, ignoreClosedReader } from './index';
 
+import type { AgentDraft } from '@/application/model-access';
 import type { TevuConfigInput } from '@/config/schema';
 
 function writeError(code: string): NodeJS.ErrnoException {
@@ -267,6 +268,119 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     );
     expect(modelFindings).toEqual([]);
     expect(outcome.value.valid).toBe(true);
+  });
+
+  describe('model access operations', () => {
+    const UNSET_VARIABLE = 'TEVU_INDEX_UNSET_KEY';
+    const OPERATOR_LITERAL = 'placeholder';
+    const HOST_SECRET = 'synthetic-acme-secret-value';
+
+    function buildAgent(executable: string, overrides: Partial<AgentDraft> = {}): AgentDraft {
+      return { command: executable, secrets: [], env: [], providers: [], ...overrides };
+    }
+
+    it('reports a command that starts as usable and a missing one as a prerequisite failure', async () => {
+      const executable = await writeFakeExecutable();
+      const { operations } = composeProgramDependencies();
+      const configPath = join(testDirectory, 'tevu.yaml');
+
+      const good = await operations.probeAgent(configPath, executable);
+      const missing = await operations.probeAgent(configPath, join(testDirectory, 'no-such-agent'));
+
+      expect(good.ok).toBe(true);
+      expect(missing).toMatchObject({ ok: false, error: { kind: 'PrerequisiteError' } });
+    });
+
+    it('reads the operator directory from the environment and reports names and states only', async () => {
+      const executable = await writeFakeExecutable();
+      await writeOperatorFixture();
+      const { operations } = composeProgramDependencies();
+      const configPath = join(testDirectory, 'tevu.yaml');
+
+      const defined = await operations.inspectModelProvider(
+        configPath,
+        buildAgent(executable),
+        'acme/synthetic-model-a',
+      );
+      const undefinedProvider = await operations.inspectModelProvider(
+        configPath,
+        buildAgent(executable),
+        'other/synthetic-model-a',
+      );
+
+      expect(defined).toEqual({
+        ok: true,
+        value: {
+          provider: 'acme',
+          definition: { defined: true, keyVariables: [], otherVariables: [], apiKey: 'value' },
+        },
+      });
+      expect(undefinedProvider).toEqual({
+        ok: true,
+        value: { provider: 'other', definition: { defined: false } },
+      });
+      expect(JSON.stringify(defined)).not.toContain(OPERATOR_LITERAL);
+      expect(JSON.stringify(defined)).not.toContain(HOST_SECRET);
+    });
+
+    it('lists a copied provider model, refuses one the listing omits, and leaks no value', async () => {
+      const executable = await writeFakeExecutable();
+      await writeOperatorFixture();
+      const { operations } = composeProgramDependencies();
+      const configPath = join(testDirectory, 'tevu.yaml');
+      const agent = buildAgent(executable, {
+        secrets: ['ACME_KEY'],
+        providers: [{ id: 'acme', api_key: 'ACME_KEY' }],
+      });
+
+      const listed = await operations.checkModelAccess(configPath, agent, 'acme/synthetic-model-a');
+      const notListed = await operations.checkModelAccess(configPath, agent, 'acme/unknown-model');
+
+      expect(listed).toEqual({ status: 'listed', unsetVariables: [], retainedDirectory: null });
+      expect(notListed).toEqual({
+        status: 'not-listed',
+        unsetVariables: [],
+        retainedDirectory: null,
+      });
+      expect(JSON.stringify([listed, notListed])).not.toContain(HOST_SECRET);
+      expect(JSON.stringify([listed, notListed])).not.toContain(OPERATOR_LITERAL);
+    });
+
+    it('does not list a provider the agent block leaves out', async () => {
+      const executable = await writeFakeExecutable();
+      await writeOperatorFixture();
+      const { operations } = composeProgramDependencies();
+
+      const outcome = await operations.checkModelAccess(
+        join(testDirectory, 'tevu.yaml'),
+        buildAgent(executable),
+        'acme/synthetic-model-a',
+      );
+
+      expect(outcome).toMatchObject({ status: 'not-listed' });
+    });
+
+    it("names a declared variable that tevu's own environment leaves unset", async () => {
+      const executable = await writeFakeExecutable();
+      await writeOperatorFixture();
+      delete process.env[UNSET_VARIABLE];
+      const { operations } = composeProgramDependencies();
+
+      const outcome = await operations.checkModelAccess(
+        join(testDirectory, 'tevu.yaml'),
+        buildAgent(executable, {
+          secrets: ['ACME_KEY', UNSET_VARIABLE],
+          providers: [{ id: 'acme', api_key: 'ACME_KEY' }],
+        }),
+        'acme/synthetic-model-a',
+      );
+
+      expect(outcome).toEqual({
+        status: 'listed',
+        unsetVariables: [UNSET_VARIABLE],
+        retainedDirectory: null,
+      });
+    });
   });
 
   it("passes the real SHA-256 digest function as executeBenchmark's textDigest", async () => {

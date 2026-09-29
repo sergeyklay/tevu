@@ -9,7 +9,10 @@
  * adapter, filesystem, Git, or Jira transport enters this module.
  */
 
-import { confirm, intro, isCancel, log, note, select, text } from '@clack/prompts';
+import { styleText } from 'node:util';
+import { cancel, confirm, intro, isCancel, log, note, select, text } from '@clack/prompts';
+import stdinDiscarder from 'stdin-discarder';
+import yoctoSpinner from 'yocto-spinner';
 
 import { describeManagedCloneError } from '@/application/managed-clone';
 import { describeReferenceIdentityInText } from '@/application/source-commit-in-prompt';
@@ -29,10 +32,16 @@ import type { AssessableCheckSummary, AssessmentCaseContext } from '@/applicatio
 import type { TaskWizardInput } from '@/application/create-task';
 import type {
   CriteriaDraft,
+  CriteriaDraftFailure,
   CriteriaDraftOutcome,
   CriteriaDraftRequest,
 } from '@/application/draft-criteria';
 import type { ManagedCommitsOutcome } from '@/application/managed-clone';
+import type {
+  AgentDraft,
+  ModelAccessOutcome,
+  ModelProviderInspection,
+} from '@/application/model-access';
 import type { ResolvedReferenceSolution } from '@/application/reference-solution';
 import type {
   CheckInput,
@@ -42,6 +51,8 @@ import type {
   TevuConfigInput,
 } from '@/config/schema';
 import type {
+  AgentCapabilityReport,
+  AgentProviderSetting,
   AssessmentDecision,
   AssessmentInput,
   AssessmentRecord,
@@ -58,10 +69,14 @@ import type {
 import type { CANCEL_SYMBOL, Option } from '@clack/prompts';
 import type { Readable, Writable } from 'node:stream';
 
-/** Interactive streams the wizards prompt on; both must be TTYs. */
+/**
+ * Interactive streams the wizards prompt on; both must be TTYs. A `signal`
+ * makes every question resolve as cancelled once it aborts.
+ */
 type WizardIo = {
   input: Readable & { isTTY?: boolean };
   output: Writable & { isTTY?: boolean };
+  signal?: AbortSignal;
 };
 
 /** Command-line facts the task wizard starts from. */
@@ -74,6 +89,8 @@ export type TaskWizardRequest = {
 /** Injected effects for the task wizard; it performs no write itself. */
 export type TaskWizardDependencies = {
   io: WizardIo;
+  /** Aborts when the operator interrupts the command; an aborted signal cancels every open or next question. */
+  cancellation: AbortSignal;
   /** Reads and validates the existing configuration; `null` means the file is missing and its directory exists. */
   readConfig: () => Promise<
     TevuResult<TevuConfig | null, LoadConfigErrorKind | 'PrerequisiteError'>
@@ -115,6 +132,20 @@ export type TaskWizardDependencies = {
   draftCriteria: (
     request: Omit<CriteriaDraftRequest, 'configPath'>,
   ) => Promise<CriteriaDraftOutcome>;
+  /** Runs the agent's capability probe for an agent command as typed. */
+  probeAgent: (
+    command: string,
+  ) => Promise<TevuResult<AgentCapabilityReport, 'PrerequisiteError' | 'AgentProtocolError'>>;
+  /** Names the provider of a model and reads what the operator's configuration defines for it. */
+  inspectModelProvider: (
+    agent: AgentDraft,
+    model: `${string}/${string}`,
+  ) => Promise<TevuResult<ModelProviderInspection, 'ConfigValidationError'>>;
+  /** Reports whether a model resolves for the agent in an environment built like a case agent's. */
+  checkModelAccess: (
+    agent: AgentDraft,
+    model: `${string}/${string}`,
+  ) => Promise<ModelAccessOutcome>;
 };
 
 /** Error kinds the task wizard can return. */
@@ -166,6 +197,60 @@ function describeManagedCloneOrPrerequisiteFailure(
   return `prerequisite "${error.tool}" is not satisfied; expected ${error.expected}${error.actual === undefined ? '' : `, actual ${error.actual}`}`;
 }
 
+/**
+ * Prints one warning: a headline, detail lines that quote a lower layer's
+ * text unchanged, and an optional next step, all redacted together.
+ */
+function warnLines(
+  io: WizardIo,
+  redact: (textContent: string) => string,
+  lines: { headline: string; details?: readonly string[]; next?: string },
+): void {
+  const text = [
+    lines.headline,
+    ...(lines.details ?? []),
+    ...(lines.next === undefined ? [] : [lines.next]),
+  ].join('\n');
+  log.warn(redact(text), promptOptions(io));
+}
+
+const WAIT_FRAMES = ['◒', '◐', '◓', '◑'];
+
+/**
+ * Runs one asynchronous step between questions behind a spinner row.
+ *
+ * Holds stdin with `stdin-discarder` so keys typed meanwhile never reach the
+ * next question and Ctrl-C arrives as SIGINT, which the command's abort
+ * signal already turns into cancellation. The spinner never installs its own
+ * signal handlers: its default would exit the process before the cancelled
+ * operation cleans up. Both stop in a `finally`, so no exit path leaves the
+ * row, a hidden cursor, or raw mode behind. An aborted signal ends the wizard
+ * whatever the operation returned.
+ */
+async function runWait<T>(io: WizardIo, label: string, operation: () => Promise<T>): Promise<T> {
+  // yocto-spinner joins the frame and the text with one space; Clack's rows use two.
+  const spinner = yoctoSpinner({
+    text: ` ${label}`,
+    stream: io.output,
+    handleSignals: false,
+    color: 'magenta',
+    spinner: { frames: WAIT_FRAMES },
+  });
+  let result: T;
+  try {
+    stdinDiscarder.start();
+    spinner.start();
+    result = await operation();
+  } finally {
+    spinner.stop();
+    stdinDiscarder.stop();
+  }
+  if (io.signal?.aborted === true) {
+    throw new WizardCancelledError();
+  }
+  return result;
+}
+
 /** Internal control-flow sentinel; never crosses the module boundary. */
 class WizardCancelledError extends Error {
   constructor() {
@@ -212,14 +297,19 @@ export async function runTaskWizard(
       },
     ]);
   }
-  const io = dependencies.io;
+  const io: WizardIo = { ...dependencies.io, signal: dependencies.cancellation };
+  const wizardDependencies: TaskWizardDependencies = { ...dependencies, io };
   intro('tevu task add', promptOptions(io));
+  log.message(
+    styleText('dim', 'Press Ctrl-C to cancel.', { stream: io.output }),
+    promptOptions(io),
+  );
   try {
     const bootstrap =
       existing.value === null
-        ? await interviewBootstrap(io, request.jiraIssueKey !== undefined)
+        ? await interviewBootstrap(io, wizardDependencies, request.jiraIssueKey !== undefined)
         : undefined;
-    const input = await interviewTask(request, dependencies, existing.value, bootstrap);
+    const input = await interviewTask(request, wizardDependencies, existing.value, bootstrap);
     if (!input.ok) {
       return input;
     }
@@ -231,7 +321,7 @@ export async function runTaskWizard(
     return input;
   } catch (error) {
     if (error instanceof WizardCancelledError) {
-      log.warn('Task creation cancelled; the configuration is unchanged.', promptOptions(io));
+      cancel('Cancelled. Nothing was saved.', promptOptions(io));
       return cancellationFailure();
     }
     throw error;
@@ -431,53 +521,67 @@ export async function runAssessmentWizard(
 /** Captures every required top-level setting for a missing configuration file. */
 async function interviewBootstrap(
   io: WizardIo,
+  dependencies: TaskWizardDependencies,
   requireJira: boolean,
 ): Promise<Omit<TevuConfigInput, 'version' | 'tasks'>> {
-  log.info(
-    'No configuration file exists yet; capturing the complete configuration first.',
-    promptOptions(io),
-  );
-  const outputDirectory = await askText(io, {
-    message: 'Run output directory (outside every repository, relative to the configuration file)',
+  log.step('New configuration', promptOptions(io));
+  const outputDirectory = await askDefaultedText(io, {
+    message: 'Output directory',
+    defaultValue: 'runs',
     validate: validateNonWhitespace,
   });
-  const concurrency = await askInteger(io, 'Concurrent cases (1-32)', 1, 32);
-  const timeout = await askText(io, {
-    message: 'Agent time limit per case (for example 10m)',
+  const concurrency = await askInteger(io, 'Concurrent cases', 1, 32, 2);
+  const timeout = await askDefaultedText(io, {
+    message: 'Agent time limit',
+    defaultValue: '10m',
     validate: validateDuration,
   });
-  const stopGrace = await askText(io, {
-    message: 'Grace period before a forced stop (for example 3s)',
+  const stopGrace = await askDefaultedText(io, {
+    message: 'Stop grace period',
+    defaultValue: '3s',
     validate: validateDuration,
   });
-  const checkTimeoutRaw = await askText(io, {
-    message: 'Default time limit for command checks (for example 5m; empty to set one per check)',
-    defaultValue: '',
-    validate: (value) =>
-      value === undefined || value.trim().length === 0 ? undefined : validateDuration(value),
+  const checkTimeout = await askDefaultedText(io, {
+    message: 'Check time limit',
+    defaultValue: '5m',
+    validate: validateDuration,
   });
-  const command = await askText(io, {
-    message: `Command for agent "${AGENT_NAMES[0]}" (name on PATH, or a path relative to the configuration file)`,
-    validate: validateNonWhitespace,
-  });
+  const command = await askAgentCommand(io, dependencies);
   const takenNames = new Set<string>();
-  const secrets = await interviewVariableList(io, 'secret', takenNames);
-  const env = await interviewVariableList(io, 'ordinary', takenNames);
+  const secrets = await askVariableNames(io, 'Secret variable names', takenNames);
+  const env = await askVariableNames(io, 'Non-secret variable names', takenNames);
   const agentNames = new Set([...secrets, ...env]);
   const jira = await interviewJiraSettings(io, requireJira, agentNames);
   const repositories = await interviewRepositories(io);
-  const models = await interviewModels(io);
-  const grader = await interviewModelRole(io, 'grader');
-  const criteria = await interviewModelRole(io, 'criteria');
+  const checkState: ModelCheckState = {
+    agent: { command, secrets, env, providers: [] },
+    keys: new Map(),
+    printedUnset: new Set(),
+    jiraNames:
+      jira === undefined
+        ? new Set()
+        : new Set([referencedVariableName(jira.email), referencedVariableName(jira.token)]),
+  };
+  const models = await interviewModels(io, dependencies, checkState);
+  const grader = await interviewModelRole(io, dependencies, checkState, 'grader');
+  const criteria = await interviewModelRole(io, dependencies, checkState, 'criteria');
+  const { agent } = checkState;
   return {
     run: {
       output_dir: outputDirectory,
       concurrency,
       timeout,
       stop_grace: stopGrace,
-      ...(checkTimeoutRaw.trim().length === 0 ? {} : { check_timeout: checkTimeoutRaw.trim() }),
+      check_timeout: checkTimeout.trim(),
     },
-    agents: { [AGENT_NAMES[0]]: { command, secrets, env } },
+    agents: {
+      [AGENT_NAMES[0]]: {
+        command: agent.command,
+        secrets: agent.secrets,
+        env: agent.env,
+        ...(agent.providers.length === 0 ? {} : { providers: agent.providers }),
+      },
+    },
     ...(jira === undefined ? {} : { trackers: { jira } }),
     repositories,
     models,
@@ -492,32 +596,69 @@ async function interviewBootstrap(
   };
 }
 
-/** One role's setup-interview texts: the confirm, the credential info line, and the two follow-up questions. */
+/**
+ * Asks the agent command and probes it behind a spinner, re-asking with the
+ * failed command filled in until the probe passes.
+ */
+async function askAgentCommand(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+): Promise<string> {
+  let command = await askDefaultedText(io, {
+    message: 'Agent command',
+    defaultValue: AGENT_NAMES[0],
+    validate: validateNonWhitespace,
+  });
+  for (;;) {
+    const probed = await runWait(io, `Checking ${command}`, () => dependencies.probeAgent(command));
+    if (probed.ok) {
+      return command;
+    }
+    const detail =
+      probed.error.kind === 'PrerequisiteError'
+        ? `expected ${probed.error.expected}${probed.error.actual === undefined ? '' : `, actual ${probed.error.actual}`}`
+        : probed.error.reason;
+    warnLines(io, dependencies.redact, {
+      headline: `Can't run ${command}.`,
+      details: [detail],
+      next: 'Fix the command below. Press Enter to retry, or Ctrl-C to cancel.',
+    });
+    command = await askText(io, {
+      message: 'Agent command',
+      initialValue: command,
+      validate: validateNonWhitespace,
+    });
+  }
+}
+
+/** One role's setup-interview texts and effort default. */
 type ModelRoleQuestionText = {
   confirm: string;
-  credentialInfo: string;
   modelQuestion: string;
   effortQuestion: string;
+  defaultEffort: string;
 };
 
 const MODEL_ROLE_QUESTION_TEXT: Record<'criteria' | 'grader', ModelRoleQuestionText> = {
   grader: {
-    confirm: 'Declare a grader model for graded checks?',
-    credentialInfo: `The grader's provider credential must be one of the secret variables of agent "${AGENT_NAMES[0]}"; every case agent of "${AGENT_NAMES[0]}" receives it too.`,
-    modelQuestion: 'Grader model (provider/model)',
-    effortQuestion: 'Grader reasoning effort (a variant the agent provides without a repository)',
+    confirm: 'Grade checks with a model?',
+    modelQuestion: 'Grader model',
+    effortQuestion: 'Grader effort',
+    defaultEffort: 'medium',
   },
   criteria: {
-    confirm: 'Declare a criteria model to draft criteria from a reference solution?',
-    credentialInfo: `The criteria model's provider credential must be one of the secret variables of agent "${AGENT_NAMES[0]}"; every case agent of "${AGENT_NAMES[0]}" receives it too.`,
-    modelQuestion: 'Criteria model (provider/model)',
-    effortQuestion: 'Criteria reasoning effort (a variant the agent provides without a repository)',
+    confirm: 'Draft criteria with a model?',
+    modelQuestion: 'Criteria model',
+    effortQuestion: 'Criteria effort',
+    defaultEffort: 'high',
   },
 };
 
 /** Captures an optional `roles.<roleName>` declaration during bootstrap; absent on decline. */
 async function interviewModelRole(
   io: WizardIo,
+  dependencies: TaskWizardDependencies,
+  checkState: ModelCheckState,
   roleName: 'criteria' | 'grader',
 ): Promise<{ model: `${string}/${string}`; effort: string } | undefined> {
   const texts = MODEL_ROLE_QUESTION_TEXT[roleName];
@@ -525,53 +666,292 @@ async function interviewModelRole(
   if (!wantsRole) {
     return undefined;
   }
-  log.info(texts.credentialInfo, promptOptions(io));
-  const model = await askModelRoleIdentifier(io, texts.modelQuestion);
-  const effort = await askText(io, {
+  const model = await askCheckedModel(io, dependencies, texts.modelQuestion, checkState);
+  const effort = await askDefaultedText(io, {
     message: texts.effortQuestion,
+    defaultValue: texts.defaultEffort,
     validate: validateNonWhitespace,
   });
   return { model, effort };
 }
 
-/** Asks a model-role question, re-prompting until the answer is a valid `provider/model` identifier. */
-async function askModelRoleIdentifier(
+type MutableAgentDraft = {
+  command: string;
+  secrets: string[];
+  env: string[];
+  providers: AgentProviderSetting[];
+};
+
+/** What the model check keeps across the setup interview's model questions. */
+type ModelCheckState = {
+  /** The agent block every accepted model so far needs. */
+  agent: MutableAgentDraft;
+  /** The recorded API key variable answer per provider; an empty answer is a recorded answer. */
+  keys: Map<string, string>;
+  /** Unset variables already reported, so each name prints once per run. */
+  printedUnset: Set<string>;
+  /** The variables the Jira answers name; a copied provider never receives them. */
+  jiraNames: ReadonlySet<string>;
+};
+
+/** Why one model answer was refused; each variant becomes one warning. */
+type ModelCheckFailure =
+  | { kind: 'config-unreadable'; findings: readonly ValidationFinding[] }
+  | { kind: 'provider-rejected'; provider: string; findings: readonly ValidationFinding[] }
+  | { kind: 'not-listed'; model: string }
+  | { kind: 'listing-failed'; detail: string };
+
+const RETRY_NEXT_STEP = 'Press Enter to retry, or Ctrl-C to cancel.';
+
+/**
+ * Asks a model question and checks the answer, re-asking with the refused
+ * answer filled in until the agent lists the model. Copies the answer's
+ * provider from the operator's configuration into the agent block on the way.
+ */
+async function askCheckedModel(
   io: WizardIo,
+  dependencies: TaskWizardDependencies,
   message: string,
+  state: ModelCheckState,
 ): Promise<`${string}/${string}`> {
+  let answer = await askText(io, { message, validate: validateModel });
   for (;;) {
-    const value = await askText(io, { message, validate: validateModel });
-    if (isModelIdentifier(value)) {
-      return value;
+    if (isModelIdentifier(answer)) {
+      const failure = await checkRound(io, dependencies, state, answer);
+      if (failure === undefined) {
+        return answer;
+      }
+      warnLines(io, dependencies.redact, describeModelCheckFailure(failure));
+    }
+    answer = await askText(io, { message, initialValue: answer, validate: validateModel });
+  }
+}
+
+/**
+ * Checks one model answer against a candidate copy of the agent block, which
+ * replaces the accepted block only when the answer passes, so a refused
+ * answer leaves no provider or variable behind. Returns `undefined` when the
+ * answer is accepted.
+ */
+async function checkRound(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+  state: ModelCheckState,
+  model: `${string}/${string}`,
+): Promise<ModelCheckFailure | undefined> {
+  let hasAskedKey = false;
+  for (;;) {
+    const candidate: MutableAgentDraft = {
+      command: state.agent.command,
+      secrets: [...state.agent.secrets],
+      env: [...state.agent.env],
+      providers: state.agent.providers.map((provider) => ({ ...provider })),
+    };
+    const inspected = await runWait(io, 'Checking model', () =>
+      dependencies.inspectModelProvider(candidate, model),
+    );
+    if (!inspected.ok) {
+      return { kind: 'config-unreadable', findings: inspected.error.findings };
+    }
+    const { provider, definition } = inspected.value;
+    if (definition.defined) {
+      if (!candidate.providers.some((entry) => entry.id === provider)) {
+        candidate.providers.push({ id: provider });
+      }
+      for (const name of [...definition.keyVariables, ...definition.otherVariables]) {
+        declareSecret(state, candidate, name);
+      }
+      const isKeyUnknown = definition.keyVariables.length === 0 || definition.apiKey === 'value';
+      if (isKeyUnknown && !state.keys.has(provider)) {
+        state.keys.set(provider, await askKeyVariable(io, state, provider, undefined));
+      }
+    }
+    const key = state.keys.get(provider) ?? '';
+    if (key !== '') {
+      const entry = candidate.providers.find((candidateEntry) => candidateEntry.id === provider);
+      if (definition.defined && entry !== undefined) {
+        entry.api_key = key;
+      }
+      declareSecret(state, candidate, key);
+    }
+
+    const outcome = await runWait(io, 'Checking model', () =>
+      dependencies.checkModelAccess(candidate, model),
+    );
+    if (outcome.status === 'cancelled') {
+      throw new WizardCancelledError();
+    }
+    if (outcome.status === 'provider-rejected') {
+      return { kind: 'provider-rejected', provider, findings: outcome.findings };
+    }
+    if (outcome.status === 'listing-failed') {
+      return { kind: 'listing-failed', detail: outcome.detail };
+    }
+    if (outcome.retainedDirectory !== null) {
+      warnRetainedDirectory(io, dependencies.redact, outcome.retainedDirectory);
+    }
+    if (
+      outcome.status === 'not-listed' &&
+      !definition.defined &&
+      outcome.unsetVariables.length > 0
+    ) {
+      warnLines(io, dependencies.redact, {
+        headline: `${model} can't be checked while ${describeUnsetNames(outcome.unsetVariables)} in this terminal, so it is kept as entered.`,
+      });
+      for (const name of outcome.unsetVariables) {
+        state.printedUnset.add(name);
+      }
+      state.agent = candidate;
+      return undefined;
+    }
+    for (const name of outcome.unsetVariables) {
+      if (!state.printedUnset.has(name)) {
+        state.printedUnset.add(name);
+        warnLines(io, dependencies.redact, {
+          headline: `${name} isn't set in this terminal. Runs will need it.`,
+        });
+      }
+    }
+    if (outcome.status === 'listed') {
+      state.agent = candidate;
+      return undefined;
+    }
+    if (definition.defined || hasAskedKey) {
+      return { kind: 'not-listed', model };
+    }
+    const answer = await askKeyVariable(io, state, provider, state.keys.get(provider));
+    state.keys.set(provider, answer);
+    hasAskedKey = true;
+    if (answer === '') {
+      return { kind: 'not-listed', model };
     }
   }
 }
 
-/** Collects one pass-through agent variable list, names only, unique across both lists. */
-async function interviewVariableList(
+/**
+ * Adds `name` to the candidate's secrets unless it is already declared, is
+ * not a variable name, is fixed by the isolation contract, or belongs to the
+ * Jira answers. A skipped name stays visible to the provider reader, which
+ * refuses a definition that references it.
+ */
+function declareSecret(state: ModelCheckState, candidate: MutableAgentDraft, name: string): void {
+  const isDeclarable =
+    !candidate.secrets.includes(name) &&
+    !candidate.env.includes(name) &&
+    validateVariableNameGrammar(name) === undefined &&
+    !isFixedEnvironmentName(name) &&
+    !state.jiraNames.has(name);
+  if (isDeclarable) {
+    candidate.secrets.push(name);
+  }
+}
+
+/** Asks the variable that holds a provider's API key; empty when the operator names none. */
+async function askKeyVariable(
   io: WizardIo,
-  kind: 'secret' | 'ordinary',
+  state: ModelCheckState,
+  provider: string,
+  previous: string | undefined,
+): Promise<string> {
+  const validateName = validateVariableName(new Set(state.agent.env));
+  return askDefaultedText(io, {
+    message: `API key variable for ${provider}`,
+    defaultValue: '',
+    placeholder: 'none',
+    ...(previous === undefined || previous === '' ? {} : { initialValue: previous }),
+    validate: (raw) => {
+      const problem = validateName(raw);
+      if (problem !== undefined) {
+        return problem;
+      }
+      return state.jiraNames.has(raw ?? '')
+        ? 'Jira credential variables must not also be passed to the agent'
+        : undefined;
+    },
+  });
+}
+
+function describeModelCheckFailure(failure: ModelCheckFailure): {
+  headline: string;
+  details: readonly string[];
+  next: string;
+} {
+  switch (failure.kind) {
+    case 'config-unreadable':
+      return {
+        headline: "Can't read your OpenCode config.",
+        details: failure.findings.map((finding) => finding.message),
+        next: `Update your OpenCode settings. ${RETRY_NEXT_STEP}`,
+      };
+    case 'provider-rejected':
+      return {
+        headline: `Can't copy provider ${failure.provider} from your OpenCode config.`,
+        details: failure.findings.map((finding) => finding.message),
+        next: `Update your OpenCode settings. ${RETRY_NEXT_STEP}`,
+      };
+    case 'not-listed':
+      return {
+        headline: `OpenCode can't find ${failure.model}.`,
+        details: [],
+        next: `Update your OpenCode settings or edit the model below. ${RETRY_NEXT_STEP}`,
+      };
+    case 'listing-failed':
+      return {
+        headline: "Can't list OpenCode models.",
+        details: [failure.detail],
+        next: RETRY_NEXT_STEP,
+      };
+  }
+}
+
+/** Warns that removing a temporary directory failed and where its remains are. */
+function warnRetainedDirectory(
+  io: WizardIo,
+  redact: (textContent: string) => string,
+  directory: string,
+): void {
+  warnLines(io, redact, {
+    headline: "Couldn't remove a temporary directory.",
+    details: [directory],
+  });
+}
+
+/**
+ * Asks one pass-through agent variable list, names only.
+ *
+ * Every name follows the single-name rules and must be new across both agent
+ * lists; accepted names join `takenNames` so the next list sees them.
+ */
+async function askVariableNames(
+  io: WizardIo,
+  message: string,
   takenNames: Set<string>,
 ): Promise<string[]> {
-  const names: string[] = [];
-  for (;;) {
-    const wantsEntry = await askConfirm(io, {
-      message:
-        names.length === 0
-          ? `Add a ${kind} variable for the agent${kind === 'secret' ? ' (name only, never the value)' : ''}?`
-          : `Add another ${kind} variable for the agent?`,
-      initialValue: false,
-    });
-    if (!wantsEntry) {
-      return names;
-    }
-    const name = await askText(io, {
-      message: kind === 'secret' ? 'Secret variable name' : 'Variable name',
-      validate: validateVariableName(takenNames),
-    });
+  const validateName = validateVariableName(takenNames);
+  const answer = await askDefaultedText(io, {
+    message,
+    defaultValue: '',
+    placeholder: 'none',
+    validate: (raw) => {
+      const seen = new Set<string>();
+      for (const name of splitNames(raw ?? '')) {
+        const problem = validateName(name);
+        if (problem !== undefined) {
+          return problem;
+        }
+        if (seen.has(name)) {
+          return `"${name}" is listed more than once`;
+        }
+        seen.add(name);
+      }
+      return undefined;
+    },
+  });
+  const names = splitNames(answer);
+  for (const name of names) {
     takenNames.add(name);
-    names.push(name);
   }
+  return names;
 }
 
 /** Captures optional Jira Cloud settings; forced when `task add --jira` started the wizard. */
@@ -583,7 +963,7 @@ async function interviewJiraSettings(
   const wantsJira =
     requireJira ||
     (await askConfirm(io, {
-      message: 'Configure Jira Cloud issue import?',
+      message: 'Import issues from Jira?',
       initialValue: false,
     }));
   if (!wantsJira) {
@@ -600,15 +980,15 @@ async function interviewJiraSettings(
     return undefined;
   };
   const url = await askText(io, {
-    message: 'Jira Cloud site URL (https)',
+    message: 'Jira site URL',
     validate: validateHttpsUrl,
   });
   const email = await askText(io, {
-    message: 'Variable holding the Jira account email',
+    message: 'Jira email variable',
     validate: validateCredentialName,
   });
   const token = await askText(io, {
-    message: 'Variable holding the Jira API token',
+    message: 'Jira token variable',
     validate: validateCredentialName,
   });
   return { url, email: `$${email}`, token: `$${token}` };
@@ -644,31 +1024,30 @@ async function interviewRepositoryEntry(
     validate: validateId(usedIds),
   });
   const source = await askSelect<'path' | 'github'>(io, {
-    message: `Where does tevu read repository "${id}" from?`,
+    message: 'Repository source',
     options: [
       { value: 'path', label: 'Local path' },
-      { value: 'github', label: 'GitHub repository, cloned by tevu' },
+      { value: 'github', label: 'GitHub, cloned by tevu' },
     ],
   });
   if (source === 'path') {
     const path = await askText(io, {
-      message: `Local path of repository "${id}" (relative to the configuration file)`,
+      message: 'Local path',
       validate: validateNonWhitespace,
     });
     return { id, path };
   }
-  const github = await askGitHubRepository(io, id);
+  const github = await askGitHubRepository(io);
   return { id, path: managedCloneLocation(github), github: github.text };
 }
 
 /** Asks a GitHub repository answer, re-prompting with the grammar message until it parses. */
 async function askGitHubRepository(
   io: WizardIo,
-  id: string,
 ): Promise<{ host: string; owner: string; repo: string; text: string }> {
   const text = (
     await askText(io, {
-      message: `GitHub repository of "${id}" (OWNER/REPO, or https://HOST/OWNER/REPO for GitHub Enterprise Server)`,
+      message: 'GitHub repository',
       validate: (value) =>
         parseGitHubRepository((value ?? '').trim()) === null ? GITHUB_GRAMMAR_MESSAGE : undefined,
     })
@@ -681,7 +1060,11 @@ async function askGitHubRepository(
 }
 
 /** Collects at least two model entries during bootstrap. */
-async function interviewModels(io: WizardIo): Promise<ModelDefinitionInput[]> {
+async function interviewModels(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+  checkState: ModelCheckState,
+): Promise<ModelDefinitionInput[]> {
   const models: ModelDefinitionInput[] = [];
   const usedIds = new Set<string>();
   for (;;) {
@@ -689,15 +1072,15 @@ async function interviewModels(io: WizardIo): Promise<ModelDefinitionInput[]> {
       message: 'Model entry ID',
       validate: validateId(usedIds),
     });
-    const model = await askModel(io, id);
+    const model = await askCheckedModel(io, dependencies, 'Model', checkState);
     const effort = await askText(io, {
-      message: `Reasoning effort for "${id}" (passed to the agent verbatim)`,
+      message: 'Reasoning effort',
       validate: validateNonWhitespace,
     });
     usedIds.add(id);
     models.push({ id, model, effort });
     if (models.length < 2) {
-      log.info('A runnable configuration needs at least two model entries.', promptOptions(io));
+      log.info('Add a second model to compare.', promptOptions(io));
       continue;
     }
     const wantsMore = await askConfirm(io, {
@@ -718,6 +1101,7 @@ async function interviewTask(
   bootstrap: Omit<TevuConfigInput, 'version' | 'tasks'> | undefined,
 ): Promise<TevuResult<TaskWizardInput, 'IssueImportError'>> {
   const io = dependencies.io;
+  log.step('New task', promptOptions(io));
   const jiraSettings = existing?.trackers?.jira ?? bootstrap?.trackers?.jira;
   const source = await interviewSource(request, dependencies, jiraSettings);
   if (!source.ok) {
@@ -732,12 +1116,7 @@ async function interviewTask(
   const resolvedReference = await interviewReferenceSolution(io, dependencies, selectedRepository);
   const baseCommitAnswer =
     resolvedReference === undefined || resolvedReference.proposedBase === undefined
-      ? (
-          await askText(io, {
-            message: 'Base commit (a commit from before the fix; resolved and pinned when saved)',
-            validate: validateNonWhitespace,
-          })
-        ).trim()
+      ? (await askText(io, { message: 'Base commit', validate: validateNonWhitespace })).trim()
       : await askBaseCommitWithProposal(io, resolvedReference);
   const baseCommit = await ensureBaseCommitInClone(
     io,
@@ -751,18 +1130,18 @@ async function interviewTask(
     validate: validateId(new Set((existing?.tasks ?? []).map((task) => task.id))),
   });
   const title = await askText(io, {
-    message: 'Task title',
+    message: 'Title',
     ...(source.value.importedTitle === undefined
       ? {}
       : { initialValue: source.value.importedTitle }),
     validate: validateNonWhitespace,
   });
   const description = await askText(io, {
-    message: 'Task description',
+    message: 'Description',
     validate: validateNonWhitespace,
   });
   const prompt = await askText(io, {
-    message: 'Task prompt sent to every model',
+    message: 'Prompt for the models',
     validate: validateNonWhitespace,
   });
   const readiness = await interviewReadiness(io);
@@ -783,6 +1162,7 @@ async function interviewTask(
   const { acceptance, done } = await interviewCriteria(
     io,
     dependencies,
+    request.configPath,
     existing,
     bootstrap,
     resolvedReference,
@@ -790,6 +1170,7 @@ async function interviewTask(
     description,
     usedCheckIds,
     excludedNames,
+    existing?.run.check_timeout ?? bootstrap?.run.check_timeout,
   );
   const task: TaskInput = {
     id: taskId,
@@ -832,15 +1213,15 @@ async function interviewSource(
         : await askSelect<'manual' | 'jira' | 'github'>(io, {
             message: 'Task source',
             options: [
-              { value: 'manual', label: 'Written by hand' },
+              { value: 'manual', label: 'Write it yourself' },
               {
                 value: 'jira',
-                label: 'Jira Cloud import',
+                label: 'Jira issue',
                 ...(jiraSettings === undefined
-                  ? { disabled: true, hint: 'requires trackers.jira' }
+                  ? { disabled: true, hint: "Jira isn't set up" }
                   : {}),
               },
-              { value: 'github', label: 'GitHub issue import' },
+              { value: 'github', label: 'GitHub issue' },
             ],
           });
   if (kind === 'manual') {
@@ -852,11 +1233,13 @@ async function interviewSource(
         request.githubIssueReference ??
         (
           await askText(io, {
-            message: 'GitHub issue (OWNER/REPO#NUMBER or issue URL)',
+            message: 'GitHub issue',
             validate: validateNonWhitespace,
           })
         ).trim();
-      return unwrapImportResult(await dependencies.importGitHubIssue(reference));
+      return unwrapImportResult(
+        await runWait(io, 'Importing issue', () => dependencies.importGitHubIssue(reference)),
+      );
     });
   }
   if (jiraSettings === undefined) {
@@ -881,7 +1264,11 @@ async function interviewSource(
           validate: validateNonWhitespace,
         })
       ).trim();
-    return unwrapImportResult(await dependencies.importJiraIssue(jiraSettings, issueKey));
+    return unwrapImportResult(
+      await runWait(io, 'Importing issue', () =>
+        dependencies.importJiraIssue(jiraSettings, issueKey),
+      ),
+    );
   });
 }
 
@@ -899,7 +1286,7 @@ async function interviewImportedSource(
   const importedAt = dependencies.now().toISOString();
   note(
     dependencies.redact(`${imported.value.summary}\n\n${imported.value.description}`),
-    `Imported ${imported.value.issueKey} (one-time snapshot)`,
+    `Imported ${imported.value.issueKey}`,
     promptOptions(io),
   );
   return {
@@ -926,16 +1313,15 @@ async function interviewRepositorySelection(
   repositories: readonly Pick<RepositoryInput, 'id' | 'path' | 'github'>[],
 ): Promise<{ repo: string; newRepository?: RepositoryDefinition }> {
   const choice = await askSelect<string>(io, {
-    message: 'Task repository',
+    message: 'Repository',
     options: [
       ...repositories.map((repository) => ({
         value: repository.id,
-        label:
-          repository.github === undefined
-            ? `${repository.id} (${repository.path})`
-            : `${repository.id} (GitHub ${repository.github})`,
+        label: repository.id,
+        hint:
+          repository.github === undefined ? (repository.path ?? '') : `GitHub ${repository.github}`,
       })),
-      { value: NEW_REPOSITORY_CHOICE, label: 'Add a new repository' },
+      { value: NEW_REPOSITORY_CHOICE, label: 'Add a repository' },
     ],
   });
   if (choice !== NEW_REPOSITORY_CHOICE) {
@@ -989,10 +1375,10 @@ async function selectTaskRepository(
     if (github === undefined) {
       return { ...selection, selectedRepository };
     }
-    const ensured = await dependencies.ensureManagedCommits(
-      { id: selectedRepository.id, github },
-      [],
-      (line) => log.step(dependencies.redact(line), promptOptions(io)),
+    const ensured = await runWait(io, 'Preparing repository', () =>
+      dependencies.ensureManagedCommits({ id: selectedRepository.id, github }, [], (line) =>
+        log.step(dependencies.redact(line), promptOptions(io)),
+      ),
     );
     if (ensured.ok) {
       return { ...selection, selectedRepository };
@@ -1000,12 +1386,10 @@ async function selectTaskRepository(
     if (ensured.error.kind === 'CancellationError') {
       throw new WizardCancelledError();
     }
-    log.warn(
-      dependencies.redact(
-        `Repository "${selectedRepository.id}" cannot be used: ${describeManagedCloneOrPrerequisiteFailure(ensured.error)}`,
-      ),
-      promptOptions(io),
-    );
+    warnLines(io, dependencies.redact, {
+      headline: `Can't use repository ${selectedRepository.id}.`,
+      details: [describeManagedCloneOrPrerequisiteFailure(ensured.error)],
+    });
   }
 }
 
@@ -1020,15 +1404,19 @@ async function interviewReferenceSolution(
 ): Promise<ResolvedReferenceSolution | undefined> {
   for (;;) {
     const identifier = (
-      await askText(io, {
-        message: `Reference solution: a pull request (OWNER/REPO#NUMBER or URL) or a commit in "${repository.id}" (empty for none)`,
+      await askDefaultedText(io, {
+        message: 'Reference PR or commit',
+        defaultValue: '',
+        placeholder: 'none',
       })
     ).trim();
     if (identifier === '') {
       return undefined;
     }
-    const result = await dependencies.resolveReference(repository, identifier, (line) =>
-      log.step(dependencies.redact(line), promptOptions(io)),
+    const result = await runWait(io, 'Resolving reference', () =>
+      dependencies.resolveReference(repository, identifier, (line) =>
+        log.step(dependencies.redact(line), promptOptions(io)),
+      ),
     );
     if (result.ok) {
       const resolved = result.value;
@@ -1038,14 +1426,14 @@ async function interviewReferenceSolution(
       }
       const unfetched = resolved.pullRequest?.unfetched;
       if (unfetched !== undefined) {
-        log.warn(
-          dependencies.redact(`Reference commits cannot be fetched: ${unfetched}`),
-          promptOptions(io),
-        );
+        warnLines(io, dependencies.redact, {
+          headline: "Can't fetch some reference commits.",
+          details: [unfetched],
+        });
       }
       note(
         dependencies.redact(renderReferenceNote(resolved, repository.id)),
-        'Reference solution (read once)',
+        'Reference solution',
         promptOptions(io),
       );
       return resolved;
@@ -1057,10 +1445,10 @@ async function interviewReferenceSolution(
       result.error.kind === 'ReferenceResolutionError'
         ? result.error.reason
         : describeManagedCloneOrPrerequisiteFailure(result.error);
-    log.warn(
-      dependencies.redact(`Reference solution cannot be resolved: ${description}`),
-      promptOptions(io),
-    );
+    warnLines(io, dependencies.redact, {
+      headline: "Can't resolve the reference.",
+      details: [description],
+    });
   }
 }
 
@@ -1085,21 +1473,19 @@ async function ensureBaseCommitInClone(
   }
   let answer = initialAnswer;
   for (;;) {
-    const ensured = await dependencies.ensureManagedCommits(
-      { id: repository.id, github },
-      [answer],
-      (line) => log.step(dependencies.redact(line), promptOptions(io)),
+    const ensured = await runWait(io, 'Fetching base commit', () =>
+      dependencies.ensureManagedCommits({ id: repository.id, github }, [answer], (line) =>
+        log.step(dependencies.redact(line), promptOptions(io)),
+      ),
     );
     if (!ensured.ok) {
       if (ensured.error.kind === 'CancellationError') {
         throw new WizardCancelledError();
       }
-      log.warn(
-        dependencies.redact(
-          `Base commit cannot be fetched: ${describeManagedCloneOrPrerequisiteFailure(ensured.error)}`,
-        ),
-        promptOptions(io),
-      );
+      warnLines(io, dependencies.redact, {
+        headline: "Can't fetch the base commit.",
+        details: [describeManagedCloneOrPrerequisiteFailure(ensured.error)],
+      });
     } else if (ensured.value.missing.includes(answer)) {
       const keepsUnfetchedAnswer =
         resolvedReference?.reference.kind === 'pull-request' &&
@@ -1109,18 +1495,16 @@ async function ensureBaseCommitInClone(
       }
       const parsed = parseGitHubRepository(github);
       const display = parsed === null ? github : formatGitHubRepository(parsed);
-      log.warn(
-        dependencies.redact(
-          `Base commit "${answer}" is not in repository "${repository.id}" and cannot be fetched from ${display}`,
-        ),
-        promptOptions(io),
-      );
+      warnLines(io, dependencies.redact, {
+        headline: `Base commit ${answer} isn't in repository ${repository.id}.`,
+        details: [`It can't be fetched from ${display}.`],
+      });
     } else {
       return answer;
     }
     answer = (
-      await askText(io, {
-        message: 'Base commit (a commit from before the fix; resolved and pinned when saved)',
+      await askDefaultedText(io, {
+        message: 'Base commit',
         defaultValue: answer,
         validate: validateNonWhitespace,
       })
@@ -1169,7 +1553,7 @@ function describeProposedBaseBasis(resolved: ResolvedReferenceSolution): string 
   return 'the parent of the reference commit';
 }
 
-/** Renders the `Reference solution (read once)` note body. */
+/** Renders the `Reference solution` note body. */
 function renderReferenceNote(resolved: ResolvedReferenceSolution, repositoryId: string): string {
   if (resolved.pullRequest !== undefined && resolved.reference.kind === 'pull-request') {
     const { key, state, targetBranch } = resolved.pullRequest;
@@ -1205,11 +1589,7 @@ async function askBaseCommitWithProposal(
     throw new Error('unreachable: askBaseCommitWithProposal requires a resolved proposed base');
   }
   const answer = (
-    await askText(io, {
-      message: `Base commit (empty for ${proposedBase.commit}, ${describeProposedBaseBasis(resolved)})`,
-      placeholder: proposedBase.commit,
-      defaultValue: proposedBase.commit,
-    })
+    await askDefaultedText(io, { message: 'Base commit', defaultValue: proposedBase.commit })
   ).trim();
   return answer === '' ? proposedBase.commit : answer;
 }
@@ -1219,12 +1599,12 @@ async function interviewReadiness(io: WizardIo): Promise<string[]> {
   const items: string[] = [];
   for (;;) {
     const item = await askText(io, {
-      message: 'Readiness item you have confirmed',
+      message: 'Confirmed prerequisite',
       validate: validateNonWhitespace,
     });
     items.push(item);
     const wantsMore = await askConfirm(io, {
-      message: 'Add another readiness item?',
+      message: 'Add another prerequisite?',
       initialValue: false,
     });
     if (!wantsMore) {
@@ -1246,12 +1626,15 @@ async function interviewChecks(
   collection: 'acceptance' | 'done',
   usedCheckIds: Set<string>,
   excludedNames: ReadonlySet<string>,
+  checkTimeout: string | undefined,
   drafted: CheckInput[] = [],
 ): Promise<CheckInput[]> {
   const checks: CheckInput[] = [...drafted];
+  const collectionName = collection === 'acceptance' ? 'acceptance' : 'Definition of Done';
+  const addAnotherQuestion = `Add another ${collectionName} check?`;
   if (drafted.length > 0) {
     const wantsMore = await askConfirm(io, {
-      message: `Add another ${collection} check?`,
+      message: addAnotherQuestion,
       initialValue: false,
     });
     if (!wantsMore) {
@@ -1260,31 +1643,27 @@ async function interviewChecks(
   }
   for (;;) {
     const id = await askText(io, {
-      message: `New ${collection} check ID`,
+      message: `${collection === 'acceptance' ? 'Acceptance' : 'Definition of Done'} check ID`,
       validate: validateId(usedCheckIds),
     });
     const kind = await askSelect<'graded' | 'command' | 'manual'>(io, {
-      message: `How is "${id}" checked?`,
+      message: 'Check type',
       options: [
-        { value: 'graded', label: 'Graded by the grader model against its description' },
-        { value: 'command', label: 'Command (literal argv, no shell)' },
-        { value: 'manual', label: 'Manual (assessed through tevu assess)' },
+        { value: 'graded', label: 'Graded by a model' },
+        { value: 'command', label: 'Command' },
+        { value: 'manual', label: 'Manual' },
       ],
       initialValue: 'graded',
     });
-    const description = await askText(
-      io,
+    const description =
       kind === 'graded'
-        ? {
-            message: `Description of "${id}" (the criterion the grader grades against)`,
-            validate: validateNonWhitespace,
-          }
-        : { message: `Description of "${id}"`, defaultValue: '' },
-    );
-    const required = await askConfirm(io, {
-      message: `Is "${id}" required?`,
-      initialValue: true,
-    });
+        ? await askText(io, { message: 'Criterion', validate: validateNonWhitespace })
+        : await askDefaultedText(io, {
+            message: 'Description',
+            defaultValue: '',
+            placeholder: 'none',
+          });
+    const required = await askConfirm(io, { message: 'Required?', initialValue: true });
     const check: CheckInput =
       kind === 'manual'
         ? { id, description, manual: true, ...(required ? {} : { required }) }
@@ -1293,7 +1672,7 @@ async function interviewChecks(
           : {
               id,
               description,
-              ...(await interviewCommandEvaluator(io, id, excludedNames)),
+              ...(await interviewCommandEvaluator(io, excludedNames, checkTimeout)),
               ...(required ? {} : { required }),
             };
     usedCheckIds.add(id);
@@ -1303,7 +1682,7 @@ async function interviewChecks(
       continue;
     }
     const wantsMore = await askConfirm(io, {
-      message: `Add another ${collection} check?`,
+      message: addAnotherQuestion,
       initialValue: false,
     });
     if (!wantsMore) {
@@ -1312,25 +1691,28 @@ async function interviewChecks(
   }
 }
 
-/** Asks argv, timeout, exit codes, and the variable list of one command check. */
+/**
+ * Asks the command line, time limit, exit codes, and variable list of one
+ * command check. The command line is saved as typed. Without a
+ * `run.check_timeout` to inherit, the time limit is required.
+ */
 async function interviewCommandEvaluator(
   io: WizardIo,
-  checkId: string,
   excludedNames: ReadonlySet<string>,
+  checkTimeout: string | undefined,
 ): Promise<Pick<CheckInput, 'run' | 'timeout' | 'exit_codes' | 'env'>> {
-  const argvText = await askText(io, {
-    message: `Command for "${checkId}" as a JSON array, e.g. ["npm","test"]`,
-    validate: validateArgvJson,
-  });
-  const run = JSON.parse(argvText) as [string, ...string[]];
-  const timeoutRaw = await askText(io, {
-    message: `Time limit for "${checkId}" (for example 2m; empty to use run.check_timeout)`,
-    defaultValue: '',
-    validate: (value) =>
-      value === undefined || value.trim().length === 0 ? undefined : validateDuration(value),
-  });
-  const codesText = await askText(io, {
-    message: `Exit codes that count as a pass for "${checkId}" (comma-separated; empty for 0)`,
+  const run = await askText(io, { message: 'Command', validate: validateNonWhitespace });
+  const timeoutRaw =
+    checkTimeout === undefined
+      ? await askText(io, { message: 'Time limit', validate: validateDuration })
+      : await askDefaultedText(io, {
+          message: 'Time limit',
+          defaultValue: '',
+          placeholder: checkTimeout,
+          validate: validateDuration,
+        });
+  const codesText = await askDefaultedText(io, {
+    message: 'Passing exit codes',
     defaultValue: '0',
     validate: validateExitCodes,
   });
@@ -1339,15 +1721,13 @@ async function interviewCommandEvaluator(
     .map((token) => token.trim())
     .filter((token) => token.length > 0)
     .map((token) => Number.parseInt(token, 10));
-  const envText = await askText(io, {
-    message: `Variables for "${checkId}" (comma-separated names; empty for none)`,
+  const envText = await askDefaultedText(io, {
+    message: 'Check variables',
     defaultValue: '',
+    placeholder: 'none',
     validate: validateCheckVariableList(excludedNames),
   });
-  const env = envText
-    .split(',')
-    .map((token) => token.trim())
-    .filter((token) => token.length > 0);
+  const env = splitNames(envText);
   return {
     run,
     ...(timeoutRaw.trim().length === 0 ? {} : { timeout: timeoutRaw.trim() }),
@@ -1385,6 +1765,7 @@ function currentConfiguration(
 async function interviewCriteria(
   io: WizardIo,
   dependencies: TaskWizardDependencies,
+  configPath: string,
   existing: TevuConfig | null,
   bootstrap: Omit<TevuConfigInput, 'version' | 'tasks'> | undefined,
   resolvedReference: ResolvedReferenceSolution | undefined,
@@ -1392,10 +1773,11 @@ async function interviewCriteria(
   description: string,
   usedCheckIds: Set<string>,
   excludedNames: ReadonlySet<string>,
+  checkTimeout: string | undefined,
 ): Promise<DraftedTaskChecks> {
   const byHand = async (): Promise<DraftedTaskChecks> => ({
-    acceptance: await interviewChecks(io, 'acceptance', usedCheckIds, excludedNames),
-    done: await interviewChecks(io, 'done', usedCheckIds, excludedNames),
+    acceptance: await interviewChecks(io, 'acceptance', usedCheckIds, excludedNames, checkTimeout),
+    done: await interviewChecks(io, 'done', usedCheckIds, excludedNames, checkTimeout),
   });
 
   if (resolvedReference === undefined) {
@@ -1403,40 +1785,33 @@ async function interviewCriteria(
   }
   const role = existing?.roles?.criteria ?? bootstrap?.roles?.criteria;
   if (role === undefined) {
-    log.info(
-      'roles.criteria is not declared; write the acceptance criteria and Definition of Done by hand.',
-      promptOptions(io),
-    );
+    log.info('No criteria model set. Enter the criteria yourself.', promptOptions(io));
     return byHand();
   }
-  log.step(
-    `Drafting acceptance criteria and a Definition of Done from the reference solution with roles.criteria (${role.model}, effort ${role.effort}); this starts a model session.`,
-    promptOptions(io),
+  const outcome = await runWait(io, 'Drafting criteria', () =>
+    dependencies.draftCriteria({
+      configuration: currentConfiguration(existing, bootstrap),
+      repository,
+      reference: resolvedReference,
+      description,
+    }),
   );
-  const outcome = await dependencies.draftCriteria({
-    configuration: currentConfiguration(existing, bootstrap),
-    repository,
-    reference: resolvedReference,
-    description,
-  });
   if (outcome.status === 'cancelled') {
     throw new WizardCancelledError();
   }
   if (outcome.retainedDirectory !== null) {
-    log.warn(
-      `The criteria call directory could not be removed; it remains at "${outcome.retainedDirectory}".`,
-      promptOptions(io),
-    );
+    warnRetainedDirectory(io, dependencies.redact, outcome.retainedDirectory);
   }
   if (outcome.status === 'failed') {
-    log.warn(
-      dependencies.redact(
-        `Criteria draft failed: ${outcome.reason}; write the acceptance criteria and Definition of Done by hand.`,
-      ),
-      promptOptions(io),
-    );
+    const { cause, details } = describeDraftFailure(outcome.failure, configPath);
+    warnLines(io, dependencies.redact, {
+      headline: "Couldn't draft criteria.",
+      details: [cause, ...details],
+      next: 'Enter the criteria yourself.',
+    });
     return byHand();
   }
+  log.success('Criteria drafted', promptOptions(io));
   const review = await reviewDraft(
     io,
     dependencies.redact,
@@ -1463,10 +1838,50 @@ async function interviewCriteria(
       'acceptance',
       usedCheckIds,
       excludedNames,
+      checkTimeout,
       draftedAcceptance,
     ),
-    done: await interviewChecks(io, 'done', usedCheckIds, excludedNames, draftedDone),
+    done: await interviewChecks(io, 'done', usedCheckIds, excludedNames, checkTimeout, draftedDone),
   };
+}
+
+/** The cause line of a failed criteria draft and the lower-layer detail lines that follow it. */
+function describeDraftFailure(
+  failure: CriteriaDraftFailure,
+  configPath: string,
+): { cause: string; details: string[] } {
+  switch (failure.cause) {
+    case 'changes-unreadable':
+      return {
+        cause: "The reference solution's changes can't be read.",
+        details: [failure.detail],
+      };
+    case 'prompt-unredactable':
+      return { cause: "The prompt couldn't be redacted, so the model wasn't called.", details: [] };
+    case 'variables-unset':
+      return {
+        cause: `${describeUnsetNames(failure.names)} in this terminal.`,
+        details: [],
+      };
+    case 'model-unavailable':
+      return {
+        cause: `OpenCode can't find ${failure.model} in tevu's environment.`,
+        details: [`Add its provider to agents.opencode.providers in ${configPath}.`],
+      };
+    case 'timed-out':
+      return { cause: `The model didn't answer within ${failure.limit}.`, details: [] };
+    case 'call-failed':
+      return failure.agentMessage === undefined
+        ? { cause: 'The OpenCode call failed.', details: [failure.detail] }
+        : { cause: `OpenCode reported "${failure.agentMessage}".`, details: [] };
+    case 'reply-invalid':
+      return { cause: "The model's reply wasn't a usable list.", details: [] };
+  }
+}
+
+/** `<NAME> isn't set` for one variable, `<A>, <B> aren't set` for several. */
+function describeUnsetNames(names: readonly string[]): string {
+  return names.length === 1 ? `${names.join(', ')} isn't set` : `${names.join(', ')} aren't set`;
 }
 
 /** Both drafted lists, in review order, once the operator accepts them. */
@@ -1494,23 +1909,23 @@ async function reviewDraft(
   for (;;) {
     note(
       redact(renderDraftReviewNote(acceptance, done, reference)),
-      'Drafted criteria (review required)',
+      'Drafted criteria',
       promptOptions(io),
     );
     const blockingReason = firstDraftBlockingReason(acceptance, done, reference);
     const hasItems = acceptance.length + done.length > 0;
     const action = await askSelect<'accept' | 'edit' | 'remove' | 'add' | 'by-hand'>(io, {
-      message: 'Review the drafted criteria',
+      message: 'What next?',
       options: [
         {
           value: 'accept',
-          label: 'Accept these criteria',
+          label: 'Accept',
           ...(blockingReason === undefined ? {} : { disabled: true, hint: blockingReason }),
         },
         { value: 'edit', label: 'Edit an item', ...(hasItems ? {} : { disabled: true }) },
         { value: 'remove', label: 'Remove an item', ...(hasItems ? {} : { disabled: true }) },
         { value: 'add', label: 'Add an item' },
-        { value: 'by-hand', label: 'Write the criteria by hand instead' },
+        { value: 'by-hand', label: 'Write my own instead' },
       ],
     });
 
@@ -1541,7 +1956,7 @@ async function reviewDraft(
       }
       const edited = (
         await askText(io, {
-          message: 'Edited item',
+          message: 'Item',
           initialValue: lists[target.index],
           validate: draftItemValidator(reference),
         })
@@ -1556,7 +1971,7 @@ async function reviewDraft(
     }
 
     const targetCollection = await askSelect<'acceptance' | 'done' | 'back'>(io, {
-      message: 'Add the item to',
+      message: 'Add to',
       options: [
         { value: 'acceptance', label: 'Acceptance criteria' },
         { value: 'done', label: 'Definition of Done' },
@@ -1642,7 +2057,7 @@ function renderDraftReviewNote(
   reference: TaskReference,
 ): string {
   return [
-    "Every item reaches every benchmarked agent's prompt: keep outcomes any correct solution achieves, not details of the reference solution.",
+    'Agents see every item. Keep outcomes, not details of the reference solution.',
     '',
     'Acceptance criteria:',
     ...renderDraftItemLines(acceptance, reference),
@@ -1697,7 +2112,7 @@ async function reviewAndConfirm(
 ): Promise<void> {
   note(redact(renderTaskReview(input, graderDeclared)), 'Review', promptOptions(io));
   const accepted = await askConfirm(io, {
-    message: `Write this to ${input.configPath}?`,
+    message: `Save to ${input.configPath}?`,
     initialValue: true,
   });
   if (!accepted) {
@@ -1723,6 +2138,7 @@ function renderTaskReview(input: TaskWizardInput, graderDeclared: boolean): stri
         `  agents.${name}.command: ${settings.command}`,
         `  agents.${name}.secrets: ${renderVariableList(settings.secrets ?? [])}`,
         `  agents.${name}.env: ${renderVariableList(settings.env ?? [])}`,
+        `  agents.${name}.providers: ${renderProviderList(settings.providers ?? [])}`,
       ]),
     );
     if (bootstrap.roles?.criteria !== undefined) {
@@ -1816,6 +2232,18 @@ function renderVariableList(names: readonly string[]): string {
   return names.length === 0 ? '(none)' : names.join(', ');
 }
 
+function renderProviderList(providers: readonly AgentProviderSetting[]): string {
+  return providers.length === 0
+    ? '(none)'
+    : providers
+        .map((provider) =>
+          provider.api_key === undefined
+            ? provider.id
+            : `${provider.id} (api_key ${provider.api_key})`,
+        )
+        .join(', ');
+}
+
 function renderCheck(check: CheckInput): string {
   const requirement = check.required === false ? 'optional' : 'required';
   if (check.manual === true) {
@@ -1827,7 +2255,7 @@ function renderCheck(check: CheckInput): string {
   const env =
     check.env === undefined || check.env.length === 0 ? '' : `, variables ${check.env.join(',')}`;
   return (
-    `${check.description} (${requirement}, command ${JSON.stringify(check.run)}, ` +
+    `${check.description} (${requirement}, command ${typeof check.run === 'string' ? check.run : check.run.join(' ')}, ` +
     `timeout ${check.timeout ?? 'run.check_timeout'}, ` +
     `exit codes ${(check.exit_codes ?? [0]).join(',')}${env})`
   );
@@ -1871,6 +2299,36 @@ function promptOptions(io: WizardIo): { input: Readable; output: Writable } {
   return { input: io.input, output: io.output };
 }
 
+/**
+ * Asks one Clack question with a signal that follows the wizard's cancellation
+ * only while the question is open.
+ *
+ * Clack never removes the abort listener of a finished question, so handing
+ * every question the wizard's own signal would make each earlier question write
+ * a stray newline to the terminal the moment the wizard is cancelled.
+ */
+async function withPromptSignal<T>(
+  io: WizardIo,
+  ask: (options: { signal?: AbortSignal }) => Promise<T>,
+): Promise<T> {
+  const wizardSignal = io.signal;
+  if (wizardSignal === undefined) {
+    return ask({});
+  }
+  const questionController = new AbortController();
+  const abortQuestion = (): void => questionController.abort();
+  if (wizardSignal.aborted) {
+    abortQuestion();
+  } else {
+    wizardSignal.addEventListener('abort', abortQuestion, { once: true });
+  }
+  try {
+    return await ask({ signal: questionController.signal });
+  } finally {
+    wizardSignal.removeEventListener('abort', abortQuestion);
+  }
+}
+
 /** Maps a Clack cancellation to the internal sentinel the wizard entry points catch. */
 function unwrap<T>(value: T | typeof CANCEL_SYMBOL): T {
   if (isCancel(value)) {
@@ -1903,14 +2361,49 @@ async function askText(
     validate?: (value: string | undefined) => string | undefined;
   },
 ): Promise<string> {
-  return unwrap(await text({ ...options, ...promptOptions(io) }));
+  return unwrap(
+    await withPromptSignal(io, (signal) => text({ ...options, ...promptOptions(io), ...signal })),
+  );
+}
+
+/**
+ * Asks a question whose default Clack shows dim and submits on an empty Enter.
+ *
+ * Clack validates the raw input before it applies `defaultValue`, so the
+ * validator must accept empty input for the default to be reachable.
+ */
+async function askDefaultedText(
+  io: WizardIo,
+  options: {
+    message: string;
+    defaultValue: string;
+    initialValue?: string;
+    placeholder?: string;
+    validate?: (value: string | undefined) => string | undefined;
+  },
+): Promise<string> {
+  const { validate, placeholder, ...rest } = options;
+  return askText(io, {
+    ...rest,
+    placeholder: placeholder ?? options.defaultValue,
+    validate: (raw) => (raw === undefined || raw.length === 0 ? undefined : validate?.(raw)),
+  });
+}
+
+/** Splits a list answer on commas, whitespace, or both, dropping empty tokens. */
+function splitNames(raw: string): string[] {
+  return raw.split(/[\s,]+/).filter((token) => token.length > 0);
 }
 
 async function askConfirm(
   io: WizardIo,
   options: { message: string; initialValue: boolean },
 ): Promise<boolean> {
-  return unwrap(await confirm({ ...options, ...promptOptions(io) }));
+  return unwrap(
+    await withPromptSignal(io, (signal) =>
+      confirm({ ...options, ...promptOptions(io), ...signal }),
+    ),
+  );
 }
 
 async function askSelect<Value extends string>(
@@ -1921,46 +2414,37 @@ async function askSelect<Value extends string>(
     initialValue?: Value;
   },
 ): Promise<Value> {
-  return unwrap(await select<Value>({ ...options, ...promptOptions(io) }));
+  return unwrap(
+    await withPromptSignal(io, (signal) =>
+      select<Value>({ ...options, ...promptOptions(io), ...signal }),
+    ),
+  );
 }
 
 async function askInteger(
   io: WizardIo,
   message: string,
   min: number,
-  max?: number,
+  max: number,
+  defaultValue: number,
 ): Promise<number> {
-  const value = await askText(io, {
+  const bounds = `an integer from ${min} through ${max}`;
+  const value = await askDefaultedText(io, {
     message,
+    defaultValue: String(defaultValue),
     validate: (raw) => {
       const trimmed = (raw ?? '').trim();
-      const bounds =
-        max === undefined
-          ? `an integer of at least ${min}`
-          : `an integer from ${min} through ${max}`;
       if (!/^\d+$/.test(trimmed)) {
         return `enter ${bounds}`;
       }
       const parsed = Number.parseInt(trimmed, 10);
-      if (parsed < min || (max !== undefined && parsed > max)) {
+      if (parsed < min || parsed > max) {
         return `enter ${bounds}`;
       }
       return undefined;
     },
   });
   return Number.parseInt(value.trim(), 10);
-}
-
-async function askModel(io: WizardIo, modelEntryId: string): Promise<`${string}/${string}`> {
-  for (;;) {
-    const value = await askText(io, {
-      message: `Model for "${modelEntryId}" (provider/model)`,
-      validate: validateModel,
-    });
-    if (isModelIdentifier(value)) {
-      return value;
-    }
-  }
 }
 
 async function askVerdict(io: WizardIo, checkId: string): Promise<'passed' | 'failed'> {
@@ -2067,10 +2551,7 @@ function validateCheckVariableList(
   excludedNames: ReadonlySet<string>,
 ): (value: string | undefined) => string | undefined {
   return (raw) => {
-    const names = (raw ?? '')
-      .split(',')
-      .map((token) => token.trim())
-      .filter((token) => token.length > 0);
+    const names = splitNames(raw ?? '');
     const seen = new Set<string>();
     for (const name of names) {
       const grammar = validateVariableNameGrammar(name);
@@ -2090,24 +2571,6 @@ function validateCheckVariableList(
     }
     return undefined;
   };
-}
-
-function validateArgvJson(value: string | undefined): string | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value ?? '');
-  } catch {
-    return 'enter a JSON array of strings, e.g. ["npm","test"]';
-  }
-  if (
-    !Array.isArray(parsed) ||
-    parsed.length === 0 ||
-    !parsed.every((element) => typeof element === 'string') ||
-    parsed[0] === ''
-  ) {
-    return 'the argv array needs a non-empty executable followed by literal string arguments';
-  }
-  return undefined;
 }
 
 function validateExitCodes(value: string | undefined): string | undefined {

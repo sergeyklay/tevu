@@ -15,7 +15,12 @@ import { parse, printParseErrorCode } from 'jsonc-parser';
 import { describeCause } from '@/domain/describe-cause';
 
 import type { OpenCodeAdapterDependencies, OpenCodeAdapterSettings } from './opencode';
-import type { ProviderSnapshot, TevuResult, ValidationFinding } from '@/domain/types';
+import type {
+  OperatorProvider,
+  ProviderSnapshot,
+  TevuResult,
+  ValidationFinding,
+} from '@/domain/types';
 import type { ParseError } from 'jsonc-parser';
 
 /** OpenCode's own file names and load order for its global configuration directory. */
@@ -71,29 +76,15 @@ export async function readOpenCodeProviders(
   }
 
   const blockIdentifier = `agents.${agent}.providers`;
-  const directory = operatorOpenCodeDirectory(operatorDirectories);
-  if (directory === undefined) {
-    return configValidationError([
-      {
-        severity: 'error',
-        identifier: blockIdentifier,
-        message:
-          'no OpenCode configuration directory to copy providers from: XDG_CONFIG_HOME and HOME are both unset, empty, or relative',
-      },
-    ]);
+  const read = await collectOperatorDefinitions(
+    providers.map((entry) => entry.id),
+    blockIdentifier,
+    operatorDirectories,
+  );
+  if (!read.ok) {
+    return configValidationError(read.findings);
   }
-
-  const collected = new Map<string, unknown>();
-  const readFindings: ValidationFinding[] = [];
-  for (const fileName of CONFIG_FILE_NAMES) {
-    const filePath = path.join(directory, fileName);
-    readFindings.push(
-      ...(await readOneConfigFile(filePath, blockIdentifier, providers, collected)),
-    );
-  }
-  if (readFindings.length > 0) {
-    return configValidationError(readFindings);
-  }
+  const { directory, collected } = read;
 
   const findings: ValidationFinding[] = [];
   const warnings: ValidationFinding[] = [];
@@ -161,6 +152,130 @@ export async function readOpenCodeProviders(
 }
 
 /**
+ * Reads what the operator's OpenCode global configuration defines for
+ * provider `id`, without copying anything: which variables the definition
+ * references, sorted by whether they sit in a credential position, and how
+ * `options.apiKey` is written.
+ *
+ * Reads files with the same directory resolution and merge rules as
+ * {@link readOpenCodeProviders} and yields its findings for an unreadable or
+ * invalid file. Names and states only: no value from a host file appears in
+ * the result or in a finding.
+ */
+export async function inspectOpenCodeProvider(
+  agent: string,
+  id: string,
+  operatorDirectories: OpenCodeAdapterDependencies['operatorDirectories'],
+): Promise<TevuResult<OperatorProvider, 'ConfigValidationError'>> {
+  const blockIdentifier = `agents.${agent}.providers`;
+  const read = await collectOperatorDefinitions([id], blockIdentifier, operatorDirectories);
+  if (!read.ok) {
+    return configValidationError(read.findings);
+  }
+  const raw = read.collected.get(id);
+  if (raw === undefined) {
+    return { ok: true, value: { defined: false } };
+  }
+  if (!isPlainObject(raw)) {
+    return configValidationError([
+      {
+        severity: 'error',
+        identifier: `${blockIdentifier}.${id}`,
+        message: `the definition of provider "${id}" is not an object`,
+      },
+    ]);
+  }
+  return { ok: true, value: classifyDefinition(raw) };
+}
+
+function classifyDefinition(definition: Record<string, unknown>): OperatorProvider {
+  const keyVariables = new Set<string>();
+  const otherVariables = new Set<string>();
+  const sortReferences = (names: readonly string[], isCredentialPosition: boolean): void => {
+    for (const name of names) {
+      (isCredentialPosition ? keyVariables : otherVariables).add(name);
+    }
+  };
+
+  walkDefinition(definition, {
+    header: (segments, value) => {
+      if (typeof value === 'string') {
+        sortReferences(extractReferenceNames(value), isCredentialHeaderPath(segments));
+      }
+    },
+    credential: (_segments, value) => {
+      if (typeof value !== 'string') {
+        return;
+      }
+      const whole = wholeReferenceName(value);
+      if (whole === undefined) {
+        sortReferences(extractReferenceNames(value), false);
+      } else {
+        keyVariables.add(whole);
+      }
+    },
+    text: (_segments, value) => sortReferences(extractReferenceNames(value), false),
+    rootEnvName: (name) => keyVariables.add(name),
+  });
+
+  return {
+    defined: true,
+    keyVariables: [...keyVariables],
+    otherVariables: [...otherVariables].filter((name) => !keyVariables.has(name)),
+    apiKey: describeApiKey(definition['options']),
+  };
+}
+
+function describeApiKey(options: unknown): 'reference' | 'value' | 'absent' {
+  if (!isPlainObject(options) || options['apiKey'] === undefined) {
+    return 'absent';
+  }
+  const apiKey = options['apiKey'];
+  return typeof apiKey === 'string' && wholeReferenceName(apiKey) !== undefined
+    ? 'reference'
+    : 'value';
+}
+
+/** The merged raw definition of every requested provider some file defines, keyed by provider ID. */
+type CollectedDefinitions =
+  | { ok: true; directory: string; collected: Map<string, unknown> }
+  | { ok: false; findings: ValidationFinding[] };
+
+/**
+ * Resolves the operator's OpenCode directory, reads its three configuration
+ * files in OpenCode's load order, and merges the definitions of `ids`. The
+ * only reader of host files: both the copy and the inspection go through it.
+ */
+async function collectOperatorDefinitions(
+  ids: readonly string[],
+  blockIdentifier: string,
+  operatorDirectories: OpenCodeAdapterDependencies['operatorDirectories'],
+): Promise<CollectedDefinitions> {
+  const directory = operatorOpenCodeDirectory(operatorDirectories);
+  if (directory === undefined) {
+    return {
+      ok: false,
+      findings: [
+        {
+          severity: 'error',
+          identifier: blockIdentifier,
+          message:
+            'no OpenCode configuration directory to copy providers from: XDG_CONFIG_HOME and HOME are both unset, empty, or relative',
+        },
+      ],
+    };
+  }
+
+  const collected = new Map<string, unknown>();
+  const findings: ValidationFinding[] = [];
+  for (const fileName of CONFIG_FILE_NAMES) {
+    const filePath = path.join(directory, fileName);
+    findings.push(...(await readOneConfigFile(filePath, blockIdentifier, ids, collected)));
+  }
+  return findings.length > 0 ? { ok: false, findings } : { ok: true, directory, collected };
+}
+
+/**
  * Reads and parses one candidate configuration file, merging every named
  * provider's definition it defines into `collected`. A missing file (ENOENT)
  * contributes nothing; every other failure becomes a finding and the file
@@ -169,7 +284,7 @@ export async function readOpenCodeProviders(
 async function readOneConfigFile(
   filePath: string,
   blockIdentifier: string,
-  providers: OpenCodeAdapterSettings['providers'],
+  ids: readonly string[],
   collected: Map<string, unknown>,
 ): Promise<ValidationFinding[]> {
   let text: string;
@@ -223,9 +338,9 @@ async function readOneConfigFile(
       },
     ];
   }
-  for (const entry of providers) {
-    if (Object.prototype.hasOwnProperty.call(providerMap, entry.id)) {
-      collected.set(entry.id, merge(collected.get(entry.id), providerMap[entry.id]));
+  for (const id of ids) {
+    if (Object.prototype.hasOwnProperty.call(providerMap, id)) {
+      collected.set(id, merge(collected.get(id), providerMap[id]));
     }
   }
   return [];
@@ -303,8 +418,7 @@ function checkDefinition(
 
   const checkHeaderValue = (segments: readonly (string | number)[], value: unknown): void => {
     const pathText = segments.join('.');
-    const lastKey = segments[segments.length - 1];
-    const isCredentialHeader = typeof lastKey === 'string' && CREDENTIAL_KEY.test(lastKey);
+    const isCredentialHeader = isCredentialHeaderPath(segments);
     const text = typeof value === 'string' ? value : undefined;
     const names = text === undefined ? [] : extractReferenceNames(text);
     if (names.length === 0) {
@@ -342,9 +456,45 @@ function checkDefinition(
     }
   };
 
-  const walk = (value: unknown, segments: readonly (string | number)[]): void => {
+  walkDefinition(definition, {
+    header: checkHeaderValue,
+    credential: checkApiKeyLike,
+    text: checkGenericString,
+    rootEnvName: (name) => {
+      noteSecretName(name);
+      if (declared.env.includes(name)) {
+        pushOnce(`rootenv\u0000${name}`, rootEnvSecretFinding(agent, id, name));
+      }
+    },
+  });
+
+  return { findings, namesSecret };
+}
+
+type DefinitionSegments = readonly (string | number)[];
+
+/** What a definition walk reports, by the position a value sits in. */
+type DefinitionVisitor = {
+  /** A value under `headers`. */
+  header: (segments: DefinitionSegments, value: unknown) => void;
+  /** A value at `apiKey` or at a credential-named string key. */
+  credential: (segments: DefinitionSegments, value: unknown) => void;
+  /** Any other string, including every object key. */
+  text: (segments: DefinitionSegments, value: string) => void;
+  /** One string item of the definition's root `env` list. */
+  rootEnvName: (name: string) => void;
+};
+
+/**
+ * Walks one provider definition depth-first in key order and classifies
+ * every value by position, then the root `env` list. The one place that
+ * decides which positions carry a credential, for the copy check and the
+ * inspection alike.
+ */
+function walkDefinition(definition: Record<string, unknown>, visitor: DefinitionVisitor): void {
+  const walk = (value: unknown, segments: DefinitionSegments): void => {
     if (segments.length > 0 && isHeaderPath(segments)) {
-      checkHeaderValue(segments, value);
+      visitor.header(segments, value);
       return;
     }
     const lastKey = segments[segments.length - 1];
@@ -353,11 +503,11 @@ function checkDefinition(
       typeof lastKey === 'string' &&
       (lastKey === 'apiKey' || (CREDENTIAL_KEY.test(lastKey) && typeof value === 'string'));
     if (isApiKeyPath) {
-      checkApiKeyLike(segments, value);
+      visitor.credential(segments, value);
       return;
     }
     if (typeof value === 'string') {
-      checkGenericString(segments, value);
+      visitor.text(segments, value);
       return;
     }
     if (Array.isArray(value)) {
@@ -366,7 +516,7 @@ function checkDefinition(
     }
     if (isPlainObject(value)) {
       for (const key of Object.keys(value)) {
-        checkGenericString([...segments, key], key);
+        visitor.text([...segments, key], key);
         walk(value[key], [...segments, key]);
       }
     }
@@ -377,21 +527,20 @@ function checkDefinition(
   const rootEnv = definition['env'];
   if (Array.isArray(rootEnv)) {
     for (const item of rootEnv) {
-      if (typeof item !== 'string') {
-        continue;
-      }
-      noteSecretName(item);
-      if (declared.env.includes(item)) {
-        pushOnce(`rootenv\u0000${item}`, rootEnvSecretFinding(agent, id, item));
+      if (typeof item === 'string') {
+        visitor.rootEnvName(item);
       }
     }
   }
-
-  return { findings, namesSecret };
 }
 
-function isHeaderPath(segments: readonly (string | number)[]): boolean {
+function isHeaderPath(segments: DefinitionSegments): boolean {
   return segments.length >= 2 && segments[segments.length - 2] === 'headers';
+}
+
+function isCredentialHeaderPath(segments: DefinitionSegments): boolean {
+  const lastKey = segments[segments.length - 1];
+  return typeof lastKey === 'string' && CREDENTIAL_KEY.test(lastKey);
 }
 
 function extractReferenceNames(text: string): string[] {
@@ -514,8 +663,8 @@ function lineAndColumn(text: string, offset: number): { line: number; column: nu
   return { line, column: offset - columnStart + 1 };
 }
 
-function configValidationError(
+function configValidationError<T>(
   findings: readonly ValidationFinding[],
-): TevuResult<ProviderSnapshot, 'ConfigValidationError'> {
+): TevuResult<T, 'ConfigValidationError'> {
   return { ok: false, error: { kind: 'ConfigValidationError', findings: [...findings] } };
 }

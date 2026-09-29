@@ -8,7 +8,7 @@ import { createConfigStore } from '@/adapters/artifact-store';
 import { createTask } from '@/application/create-task';
 
 import { appendToConfigText, renderConfigDocument } from './document';
-import { parseConfigText } from './load';
+import { parseConfigText, resolveConfig } from './load';
 
 import type {
   CheckInput,
@@ -338,6 +338,114 @@ describe('renderConfigDocument', () => {
   });
 });
 
+describe('renderConfigDocument with agent providers', () => {
+  function buildAgentWithProviders(
+    overrides: Partial<TevuConfigInput['agents']['opencode']> = {},
+  ): TevuConfigInput {
+    return buildConfig({
+      agents: {
+        opencode: {
+          command: 'opencode',
+          secrets: ['LITELLM_API_KEY', 'LITELLM_BASE'],
+          env: [],
+          providers: [{ id: 'litellm', api_key: 'LITELLM_API_KEY' }, { id: 'acme' }],
+          ...overrides,
+        },
+      },
+    });
+  }
+
+  it('renders output that parses and resolves with the providers and secrets intact', async () => {
+    const rendered = renderConfigDocument(buildAgentWithProviders(), { redact: (text) => text });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    const parsed = parseConfigText(rendered.value);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = await resolveConfig(parsed.value, join(tmpdir(), 'tevu.yaml'), undefined);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.agents.opencode).toMatchObject({
+      secrets: ['LITELLM_API_KEY', 'LITELLM_BASE'],
+      providers: [{ id: 'litellm', api_key: 'LITELLM_API_KEY' }, { id: 'acme' }],
+    });
+  });
+
+  it('renders the providers after env with id before api_key', () => {
+    const config = buildAgentWithProviders({ env: ['NODE_ENV'] });
+
+    const rendered = renderConfigDocument(config, { redact: (text) => text });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value).toContain(
+      'env:\n      - NODE_ENV\n' +
+        '    providers:\n' +
+        '      - id: litellm\n' +
+        '        api_key: LITELLM_API_KEY\n' +
+        '      - id: acme\n',
+    );
+  });
+
+  it.each([
+    { name: 'an empty list', providers: [] },
+    { name: 'an absent list', providers: undefined },
+  ])('omits the providers key for $name', ({ providers }) => {
+    const config = buildConfig({
+      agents: {
+        opencode: {
+          command: 'opencode',
+          secrets: [],
+          env: [],
+          ...(providers === undefined ? {} : { providers }),
+        },
+      },
+    });
+
+    const rendered = renderConfigDocument(config, { redact: (text) => text });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value).not.toContain('providers');
+  });
+
+  it('rejects a provider api_key that is absent from secrets when the text is parsed', () => {
+    const config = buildAgentWithProviders({ secrets: ['LITELLM_BASE'] });
+    const rendered = renderConfigDocument(config, { redact: (text) => text });
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+
+    const parsed = parseConfigText(rendered.value);
+
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toMatchObject({
+      kind: 'ConfigValidationError',
+      findings: [
+        {
+          severity: 'error',
+          message: 'api_key "LITELLM_API_KEY" must be listed in agents.opencode.secrets',
+        },
+      ],
+    });
+  });
+
+  it('redacts a secret value in a provider id and api_key before it becomes YAML', () => {
+    const config = buildAgentWithProviders({
+      providers: [{ id: 'SECRET_ID', api_key: 'LITELLM_API_KEY' }],
+    });
+    const redact = (text: string): string => text.replaceAll('SECRET_ID', '[REDACTED]');
+
+    const rendered = renderConfigDocument(config, { redact });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value).not.toContain('SECRET_ID');
+    expect(rendered.value).toContain('[REDACTED]');
+  });
+});
+
 describe('appendToConfigText', () => {
   const newTask = buildTask({
     id: 'new-task',
@@ -493,6 +601,83 @@ function buildTaskDependencies(overrides: Partial<TaskDependencies> = {}): TaskD
     ...overrides,
   };
 }
+
+describe('a command check with a string run', () => {
+  const TRICKY_COMMANDS = [
+    'npm test -- --run',
+    'echo "a: #b" && npm test',
+    "FOO=$KEY_A npm test -- --run && echo 'x: y'",
+    '  padded with spaces  ',
+    '[npm, test]',
+    '{ a: b }',
+    '- not a list item',
+    'true',
+    '42',
+  ];
+
+  function checksWithRun(run: string): TaskInput['checks'] {
+    return {
+      acceptance: [buildCommandCheck({ id: 'a1', run })],
+      done: [buildCommandCheck({ id: 'd1', run: ['npm', 'test'] })],
+    };
+  }
+
+  it.each(TRICKY_COMMANDS)('renders %j as text that loads back to the same string', (run) => {
+    const config = buildConfig({ tasks: [buildTask({ checks: checksWithRun(run) })] });
+
+    const rendered = renderConfigDocument(config, { redact: (text) => text });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    const reparsed = parseConfigText(rendered.value);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.value.tasks[0]?.checks.acceptance[0]).toMatchObject({ run });
+  });
+
+  it('keeps an array run in flow style beside a string run', () => {
+    const config = buildConfig({
+      tasks: [buildTask({ checks: checksWithRun('npm test -- --run') })],
+    });
+
+    const rendered = renderConfigDocument(config, { redact: (text) => text });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value).toContain('run: npm test -- --run\n');
+    expect(rendered.value).toContain('run: [npm, test]');
+  });
+
+  it.each(TRICKY_COMMANDS)('appends %j so it loads back to the same string', (run) => {
+    const base = renderConfigDocument(buildConfig(), { redact: (text) => text });
+    expect(base.ok).toBe(true);
+    if (!base.ok) return;
+    const task = buildTask({ id: 'added', checks: checksWithRun(run) });
+
+    const appended = appendToConfigText(base.value, { task }, { redact: (text) => text });
+
+    expect(appended.ok).toBe(true);
+    if (!appended.ok) return;
+    const reparsed = parseConfigText(appended.value);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.value.tasks[1]?.checks.acceptance[0]).toMatchObject({ run });
+  });
+
+  it('redacts a secret value inside the string as it redacts an array token', () => {
+    const redact = (text: string): string => text.replaceAll('SECRET_VALUE', '[REDACTED]');
+    const config = buildConfig({
+      tasks: [buildTask({ checks: checksWithRun('curl -H "token: SECRET_VALUE" host') })],
+    });
+
+    const rendered = renderConfigDocument(config, { redact });
+
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value).not.toContain('SECRET_VALUE');
+    expect(rendered.value).toContain('[REDACTED]');
+  });
+});
 
 describe('createTask leaves the configuration file byte-identical on failure', () => {
   let tempDirectory: string;

@@ -1,10 +1,12 @@
 // @vitest-environment node
 import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { setTimeout as delay } from 'node:timers/promises';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
@@ -43,7 +45,18 @@ function buildSecretRedactor(secretValues: readonly string[]): SecretRedactor {
   return createSecretRedactor(() => secretValues, createRedactor(secretValues));
 }
 
-type RunBehavior = 'ok' | 'error-exit-1';
+type RunBehavior = 'ok' | 'error-exit-1' | 'sleep';
+type ModelsBehavior = 'fail' | 'lists-role-model' | 'omits-role-model' | 'sleep';
+type ExportBehavior = 'reply' | 'garbage';
+
+type FakeBehavior = {
+  run: RunBehavior;
+  models?: ModelsBehavior;
+  export?: ExportBehavior;
+  replyText: string;
+  /** Every `run` and `models` invocation appends its name here, so a test can tell what was started. */
+  invocationsPath: string;
+};
 
 const PROBE_PREAMBLE = `
 const args = process.argv.slice(2);
@@ -63,10 +76,20 @@ if (args[0] === "models" && args[1] === "--help") {
 }
 `;
 
-function renderRunSection(behavior: RunBehavior): string {
+function renderRunSection(behavior: RunBehavior, invocationsPath: string): string {
+  const log = `appendFileSync(${JSON.stringify(invocationsPath)}, "run\\n");`;
+  if (behavior === 'sleep') {
+    return `
+if (args[0] === "run") {
+  ${log}
+  setInterval(function () {}, 1000);
+}
+`;
+  }
   if (behavior === 'error-exit-1') {
     return `
 if (args[0] === "run") {
+  ${log}
   console.log(JSON.stringify({ type: "error", timestamp: 1, sessionID: "${SESSION_ID}", error: { data: { message: "Synthetic failure" } } }));
   process.exit(1);
 }
@@ -74,13 +97,38 @@ if (args[0] === "run") {
   }
   return `
 if (args[0] === "run") {
+  ${log}
   console.log(JSON.stringify({ type: "step_start", timestamp: 1, sessionID: "${SESSION_ID}", part: { id: "prt-0", sessionID: "${SESSION_ID}", messageID: "msg-0", type: "step-start" } }));
   process.exit(0);
 }
 `;
 }
 
-function renderExportSection(replyText: string): string {
+function renderModelsSection(behavior: ModelsBehavior, invocationsPath: string): string {
+  if (behavior === 'fail') {
+    return '';
+  }
+  const listing =
+    behavior === 'sleep'
+      ? 'setInterval(function () {}, 1000); await new Promise(function () {});'
+      : `console.log(${JSON.stringify(behavior === 'lists-role-model' ? 'openai/criteria-model' : 'openai/other-model')}); process.exit(0);`;
+  return `
+if (args[0] === "models") {
+  appendFileSync(${JSON.stringify(invocationsPath)}, "models\\n");
+  ${listing}
+}
+`;
+}
+
+function renderExportSection(behavior: ExportBehavior, replyText: string): string {
+  if (behavior === 'garbage') {
+    return `
+if (args[0] === "export") {
+  console.log("this is not a session export");
+  process.exit(0);
+}
+`;
+  }
   return `
 if (args[0] === "export") {
   var requested = args[1] || "";
@@ -98,12 +146,13 @@ function nextScriptName(): string {
   return `fake-opencode-${String(scriptCounter)}.mjs`;
 }
 
-async function writeFakeExecutable(run: RunBehavior, replyText: string): Promise<string> {
+async function writeFakeExecutable(behavior: FakeBehavior): Promise<string> {
   const body =
-    '#!/usr/bin/env node\n' +
+    '#!/usr/bin/env node\nimport { appendFileSync } from "node:fs";\n' +
     PROBE_PREAMBLE +
-    renderRunSection(run) +
-    renderExportSection(replyText) +
+    renderRunSection(behavior.run, behavior.invocationsPath) +
+    renderModelsSection(behavior.models ?? 'fail', behavior.invocationsPath) +
+    renderExportSection(behavior.export ?? 'reply', behavior.replyText) +
     '\nif (args[0] !== "run" && args[0] !== "export") { process.exit(3); }\n';
   const filePath = join(tempRoot, nextScriptName());
   await writeFile(filePath, body, { mode: 0o755 });
@@ -197,6 +246,9 @@ function failingPullRequestReader(): Pick<PullRequestReader, 'readPullRequestDif
 
 type BuildOptions = {
   run: RunBehavior;
+  models?: ModelsBehavior;
+  export?: ExportBehavior;
+  invocationsPath?: string;
   replyText?: string;
   config?: TevuConfig;
   configuration?: CriteriaDraftRequest['configuration'];
@@ -234,7 +286,13 @@ function buildBootstrapAnswers(): Omit<TevuConfigInput, 'version' | 'tasks'> {
 async function draftWithFakeAgent(
   options: BuildOptions,
 ): Promise<ReturnType<typeof draftCriteria> extends Promise<infer T> ? T : never> {
-  const executable = await writeFakeExecutable(options.run, options.replyText ?? DRAFTED_REPLY);
+  const executable = await writeFakeExecutable({
+    run: options.run,
+    ...(options.models === undefined ? {} : { models: options.models }),
+    ...(options.export === undefined ? {} : { export: options.export }),
+    replyText: options.replyText ?? DRAFTED_REPLY,
+    invocationsPath: options.invocationsPath ?? join(tempRoot, nextScriptName()),
+  });
   const dependencies: OpenCodeAdapterDependencies = {
     runProcess: runManagedProcess,
     secrets: buildSecretRedactor([SECRET_VALUE]),
@@ -320,7 +378,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
     });
   });
 
-  it('yields F3 when redact returns a non-string value', async () => {
+  it('fails as unredactable when redact returns a non-string value', async () => {
     const repository = await createSyntheticRepository();
 
     const outcome = await draftWithFakeAgent({
@@ -337,7 +395,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
 
     expect(outcome).toEqual({
       status: 'failed',
-      reason: 'the criteria prompt could not be redacted; the criteria model was not called',
+      failure: { cause: 'prompt-unredactable' },
       retainedDirectory: null,
     });
   });
@@ -356,7 +414,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
     expect(outcome.status).toBe('drafted');
   });
 
-  it('yields F1 when the reference changes cannot be read', async () => {
+  it('fails as unreadable changes when the reference changes cannot be read', async () => {
     const repository = await createSyntheticRepository();
     const rootCommit = runGitSync(repository.path, ['rev-list', '--max-parents=0', 'HEAD']);
 
@@ -368,11 +426,11 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
 
     expect(outcome.status).toBe('failed');
     if (outcome.status !== 'failed') return;
-    expect(outcome.reason).toMatch(/^the reference solution's changes cannot be read: /);
+    expect(outcome.failure).toEqual({ cause: 'changes-unreadable', detail: expect.any(String) });
     expect(outcome.retainedDirectory).toBeNull();
   });
 
-  it('yields F3 when the prompt could not be redacted', async () => {
+  it('fails as unredactable when the redactor throws', async () => {
     const repository = await createSyntheticRepository();
 
     const outcome = await draftWithFakeAgent({
@@ -386,12 +444,12 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
 
     expect(outcome).toEqual({
       status: 'failed',
-      reason: 'the criteria prompt could not be redacted; the criteria model was not called',
+      failure: { cause: 'prompt-unredactable' },
       retainedDirectory: null,
     });
   });
 
-  it('yields F4 whose reason carries the ModelCallError reason when the call fails', async () => {
+  it('fails as call-failed with the agent message and the call reason when the call fails and no listing settles it', async () => {
     const repository = await createSyntheticRepository();
 
     const outcome = await draftWithFakeAgent({
@@ -402,13 +460,15 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
 
     expect(outcome.status).toBe('failed');
     if (outcome.status !== 'failed') return;
-    expect(outcome.reason).toBe(
-      'the criteria call failed: ModelCallError (failed): run process exited with code 1: Synthetic failure',
-    );
+    expect(outcome.failure).toEqual({
+      cause: 'call-failed',
+      agentMessage: 'Synthetic failure',
+      detail: 'run process exited with code 1: Synthetic failure',
+    });
     expect(outcome.retainedDirectory).toBeNull();
   });
 
-  it("yields F5 with the call's retained directory when the reply is malformed", async () => {
+  it('fails as an invalid reply when the reply is malformed', async () => {
     const repository = await createSyntheticRepository();
 
     const outcome = await draftWithFakeAgent({
@@ -420,7 +480,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
 
     expect(outcome).toEqual({
       status: 'failed',
-      reason: 'the criteria reply is not valid: done is not an array',
+      failure: { cause: 'reply-invalid', defect: 'done is not an array' },
       retainedDirectory: null,
     });
   });
@@ -448,7 +508,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
     expect(outcome).toEqual({ status: 'cancelled' });
   });
 
-  it('runs registerSecrets before redact (P9)', async () => {
+  it('runs registerSecrets before redact', async () => {
     const repository = await createSyntheticRepository();
     const order: string[] = [];
 
@@ -464,5 +524,169 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
     });
 
     expect(order).toEqual(['registerSecrets', 'redact']);
+  });
+});
+
+describe('draftCriteria failure causes against a fake OpenCode executable', () => {
+  const UNSET_VARIABLE = 'TEVU_DRAFT_CRITERIA_UNSET_A';
+  const OTHER_UNSET_VARIABLE = 'TEVU_DRAFT_CRITERIA_UNSET_B';
+
+  function buildConfigWithVariables(secrets: string[], env: string[] = []): TevuConfig {
+    const config = buildConfig();
+    return { ...config, agents: { opencode: { ...config.agents.opencode, secrets, env } } };
+  }
+
+  async function readInvocations(path: string): Promise<string[]> {
+    return existsSync(path)
+      ? readFileSync(path, 'utf8')
+          .split('\n')
+          .filter((line) => line.length > 0)
+      : [];
+  }
+
+  async function waitForInvocation(path: string, name: string): Promise<void> {
+    while (!(await readInvocations(path)).includes(name)) {
+      await delay(20);
+    }
+  }
+
+  it('fails as model-unavailable when the call fails and the agent does not list the criteria model', async () => {
+    const repository = await createSyntheticRepository();
+
+    const outcome = await draftWithFakeAgent({
+      run: 'error-exit-1',
+      models: 'omits-role-model',
+      reference: buildResolvedCommitReference(repository.commit),
+      repository: { id: 'repo-1', path: repository.path },
+    });
+
+    expect(outcome).toEqual({
+      status: 'failed',
+      failure: { cause: 'model-unavailable', model: 'openai/criteria-model' },
+      retainedDirectory: null,
+    });
+  });
+
+  it("fails as call-failed with the agent's own message when the call fails and the agent lists the model", async () => {
+    const repository = await createSyntheticRepository();
+
+    const outcome = await draftWithFakeAgent({
+      run: 'error-exit-1',
+      models: 'lists-role-model',
+      reference: buildResolvedCommitReference(repository.commit),
+      repository: { id: 'repo-1', path: repository.path },
+    });
+
+    expect(outcome).toEqual({
+      status: 'failed',
+      failure: {
+        cause: 'call-failed',
+        agentMessage: 'Synthetic failure',
+        detail: 'run process exited with code 1: Synthetic failure',
+      },
+      retainedDirectory: null,
+    });
+  });
+
+  it('fails as call-failed without an agent message when the failure is not a failed run', async () => {
+    const repository = await createSyntheticRepository();
+
+    const outcome = await draftWithFakeAgent({
+      run: 'ok',
+      export: 'garbage',
+      reference: buildResolvedCommitReference(repository.commit),
+      repository: { id: 'repo-1', path: repository.path },
+    });
+
+    expect(outcome.status).toBe('failed');
+    if (outcome.status !== 'failed') return;
+    expect(outcome.failure).toEqual({ cause: 'call-failed', detail: expect.any(String) });
+  });
+
+  it('fails as variables-unset naming each unset declared variable, with no read and no call', async () => {
+    const invocationsPath = join(tempRoot, nextScriptName());
+    const git = createGitWorkspaceAdapter({ workspacesDirectory: join(tempRoot, 'workspaces') });
+    const diffCommit = vi.spyOn(git, 'diffCommit');
+
+    const outcome = await draftWithFakeAgent({
+      run: 'ok',
+      invocationsPath,
+      git,
+      config: buildConfigWithVariables(
+        [UNSET_VARIABLE, SECRET_VARIABLE_NAME],
+        [OTHER_UNSET_VARIABLE],
+      ),
+    });
+
+    expect(outcome).toEqual({
+      status: 'failed',
+      failure: { cause: 'variables-unset', names: [UNSET_VARIABLE, OTHER_UNSET_VARIABLE] },
+      retainedDirectory: null,
+    });
+    expect(diffCommit).not.toHaveBeenCalled();
+    expect(await readInvocations(invocationsPath)).toEqual([]);
+  });
+
+  it('fails as variables-unset for bootstrap answers that declare an unset variable', async () => {
+    const answers = buildBootstrapAnswers();
+
+    const outcome = await draftWithFakeAgent({
+      run: 'ok',
+      configuration: {
+        kind: 'bootstrap',
+        answers: {
+          ...answers,
+          agents: {
+            opencode: {
+              command: 'unused-fake-opencode-command',
+              secrets: [UNSET_VARIABLE],
+              env: [],
+            },
+          },
+        },
+      },
+    });
+
+    expect(outcome).toMatchObject({
+      status: 'failed',
+      failure: { cause: 'variables-unset', names: [UNSET_VARIABLE] },
+    });
+  });
+
+  it('fails as timed-out with the configured run limit when the model does not answer in time', async () => {
+    const repository = await createSyntheticRepository();
+    const config = buildConfig();
+
+    const outcome = await draftWithFakeAgent({
+      run: 'sleep',
+      config: { ...config, run: { ...config.run, timeout: '400ms' } },
+      reference: buildResolvedCommitReference(repository.commit),
+      repository: { id: 'repo-1', path: repository.path },
+    });
+
+    expect(outcome).toEqual({
+      status: 'failed',
+      failure: { cause: 'timed-out', limit: '400ms' },
+      retainedDirectory: null,
+    });
+  });
+
+  it('is cancelled when the signal aborts while the failed call is being explained', async () => {
+    const repository = await createSyntheticRepository();
+    const invocationsPath = join(tempRoot, nextScriptName());
+    const controller = new AbortController();
+
+    const pending = draftWithFakeAgent({
+      run: 'error-exit-1',
+      models: 'sleep',
+      invocationsPath,
+      cancellation: controller.signal,
+      reference: buildResolvedCommitReference(repository.commit),
+      repository: { id: 'repo-1', path: repository.path },
+    });
+    await waitForInvocation(invocationsPath, 'models');
+    controller.abort();
+
+    expect(await pending).toEqual({ status: 'cancelled' });
   });
 });

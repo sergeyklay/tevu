@@ -10,7 +10,7 @@ type SnapshotCheck = {
   description: string;
   required?: boolean;
   manual?: boolean;
-  run?: readonly string[];
+  run?: string | readonly string[];
   timeout?: string;
   exit_codes?: readonly number[];
   env?: readonly string[];
@@ -164,6 +164,32 @@ describe('decodeRunConfig', () => {
         description: 'the thing works',
         required: false,
         evaluator: 'manual',
+      },
+    ]);
+  });
+
+  it('decodes a string run and an array run to the same command check record', () => {
+    const decodeWith = (run: string | readonly string[]): CheckRecord[] | undefined => {
+      const task = buildSnapshotTask({
+        checks: {
+          acceptance: [buildSnapshotCheck({ id: 'acc-command', manual: undefined, run })],
+          done: [],
+        },
+      });
+      return expectDecoded(decodeRunConfig(buildSnapshot({ tasks: [task] }))).tasks[0]?.checks;
+    };
+
+    const fromString = decodeWith('npm test -- --run');
+    const fromArray = decodeWith(['npm', 'test', '--', '--run']);
+
+    expect(fromString).toEqual(fromArray);
+    expect(fromString).toEqual<CheckRecord[]>([
+      {
+        id: 'acc-command',
+        category: 'acceptance',
+        description: 'the thing works',
+        required: true,
+        evaluator: 'command',
       },
     ]);
   });

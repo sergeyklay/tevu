@@ -81,6 +81,8 @@ export type TevuError =
       agent: string;
       cause: 'launch-failed' | 'failed' | 'timed-out';
       reason: string;
+      /** First line of the agent's own error message, redacted; absent when the agent reported none. */
+      agentMessage?: string;
     }
   | { kind: 'CaseTimeoutError'; caseId: string; timeoutMs: number }
   | { kind: 'EvaluationError'; caseId: string; checkId: string; reason: string }
@@ -175,7 +177,21 @@ export type AgentConfigurationFileRecord = { path: string; sha256: string };
 export type ModelListing =
   | { outcome: 'listed'; models: readonly string[] }
   | { outcome: 'timed-out'; limitMs: number }
-  | { outcome: 'failed'; reason: string };
+  | { outcome: 'failed'; reason: string }
+  | { outcome: 'cancelled' };
+
+/** One provider as the operator's own configuration of an agent defines it; names and states only, never values. */
+export type OperatorProvider =
+  | { defined: false }
+  | {
+      defined: true;
+      /** Variables in credential positions: a whole `{env:NAME}` value at `apiKey` or at a credential-named key, a reference in a credential-named header, or a name in the root `env` list; first-seen order, no repeats. */
+      keyVariables: readonly string[];
+      /** Every other variable a `{env:NAME}` reference names; first-seen order, no repeats, none also in `keyVariables`. */
+      otherVariables: readonly string[];
+      /** `options.apiKey` as written: exactly one whole `{env:NAME}` reference, any other value, or no value. */
+      apiKey: 'reference' | 'value' | 'absent';
+    };
 
 /** Parsed Jira Cloud connection settings. */
 export type JiraTrackerSettings = {
@@ -184,7 +200,7 @@ export type JiraTrackerSettings = {
   token: string;
 };
 
-/** One repository setup command: executable and literal arguments, no shell; the shape of a check's `run`. */
+/** One repository setup command: executable and literal arguments, no shell; the array form of a check's `run`. */
 export type SetupCommand = [string, ...string[]];
 
 /** A repository's setup block; a phase key is present only when its list holds at least one command. */
@@ -293,11 +309,15 @@ export type PullRequestSnapshot = {
   body: string;
 };
 
-/** A command check's resolved shape: literal argv, no shell, and every default materialized. */
+/**
+ * A command check's resolved shape with every default materialized. `run` is
+ * either a command line that `/bin/sh -c` runs, or an executable followed by
+ * literal arguments that run without a shell.
+ */
 export interface CommandCheck {
   id: string;
   description: string;
-  run: [string, ...string[]];
+  run: string | [string, ...string[]];
   timeout: string;
   exit_codes: number[];
   env: string[];
@@ -846,6 +866,8 @@ export interface EnvironmentAdapter {
   snapshotParent(
     names: EnvironmentVariableNames,
   ): TevuResult<ParentEnvironmentSnapshot, 'PrerequisiteError'>;
+  /** The names in `names` that tevu's own environment leaves unset, in input order. */
+  unsetVariables(names: readonly string[]): string[];
   createCaseEnvironments(
     workspace: CaseWorkspace,
     snapshot: ParentEnvironmentSnapshot,
@@ -867,7 +889,7 @@ export type RedactedCapture = {
   truncated: boolean;
 };
 
-/** Literal-argv evaluator process request with an explicit replacement environment. */
+/** Evaluator process request: argv started as given, with an explicit replacement environment. */
 export type EvaluatorProcessRequest = {
   argv: [string, ...string[]];
   cwd: string;
@@ -891,7 +913,7 @@ export type EvaluatorProcessResult =
     }
   | { launched: false; reason: string };
 
-/** Runs one benchmark-task acceptance command, or one repository setup command, without a shell. */
+/** Runs one benchmark-task acceptance command, or one repository setup command, as the argv of its request. */
 export interface EvaluatorProcessAdapter {
   run(request: EvaluatorProcessRequest): Promise<EvaluatorProcessResult>;
 }
@@ -1027,8 +1049,15 @@ export interface AgentAdapter {
    * nothing and starts no process.
    */
   readProviders(): Promise<TevuResult<ProviderSnapshot, 'ConfigValidationError'>>;
+  /**
+   * Reads what the operator's own configuration of this agent defines for
+   * provider `id`; reads files, starts no process.
+   */
+  inspectOperatorProvider(
+    id: string,
+  ): Promise<TevuResult<OperatorProvider, 'ConfigValidationError'>>;
   /** Lists every model the agent resolves in `environment`, without starting a model session. */
-  listModels(environment: ModelCallEnvironment): Promise<ModelListing>;
+  listModels(environment: ModelCallEnvironment, cancellation?: AbortSignal): Promise<ModelListing>;
   run(
     input: AgentRunInput,
   ): Promise<

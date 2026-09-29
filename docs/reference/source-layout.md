@@ -4,7 +4,7 @@
 | --- | --- |
 | `src/config` | YAML loading, configuration file search, the strict configuration schema, the configuration template, configuration document rendering and append, and run-snapshot decoding |
 | `src/domain` | Shared records, dependency contracts, and helpers that every layer may import |
-| `src/application` | Task creation, task prompt building, reference-solution resolution, managed-clone preparation, validation, orchestration, assessment, report rebuilding, the one-shot model call, the one-shot grading call, and the one-shot criteria drafting call |
+| `src/application` | Task creation, task prompt building, reference-solution resolution, managed-clone preparation, validation, orchestration, assessment, report rebuilding, the one-shot model call, the one-shot grading call, and the one-shot criteria drafting call, and the model access check the setup interview uses |
 | `src/evaluation` | Checks, agent-independent metric rules, grading logic, and report rendering |
 | `src/adapters` | Git, managed clones, issue tracker, process, and artifact I/O |
 | `src/adapters/agents` | One directory per agent adapter: probing, case runs, session export, model calls, metric normalization, protocol decoding, provider copying from the operator's own agent configuration, and model listing |

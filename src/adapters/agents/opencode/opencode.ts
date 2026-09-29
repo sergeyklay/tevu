@@ -11,7 +11,7 @@ import {
   normalizeMetrics as normalizeOpenCodeMetrics,
 } from './opencode-metrics';
 import { decodeEvent, decodeExport } from './opencode-protocol';
-import { readOpenCodeProviders } from './opencode-providers';
+import { inspectOpenCodeProvider, readOpenCodeProviders } from './opencode-providers';
 
 import type { OpenCodeExport, ProtocolContext, ProtocolErrorShape } from './opencode-protocol';
 import type {
@@ -34,6 +34,7 @@ import type {
   ModelCallResult,
   ModelListing,
   ModelRoleName,
+  OperatorProvider,
   ProcessResult,
   ProviderSnapshot,
   SecretRedactor,
@@ -91,8 +92,16 @@ export function createOpenCodeAdapter(
     readProviders(): Promise<TevuResult<ProviderSnapshot, 'ConfigValidationError'>> {
       return readOpenCodeProviders(settings, dependencies.operatorDirectories);
     },
-    listModels(environment: ModelCallEnvironment): Promise<ModelListing> {
-      return runListModels(settings, dependencies, environment);
+    inspectOperatorProvider(
+      id: string,
+    ): Promise<TevuResult<OperatorProvider, 'ConfigValidationError'>> {
+      return inspectOpenCodeProvider(settings.agent, id, dependencies.operatorDirectories);
+    },
+    listModels(
+      environment: ModelCallEnvironment,
+      cancellation?: AbortSignal,
+    ): Promise<ModelListing> {
+      return runListModels(settings, dependencies, environment, cancellation);
     },
     async run(
       input: AgentRunInput,
@@ -521,8 +530,19 @@ function modelCallFailed(
   role: ModelRoleName,
   agent: string,
   reason: string,
+  agentMessage?: string,
 ): { ok: false; error: Extract<TevuError, { kind: 'ModelCallError' }> } {
-  return { ok: false, error: { kind: 'ModelCallError', role, agent, cause: 'failed', reason } };
+  return {
+    ok: false,
+    error: {
+      kind: 'ModelCallError',
+      role,
+      agent,
+      cause: 'failed',
+      reason,
+      ...(agentMessage === undefined ? {} : { agentMessage }),
+    },
+  };
 }
 
 /**
@@ -685,6 +705,7 @@ async function runModelCall(
       detail === undefined
         ? `run process exited with code ${run.exitCode}`
         : `run process exited with code ${run.exitCode}: ${detail}`,
+      detail,
     );
   }
   if (run.exitCode === null) {
@@ -700,6 +721,7 @@ async function runModelCall(
       input.role,
       settings.agent,
       detail === undefined ? 'run reported an error' : `run reported an error: ${detail}`,
+      detail,
     );
   }
   if (sessionId === null) {
@@ -764,12 +786,14 @@ async function runModelCall(
 
 /**
  * Lists every model the agent resolves in `environment` by running
- * `<executable> models`, without starting a model session.
+ * `<executable> models`, without starting a model session. A cancellation
+ * terminates the listing's process group.
  */
 async function runListModels(
   settings: OpenCodeAdapterSettings,
   dependencies: OpenCodeAdapterDependencies,
   environment: ModelCallEnvironment,
+  cancellation: AbortSignal | undefined,
 ): Promise<ModelListing> {
   const outcome = await dependencies.runProcess({
     argv: [settings.executable, 'models'],
@@ -777,11 +801,17 @@ async function runListModels(
     environment: environment.variables,
     timeoutMs: MODEL_LISTING_TIMEOUT_MS,
     terminationGraceMs: MODEL_LISTING_TERMINATION_GRACE_MS,
+    cancellation,
     secretValues: dependencies.secrets.secretValues(),
     maxCaptureBytes: MODEL_LISTING_MAX_CAPTURE_BYTES,
   });
   if (!outcome.launched) {
-    return { outcome: 'failed', reason: `cannot be started: ${outcome.reason}` };
+    return outcome.reason === 'cancelled before launch'
+      ? { outcome: 'cancelled' }
+      : { outcome: 'failed', reason: `cannot be started: ${outcome.reason}` };
+  }
+  if (outcome.cancelled) {
+    return { outcome: 'cancelled' };
   }
   if (outcome.timedOut) {
     return { outcome: 'timed-out', limitMs: MODEL_LISTING_TIMEOUT_MS };

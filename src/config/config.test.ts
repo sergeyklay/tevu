@@ -328,6 +328,10 @@ function buildFakeAgentAdapter(overrides: Partial<AgentAdapter> = {}): AgentAdap
       ok: true as const,
       value: { agent: 'opencode', configurationFiles: [], findings: [] },
     })),
+    inspectOperatorProvider: vi.fn(async () => ({
+      ok: true as const,
+      value: { defined: false as const },
+    })),
     // Every `model` string this file's fixtures declare, so the model-resolution
     // stage reports nothing new for a test that does not override this stub.
     listModels: vi.fn(async () => ({
@@ -384,6 +388,7 @@ function buildEnvironments(overrides: Partial<EnvironmentAdapter> = {}): Environ
         secretValues: [],
       },
     })),
+    unsetVariables: vi.fn(() => []),
     createCaseEnvironments: vi.fn(async () => ({
       ok: false as const,
       error: {
@@ -1544,6 +1549,83 @@ describe('TevuConfigSchema', () => {
       });
     },
   );
+
+  describe('command check run', () => {
+    const RUN_MESSAGE =
+      'run must be a non-blank command string or an array starting with a non-empty executable';
+
+    function buildConfigWithDoneCheck(check: CheckInput): TevuConfigInput {
+      return buildConfig({
+        tasks: [
+          buildTaskDefinition({ checks: { acceptance: [buildManualCheck()], done: [check] } }),
+        ],
+      });
+    }
+
+    it.each([
+      { form: 'a command string', run: 'npm test' },
+      { form: 'an executable and arguments', run: ['npm', 'test'] as [string, ...string[]] },
+    ])('accepts $form', ({ run }) => {
+      const config = buildConfigWithDoneCheck(buildCommandCheck({ run }));
+
+      const accepted = expectSchemaAcceptance(config);
+
+      expect(accepted.tasks[0]?.checks.done[0]).toMatchObject({ run });
+    });
+
+    it('keeps a command string exactly as written', () => {
+      const run = '  CI=1 npm test -- --run | tee "out log" && echo "a: #b"  ';
+      const config = buildConfigWithDoneCheck(buildCommandCheck({ run }));
+
+      const accepted = expectSchemaAcceptance(config);
+
+      expect(accepted.tasks[0]?.checks.done[0]).toMatchObject({ run });
+    });
+
+    it.each([
+      { description: 'a blank string', run: '  ' },
+      { description: 'an empty array', run: [] },
+      { description: 'an array with an empty executable', run: [''] },
+      { description: 'a number', run: 42 },
+    ])('rejects $description with one finding at run', ({ run }) => {
+      const config = buildConfigWithDoneCheck(
+        buildCommandCheck({ run: run as unknown as [string, ...string[]] }),
+      );
+
+      expect(expectSchemaRejection(config)).toEqual([
+        { path: 'tasks.0.checks.done.0.run', message: RUN_MESSAGE },
+      ]);
+    });
+
+    it('still rejects an unknown check field', () => {
+      const config = buildConfigWithDoneCheck({
+        ...buildCommandCheck({ run: 'npm test' }),
+        bogus: true,
+      } as CheckInput);
+
+      expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain(
+        'tasks.0.checks.done.0',
+      );
+    });
+
+    it('still rejects a command string in a repository setup command', () => {
+      const config = buildConfig({
+        repositories: [
+          buildRepository({
+            setup: {
+              before_agent: ['npm ci' as unknown as [string, ...string[]]],
+              timeout: '1m',
+              env: [],
+            },
+          }),
+        ],
+      });
+
+      expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain(
+        'repositories.0.setup.before_agent.0',
+      );
+    });
+  });
 
   describe('run.repeat', () => {
     it('defaults to 1 when omitted', () => {

@@ -4,7 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { operatorOpenCodeDirectory, readOpenCodeProviders } from './opencode-providers';
+import {
+  inspectOpenCodeProvider,
+  operatorOpenCodeDirectory,
+  readOpenCodeProviders,
+} from './opencode-providers';
 
 import type { OpenCodeAdapterDependencies, OpenCodeAdapterSettings } from './opencode';
 import type { AgentProviderSetting } from '@/domain/types';
@@ -58,8 +62,13 @@ describe('operatorOpenCodeDirectory', () => {
   );
 });
 
-describe('readOpenCodeProviders', () => {
-  let operatorRoot: string;
+function useOperatorConfigDirectory(): {
+  operatorRoot: () => string;
+  operatorDirectories: () => OperatorDirectories;
+  writeConfigFile: (fileName: string, text: string) => Promise<void>;
+  writeOpencodeJson: (document: unknown) => Promise<void>;
+} {
+  let operatorRoot = '';
 
   beforeEach(async () => {
     operatorRoot = await mkdtemp(join(tmpdir(), 'tevu-opencode-providers-'));
@@ -69,19 +78,24 @@ describe('readOpenCodeProviders', () => {
     await rm(operatorRoot, { recursive: true, force: true });
   });
 
-  function operatorDirectories(): OperatorDirectories {
-    return { home: undefined, xdgConfigHome: operatorRoot };
-  }
-
   async function writeConfigFile(fileName: string, text: string): Promise<void> {
     const directory = join(operatorRoot, 'opencode');
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, fileName), text);
   }
 
-  async function writeOpencodeJson(document: unknown): Promise<void> {
-    await writeConfigFile('opencode.json', JSON.stringify(document, null, 2));
-  }
+  return {
+    operatorRoot: () => operatorRoot,
+    operatorDirectories: () => ({ home: undefined, xdgConfigHome: operatorRoot }),
+    writeConfigFile,
+    writeOpencodeJson: (document) =>
+      writeConfigFile('opencode.json', JSON.stringify(document, null, 2)),
+  };
+}
+
+describe('readOpenCodeProviders', () => {
+  const { operatorRoot, operatorDirectories, writeConfigFile, writeOpencodeJson } =
+    useOperatorConfigDirectory();
 
   it('never reads a host file and writes no configuration file when the block names no provider', async () => {
     const settings = buildSettings({ providers: [] });
@@ -253,7 +267,7 @@ describe('readOpenCodeProviders', () => {
     });
 
     it('draws P-READ when a candidate file cannot be read for a reason other than ENOENT', async () => {
-      await mkdir(join(operatorRoot, 'opencode', 'config.json'), { recursive: true });
+      await mkdir(join(operatorRoot(), 'opencode', 'config.json'), { recursive: true });
       const settings = buildSettings({ providers: buildProviders({ id: 'acme' }) });
 
       const result = await readOpenCodeProviders(settings, operatorDirectories());
@@ -266,7 +280,7 @@ describe('readOpenCodeProviders', () => {
         identifier: 'agents.opencode.providers',
       });
       expect(result.error.findings[0]?.message).toContain(
-        join(operatorRoot, 'opencode', 'config.json'),
+        join(operatorRoot(), 'opencode', 'config.json'),
       );
       expect(result.error.findings[0]?.message).toContain('EISDIR');
     });
@@ -325,7 +339,7 @@ describe('readOpenCodeProviders', () => {
           identifier: 'agents.opencode.providers.ghost',
           message:
             `provider "ghost" is not defined in config.json, opencode.json, or opencode.jsonc ` +
-            `under "${join(operatorRoot, 'opencode')}"`,
+            `under "${join(operatorRoot(), 'opencode')}"`,
         },
       ]);
     });
@@ -576,6 +590,227 @@ describe('readOpenCodeProviders', () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.value.findings).toEqual([]);
+    });
+  });
+});
+
+describe('inspectOpenCodeProvider', () => {
+  const { operatorRoot, operatorDirectories, writeConfigFile, writeOpencodeJson } =
+    useOperatorConfigDirectory();
+
+  it('reports the provider as undefined when no file defines it', async () => {
+    await writeOpencodeJson({ provider: { other: { baseURL: 'https://other.example.test' } } });
+
+    const result = await inspectOpenCodeProvider('opencode', 'acme', operatorDirectories());
+
+    expect(result).toEqual({ ok: true, value: { defined: false } });
+  });
+
+  it('reports the provider as undefined when the configuration directory holds no file', async () => {
+    const result = await inspectOpenCodeProvider('opencode', 'acme', operatorDirectories());
+
+    expect(result).toEqual({ ok: true, value: { defined: false } });
+  });
+
+  it('reads a whole reference at options.apiKey as a key variable', async () => {
+    await writeOpencodeJson({ provider: { acme: { options: { apiKey: '{env:ACME_KEY}' } } } });
+
+    const result = await inspectOpenCodeProvider('opencode', 'acme', operatorDirectories());
+
+    expect(result).toEqual({
+      ok: true,
+      value: { defined: true, keyVariables: ['ACME_KEY'], otherVariables: [], apiKey: 'reference' },
+    });
+  });
+
+  it('reads a baseURL reference as another variable and options.apiKey as absent', async () => {
+    await writeOpencodeJson({
+      provider: { acme: { options: { baseURL: '{env:ACME_BASE}/v1' } } },
+    });
+
+    const result = await inspectOpenCodeProvider('opencode', 'acme', operatorDirectories());
+
+    expect(result).toEqual({
+      ok: true,
+      value: { defined: true, keyVariables: [], otherVariables: ['ACME_BASE'], apiKey: 'absent' },
+    });
+  });
+
+  it('sorts a credential header, a credential-named option, and the root env list as key variables and an ordinary header as another variable', async () => {
+    await writeOpencodeJson({
+      provider: {
+        acme: {
+          env: ['ACME_ROOT_KEY'],
+          options: {
+            clientSecret: '{env:ACME_SECRET}',
+            headers: {
+              Authorization: 'Bearer {env:ACME_TOKEN}',
+              'X-Team': '{env:ACME_TEAM}',
+            },
+          },
+        },
+      },
+    });
+
+    const result = await inspectOpenCodeProvider('opencode', 'acme', operatorDirectories());
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        defined: true,
+        keyVariables: ['ACME_SECRET', 'ACME_TOKEN', 'ACME_ROOT_KEY'],
+        otherVariables: ['ACME_TEAM'],
+        apiKey: 'absent',
+      },
+    });
+  });
+
+  it('treats an apiKey that mixes a reference with other text as a value and its variable as another variable', async () => {
+    await writeOpencodeJson({
+      provider: { acme: { options: { apiKey: 'prefix-{env:ACME_KEY}' } } },
+    });
+
+    const result = await inspectOpenCodeProvider('opencode', 'acme', operatorDirectories());
+
+    expect(result).toEqual({
+      ok: true,
+      value: { defined: true, keyVariables: [], otherVariables: ['ACME_KEY'], apiKey: 'value' },
+    });
+  });
+
+  it('returns a literal apiKey as a value state and leaks the literal into neither the result nor a finding', async () => {
+    await writeOpencodeJson({ provider: { acme: { options: { apiKey: 'sk-test-literal' } } } });
+
+    const result = await inspectOpenCodeProvider('opencode', 'acme', operatorDirectories());
+
+    expect(result).toEqual({
+      ok: true,
+      value: { defined: true, keyVariables: [], otherVariables: [], apiKey: 'value' },
+    });
+    expect(JSON.stringify(result)).not.toContain('sk-test-literal');
+  });
+
+  it('leaks no host value into the finding for a definition that is not an object', async () => {
+    await writeOpencodeJson({ provider: { acme: 'sk-test-literal' } });
+
+    const result = await inspectOpenCodeProvider('opencode', 'acme', operatorDirectories());
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: 'ConfigValidationError',
+        findings: [
+          {
+            severity: 'error',
+            identifier: 'agents.opencode.providers.acme',
+            message: 'the definition of provider "acme" is not an object',
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain('sk-test-literal');
+  });
+
+  it('lets a later file win when merging the definition across the three files', async () => {
+    await writeConfigFile(
+      'config.json',
+      JSON.stringify({
+        provider: { acme: { options: { apiKey: '{env:FIRST_KEY}', baseURL: '{env:FIRST_BASE}' } } },
+      }),
+    );
+    await writeConfigFile(
+      'opencode.json',
+      JSON.stringify({ provider: { acme: { options: { apiKey: '{env:SECOND_KEY}' } } } }),
+    );
+    await writeConfigFile(
+      'opencode.jsonc',
+      '{ "provider": { "acme": { "options": { "apiKey": "{env:THIRD_KEY}" } } } } // trailing',
+    );
+
+    const result = await inspectOpenCodeProvider('opencode', 'acme', operatorDirectories());
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        defined: true,
+        keyVariables: ['THIRD_KEY'],
+        otherVariables: ['FIRST_BASE'],
+        apiKey: 'reference',
+      },
+    });
+  });
+
+  it('lists variables in first-seen order without repeats and keeps a name out of both lists', async () => {
+    await writeOpencodeJson({
+      provider: {
+        acme: {
+          options: {
+            baseURL: '{env:B}/{env:A}/{env:B}',
+            apiKey: '{env:A}',
+            headers: { 'X-One': '{env:C}', 'X-Two': '{env:C}{env:B}' },
+          },
+          env: ['A', 'D'],
+        },
+      },
+    });
+
+    const result = await inspectOpenCodeProvider('opencode', 'acme', operatorDirectories());
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        defined: true,
+        keyVariables: ['A', 'D'],
+        otherVariables: ['B', 'C'],
+        apiKey: 'reference',
+      },
+    });
+  });
+
+  describe('findings shared with readOpenCodeProviders', () => {
+    it.each([
+      { name: 'both bases unset', directories: { home: undefined, xdgConfigHome: undefined } },
+      { name: 'an empty base', directories: { home: '', xdgConfigHome: '' } },
+      {
+        name: 'relative bases',
+        directories: { home: 'relative/home', xdgConfigHome: 'relative/xdg' },
+      },
+    ])('reports the same finding as the copy read for $name', async ({ directories }) => {
+      const copied = await readOpenCodeProviders(
+        buildSettings({ providers: buildProviders({ id: 'acme' }) }),
+        directories,
+      );
+
+      const inspected = await inspectOpenCodeProvider('opencode', 'acme', directories);
+
+      expect(copied.ok).toBe(false);
+      expect(inspected).toEqual(copied);
+    });
+
+    it('reports the same finding as the copy read for an invalid file', async () => {
+      await writeConfigFile('opencode.json', '{ "provider": ');
+      const copied = await readOpenCodeProviders(
+        buildSettings({ providers: buildProviders({ id: 'acme' }) }),
+        operatorDirectories(),
+      );
+
+      const inspected = await inspectOpenCodeProvider('opencode', 'acme', operatorDirectories());
+
+      expect(copied.ok).toBe(false);
+      expect(inspected).toEqual(copied);
+    });
+
+    it('reports the same finding as the copy read for an unreadable file', async () => {
+      await mkdir(join(operatorRoot(), 'opencode', 'config.json'), { recursive: true });
+      const copied = await readOpenCodeProviders(
+        buildSettings({ providers: buildProviders({ id: 'acme' }) }),
+        operatorDirectories(),
+      );
+
+      const inspected = await inspectOpenCodeProvider('opencode', 'acme', operatorDirectories());
+
+      expect(copied.ok).toBe(false);
+      expect(inspected).toEqual(copied);
     });
   });
 });

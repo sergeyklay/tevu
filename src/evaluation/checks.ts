@@ -154,7 +154,8 @@ async function runCommandCheck(
   command: CommandCheck,
 ): Promise<CheckResult> {
   const request: EvaluatorProcessRequest = {
-    argv: command.run,
+    // An absolute path: the check's PATH snapshot must not decide which shell runs.
+    argv: typeof command.run === 'string' ? ['/bin/sh', '-c', command.run] : command.run,
     cwd: input.workspace.worktreeDirectory,
     environment: buildCheckEnvironment(input.environment, input.snapshot, command.env),
     timeoutMs: durationMs(command.timeout),

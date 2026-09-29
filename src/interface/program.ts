@@ -7,6 +7,7 @@
  * or storage logic and imports no concrete adapter.
  */
 
+import { outro } from '@clack/prompts';
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 
 import { describeManagedCloneError } from '@/application/managed-clone';
@@ -19,6 +20,11 @@ import type { AssessmentCaseContext } from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
 import type { CriteriaDraftOutcome, CriteriaDraftRequest } from '@/application/draft-criteria';
 import type { ManagedCommitsOutcome, ManagedCommitsRequest } from '@/application/managed-clone';
+import type {
+  AgentDraft,
+  ModelAccessOutcome,
+  ModelProviderInspection,
+} from '@/application/model-access';
 import type {
   ReferenceSolutionRequest,
   ResolvedReferenceSolution,
@@ -98,6 +104,23 @@ export type ProgramOperations = {
   >;
   /** Drafts acceptance criteria and a Definition of Done from a resolved reference solution. */
   draftCriteria(request: CriteriaDraftRequest): Promise<CriteriaDraftOutcome>;
+  /** Runs the agent's capability probe for `command`, resolved against the configuration file's directory. */
+  probeAgent(
+    configPath: string,
+    command: string,
+  ): Promise<TevuResult<AgentCapabilityReport, 'PrerequisiteError' | 'AgentProtocolError'>>;
+  /** Names the provider of `model` and reads what the operator's configuration defines for it. */
+  inspectModelProvider(
+    configPath: string,
+    agent: AgentDraft,
+    model: `${string}/${string}`,
+  ): Promise<TevuResult<ModelProviderInspection, 'ConfigValidationError'>>;
+  /** Reports whether `model` resolves for `agent` in an environment built like a case agent's. */
+  checkModelAccess(
+    configPath: string,
+    agent: AgentDraft,
+    model: `${string}/${string}`,
+  ): Promise<ModelAccessOutcome>;
   prepareRepositories(
     config: TevuConfig,
     onProgress: (line: string) => void,
@@ -522,6 +545,7 @@ async function runTaskAdd(
     },
     {
       io: { input: dependencies.io.stdin, output: dependencies.io.stdout },
+      cancellation: dependencies.cancellation,
       readConfig: async (): Promise<
         TevuResult<TevuConfig | null, LoadConfigErrorKind | 'PrerequisiteError'>
       > => {
@@ -547,18 +571,25 @@ async function runTaskAdd(
       ensureManagedCommits: (repository, revisions, onProgress) =>
         operations.ensureManagedCommits({ repository, revisions }, onProgress),
       draftCriteria: (request) => operations.draftCriteria({ configPath: loaderPath, ...request }),
+      probeAgent: (command) => operations.probeAgent(loaderPath, command),
+      inspectModelProvider: (agent, model) =>
+        operations.inspectModelProvider(loaderPath, agent, model),
+      checkModelAccess: (agent, model) => operations.checkModelAccess(loaderPath, agent, model),
       now: dependencies.now,
       redact: dependencies.redact,
     },
   );
   if (!wizard.ok) {
-    return reportFailure(err, wizard.error, dependencies.redact);
+    // The wizard already printed its single cancel line.
+    return wizard.error.kind === 'CancellationError'
+      ? EXIT_CANCELLED
+      : reportFailure(err, wizard.error, dependencies.redact);
   }
   const created = await operations.createTask(wizard.value);
   if (!created.ok) {
     return reportFailure(err, created.error, dependencies.redact);
   }
-  out(`Task "${created.value.id}" added to ${loaderPath}.`);
+  outro(`Task ${created.value.id} added to ${loaderPath}`, { output: dependencies.io.stdout });
   return EXIT_COMPLETED;
 }
 

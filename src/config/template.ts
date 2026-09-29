@@ -116,7 +116,7 @@ tasks:
           description: The CSV contains the visible rows and correctly escapes values.
         - id: tests
           description: The repository's test suite passes.
-          run: [npm, test]        # executable and literal arguments, no shell
+          run: npm test           # runs as /bin/sh -c; [npm, test] runs without a shell
           # timeout: 2m           # defaults to run.check_timeout
           # exit_codes: [0]       # exit codes that count as a pass; defaults to [0]
           # env: [NODE_OPTIONS]   # ordinary variables this check receives

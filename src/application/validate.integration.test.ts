@@ -18,8 +18,10 @@ import { TevuConfigSchema } from '@/config/schema';
 import type {
   AgentAdapter,
   AgentConfigurationFile,
+  EnvironmentAdapter,
   TevuConfig,
   ValidationDependencies,
+  ValidationFinding,
 } from '@/domain/types';
 
 const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
@@ -117,6 +119,10 @@ function buildFakeAgentAdapter(
           ok: true as const,
           value: { agent: 'opencode', configurationFiles: [], findings: [] },
         })),
+      inspectOperatorProvider: vi.fn(async () => ({
+        ok: true as const,
+        value: { defined: false as const },
+      })),
       // Lists exactly what buildValidatableConfig's fixed `models` entries name,
       // so the model-resolution stage reports nothing new for these fixtures.
       listModels:
@@ -147,7 +153,7 @@ function buildValidatableConfig(options: {
   baseCommit: string;
   outputDirectory: string;
   setupCommand?: [string, ...string[]];
-  checkCommands: Array<[string, ...string[]]>;
+  checkCommands: Array<string | [string, ...string[]]>;
 }): TevuConfig {
   return parseConfig({
     version: 1,
@@ -319,6 +325,87 @@ describe('validateConfig with the real case-executable adapter', () => {
       ]);
       expect(outcome.value.valid).toBe(false);
       expect(probe).toHaveBeenCalledOnce();
+    });
+
+    describe('a command check with a shell string', () => {
+      async function validateShimCheck(check: string | [string, ...string[]]): Promise<{
+        findings: ValidationFinding[];
+        valid: boolean;
+        binDirectory: string;
+        agentScript: string;
+        probedExecutables: string[];
+      }> {
+        const { binDirectory, operatorHome, repositoryPath, baseCommit } = await setUp();
+        await writeFile(join(operatorHome, 'synthetic-pin'), 'v1\n');
+        const agentScript = join(workspace, 'agent-ok.sh');
+        await writeExecutable(agentScript, shellScript('exit 0\n'));
+        const config = buildValidatableConfig({
+          agentCommand: agentScript,
+          repositoryPath,
+          baseCommit,
+          outputDirectory: join(workspace, 'artifacts'),
+          checkCommands: [check],
+        });
+        const { adapter } = buildFakeAgentAdapter();
+        const realProbe = createCaseExecutableAdapter();
+        const probedExecutables: string[] = [];
+
+        const outcome = await validateConfig(config, {
+          ...buildDependencies(adapter),
+          caseExecutables: {
+            probe: async (request) => {
+              probedExecutables.push(request.executable);
+              return realProbe.probe(request);
+            },
+          },
+        });
+
+        if (!outcome.ok) {
+          throw new Error(`expected validateConfig to succeed: ${JSON.stringify(outcome.error)}`);
+        }
+        return { ...outcome.value, binDirectory, agentScript, probedExecutables };
+      }
+
+      it.each([
+        { form: 'a string', check: 'toolx test -- --run' },
+        { form: 'a string with leading spaces', check: '  toolx test' },
+        { form: 'an array', check: ['toolx', 'test', '--', '--run'] as [string, ...string[]] },
+      ])(
+        'probes the shim and reports the parent-only finding at the check for $form',
+        async ({ check }) => {
+          const { findings, valid, binDirectory, agentScript, probedExecutables } =
+            await validateShimCheck(check);
+
+          expect(probedExecutables).toEqual([agentScript, 'toolx']);
+          expect(findings).toEqual([
+            {
+              severity: 'error',
+              identifier: 'tasks.write-report.checks.acceptance.check-0.run',
+              message:
+                `"toolx" (${join(binDirectory, 'toolx')}) exits 0 for --version in tevu's environment, secrets withheld, but ` +
+                `exits with code 126 in a case environment, which has its own HOME and XDG directories ` +
+                `and receives from tevu's environment only PATH and the variables declared in tasks.write-report.checks.acceptance.check-0.env: ` +
+                `if it reads another variable, declare that variable there; if it is, or runs through, a ` +
+                `version-manager shim, put the real executable's directory before the shim directory on ` +
+                `PATH when starting tevu`,
+            },
+          ]);
+          expect(valid).toBe(false);
+        },
+      );
+
+      it.each([
+        { description: 'an environment assignment', command: 'CI=1 toolx test' },
+        { description: 'a subshell', command: '(cd app && toolx test)' },
+        { description: 'a quoted expansion', command: '"$NODE" test.js' },
+      ])('probes only the agent for a string starting with $description', async ({ command }) => {
+        const { findings, valid, agentScript, probedExecutables } =
+          await validateShimCheck(command);
+
+        expect(probedExecutables).toEqual([agentScript]);
+        expect(findings).toEqual([]);
+        expect(valid).toBe(true);
+      });
     });
   });
 
@@ -601,5 +688,135 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
       message: 'provider "acme" names no variable listed in agents.opencode.secrets',
     });
     expect(outcome.value.valid).toBe(true);
+  });
+});
+
+describe('validateConfig model listing outcomes', () => {
+  async function validateWith(options: {
+    listModels?: AgentAdapter['listModels'];
+    environments?: (real: EnvironmentAdapter) => EnvironmentAdapter;
+  }): Promise<ValidationFinding[]> {
+    const repositoryPath = join(workspace, 'repo');
+    const baseCommit = await createSourceRepository(repositoryPath);
+    const agentScript = join(workspace, 'agent-ok.sh');
+    await writeExecutable(agentScript, shellScript('exit 0\n'));
+    const config = buildModelResolutionConfig({
+      agentCommand: agentScript,
+      repositoryPath,
+      baseCommit,
+      outputDirectory: join(workspace, 'artifacts'),
+      models: [
+        { id: 'alpha', model: 'acme/model-a' },
+        { id: 'beta', model: 'acme/model-b' },
+      ],
+    });
+    const { adapter } = buildFakeAgentAdapter(
+      options.listModels === undefined ? {} : { listModels: options.listModels },
+    );
+    const dependencies = buildDependencies(adapter);
+
+    const outcome = await validateConfig(config, {
+      ...dependencies,
+      environments: options.environments?.(dependencies.environments) ?? dependencies.environments,
+    });
+
+    if (!outcome.ok) {
+      throw new Error(`expected validateConfig to succeed: ${JSON.stringify(outcome.error)}`);
+    }
+    return outcome.value.findings.filter((finding) => finding.identifier === 'agents.opencode');
+  }
+
+  function expectedFinding(message: string): ValidationFinding {
+    return { severity: 'error', identifier: 'agents.opencode', message };
+  }
+
+  it.each([
+    {
+      name: 'a timeout',
+      listing: { outcome: 'timed-out' as const, limitMs: 120_000 },
+      message: (command: string) =>
+        `"${command} models" did not finish within 120s in an environment built like a case agent's; the models of agent "opencode" were not checked`,
+    },
+    {
+      name: 'a failure',
+      listing: { outcome: 'failed' as const, reason: 'exits with code 4' },
+      message: (command: string) =>
+        `"${command} models" exits with code 4 in an environment built like a case agent's, so the models of agent "opencode" could not be checked`,
+    },
+    {
+      name: 'a cancellation',
+      listing: { outcome: 'cancelled' as const },
+      message: (command: string) =>
+        `"${command} models" is cancelled in an environment built like a case agent's, so the models of agent "opencode" could not be checked`,
+    },
+  ])('reports $name of the listing as one error at the agent', async ({ listing, message }) => {
+    const command = join(workspace, 'agent-ok.sh');
+
+    const findings = await validateWith({ listModels: vi.fn(async () => listing) });
+
+    expect(findings).toEqual([expectedFinding(message(command))]);
+  });
+
+  it('reports an environment that cannot be created as one error and never lists', async () => {
+    const listModels = vi.fn<AgentAdapter['listModels']>();
+
+    const findings = await validateWith({
+      listModels,
+      environments: (real) => ({
+        ...real,
+        createModelCallEnvironment: async () => ({
+          ok: false,
+          error: {
+            kind: 'ArtifactError',
+            operation: 'create-model-call-directory',
+            reason: 'disk full',
+          },
+        }),
+      }),
+    });
+
+    expect(findings).toEqual([
+      expectedFinding(
+        'the model listing environment could not be prepared: create-model-call-directory: disk full',
+      ),
+    ]);
+    expect(listModels).not.toHaveBeenCalled();
+  });
+
+  it('reports the listing finding before the warning about a directory it could not remove', async () => {
+    const findings = await validateWith({
+      listModels: vi.fn(async () => ({ outcome: 'failed' as const, reason: 'exits with code 4' })),
+      environments: (real) => ({
+        ...real,
+        createModelCallEnvironment: async (snapshot, agentVariables, configurationFiles) => {
+          const created = await real.createModelCallEnvironment(
+            snapshot,
+            agentVariables,
+            configurationFiles,
+          );
+          if (!created.ok) {
+            return created;
+          }
+          return {
+            ok: true,
+            value: {
+              ...created.value,
+              dispose: async () => {
+                await created.value.dispose();
+                return {
+                  ok: false,
+                  error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
+                };
+              },
+            },
+          };
+        },
+      }),
+    });
+
+    expect(findings.map((finding) => finding.severity)).toEqual(['error', 'warning']);
+    expect(findings[1]?.message).toMatch(
+      /^model listing directory could not be removed; retained at ".+"$/,
+    );
   });
 });
