@@ -202,8 +202,6 @@ function buildResolvedPullRequestReference(): ResolvedReferenceSolution {
     reference: { kind: 'pull-request', identifier: 'octo/app#42', commits: ['a'.repeat(40)] },
     pullRequest: {
       key: 'octo/app#42',
-      title: 'Add export button',
-      body: 'Implements CSV export for the current view.',
       state: 'open',
       targetBranch: 'main',
     },
@@ -253,6 +251,7 @@ type BuildOptions = {
   config?: TevuConfig;
   configuration?: CriteriaDraftRequest['configuration'];
   reference?: ResolvedReferenceSolution;
+  prompt?: string;
   repository?: RepositoryDefinition;
   pullRequests?: Pick<PullRequestReader, 'readPullRequestDiff'>;
   redact?: (text: string) => string;
@@ -311,6 +310,7 @@ async function draftWithFakeAgent(
     configuration: options.configuration ?? { kind: 'loaded', config },
     repository,
     reference: options.reference ?? buildResolvedCommitReference('f'.repeat(40)),
+    prompt: options.prompt ?? 'Implement CSV export for the current view.',
     description: 'Users need to download the table as CSV.',
   };
   const criteriaDependencies: CriteriaDraftDependencies = {
@@ -506,6 +506,30 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
     });
 
     expect(outcome).toEqual({ status: 'cancelled' });
+  });
+
+  it('sends the task prompt and description to the model for a pull-request reference', async () => {
+    const readPullRequestDiff = async (): Promise<
+      TevuResult<string, 'ReferenceResolutionError' | 'CancellationError'>
+    > => ({ ok: true, value: 'diff --git a/x b/x\n+line\n' });
+    const redacted: string[] = [];
+
+    await draftWithFakeAgent({
+      run: 'ok',
+      reference: buildResolvedPullRequestReference(),
+      pullRequests: { readPullRequestDiff },
+      prompt: 'SENTINEL-PROMPT',
+      redact: (text) => {
+        redacted.push(text);
+        return text;
+      },
+    });
+
+    expect(redacted).toHaveLength(1);
+    expect(redacted[0]).toContain('\nTask instructions:\nSENTINEL-PROMPT\n');
+    expect(redacted[0]).toContain(
+      '\nTask description:\nUsers need to download the table as CSV.\n',
+    );
   });
 
   it('runs registerSecrets before redact', async () => {

@@ -84,7 +84,7 @@ const COMMIT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const PULL_REQUEST_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
-      number url title body state headRefOid baseRefName mergeable
+      number url state headRefOid baseRefName mergeable
       baseRef { target { oid } }
       mergeCommit { oid }
       commits(first: 100, after: $endCursor) {
@@ -543,14 +543,6 @@ function decodePullRequestResponse(
   if (typeof url !== 'string') {
     return pullRequestFieldError('url');
   }
-  const title = first['title'];
-  if (typeof title !== 'string') {
-    return pullRequestFieldError('title');
-  }
-  const body = first['body'];
-  if (typeof body !== 'string') {
-    return pullRequestFieldError('body');
-  }
   const target = parseIssueUrlOnHost(url, parsed.host);
   if (target === null || target.number !== number) {
     return referenceFailure(
@@ -628,8 +620,6 @@ function decodePullRequestResponse(
     value: {
       key,
       url,
-      title,
-      body,
       state,
       targetBranch: baseRefName,
       targetTip,

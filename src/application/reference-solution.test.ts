@@ -66,8 +66,6 @@ function buildPullRequestSnapshot(
   return {
     key: 'octo/repo#42',
     url: 'https://github.com/octo/repo/pull/42',
-    title: 'Add export button',
-    body: 'Implement CSV export for the current view.',
     state: 'open',
     targetBranch: 'main',
     targetTip: 'e'.repeat(40),
@@ -500,24 +498,6 @@ describe('resolveReferenceSolution pull-request reference block', () => {
       identifier: 'octo/repo#42',
       commits: [A, B],
     });
-  });
-
-  it("copies the pull request's title and body from the read snapshot", async () => {
-    const snapshot = buildPullRequestSnapshot({
-      title: 'Add export button',
-      body: 'Implement CSV export for the current view.',
-    });
-    const dependencies = buildDependencies(undefined, buildPullRequestReader(snapshot));
-
-    const result = await resolveReferenceSolution(
-      buildRequest({ identifier: 'octo/repo#42' }),
-      dependencies,
-    );
-
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.value.pullRequest?.title).toBe('Add export button');
-    expect(result.value.pullRequest?.body).toBe('Implement CSV export for the current view.');
   });
 });
 

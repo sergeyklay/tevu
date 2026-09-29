@@ -303,10 +303,6 @@ export type PullRequestSnapshot = {
   mergeability: PullRequestMergeability;
   /** Every commit GitHub lists, in GitHub's order; never a partial list. */
   commits: PullRequestCommit[];
-  /** GraphQL `title`. */
-  title: string;
-  /** GraphQL `body`; empty when the pull request has no description. */
-  body: string;
 };
 
 /**

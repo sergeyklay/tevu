@@ -28,6 +28,8 @@ import {
   parseGitHubRepository,
 } from '@/domain/github-reference';
 
+import { sectionedSelect } from './sectioned-select';
+
 import type { AssessableCheckSummary, AssessmentCaseContext } from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
 import type {
@@ -186,6 +188,7 @@ const GITHUB_GRAMMAR_MESSAGE =
   'github must be OWNER/REPO or https://HOST/OWNER/REPO, with a HOST of letters, digits, hyphens, and dots, and without surrounding spaces, user info, a port, a query, or a fragment';
 /** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
 const FULL_COMMIT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const DRAFT_REVIEW_BACK_OPTION = { value: 'back', label: 'Back to the review' };
 
 /** Renders a `ManagedCloneError` or `PrerequisiteError` for a wizard warning line. */
 function describeManagedCloneOrPrerequisiteFailure(
@@ -1167,6 +1170,7 @@ async function interviewTask(
     bootstrap,
     resolvedReference,
     selectedRepository,
+    prompt,
     description,
     usedCheckIds,
     excludedNames,
@@ -1770,6 +1774,7 @@ async function interviewCriteria(
   bootstrap: Omit<TevuConfigInput, 'version' | 'tasks'> | undefined,
   resolvedReference: ResolvedReferenceSolution | undefined,
   repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>,
+  prompt: string,
   description: string,
   usedCheckIds: Set<string>,
   excludedNames: ReadonlySet<string>,
@@ -1793,6 +1798,7 @@ async function interviewCriteria(
       configuration: currentConfiguration(existing, bootstrap),
       repository,
       reference: resolvedReference,
+      prompt,
       description,
     }),
   );
@@ -1893,8 +1899,9 @@ type DraftItemTarget = { collection: 'acceptance' | 'done'; index: number };
 /**
  * Runs the mandatory draft review: the operator accepts,
  * edits, removes, or adds items until either accepting the draft or choosing
- * to write the criteria by hand instead. Accept stays blocked while a list is
- * empty or an item names the reference solution; every note, log line, and
+ * to write the criteria by hand instead. Accept stays blocked while the
+ * acceptance list is empty or an item names the reference solution; the
+ * Definition of Done list may be empty. Every note, log line, and
  * select label carrying item text passes through `redact`.
  */
 async function reviewDraft(
@@ -1908,7 +1915,7 @@ async function reviewDraft(
 
   for (;;) {
     note(
-      redact(renderDraftReviewNote(acceptance, done, reference)),
+      redact(renderDraftReviewNote(acceptance, done, reference, io)),
       'Drafted criteria',
       promptOptions(io),
     );
@@ -1970,14 +1977,24 @@ async function reviewDraft(
       continue;
     }
 
-    const targetCollection = await askSelect<'acceptance' | 'done' | 'back'>(io, {
-      message: 'Add to',
-      options: [
-        { value: 'acceptance', label: 'Acceptance criteria' },
-        { value: 'done', label: 'Definition of Done' },
-        { value: 'back', label: 'Back to the review' },
-      ],
-    });
+    const targetCollection = unwrap(
+      await withPromptSignal(io, (signal) =>
+        sectionedSelect({
+          message: 'Add to',
+          sections: [
+            {
+              options: [
+                { value: 'acceptance', label: 'Acceptance Criteria' },
+                { value: 'done', label: 'Definition of Done' },
+              ],
+            },
+          ],
+          back: DRAFT_REVIEW_BACK_OPTION,
+          ...promptOptions(io),
+          ...signal,
+        }),
+      ),
+    );
     if (targetCollection === 'back') {
       continue;
     }
@@ -1998,7 +2015,11 @@ async function reviewDraft(
   }
 }
 
-/** Selects one item to edit or remove, or `'back'`; every label passes through `redact`. */
+/**
+ * Selects one item to edit or remove, or `'back'`. The headings and the
+ * back label are constants and item text passes through `redact`. Escape
+ * resolves `back` inside the prompt, while Ctrl-C cancels through `unwrap`.
+ */
 async function selectDraftItem(
   io: WizardIo,
   redact: (textContent: string) => string,
@@ -2006,21 +2027,32 @@ async function selectDraftItem(
   done: readonly string[],
   action: 'edit' | 'remove',
 ): Promise<DraftItemTarget | 'back'> {
-  const options: Option<string>[] = [
-    ...acceptance.map((text, index) => ({
-      value: `acceptance:${String(index)}`,
-      label: `Acceptance ${String(index + 1)}: ${redact(text)}`,
-    })),
-    ...done.map((text, index) => ({
-      value: `done:${String(index)}`,
-      label: `Definition of Done ${String(index + 1)}: ${redact(text)}`,
-    })),
-    { value: 'back', label: 'Back to the review' },
-  ];
-  const choice = await askSelect<string>(io, {
-    message: action === 'edit' ? 'Item to edit' : 'Item to remove',
-    options,
-  });
+  const choice = unwrap(
+    await withPromptSignal(io, (signal) =>
+      sectionedSelect({
+        message: action === 'edit' ? 'Item to edit' : 'Item to remove',
+        sections: [
+          {
+            heading: 'Acceptance Criteria',
+            options: acceptance.map((text, index) => ({
+              value: `acceptance:${String(index)}`,
+              label: redact(text),
+            })),
+          },
+          {
+            heading: 'Definition of Done',
+            options: done.map((text, index) => ({
+              value: `done:${String(index)}`,
+              label: redact(text),
+            })),
+          },
+        ],
+        back: DRAFT_REVIEW_BACK_OPTION,
+        ...promptOptions(io),
+        ...signal,
+      }),
+    ),
+  );
   if (choice === 'back') {
     return 'back';
   }
@@ -2055,15 +2087,21 @@ function renderDraftReviewNote(
   acceptance: readonly string[],
   done: readonly string[],
   reference: TaskReference,
+  io: WizardIo,
 ): string {
   return [
     'Agents see every item. Keep outcomes, not details of the reference solution.',
     '',
-    'Acceptance criteria:',
+    boldText(io, 'Acceptance Criteria'),
     ...renderDraftItemLines(acceptance, reference),
-    'Definition of Done:',
+    '',
+    boldText(io, 'Definition of Done'),
     ...renderDraftItemLines(done, reference),
   ].join('\n');
+}
+
+function boldText(io: WizardIo, text: string): string {
+  return styleText('bold', text, { stream: io.output });
 }
 
 function renderDraftItemLines(items: readonly string[], reference: TaskReference): string[] {
@@ -2078,8 +2116,8 @@ function renderDraftItemLines(items: readonly string[], reference: TaskReference
 
 /**
  * The first reason `accept` stays blocked, checked in this order: an empty
- * acceptance list, an empty Definition of Done list, then any item naming
- * the reference solution.
+ * acceptance list, then any item naming the reference solution. An empty
+ * Definition of Done list never blocks.
  */
 function firstDraftBlockingReason(
   acceptance: readonly string[],
@@ -2088,9 +2126,6 @@ function firstDraftBlockingReason(
 ): string | undefined {
   if (acceptance.length === 0) {
     return 'the acceptance criteria need at least one item';
-  }
-  if (done.length === 0) {
-    return 'the Definition of Done needs at least one item';
   }
   const namingCount = [...acceptance, ...done].filter(
     (item) => describeReferenceIdentityInText(item, reference) !== undefined,
