@@ -28,7 +28,8 @@ export type ConfigRendering = { redact: (text: string) => string };
  * Renders a brand-new configuration document from validated input,
  * in the canonical key order, applying every rendering rule shared with
  * `appendToConfigText`: omitted defaults, a double-quoted `base_commit`,
- * flow-style check argv/exit codes/env, and redaction before serialization.
+ * check `run` as a scalar or a flow sequence, flow-style exit codes and env, and
+ * redaction before serialization.
  */
 export function renderConfigDocument(
   config: TevuConfigInput,
@@ -216,6 +217,12 @@ function buildAgentSettingsNode(
   if (settings.env !== undefined && settings.env.length > 0) {
     node.env = settings.env.map((name) => guard.redact(name));
   }
+  if (settings.providers !== undefined && settings.providers.length > 0) {
+    node.providers = settings.providers.map((provider) => ({
+      id: guard.redact(provider.id),
+      ...(provider.api_key === undefined ? {} : { api_key: guard.redact(provider.api_key) }),
+    }));
+  }
   return node;
 }
 
@@ -334,7 +341,10 @@ function buildCheckNode(check: CheckInput, guard: GuardedRedactor): Record<strin
   if (check.manual === true) {
     node.manual = true;
   } else if (check.run !== undefined) {
-    node.run = flowSeq(check.run.map((token) => guard.redact(token)));
+    node.run =
+      typeof check.run === 'string'
+        ? guard.redact(check.run)
+        : flowSeq(check.run.map((token) => guard.redact(token)));
     if (check.timeout !== undefined) {
       node.timeout = guard.redact(check.timeout);
     }

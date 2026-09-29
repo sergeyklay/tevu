@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createGitHubPullRequestReader } from '@/adapters/trackers/github-issues';
@@ -24,6 +25,8 @@ import type {
 import type { GhRun } from '@/adapters/trackers/github-issues';
 import type { AssessableCheckSummary, AssessmentCaseContext } from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
+import type { CriteriaDraftFailure } from '@/application/draft-criteria';
+import type { ModelAccessOutcome } from '@/application/model-access';
 import type { CheckInput, ModelDefinitionInput, TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentCapabilityReport,
@@ -38,6 +41,7 @@ import type {
   IssueSnapshot,
   JiraTrackerSettings,
   ManagedCloneAdapter,
+  OperatorProvider,
   ReportResult,
   RunFinding,
   RunResult,
@@ -51,11 +55,22 @@ import type {
 const clack = vi.hoisted(() => {
   const CANCEL = Symbol('clack-cancel');
   const state = {
-    prompts: [] as Array<{ kind: string; message: string }>,
+    prompts: [] as Array<{
+      kind: string;
+      message: string;
+      placeholder: string | undefined;
+      defaultValue: string | undefined;
+      initialValue: unknown;
+      options: Array<{ label: string; hint: string | undefined; disabled: boolean }> | undefined;
+    }>,
     notes: [] as Array<{ message: string; title: string | undefined }>,
     logs: [] as Array<{ kind: string; message: string }>,
     rejections: [] as Array<{ kind: string; message: string; reason: string }>,
     answers: [] as unknown[],
+    cancels: [] as string[],
+    outros: [] as string[],
+    spinners: [] as Array<{ label: string; handleSignals: boolean | undefined }>,
+    timeline: [] as string[],
   };
   return { CANCEL, state };
 });
@@ -63,16 +78,49 @@ const clack = vi.hoisted(() => {
 vi.mock('@clack/prompts', () => {
   type AskOptions = {
     message: string;
+    placeholder?: string;
+    defaultValue?: string;
+    initialValue?: unknown;
+    options?: Array<{ label?: string; hint?: string; disabled?: boolean }>;
+    signal?: AbortSignal;
     validate?: (value: string | undefined) => string | undefined;
   };
   const isInvalidMarker = (value: unknown): value is { invalid: string } =>
     typeof value === 'object' && value !== null && 'invalid' in value;
+  const isAborted = (signal: AbortSignal | undefined): boolean => signal?.aborted === true;
+  const isInterruption = (value: unknown): value is () => void => typeof value === 'function';
+  const applyDefault = (kind: string, options: AskOptions, answer: unknown): unknown =>
+    kind === 'text' && answer === '' && options.defaultValue !== undefined
+      ? options.defaultValue
+      : answer;
   const ask = async (kind: string, options: AskOptions): Promise<unknown> => {
     for (;;) {
-      clack.state.prompts.push({ kind, message: options.message });
+      clack.state.prompts.push({
+        kind,
+        message: options.message,
+        placeholder: options.placeholder,
+        defaultValue: options.defaultValue,
+        initialValue: options.initialValue,
+        options: options.options?.map((option) => ({
+          label: option.label ?? '',
+          hint: option.hint,
+          disabled: option.disabled === true,
+        })),
+      });
+      clack.state.timeline.push(`prompt:${options.message}`);
+      if (isAborted(options.signal)) {
+        return clack.CANCEL;
+      }
       const answer = clack.state.answers.shift();
       if (answer === undefined) {
         throw new Error(`no scripted answer left for ${kind}: ${options.message}`);
+      }
+      if (isInterruption(answer)) {
+        answer();
+        if (isAborted(options.signal)) {
+          return clack.CANCEL;
+        }
+        continue;
       }
       if (isInvalidMarker(answer)) {
         const reason = options.validate?.(answer.invalid);
@@ -80,36 +128,88 @@ vi.mock('@clack/prompts', () => {
           clack.state.rejections.push({ kind, message: options.message, reason });
           continue;
         }
-        return answer.invalid;
+        return applyDefault(kind, options, answer.invalid);
       }
-      return answer;
+      return applyDefault(kind, options, answer);
     }
+  };
+  const recordLog = (kind: string, message: string): void => {
+    clack.state.logs.push({ kind, message });
+    clack.state.timeline.push(`log:${kind}`);
   };
   return {
     text: (options: AskOptions) => ask('text', options),
-    confirm: (options: { message: string }) => ask('confirm', options),
-    select: (options: { message: string }) => ask('select', options),
-    multiselect: (options: { message: string }) => ask('multiselect', options),
+    confirm: (options: AskOptions) => ask('confirm', options),
+    select: (options: AskOptions) => ask('select', options),
+    multiselect: (options: AskOptions) => ask('multiselect', options),
     intro: (message: string) => {
-      clack.state.prompts.push({ kind: 'intro', message });
+      clack.state.prompts.push({
+        kind: 'intro',
+        message,
+        placeholder: undefined,
+        defaultValue: undefined,
+        initialValue: undefined,
+        options: undefined,
+      });
+      clack.state.timeline.push('intro');
+    },
+    outro: (message: string) => {
+      clack.state.outros.push(message);
+      clack.state.timeline.push('outro');
+    },
+    cancel: (message: string) => {
+      clack.state.cancels.push(message);
+      clack.state.timeline.push('cancel');
     },
     note: (message: string, title?: string) => {
       clack.state.notes.push({ message, title });
     },
     log: {
       info: (message: string) => {
-        clack.state.logs.push({ kind: 'info', message });
+        recordLog('info', message);
       },
       warn: (message: string) => {
-        clack.state.logs.push({ kind: 'warn', message });
+        recordLog('warn', message);
       },
       step: (message: string) => {
-        clack.state.logs.push({ kind: 'step', message });
+        recordLog('step', message);
+      },
+      message: (message: string) => {
+        recordLog('message', message);
+      },
+      success: (message: string) => {
+        recordLog('success', message);
       },
     },
     isCancel: (value: unknown) => value === clack.CANCEL,
   };
 });
+
+vi.mock('yocto-spinner', () => ({
+  default: (options: { text?: string; handleSignals?: boolean }) => {
+    const label = (options.text ?? '').trim();
+    clack.state.spinners.push({ label, handleSignals: options.handleSignals });
+    return {
+      start: () => {
+        clack.state.timeline.push(`spinner:start:${label}`);
+      },
+      stop: () => {
+        clack.state.timeline.push(`spinner:stop:${label}`);
+      },
+    };
+  },
+}));
+
+vi.mock('stdin-discarder', () => ({
+  default: {
+    start: () => {
+      clack.state.timeline.push('discarder:start');
+    },
+    stop: () => {
+      clack.state.timeline.push('discarder:stop');
+    },
+  },
+}));
 
 const FIXED_NOW = new Date('2026-09-23T10:00:00.000Z');
 
@@ -496,6 +596,19 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
         'draftCriteria should not be called without a resolved reference and a declared criteria role',
       );
     }),
+    probeAgent: vi.fn(async () => ({ ok: true as const, value: buildCapabilityReport() })),
+    inspectModelProvider: vi.fn(async (_configPath, _agent, model) => ({
+      ok: true as const,
+      value: {
+        provider: model.slice(0, model.indexOf('/')),
+        definition: { defined: false as const },
+      },
+    })),
+    checkModelAccess: vi.fn(async () => ({
+      status: 'listed' as const,
+      unsetVariables: [],
+      retainedDirectory: null,
+    })),
     prepareRepositories: vi.fn(async () => ({ ok: true as const, value: [] })),
     createTask: vi.fn(async () => ({
       ok: true as const,
@@ -577,6 +690,44 @@ async function runCli(
 
 function scriptAnswers(...answers: unknown[]): void {
   clack.state.answers.push(...answers);
+}
+
+/** Wraps a fake operation so the shared timeline shows when it started and ended. */
+function recordOperation<Args extends unknown[], Result>(
+  name: string,
+  operation: (...args: Args) => Promise<Result>,
+): (...args: Args) => Promise<Result> {
+  return async (...args) => {
+    clack.state.timeline.push(`operation:${name}:start`);
+    try {
+      return await operation(...args);
+    } finally {
+      clack.state.timeline.push(`operation:${name}:end`);
+    }
+  };
+}
+
+/** A scripted answer that interrupts the command while the prompt that consumes it is open. */
+function interruptWith(controller: AbortController): () => void {
+  return () => {
+    controller.abort();
+  };
+}
+
+function managedCloneFailure(): Extract<TevuError, { kind: 'ManagedCloneError' }> {
+  return {
+    kind: 'ManagedCloneError',
+    operation: 'clone',
+    repository: 'github.com/octo/app',
+    reason: 'git clone exited with code 128',
+  };
+}
+
+function buildGitHubRepositoryConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
+  return {
+    ...buildTevuConfig({ repositories: [{ id: 'repo-1', github: 'octo/app' }] }),
+    ...overrides,
+  };
 }
 
 function expectNoWrites(operations: ProgramOperations): void {
@@ -678,29 +829,276 @@ function taskInterviewAnswers(repositoryChoice: string): unknown[] {
   ];
 }
 
+/** Answers the questions of one command check, each entry listing the answers its question consumes in order. */
+function commandCheckAnswers(
+  overrides: {
+    command?: readonly unknown[];
+    timeLimit?: readonly unknown[];
+    variables?: readonly unknown[];
+  } = {},
+): unknown[] {
+  return [
+    'acc-1',
+    'command',
+    'The test suite passes',
+    true,
+    ...(overrides.command ?? ['npm test -- --run']),
+    ...(overrides.timeLimit ?? ['']),
+    '',
+    ...(overrides.variables ?? ['']),
+    false,
+  ];
+}
+
+/** Answers a whole task interview around a scripted acceptance check, ending after the last check. */
+function taskAnswersWithAcceptanceCheck(
+  repositoryChoice: string,
+  acceptanceCheck: readonly unknown[],
+): unknown[] {
+  return [
+    'manual',
+    repositoryChoice,
+    '',
+    'abc123',
+    'task-2',
+    'Add an export button',
+    'Export the current view as CSV.',
+    'Implement CSV export for the current view.',
+    'Repository is readable',
+    false,
+    ...acceptanceCheck,
+    'dod-1',
+    'manual',
+    'README documents the button',
+    true,
+    false,
+  ];
+}
+
+const REFERENCE_HASH = '0123456789abcdef0123456789abcdef01234567';
+const REFERENCE_PARENT = 'fedcba9876543210fedcba9876543210fedcba98';
+
+/** A configuration whose `roles.criteria` is declared. */
+function buildCriteriaConfig(): TevuConfig {
+  return {
+    ...buildTevuConfig(),
+    roles: {
+      criteria: { model: 'openai/criteria-model', effort: 'high', agent: AGENT_NAME },
+    },
+  };
+}
+
+function buildResolvedCommitReference(): {
+  reference: { kind: 'commit'; identifier: string; commits: [string] };
+  proposedBase: { commit: string; basis: 'commit-parent' };
+} {
+  return {
+    reference: { kind: 'commit', identifier: 'HEAD~3', commits: [REFERENCE_HASH] },
+    proposedBase: { commit: REFERENCE_PARENT, basis: 'commit-parent' },
+  };
+}
+
+/** Answers every task question from the source through the readiness list when a reference resolves. */
+const READY_ANSWERS = [
+  'manual',
+  'repo-1',
+  'HEAD~3',
+  '',
+  'task-2',
+  'Add an export button',
+  'Export the current view as CSV.',
+  'Implement CSV export for the current view.',
+  'Repository is readable',
+  false,
+];
+
 const BOOTSTRAP_PROMPTS = [
-  'Run output directory (outside every repository, relative to the configuration file)',
-  'Concurrent cases (1-32)',
-  'Agent time limit per case (for example 10m)',
-  'Grace period before a forced stop (for example 3s)',
-  'Default time limit for command checks (for example 5m; empty to set one per check)',
-  'Command for agent "opencode" (name on PATH, or a path relative to the configuration file)',
-  'Add a secret variable for the agent (name only, never the value)?',
-  'Add a ordinary variable for the agent?',
-  'Configure Jira Cloud issue import?',
+  'Output directory',
+  'Concurrent cases',
+  'Agent time limit',
+  'Stop grace period',
+  'Check time limit',
+  'Agent command',
+  'Secret variable names',
+  'Non-secret variable names',
+  'Import issues from Jira?',
   'Repository ID',
-  'Where does tevu read repository "alpha" from?',
-  'Local path of repository "alpha" (relative to the configuration file)',
+  'Repository source',
+  'Local path',
   'Add another repository?',
   'Model entry ID',
-  'Model for "c1" (provider/model)',
-  'Reasoning effort for "c1" (passed to the agent verbatim)',
+  'Model',
+  'Reasoning effort',
   'Model entry ID',
-  'Model for "c2" (provider/model)',
-  'Reasoning effort for "c2" (passed to the agent verbatim)',
+  'Model',
+  'Reasoning effort',
   'Add another model?',
-  'Declare a grader model for graded checks?',
+  'Grade checks with a model?',
 ];
+
+/** Answers every setup question up to and including "Add another model?" without typing the defaults. */
+const BOOTSTRAP_ANSWERS: unknown[] = [
+  '/tmp/bench-artifacts',
+  '4',
+  '10m',
+  '5s',
+  '',
+  'opencode',
+  '',
+  '',
+  false,
+  'alpha',
+  'path',
+  '../repos/alpha',
+  false,
+  'c1',
+  'provider/model-a',
+  'high',
+  'c2',
+  'provider/model-b',
+  'low',
+  false,
+];
+
+/** The failed-draft causes with the lines the wizard prints after its headline and before its last line. */
+const DRAFT_FAILURE_CASES: Array<{
+  name: string;
+  failure: CriteriaDraftFailure;
+  lines: string[];
+}> = [
+  {
+    name: 'unreadable changes',
+    failure: { cause: 'changes-unreadable', detail: 'git-diff: bad object' },
+    lines: ["The reference solution's changes can't be read.", 'git-diff: bad object'],
+  },
+  {
+    name: 'an unredactable prompt',
+    failure: { cause: 'prompt-unredactable' },
+    lines: ["The prompt couldn't be redacted, so the model wasn't called."],
+  },
+  {
+    name: 'one unset variable',
+    failure: { cause: 'variables-unset', names: ['ACME_KEY'] },
+    lines: ["ACME_KEY isn't set in this terminal."],
+  },
+  {
+    name: 'several unset variables',
+    failure: { cause: 'variables-unset', names: ['ACME_KEY', 'ACME_BASE'] },
+    lines: ["ACME_KEY, ACME_BASE aren't set in this terminal."],
+  },
+  {
+    name: "the operator's model missing from the environment",
+    failure: { cause: 'model-unavailable', model: 'litellm/anthropic/claude-opus-5' },
+    lines: [
+      "OpenCode can't find litellm/anthropic/claude-opus-5 in tevu's environment.",
+      'Add its provider to agents.opencode.providers in tevu.yaml.',
+    ],
+  },
+  {
+    name: 'a timeout',
+    failure: { cause: 'timed-out', limit: '10m' },
+    lines: ["The model didn't answer within 10m."],
+  },
+  {
+    name: 'a failure that carries the agent message',
+    failure: {
+      cause: 'call-failed',
+      agentMessage: 'Unexpected server error. Check server logs for details.',
+      detail: 'run process exited with code 1: Unexpected server error.',
+    },
+    lines: ['OpenCode reported "Unexpected server error. Check server logs for details.".'],
+  },
+  {
+    name: 'a failure without an agent message',
+    failure: { cause: 'call-failed', detail: 'ModelCallError (failed): synthetic failure' },
+    lines: ['The OpenCode call failed.', 'ModelCallError (failed): synthetic failure'],
+  },
+  {
+    name: 'an invalid reply',
+    failure: { cause: 'reply-invalid', defect: 'done is not an array' },
+    lines: ["The model's reply wasn't a usable list."],
+  },
+];
+
+function draftFailureMessage(lines: readonly string[]): string {
+  return ["Couldn't draft criteria.", ...lines, 'Enter the criteria yourself.'].join('\n');
+}
+
+/**
+ * The setup answers from the first question through "Add another model?".
+ * An option replaces the answers its question consumes, so a test can script
+ * an extra answer (a retry, a key variable) where the interview asks for it.
+ */
+function setupAnswers(
+  options: {
+    command?: readonly unknown[];
+    secrets?: string;
+    env?: string;
+    jira?: readonly unknown[];
+    firstModel?: readonly unknown[];
+    secondModel?: readonly unknown[];
+  } = {},
+): unknown[] {
+  return [
+    ...BOOTSTRAP_ANSWERS.slice(0, 5),
+    ...(options.command ?? ['opencode']),
+    options.secrets ?? '',
+    options.env ?? '',
+    ...(options.jira ?? [false]),
+    ...BOOTSTRAP_ANSWERS.slice(9, 14),
+    ...(options.firstModel ?? ['provider/model-a']),
+    'high',
+    'c2',
+    ...(options.secondModel ?? ['provider/model-b']),
+    'low',
+    false,
+  ];
+}
+
+/** A complete setup and task interview that declines both roles and saves. */
+function fullSetupAnswers(options: Parameters<typeof setupAnswers>[0] = {}): unknown[] {
+  return [...setupAnswers(options), false, false, ...taskInterviewAnswers('alpha'), true];
+}
+
+function operationsWithModelCheck(overrides: Partial<ProgramOperations> = {}): ProgramOperations {
+  return createOperations({ configExists: vi.fn(async () => false), ...overrides });
+}
+
+function definedProvider(
+  overrides: Partial<Extract<OperatorProvider, { defined: true }>> = {},
+): OperatorProvider {
+  return { defined: true, keyVariables: [], otherVariables: [], apiKey: 'absent', ...overrides };
+}
+
+/** Answers `inspectModelProvider` from a table keyed by provider; an absent provider is undefined. */
+function inspectingProviders(
+  definitions: Record<string, OperatorProvider>,
+): ProgramOperations['inspectModelProvider'] {
+  return vi.fn<ProgramOperations['inspectModelProvider']>(async (_configPath, _agent, model) => {
+    const provider = model.slice(0, model.indexOf('/'));
+    return {
+      ok: true as const,
+      value: { provider, definition: definitions[provider] ?? { defined: false as const } },
+    };
+  });
+}
+
+function accessOutcome(
+  status: 'listed' | 'not-listed',
+  overrides: { unsetVariables?: string[]; retainedDirectory?: string | null } = {},
+): ModelAccessOutcome {
+  return { status, unsetVariables: [], retainedDirectory: null, ...overrides };
+}
+
+function requireAgentBlock(
+  operations: ProgramOperations,
+): NonNullable<TaskWizardInput['bootstrap']>['agents']['opencode'] {
+  const agent = requireCreateTaskCall(operations).bootstrap?.agents.opencode;
+  if (agent === undefined) {
+    throw new Error('expected the captured createTask call to carry an agent block');
+  }
+  return agent;
+}
 
 const HELP_CASES: Array<{ argv: string[]; description: string; usage: string }> = [
   {
@@ -875,6 +1273,10 @@ describe('tevu CLI', () => {
     clack.state.logs = [];
     clack.state.rejections = [];
     clack.state.answers = [];
+    clack.state.cancels = [];
+    clack.state.outros = [];
+    clack.state.spinners = [];
+    clack.state.timeline = [];
   });
 
   describe('command surface', () => {
@@ -2090,34 +2492,12 @@ describe('tevu CLI', () => {
 
     it('bootstraps the configuration before the first task question and cancels without a write', async () => {
       const operations = createOperations({ configExists: vi.fn(async () => false) });
-      scriptAnswers(
-        '/tmp/bench-artifacts',
-        '4',
-        '10m',
-        '5s',
-        '',
-        'opencode',
-        false,
-        false,
-        false,
-        'alpha',
-        'path',
-        '../repos/alpha',
-        false,
-        'c1',
-        'provider/model-a',
-        'high',
-        'c2',
-        'provider/model-b',
-        'low',
-        false,
-        clack.CANCEL,
-      );
+      scriptAnswers(...BOOTSTRAP_ANSWERS, clack.CANCEL);
 
       const { code, err } = await runCli(['task', 'add'], { operations });
 
       expect(code).toBe(130);
-      expect(err[0]).toBe('Cancelled.');
+      expect(err).toEqual([]);
       expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
         'tevu task add',
         ...BOOTSTRAP_PROMPTS,
@@ -2125,10 +2505,7 @@ describe('tevu CLI', () => {
       expect(vi.mocked(operations.configExists)).toHaveBeenCalledExactlyOnceWith('tevu.yaml');
       expect(operations.loadConfig).not.toHaveBeenCalled();
       expect(operations.createTask).not.toHaveBeenCalled();
-      expect(clack.state.logs).toContainEqual({
-        kind: 'warn',
-        message: 'Task creation cancelled; the configuration is unchanged.',
-      });
+      expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
     });
 
     const GITHUB_GRAMMAR_MESSAGE =
@@ -2143,8 +2520,8 @@ describe('tevu CLI', () => {
         '5s',
         '',
         'opencode',
-        false,
-        false,
+        '',
+        '',
         false,
         'alpha',
         'github',
@@ -2159,22 +2536,17 @@ describe('tevu CLI', () => {
       expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
         'tevu task add',
         ...BOOTSTRAP_PROMPTS.slice(0, 10),
-        'Where does tevu read repository "alpha" from?',
-        'GitHub repository of "alpha" (OWNER/REPO, or https://HOST/OWNER/REPO for GitHub Enterprise Server)',
-        'GitHub repository of "alpha" (OWNER/REPO, or https://HOST/OWNER/REPO for GitHub Enterprise Server)',
+        'Repository source',
+        'GitHub repository',
+        'GitHub repository',
         'Add another repository?',
       ]);
       expect(clack.state.rejections).toEqual([
-        {
-          kind: 'text',
-          message:
-            'GitHub repository of "alpha" (OWNER/REPO, or https://HOST/OWNER/REPO for GitHub Enterprise Server)',
-          reason: GITHUB_GRAMMAR_MESSAGE,
-        },
+        { kind: 'text', message: 'GitHub repository', reason: GITHUB_GRAMMAR_MESSAGE },
       ]);
     });
 
-    it('re-asks the Task repository select on a ManagedCloneError, keeping every earlier answer (AC-9)', async () => {
+    it('re-asks the Repository select on a ManagedCloneError, keeping every earlier answer (AC-9)', async () => {
       const config = buildTevuConfig({ repositories: [{ id: 'repo-1', github: 'octo/app' }] });
       const ensureManagedCommits = vi
         .fn()
@@ -2198,13 +2570,13 @@ describe('tevu CLI', () => {
       const { code } = await runCli(['task', 'add'], { operations });
 
       expect(code).toBe(0);
-      expect(
-        clack.state.prompts.filter((prompt) => prompt.message === 'Task repository'),
-      ).toHaveLength(2);
+      expect(clack.state.prompts.filter((prompt) => prompt.message === 'Repository')).toHaveLength(
+        2,
+      );
       expect(clack.state.logs).toContainEqual({
         kind: 'warn',
         message:
-          'Repository "repo-1" cannot be used: cloning github.com/octo/app failed: git clone exited with code 128',
+          "Can't use repository repo-1.\ncloning github.com/octo/app failed: git clone exited with code 128",
       });
       expect(ensureManagedCommits).toHaveBeenCalledWith(
         { repository: { id: 'repo-1', github: 'octo/app' }, revisions: [] },
@@ -2217,25 +2589,7 @@ describe('tevu CLI', () => {
       scriptAnswers(
         '/tmp/bench-artifacts',
         { invalid: 'abc' },
-        '4',
-        '10m',
-        '5s',
-        '',
-        'opencode',
-        false,
-        false,
-        false,
-        'alpha',
-        'path',
-        '../repos/alpha',
-        false,
-        'c1',
-        'provider/model-a',
-        'high',
-        'c2',
-        'provider/model-b',
-        'low',
-        false,
+        ...BOOTSTRAP_ANSWERS.slice(1),
         false,
         false,
         ...taskInterviewAnswers('alpha'),
@@ -2245,11 +2599,12 @@ describe('tevu CLI', () => {
       const { code, out } = await runCli(['task', 'add'], { operations });
 
       expect(code).toBe(0);
-      expect(out).toEqual(['Configuration: tevu.yaml', 'Task "task-2" added to tevu.yaml.']);
+      expect(out).toEqual(['Configuration: tevu.yaml']);
+      expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
       expect(clack.state.rejections).toEqual([
         {
           kind: 'text',
-          message: 'Concurrent cases (1-32)',
+          message: 'Concurrent cases',
           reason: 'enter an integer from 1 through 32',
         },
       ]);
@@ -2263,6 +2618,7 @@ describe('tevu CLI', () => {
             concurrency: 4,
             timeout: '10m',
             stop_grace: '5s',
+            check_timeout: '5m',
           },
           agents: { opencode: { command: 'opencode', secrets: [], env: [] } },
           repositories: [{ id: 'alpha', path: '../repos/alpha' }],
@@ -2290,26 +2646,7 @@ describe('tevu CLI', () => {
     it('declares roles.grader in the bootstrap answers when the operator opts in, and the written configuration parses with the role (P11)', async () => {
       const operations = createOperations({ configExists: vi.fn(async () => false) });
       scriptAnswers(
-        '/tmp/bench-artifacts',
-        '4',
-        '10m',
-        '5s',
-        '',
-        'opencode',
-        false,
-        false,
-        false,
-        'alpha',
-        'path',
-        '../repos/alpha',
-        false,
-        'c1',
-        'provider/model-a',
-        'high',
-        'c2',
-        'provider/model-b',
-        'low',
-        false,
+        ...BOOTSTRAP_ANSWERS,
         true,
         'openai/grader-model',
         'high',
@@ -2322,11 +2659,7 @@ describe('tevu CLI', () => {
 
       expect(code).toBe(0);
       expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual(
-        expect.arrayContaining([
-          ...BOOTSTRAP_PROMPTS,
-          'Grader model (provider/model)',
-          'Grader reasoning effort (a variant the agent provides without a repository)',
-        ]),
+        expect.arrayContaining([...BOOTSTRAP_PROMPTS, 'Grader model', 'Grader effort']),
       );
       const call = requireCreateTaskCall(operations);
       expect(call.bootstrap?.roles).toEqual({
@@ -2341,26 +2674,7 @@ describe('tevu CLI', () => {
     it('asks the criteria question after the grader question and declares roles.criteria when the operator opts in (E5)', async () => {
       const operations = createOperations({ configExists: vi.fn(async () => false) });
       scriptAnswers(
-        '/tmp/bench-artifacts',
-        '4',
-        '10m',
-        '5s',
-        '',
-        'opencode',
-        false,
-        false,
-        false,
-        'alpha',
-        'path',
-        '../repos/alpha',
-        false,
-        'c1',
-        'provider/model-a',
-        'high',
-        'c2',
-        'provider/model-b',
-        'low',
-        false,
+        ...BOOTSTRAP_ANSWERS,
         false,
         true,
         'openai/criteria-model',
@@ -2373,12 +2687,10 @@ describe('tevu CLI', () => {
 
       expect(code).toBe(0);
       const graderIndex = clack.state.prompts.findIndex(
-        (prompt) => prompt.message === 'Declare a grader model for graded checks?',
+        (prompt) => prompt.message === 'Grade checks with a model?',
       );
       const criteriaIndex = clack.state.prompts.findIndex(
-        (prompt) =>
-          prompt.message ===
-          'Declare a criteria model to draft criteria from a reference solution?',
+        (prompt) => prompt.message === 'Draft criteria with a model?',
       );
       expect(graderIndex).toBeGreaterThanOrEqual(0);
       expect(criteriaIndex).toBeGreaterThan(graderIndex);
@@ -2398,32 +2710,7 @@ describe('tevu CLI', () => {
 
     it('omits roles from the bootstrap answers when the operator declines a grader model, and the written configuration still parses (P11)', async () => {
       const operations = createOperations({ configExists: vi.fn(async () => false) });
-      scriptAnswers(
-        '/tmp/bench-artifacts',
-        '4',
-        '10m',
-        '5s',
-        '',
-        'opencode',
-        false,
-        false,
-        false,
-        'alpha',
-        'path',
-        '../repos/alpha',
-        false,
-        'c1',
-        'provider/model-a',
-        'high',
-        'c2',
-        'provider/model-b',
-        'low',
-        false,
-        false,
-        false,
-        ...taskInterviewAnswers('alpha'),
-        true,
-      );
+      scriptAnswers(...BOOTSTRAP_ANSWERS, false, false, ...taskInterviewAnswers('alpha'), true);
 
       const { code } = await runCli(['task', 'add'], { operations });
 
@@ -2440,26 +2727,7 @@ describe('tevu CLI', () => {
     it('re-prompts the grader model question until the answer is a valid provider/model identifier', async () => {
       const operations = createOperations({ configExists: vi.fn(async () => false) });
       scriptAnswers(
-        '/tmp/bench-artifacts',
-        '4',
-        '10m',
-        '5s',
-        '',
-        'opencode',
-        false,
-        false,
-        false,
-        'alpha',
-        'path',
-        '../repos/alpha',
-        false,
-        'c1',
-        'provider/model-a',
-        'high',
-        'c2',
-        'provider/model-b',
-        'low',
-        false,
+        ...BOOTSTRAP_ANSWERS,
         true,
         { invalid: 'not-a-model' },
         'openai/grader-model',
@@ -2472,16 +2740,12 @@ describe('tevu CLI', () => {
       expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
         'tevu task add',
         ...BOOTSTRAP_PROMPTS,
-        'Grader model (provider/model)',
-        'Grader model (provider/model)',
-        'Grader reasoning effort (a variant the agent provides without a repository)',
+        'Grader model',
+        'Grader model',
+        'Grader effort',
       ]);
       expect(clack.state.rejections).toEqual([
-        {
-          kind: 'text',
-          message: 'Grader model (provider/model)',
-          reason: 'model must be "<provider>/<model>"',
-        },
+        { kind: 'text', message: 'Grader model', reason: 'model must be "<provider>/<model>"' },
       ]);
       expect(operations.createTask).not.toHaveBeenCalled();
     });
@@ -2493,7 +2757,8 @@ describe('tevu CLI', () => {
       const { code, out } = await runCli(['task', 'add'], { operations });
 
       expect(code).toBe(0);
-      expect(out).toEqual(['Configuration: tevu.yaml', 'Task "task-2" added to tevu.yaml.']);
+      expect(out).toEqual(['Configuration: tevu.yaml']);
+      expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
       expect(vi.mocked(operations.configExists)).toHaveBeenCalledExactlyOnceWith('tevu.yaml');
       expect(vi.mocked(operations.loadConfig)).toHaveBeenCalledOnce();
       expect(operations.importJiraIssue).not.toHaveBeenCalled();
@@ -2526,7 +2791,8 @@ describe('tevu CLI', () => {
       const { code, out } = await runCli(['task', 'add'], { operations });
 
       expect(code).toBe(0);
-      expect(out).toEqual([`Configuration: ${foundPath}`, `Task "task-2" added to ${foundPath}.`]);
+      expect(out).toEqual([`Configuration: ${foundPath}`]);
+      expect(clack.state.outros).toEqual([`Task task-2 added to ${foundPath}`]);
       expect(vi.mocked(operations.configExists)).toHaveBeenCalledExactlyOnceWith(foundPath);
       expect(vi.mocked(operations.loadConfig)).toHaveBeenCalledExactlyOnceWith(foundPath);
     });
@@ -2539,40 +2805,13 @@ describe('tevu CLI', () => {
           error: configNotFoundError(['/work/tevu.yaml', '/home/u/.config/tevu/tevu.yaml']),
         })),
       });
-      scriptAnswers(
-        '/tmp/bench-artifacts',
-        '4',
-        '10m',
-        '5s',
-        '',
-        'opencode',
-        false,
-        false,
-        false,
-        'alpha',
-        'path',
-        '../repos/alpha',
-        false,
-        'c1',
-        'provider/model-a',
-        'high',
-        'c2',
-        'provider/model-b',
-        'low',
-        false,
-        false,
-        false,
-        ...taskInterviewAnswers('alpha'),
-        true,
-      );
+      scriptAnswers(...BOOTSTRAP_ANSWERS, false, false, ...taskInterviewAnswers('alpha'), true);
 
       const { code, out } = await runCli(['task', 'add'], { operations });
 
       expect(code).toBe(0);
-      expect(out).toEqual([
-        'Configuration: /work/tevu.yaml',
-        'Task "task-2" added to /work/tevu.yaml.',
-      ]);
+      expect(out).toEqual(['Configuration: /work/tevu.yaml']);
+      expect(clack.state.outros).toEqual(['Task task-2 added to /work/tevu.yaml']);
       expect(vi.mocked(operations.configExists)).toHaveBeenCalledExactlyOnceWith('/work/tevu.yaml');
       expect(vi.mocked(operations.requireConfigDirectory)).toHaveBeenCalledExactlyOnceWith(
         '/work/tevu.yaml',
@@ -2634,13 +2873,14 @@ describe('tevu CLI', () => {
       const { code, out } = await runCli(['task', 'add', '--jira', 'TEVU-42'], { operations });
 
       expect(code).toBe(0);
-      expect(out).toEqual(['Configuration: tevu.yaml', 'Task "task-2" added to tevu.yaml.']);
+      expect(out).toEqual(['Configuration: tevu.yaml']);
+      expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
       expect(vi.mocked(operations.importJiraIssue)).toHaveBeenCalledExactlyOnceWith(
         jiraSettings,
         'TEVU-42',
       );
       expect(clack.state.notes).toContainEqual({
-        title: 'Imported TEVU-42 (one-time snapshot)',
+        title: 'Imported TEVU-42',
         message: 'Add an export button\n\nUsers cannot export the current view.',
       });
       expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task.source).toEqual({
@@ -2691,13 +2931,14 @@ describe('tevu CLI', () => {
       });
 
       expect(code).toBe(0);
-      expect(out).toEqual(['Configuration: tevu.yaml', 'Task "task-2" added to tevu.yaml.']);
+      expect(out).toEqual(['Configuration: tevu.yaml']);
+      expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
       expect(vi.mocked(operations.importGitHubIssue)).toHaveBeenCalledExactlyOnceWith(
         'octo/repo#42',
       );
       expect(operations.importJiraIssue).not.toHaveBeenCalled();
       expect(clack.state.notes).toContainEqual({
-        title: 'Imported octo/repo#42 (one-time snapshot)',
+        title: 'Imported octo/repo#42',
         message: 'Add an export button\n\nUsers cannot export the current view.',
       });
       expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task.source).toEqual({
@@ -2743,12 +2984,9 @@ describe('tevu CLI', () => {
         const { code, err } = await runCli(argv, { operations });
 
         expect(code).toBe(130);
-        expect(err[0]).toBe('Cancelled.');
+        expect(err).toEqual([]);
         expect(operations.createTask).not.toHaveBeenCalled();
-        expect(clack.state.logs).toContainEqual({
-          kind: 'warn',
-          message: 'Task creation cancelled; the configuration is unchanged.',
-        });
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
       },
     );
 
@@ -2759,12 +2997,9 @@ describe('tevu CLI', () => {
       const { code, err } = await runCli(['task', 'add'], { operations });
 
       expect(code).toBe(130);
-      expect(err[0]).toBe('Cancelled.');
+      expect(err).toEqual([]);
       expect(operations.createTask).not.toHaveBeenCalled();
-      expect(clack.state.logs).toContainEqual({
-        kind: 'warn',
-        message: 'Task creation cancelled; the configuration is unchanged.',
-      });
+      expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
     });
 
     it('maps a configuration parse failure to exit 1 before any question', async () => {
@@ -2866,12 +3101,16 @@ describe('tevu CLI', () => {
       expect(code).toBe(0);
       expect(operations.resolveReference).not.toHaveBeenCalled();
       expect(operations.draftCriteria).not.toHaveBeenCalled();
-      expect(clack.state.prompts.map((prompt) => prompt.message)).toContain(
-        'Reference solution: a pull request (OWNER/REPO#NUMBER or URL) or a commit in "repo-1" (empty for none)',
-      );
-      expect(clack.state.prompts.map((prompt) => prompt.message)).toContain(
-        'Base commit (a commit from before the fix; resolved and pinned when saved)',
-      );
+      expect(
+        clack.state.prompts.find((prompt) => prompt.message === 'Reference PR or commit'),
+      ).toMatchObject({
+        placeholder: 'none',
+        defaultValue: '',
+      });
+      expect(clack.state.prompts.find((prompt) => prompt.message === 'Base commit')).toMatchObject({
+        placeholder: undefined,
+        defaultValue: undefined,
+      });
       expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task).not.toHaveProperty(
         'reference',
       );
@@ -2927,7 +3166,8 @@ describe('tevu CLI', () => {
       const { code, out } = await runCli(['task', 'add'], { operations });
 
       expect(code).toBe(0);
-      expect(out).toEqual(['Configuration: tevu.yaml', 'Task "task-2" added to tevu.yaml.']);
+      expect(out).toEqual(['Configuration: tevu.yaml']);
+      expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
       expect(resolveReference).toHaveBeenCalledTimes(2);
       expect(resolveReference.mock.calls[0]?.[0]).toEqual({
         configPath: 'tevu.yaml',
@@ -2941,15 +3181,16 @@ describe('tevu CLI', () => {
       });
       expect(clack.state.logs).toContainEqual({
         kind: 'warn',
-        message: 'Reference solution cannot be resolved: the answer does not name a commit',
+        message: "Can't resolve the reference.\nthe answer does not name a commit",
       });
       expect(clack.state.notes).toContainEqual({
-        title: 'Reference solution (read once)',
+        title: 'Reference solution',
         message: `Commit ${hash} in "repo-1"\nProposed base: ${parent} (the parent of the reference commit)`,
       });
-      expect(clack.state.prompts.map((prompt) => prompt.message)).toContain(
-        `Base commit (empty for ${parent}, the parent of the reference commit)`,
-      );
+      expect(clack.state.prompts.find((prompt) => prompt.message === 'Base commit')).toMatchObject({
+        placeholder: parent,
+        defaultValue: parent,
+      });
       expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task).toMatchObject({
         base_commit: parent,
         reference: { kind: 'commit', identifier: 'HEAD~3', commits: [hash] },
@@ -3054,7 +3295,7 @@ describe('tevu CLI', () => {
         },
       });
       expect(clack.state.notes).toContainEqual({
-        title: 'Reference solution (read once)',
+        title: 'Reference solution',
         message: `Pull request octo/app#128 (merged) into main\nCommits: 1, merge commit ${mergeHash}\nProposed base: ${parentHash} (the parent of the pull request's first commit)`,
       });
       const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
@@ -3228,11 +3469,12 @@ describe('tevu CLI', () => {
         kind: 'warn',
         message: `No base commit is proposed: ${noProposedBase}`,
       });
-      expect(clack.state.prompts.map((prompt) => prompt.message)).toContain(
-        'Base commit (a commit from before the fix; resolved and pinned when saved)',
-      );
+      expect(clack.state.prompts.find((prompt) => prompt.message === 'Base commit')).toMatchObject({
+        placeholder: undefined,
+        defaultValue: undefined,
+      });
       expect(clack.state.notes).toContainEqual({
-        title: 'Reference solution (read once)',
+        title: 'Reference solution',
         message: 'Pull request octo/app#128 (merged) into main\nCommits: 1\nProposed base: none',
       });
       expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task).toMatchObject({
@@ -3241,50 +3483,1766 @@ describe('tevu CLI', () => {
       });
     });
 
-    describe('criteria drafting (AC-1 to AC-6, AC-12, AC-17)', () => {
-      const HASH = '0123456789abcdef0123456789abcdef01234567';
-      const PARENT = 'fedcba9876543210fedcba9876543210fedcba98';
-
-      function buildCriteriaConfig(): TevuConfig {
-        return {
-          ...buildTevuConfig(),
-          roles: {
-            criteria: { model: 'openai/criteria-model', effort: 'high', agent: AGENT_NAME },
-          },
-        };
-      }
-
-      function buildResolvedCommitReference(): {
-        reference: { kind: 'commit'; identifier: string; commits: [string] };
-        proposedBase: { commit: string; basis: 'commit-parent' };
-      } {
-        return {
-          reference: { kind: 'commit', identifier: 'HEAD~3', commits: [HASH] },
-          proposedBase: { commit: PARENT, basis: 'commit-parent' },
-        };
-      }
-
-      const READY_ANSWERS = [
-        'manual',
-        'repo-1',
-        'HEAD~3',
+    describe('defaults and list answers', () => {
+      const DEFAULTED_BOOTSTRAP_ANSWERS: unknown[] = [
         '',
-        'task-2',
-        'Add an export button',
-        'Export the current view as CSV.',
-        'Implement CSV export for the current view.',
-        'Repository is readable',
-        false,
+        '',
+        '',
+        '',
+        '',
+        '',
+        ...BOOTSTRAP_ANSWERS.slice(6),
       ];
 
-      it('never calls draftCriteria when roles.criteria is not declared, printing the by-hand notice (C1)', async () => {
+      it('creates the documented run settings, agent command, and role efforts from empty answers', async () => {
+        const operations = createOperations({ configExists: vi.fn(async () => false) });
+        scriptAnswers(
+          ...DEFAULTED_BOOTSTRAP_ANSWERS,
+          true,
+          'openai/grader-model',
+          '',
+          true,
+          'openai/criteria-model',
+          '',
+          ...taskAnswersWithAcceptanceCheck('alpha', commandCheckAnswers()),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(requireCreateTaskCall(operations).bootstrap).toMatchObject({
+          run: {
+            output_dir: 'runs',
+            concurrency: 2,
+            timeout: '10m',
+            stop_grace: '3s',
+            check_timeout: '5m',
+          },
+          agents: { opencode: { command: 'opencode' } },
+          roles: {
+            grader: { model: 'openai/grader-model', effort: 'medium' },
+            criteria: { model: 'openai/criteria-model', effort: 'high' },
+          },
+        });
+      });
+
+      it('shows every default as the placeholder of its prompt', async () => {
+        const operations = createOperations({ configExists: vi.fn(async () => false) });
+        scriptAnswers(
+          ...DEFAULTED_BOOTSTRAP_ANSWERS,
+          true,
+          'openai/grader-model',
+          '',
+          true,
+          'openai/criteria-model',
+          '',
+          ...taskAnswersWithAcceptanceCheck('alpha', commandCheckAnswers()),
+          true,
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        const defaulted = clack.state.prompts
+          .filter((prompt) => prompt.kind === 'text' && prompt.defaultValue !== undefined)
+          .map((prompt) => [prompt.message, prompt.defaultValue, prompt.placeholder]);
+        expect(defaulted).toEqual([
+          ['Output directory', 'runs', 'runs'],
+          ['Concurrent cases', '2', '2'],
+          ['Agent time limit', '10m', '10m'],
+          ['Stop grace period', '3s', '3s'],
+          ['Check time limit', '5m', '5m'],
+          ['Agent command', 'opencode', 'opencode'],
+          ['Secret variable names', '', 'none'],
+          ['Non-secret variable names', '', 'none'],
+          ['Grader effort', 'medium', 'medium'],
+          ['Criteria effort', 'high', 'high'],
+          ['Reference PR or commit', '', 'none'],
+          ['Description', '', 'none'],
+          ['Time limit', '', '5m'],
+          ['Passing exit codes', '0', '0'],
+          ['Check variables', '', 'none'],
+          ['Description', '', 'none'],
+        ]);
+      });
+
+      it('prints the step lines and asks for a second model when only one is entered', async () => {
+        const operations = createOperations({ configExists: vi.fn(async () => false) });
+        scriptAnswers(...BOOTSTRAP_ANSWERS, false, false, ...taskInterviewAnswers('alpha'), true);
+
+        await runCli(['task', 'add'], { operations });
+
+        const infoAndSteps = clack.state.logs.filter((log) => log.kind !== 'message');
+        expect(infoAndSteps).toEqual([
+          { kind: 'step', message: 'New configuration' },
+          { kind: 'info', message: 'Add a second model to compare.' },
+          { kind: 'step', message: 'New task' },
+        ]);
+      });
+
+      it.each([
+        { separator: ',', description: 'commas' },
+        { separator: ' ', description: 'spaces' },
+        { separator: ', ', description: 'commas and spaces' },
+      ])(
+        'reads the secret, non-secret, and check variable lists separated by $description',
+        async ({ separator }) => {
+          const operations = createOperations({ configExists: vi.fn(async () => false) });
+          scriptAnswers(
+            ...BOOTSTRAP_ANSWERS.slice(0, 6),
+            ['SECRET_ONE', 'SECRET_TWO'].join(separator),
+            ['PLAIN_ONE', 'PLAIN_TWO'].join(separator),
+            ...BOOTSTRAP_ANSWERS.slice(8),
+            false,
+            false,
+            ...taskAnswersWithAcceptanceCheck(
+              'alpha',
+              commandCheckAnswers({ variables: [['CHECK_ONE', 'CHECK_TWO'].join(separator)] }),
+            ),
+            true,
+          );
+
+          const { code } = await runCli(['task', 'add'], { operations });
+
+          const call = requireCreateTaskCall(operations);
+          expect(code).toBe(0);
+          expect(call.bootstrap?.agents).toEqual({
+            opencode: {
+              command: 'opencode',
+              secrets: ['SECRET_ONE', 'SECRET_TWO'],
+              env: ['PLAIN_ONE', 'PLAIN_TWO'],
+            },
+          });
+          expect(call.task.checks.acceptance[0]).toMatchObject({ env: ['CHECK_ONE', 'CHECK_TWO'] });
+        },
+      );
+
+      it.each([
+        {
+          description: 'a name repeated inside one secret list',
+          answers: [{ invalid: 'KEY_A KEY_A' }, 'KEY_A', ''],
+          rejection: {
+            message: 'Secret variable names',
+            reason: '"KEY_A" is listed more than once',
+          },
+        },
+        {
+          description: 'a secret name repeated in the non-secret list',
+          answers: ['SHARED_KEY', { invalid: 'SHARED_KEY' }, 'OTHER_VAR'],
+          rejection: {
+            message: 'Non-secret variable names',
+            reason: '"SHARED_KEY" is already configured',
+          },
+        },
+        {
+          description: 'a name the isolation contract fixes',
+          answers: [{ invalid: 'PATH' }, '', ''],
+          rejection: {
+            message: 'Secret variable names',
+            reason:
+              'PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract',
+          },
+        },
+      ])('rejects $description', async ({ answers, rejection }) => {
+        const operations = createOperations({ configExists: vi.fn(async () => false) });
+        scriptAnswers(...BOOTSTRAP_ANSWERS.slice(0, 6), ...answers, clack.CANCEL);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(130);
+        expect(clack.state.rejections).toEqual([{ kind: 'text', ...rejection }]);
+      });
+
+      it('shows the inherited check time limit as the placeholder and writes no timeout for an empty answer', async () => {
+        const config = buildTevuConfig({
+          run: {
+            output_dir: '/tmp/artifacts',
+            concurrency: 2,
+            timeout: '10m',
+            stop_grace: '5s',
+            check_timeout: '7m',
+          },
+        });
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+        });
+        scriptAnswers(...taskAnswersWithAcceptanceCheck('repo-1', commandCheckAnswers()), true);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.prompts.find((prompt) => prompt.message === 'Time limit')).toMatchObject(
+          {
+            placeholder: '7m',
+          },
+        );
+        const check = requireCreateTaskCall(operations).task.checks.acceptance[0];
+        expect(check).not.toHaveProperty('timeout');
+      });
+
+      it('writes a typed check time limit', async () => {
+        const operations = createOperations();
+        scriptAnswers(
+          ...taskAnswersWithAcceptanceCheck('repo-1', commandCheckAnswers({ timeLimit: ['2m'] })),
+          true,
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(requireCreateTaskCall(operations).task.checks.acceptance[0]).toMatchObject({
+          timeout: '2m',
+        });
+      });
+
+      it('requires a check time limit when the configuration has none to inherit', async () => {
+        const operations = createOperations();
+        scriptAnswers(
+          ...taskAnswersWithAcceptanceCheck(
+            'repo-1',
+            commandCheckAnswers({ timeLimit: [{ invalid: '' }, '2m'] }),
+          ),
+          true,
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.rejections).toEqual([
+          { kind: 'text', message: 'Time limit', reason: expect.any(String) },
+        ]);
+        expect(clack.state.prompts.find((prompt) => prompt.message === 'Time limit')).toMatchObject(
+          {
+            placeholder: undefined,
+          },
+        );
+        expect(requireCreateTaskCall(operations).task.checks.acceptance[0]).toMatchObject({
+          timeout: '2m',
+        });
+      });
+    });
+
+    describe('prompt vocabulary', () => {
+      async function runFullInterview(): Promise<void> {
+        const operations = createOperations({
+          configExists: vi.fn(async () => false),
+          ensureManagedCommits: vi.fn(async () => ({ ok: true as const, value: { missing: [] } })),
+        });
+        scriptAnswers(
+          ...BOOTSTRAP_ANSWERS.slice(0, 6),
+          '',
+          '',
+          true,
+          'https://jira.example.com',
+          'JIRA_EMAIL',
+          'JIRA_TOKEN',
+          'alpha',
+          'github',
+          'octo/app',
+          true,
+          'beta',
+          'path',
+          '../beta',
+          false,
+          ...BOOTSTRAP_ANSWERS.slice(13),
+          true,
+          'openai/grader-model',
+          '',
+          true,
+          'openai/criteria-model',
+          '',
+          ...taskAnswersWithAcceptanceCheck('alpha', commandCheckAnswers()),
+          true,
+        );
+
+        await runCli(['task', 'add'], { operations });
+      }
+
+      it('keeps every label at 40 characters or fewer, without parentheses', async () => {
+        await runFullInterview();
+
+        const labels = clack.state.prompts
+          .filter((prompt) => prompt.kind !== 'intro')
+          .map((prompt) => prompt.message);
+        expect(labels).toContain('Jira token variable');
+        expect(labels.filter((label) => label.length > 40 || /[()]/.test(label))).toEqual([]);
+      });
+
+      it('asks the Jira and repository setup questions in order with the terse labels', async () => {
+        await runFullInterview();
+
+        const labels = clack.state.prompts.map((prompt) => prompt.message);
+        const jiraStart = labels.indexOf('Import issues from Jira?');
+        expect(labels.slice(jiraStart, jiraStart + 12)).toEqual([
+          'Import issues from Jira?',
+          'Jira site URL',
+          'Jira email variable',
+          'Jira token variable',
+          'Repository ID',
+          'Repository source',
+          'GitHub repository',
+          'Add another repository?',
+          'Repository ID',
+          'Repository source',
+          'Local path',
+          'Add another repository?',
+        ]);
+      });
+
+      it('offers each configured repository by ID with its source as the hint, then adding one', async () => {
+        await runFullInterview();
+
+        const repositoryPrompt = clack.state.prompts.find(
+          (prompt) => prompt.message === 'Repository',
+        );
+        expect(repositoryPrompt?.options).toEqual([
+          { label: 'alpha', hint: 'GitHub octo/app', disabled: false },
+          { label: 'beta', hint: '../beta', disabled: false },
+          { label: 'Add a repository', hint: undefined, disabled: false },
+        ]);
+      });
+
+      it.each([
+        { setup: 'no Jira settings', jira: false, disabled: true },
+        { setup: 'Jira settings', jira: true, disabled: false },
+      ])('marks the Jira task source disabled only with $setup', async ({ jira, disabled }) => {
+        const config = buildTevuConfig(
+          jira ? { trackers: { jira: buildJiraTrackerSettings() } } : {},
+        );
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+        });
+        scriptAnswers(clack.CANCEL);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(
+          clack.state.prompts.find((prompt) => prompt.message === 'Task source')?.options,
+        ).toEqual([
+          { label: 'Write it yourself', hint: undefined, disabled: false },
+          { label: 'Jira issue', hint: disabled ? "Jira isn't set up" : undefined, disabled },
+          { label: 'GitHub issue', hint: undefined, disabled: false },
+        ]);
+      });
+    });
+
+    describe('command check', () => {
+      it('saves the typed command line verbatim and shows it in the review', async () => {
+        const commandLine = '  CI=1 npm test -- --run | tee "out log" && echo "a: #b"  ';
+        const operations = createOperations();
+        scriptAnswers(
+          ...taskAnswersWithAcceptanceCheck(
+            'repo-1',
+            commandCheckAnswers({ command: [commandLine] }),
+          ),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(requireCreateTaskCall(operations).task.checks.acceptance[0]).toEqual({
+          id: 'acc-1',
+          description: 'The test suite passes',
+          run: commandLine,
+        });
+        const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
+        expect(reviewNote?.message).toContain(`command ${commandLine}, `);
+      });
+
+      it('asks for the command with the label Command', async () => {
+        const operations = createOperations();
+        scriptAnswers(...taskAnswersWithAcceptanceCheck('repo-1', commandCheckAnswers()), true);
+
+        await runCli(['task', 'add'], { operations });
+
+        const messages = clack.state.prompts.map((prompt) => prompt.message);
+        const checkStart = messages.indexOf('Acceptance check ID');
+        expect(messages.slice(checkStart, checkStart + 8)).toEqual([
+          'Acceptance check ID',
+          'Check type',
+          'Description',
+          'Required?',
+          'Command',
+          'Time limit',
+          'Passing exit codes',
+          'Check variables',
+        ]);
+        expect(clack.state.prompts.find((prompt) => prompt.message === 'Command')).toMatchObject({
+          placeholder: undefined,
+          defaultValue: undefined,
+        });
+      });
+
+      it.each([
+        { description: 'an empty', answer: '' },
+        { description: 'a whitespace', answer: '   ' },
+      ])('rejects $description command', async ({ answer }) => {
+        const operations = createOperations();
+        scriptAnswers(
+          ...taskAnswersWithAcceptanceCheck(
+            'repo-1',
+            commandCheckAnswers({ command: [{ invalid: answer }, 'npm test'] }),
+          ),
+          true,
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.rejections).toEqual([
+          { kind: 'text', message: 'Command', reason: 'a non-empty value is required' },
+        ]);
+        expect(requireCreateTaskCall(operations).task.checks.acceptance[0]).toMatchObject({
+          run: 'npm test',
+        });
+      });
+    });
+
+    describe('cancellation and framing', () => {
+      it.each([
+        {
+          where: 'a setup prompt',
+          exists: false,
+          answers: () => ['/tmp/bench-artifacts', clack.CANCEL],
+        },
+        {
+          where: 'a task prompt',
+          exists: true,
+          answers: () => ['manual', clack.CANCEL],
+        },
+        {
+          where: 'the draft review',
+          exists: true,
+          answers: () => [...READY_ANSWERS, clack.CANCEL],
+        },
+        {
+          where: 'the save confirmation',
+          exists: true,
+          answers: () => [...taskInterviewAnswers('repo-1'), false],
+        },
+      ])(
+        'ends with exit 130 and one cancel line when the operator cancels at $where',
+        async ({ exists, answers }) => {
+          const operations = createOperations({
+            configExists: vi.fn(async () => exists),
+            loadConfig: vi.fn(async () => ({ ok: true as const, value: buildCriteriaConfig() })),
+            resolveReference: vi.fn(async () => ({
+              ok: true as const,
+              value: buildResolvedCommitReference(),
+            })),
+            draftCriteria: vi.fn(async () => ({
+              status: 'drafted' as const,
+              draft: { acceptance: ['a'], done: ['d'] },
+              retainedDirectory: null,
+            })),
+          });
+          scriptAnswers(...answers());
+
+          const { code, err } = await runCli(['task', 'add'], { operations });
+
+          expect(code).toBe(130);
+          expect(err).toEqual([]);
+          expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+          expect(clack.state.outros).toEqual([]);
+          expect(operations.createTask).not.toHaveBeenCalled();
+        },
+      );
+
+      it('cancels the next prompt when the command was interrupted between prompts', async () => {
+        const controller = new AbortController();
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => {
+            controller.abort();
+            return { ok: true as const, value: buildTevuConfig() };
+          }),
+        });
+
+        const { code, err } = await runCli(['task', 'add'], {
+          operations,
+          cancellation: controller.signal,
+        });
+
+        expect(code).toBe(130);
+        expect(err).toEqual([]);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
+          'tevu task add',
+          'Task source',
+        ]);
+        expect(operations.createTask).not.toHaveBeenCalled();
+      });
+
+      it('cancels the open prompt when the command is interrupted while it waits for input', async () => {
+        const controller = new AbortController();
+        const operations = createOperations();
+        scriptAnswers(interruptWith(controller));
+
+        const { code, err } = await runCli(['task', 'add'], {
+          operations,
+          cancellation: controller.signal,
+        });
+
+        expect(code).toBe(130);
+        expect(err).toEqual([]);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(operations.createTask).not.toHaveBeenCalled();
+      });
+
+      it('prints the Ctrl-C hint as the first line after the intro', async () => {
+        const operations = createOperations();
+        scriptAnswers(clack.CANCEL);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.timeline.slice(0, 2)).toEqual(['intro', 'log:message']);
+        expect(clack.state.logs[0]).toMatchObject({ kind: 'message' });
+        expect(stripVTControlCharacters(clack.state.logs[0]?.message ?? '')).toBe(
+          'Press Ctrl-C to cancel.',
+        );
+      });
+
+      it('closes a saved task with the closing line only', async () => {
         const operations = createOperations();
         scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
+        expect(clack.state.cancels).toEqual([]);
+        expect(clack.state.timeline.at(-1)).toBe('outro');
+      });
+
+      it('reports a failed write as an error with exit 1 and no closing line', async () => {
+        const operations = createOperations({
+          createTask: vi.fn(async () => ({
+            ok: false as const,
+            error: artifactError('write-config', 'disk full'),
+          })),
+        });
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+        const { code, err } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(1);
+        expect(err).toEqual(['error: artifact operation "write-config" failed: disk full']);
+        expect(clack.state.outros).toEqual([]);
+        expect(clack.state.cancels).toEqual([]);
+      });
+    });
+
+    describe('waits', () => {
+      type WaitOutcome = 'succeeds' | 'returns an error' | 'throws' | 'aborts the signal';
+
+      type WaitScenario = {
+        label: string;
+        operation: string;
+        argv: string[];
+        build: (
+          outcome: WaitOutcome,
+          controller: AbortController,
+        ) => { operations: ProgramOperations; answers: unknown[] };
+      };
+
+      function applyOutcome(outcome: WaitOutcome, controller: AbortController): void {
+        if (outcome === 'throws') {
+          throw new Error('boom');
+        }
+        if (outcome === 'aborts the signal') {
+          controller.abort();
+        }
+      }
+
+      const SCENARIOS: WaitScenario[] = [
+        {
+          label: 'Importing issue',
+          operation: 'importGitHubIssue',
+          argv: ['task', 'add', '--github', 'octo/repo#42'],
+          build: (outcome, controller) => ({
+            operations: createOperations({
+              importGitHubIssue: recordOperation('importGitHubIssue', async () => {
+                applyOutcome(outcome, controller);
+                return outcome === 'returns an error'
+                  ? {
+                      ok: false as const,
+                      error: {
+                        kind: 'IssueImportError' as const,
+                        tracker: 'github-issue' as const,
+                        reference: 'octo/repo#42',
+                        reason: 'not found',
+                      },
+                    }
+                  : { ok: true as const, value: buildJiraIssueSnapshot() };
+              }),
+            }),
+            answers: ['repo-1', clack.CANCEL],
+          }),
+        },
+        {
+          label: 'Preparing repository',
+          operation: 'ensureManagedCommits',
+          argv: ['task', 'add'],
+          build: (outcome, controller) => ({
+            operations: createOperations({
+              loadConfig: vi.fn(async () => ({
+                ok: true as const,
+                value: buildGitHubRepositoryConfig(),
+              })),
+              ensureManagedCommits: recordOperation('ensureManagedCommits', async () => {
+                applyOutcome(outcome, controller);
+                return outcome === 'returns an error'
+                  ? { ok: false as const, error: managedCloneFailure() }
+                  : { ok: true as const, value: { missing: [] } };
+              }),
+            }),
+            answers: ['manual', 'repo-1', clack.CANCEL],
+          }),
+        },
+        {
+          label: 'Resolving reference',
+          operation: 'resolveReference',
+          argv: ['task', 'add'],
+          build: (outcome, controller) => ({
+            operations: createOperations({
+              resolveReference: recordOperation('resolveReference', async () => {
+                applyOutcome(outcome, controller);
+                return outcome === 'returns an error'
+                  ? {
+                      ok: false as const,
+                      error: {
+                        kind: 'ReferenceResolutionError' as const,
+                        reason: 'the answer does not name a commit',
+                      },
+                    }
+                  : { ok: true as const, value: buildResolvedCommitReference() };
+              }),
+            }),
+            answers: ['manual', 'repo-1', 'HEAD~3', clack.CANCEL],
+          }),
+        },
+        {
+          label: 'Fetching base commit',
+          operation: 'fetchBaseCommit',
+          argv: ['task', 'add'],
+          build: (outcome, controller) => {
+            const fetchBaseCommit = recordOperation('fetchBaseCommit', async () => {
+              applyOutcome(outcome, controller);
+              return outcome === 'returns an error'
+                ? { ok: false as const, error: managedCloneFailure() }
+                : { ok: true as const, value: { missing: [] } };
+            });
+            return {
+              operations: createOperations({
+                loadConfig: vi.fn(async () => ({
+                  ok: true as const,
+                  value: buildGitHubRepositoryConfig(),
+                })),
+                ensureManagedCommits: async (request) =>
+                  request.revisions.length === 0
+                    ? { ok: true as const, value: { missing: [] } }
+                    : fetchBaseCommit(),
+              }),
+              answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL],
+            };
+          },
+        },
+        {
+          label: 'Drafting criteria',
+          operation: 'draftCriteria',
+          argv: ['task', 'add'],
+          build: (outcome, controller) => ({
+            operations: createOperations({
+              loadConfig: vi.fn(async () => ({ ok: true as const, value: buildCriteriaConfig() })),
+              resolveReference: vi.fn(async () => ({
+                ok: true as const,
+                value: buildResolvedCommitReference(),
+              })),
+              draftCriteria: recordOperation('draftCriteria', async () => {
+                applyOutcome(outcome, controller);
+                return outcome === 'returns an error'
+                  ? {
+                      status: 'failed' as const,
+                      failure: { cause: 'call-failed' as const, detail: 'boom' },
+                      retainedDirectory: null,
+                    }
+                  : {
+                      status: 'drafted' as const,
+                      draft: { acceptance: ['a'], done: ['d'] },
+                      retainedDirectory: null,
+                    };
+              }),
+            }),
+            answers: [...READY_ANSWERS, clack.CANCEL],
+          }),
+        },
+        {
+          label: 'Checking opencode',
+          operation: 'probeAgent',
+          argv: ['task', 'add'],
+          build: (outcome, controller) => ({
+            operations: operationsWithModelCheck({
+              probeAgent: recordOperation('probeAgent', async () => {
+                applyOutcome(outcome, controller);
+                return outcome === 'returns an error'
+                  ? {
+                      ok: false as const,
+                      error: {
+                        kind: 'PrerequisiteError' as const,
+                        tool: 'opencode',
+                        expected: 'an executable command',
+                        actual: 'not found',
+                      },
+                    }
+                  : { ok: true as const, value: buildCapabilityReport() };
+              }),
+            }),
+            answers: [...BOOTSTRAP_ANSWERS.slice(0, 6), clack.CANCEL],
+          }),
+        },
+        {
+          label: 'Checking model',
+          operation: 'inspectModelProvider',
+          argv: ['task', 'add'],
+          build: (outcome, controller) => ({
+            operations: operationsWithModelCheck({
+              inspectModelProvider: recordOperation(
+                'inspectModelProvider',
+                async (_configPath, _agent, model) => {
+                  applyOutcome(outcome, controller);
+                  return outcome === 'returns an error'
+                    ? {
+                        ok: false as const,
+                        error: {
+                          kind: 'ConfigValidationError' as const,
+                          findings: [buildFinding({ message: 'cannot read the file' })],
+                        },
+                      }
+                    : {
+                        ok: true as const,
+                        value: {
+                          provider: model.slice(0, model.indexOf('/')),
+                          definition: { defined: false as const },
+                        },
+                      };
+                },
+              ),
+            }),
+            answers: [...BOOTSTRAP_ANSWERS.slice(0, 15), clack.CANCEL],
+          }),
+        },
+        {
+          label: 'Checking model',
+          operation: 'checkModelAccess',
+          argv: ['task', 'add'],
+          build: (outcome, controller) => ({
+            operations: operationsWithModelCheck({
+              checkModelAccess: recordOperation('checkModelAccess', async () => {
+                applyOutcome(outcome, controller);
+                return outcome === 'returns an error'
+                  ? { status: 'listing-failed' as const, detail: 'exits with code 3' }
+                  : accessOutcome('listed');
+              }),
+            }),
+            answers: [...BOOTSTRAP_ANSWERS.slice(0, 15), clack.CANCEL],
+          }),
+        },
+      ];
+
+      function expectWaitAroundOperation(label: string, operation: string): void {
+        const events = clack.state.timeline;
+        const operationStart = events.indexOf(`operation:${operation}:start`);
+        const operationEnd = events.indexOf(`operation:${operation}:end`);
+        const before = events.slice(0, operationStart);
+        const after = events.slice(operationEnd + 1);
+        const spinnerStart = before.lastIndexOf(`spinner:start:${label}`);
+        const discarderStart = before.lastIndexOf('discarder:start');
+        const spinnerStop = operationEnd + 1 + after.indexOf(`spinner:stop:${label}`);
+        const discarderStop = operationEnd + 1 + after.indexOf('discarder:stop');
+        expect(operationStart).toBeGreaterThanOrEqual(0);
+        expect(operationEnd).toBeGreaterThan(operationStart);
+        expect(spinnerStart).toBeGreaterThanOrEqual(0);
+        expect(discarderStart).toBeGreaterThan(before.lastIndexOf('discarder:stop'));
+        expect(spinnerStop).toBeGreaterThan(operationEnd);
+        expect(discarderStop).toBeGreaterThan(operationEnd);
+        const heldSpan = events.slice(
+          Math.min(spinnerStart, discarderStart),
+          Math.max(spinnerStop, discarderStop) + 1,
+        );
+        expect(heldSpan.filter((event) => event.startsWith('prompt:'))).toEqual([]);
+      }
+
+      describe.each(SCENARIOS)('$label', (scenario) => {
+        it.each(['succeeds', 'returns an error', 'throws'] as const)(
+          'holds stdin and shows the spinner around the operation when it %s',
+          async (outcome) => {
+            const controller = new AbortController();
+            const { operations, answers } = scenario.build(outcome, controller);
+            scriptAnswers(...answers);
+
+            const [settled] = await Promise.allSettled([
+              runCli(scenario.argv, { operations, cancellation: controller.signal }),
+            ]);
+
+            expect(settled.status).toBe(outcome === 'throws' ? 'rejected' : 'fulfilled');
+            expect(clack.state.spinners).toContainEqual({
+              label: scenario.label,
+              handleSignals: false,
+            });
+            expectWaitAroundOperation(scenario.label, scenario.operation);
+          },
+        );
+
+        it('ends with the cancel line and exit 130 when the signal aborts during the wait', async () => {
+          const controller = new AbortController();
+          const { operations, answers } = scenario.build('aborts the signal', controller);
+          scriptAnswers(...answers);
+
+          const { code, err } = await runCli(scenario.argv, {
+            operations,
+            cancellation: controller.signal,
+          });
+
+          expect(code).toBe(130);
+          expect(err).toEqual([]);
+          expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+          expect(operations.createTask).not.toHaveBeenCalled();
+          expectWaitAroundOperation(scenario.label, scenario.operation);
+          const afterWait = clack.state.timeline
+            .slice(clack.state.timeline.lastIndexOf(`spinner:stop:${scenario.label}`) + 1)
+            .filter((event) => event !== 'discarder:stop');
+          expect(afterWait).toEqual(['cancel']);
+        });
+      });
+    });
+
+    describe('warnings', () => {
+      type WarningScenario = {
+        description: string;
+        build: () => { operations: ProgramOperations; answers: unknown[] };
+        expected: string;
+        composedLines: number[];
+      };
+
+      const CLONE_FAILURE_DETAIL =
+        'cloning github.com/octo/app failed: git clone exited with code 128';
+
+      const SCENARIOS: WarningScenario[] = [
+        {
+          description: 'an unusable repository',
+          build: () => ({
+            operations: createOperations({
+              loadConfig: vi.fn(async () => ({
+                ok: true as const,
+                value: buildGitHubRepositoryConfig(),
+              })),
+              ensureManagedCommits: vi
+                .fn<ProgramOperations['ensureManagedCommits']>()
+                .mockResolvedValueOnce({ ok: false, error: managedCloneFailure() }),
+            }),
+            answers: ['manual', 'repo-1', clack.CANCEL],
+          }),
+          expected: `Can't use repository repo-1.\n${CLONE_FAILURE_DETAIL}`,
+          composedLines: [0],
+        },
+        {
+          description: 'an unresolved reference',
+          build: () => ({
+            operations: createOperations({
+              resolveReference: vi.fn<ProgramOperations['resolveReference']>().mockResolvedValue({
+                ok: false,
+                error: {
+                  kind: 'ReferenceResolutionError',
+                  reason: 'the answer does not name a commit',
+                },
+              }),
+            }),
+            answers: ['manual', 'repo-1', 'bad-ref', clack.CANCEL],
+          }),
+          expected: "Can't resolve the reference.\nthe answer does not name a commit",
+          composedLines: [0],
+        },
+        {
+          description: 'reference commits that could not be fetched',
+          build: () => ({
+            operations: createOperations({
+              resolveReference: vi.fn<ProgramOperations['resolveReference']>().mockResolvedValue({
+                ok: true,
+                value: {
+                  reference: {
+                    kind: 'pull-request',
+                    identifier: 'octo/app#128',
+                    commits: ['a'.repeat(40)],
+                  },
+                  pullRequest: {
+                    key: 'octo/app#128',
+                    title: 'Add export button',
+                    body: 'Implement CSV export for the current view.',
+                    state: 'merged',
+                    targetBranch: 'main',
+                    noProposedBase: 'first commit aaaaaaa has no parent',
+                    unfetched: 'commit aaaaaaa could not be fetched',
+                  },
+                },
+              }),
+            }),
+            answers: ['manual', 'repo-1', 'octo/app#128', clack.CANCEL],
+          }),
+          expected: "Can't fetch some reference commits.\ncommit aaaaaaa could not be fetched",
+          composedLines: [0],
+        },
+        {
+          description: 'a base commit that could not be fetched',
+          build: () => ({
+            operations: createOperations({
+              loadConfig: vi.fn(async () => ({
+                ok: true as const,
+                value: buildGitHubRepositoryConfig(),
+              })),
+              ensureManagedCommits: vi
+                .fn<ProgramOperations['ensureManagedCommits']>()
+                .mockResolvedValueOnce({ ok: true, value: { missing: [] } })
+                .mockResolvedValueOnce({ ok: false, error: managedCloneFailure() }),
+            }),
+            answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL],
+          }),
+          expected: `Can't fetch the base commit.\n${CLONE_FAILURE_DETAIL}`,
+          composedLines: [0],
+        },
+        {
+          description: 'a base commit missing from the repository',
+          build: () => ({
+            operations: createOperations({
+              loadConfig: vi.fn(async () => ({
+                ok: true as const,
+                value: buildGitHubRepositoryConfig(),
+              })),
+              ensureManagedCommits: vi
+                .fn<ProgramOperations['ensureManagedCommits']>()
+                .mockResolvedValueOnce({ ok: true, value: { missing: [] } })
+                .mockResolvedValueOnce({ ok: true, value: { missing: ['abc123'] } }),
+            }),
+            answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL],
+          }),
+          expected:
+            "Base commit abc123 isn't in repository repo-1.\nIt can't be fetched from github.com/octo/app.",
+          composedLines: [0],
+        },
+        ...DRAFT_FAILURE_CASES.map(({ name, failure, lines }) => ({
+          description: `a failed criteria draft with ${name}`,
+          build: () => ({
+            operations: createOperations({
+              loadConfig: vi.fn(async () => ({ ok: true as const, value: buildCriteriaConfig() })),
+              resolveReference: vi.fn(async () => ({
+                ok: true as const,
+                value: buildResolvedCommitReference(),
+              })),
+              draftCriteria: vi.fn(async () => ({
+                status: 'failed' as const,
+                failure,
+                retainedDirectory: null,
+              })),
+            }),
+            answers: [...READY_ANSWERS, clack.CANCEL],
+          }),
+          expected: draftFailureMessage(lines),
+          composedLines: [0, 1, lines.length + 1],
+        })),
+        {
+          description: 'an agent command that cannot run',
+          build: () => ({
+            operations: operationsWithModelCheck({
+              probeAgent: vi.fn<ProgramOperations['probeAgent']>().mockResolvedValue({
+                ok: false,
+                error: {
+                  kind: 'PrerequisiteError',
+                  tool: 'nope',
+                  expected: 'an executable command',
+                  actual: 'not found',
+                },
+              }),
+            }),
+            answers: setupAnswers({ command: ['nope', clack.CANCEL] }),
+          }),
+          expected:
+            "Can't run nope.\nexpected an executable command, actual not found\nFix the command below. Press Enter to retry, or Ctrl-C to cancel.",
+          composedLines: [0, 2],
+        },
+        {
+          description: 'an OpenCode configuration that cannot be read',
+          build: () => ({
+            operations: operationsWithModelCheck({
+              inspectModelProvider: vi.fn<ProgramOperations['inspectModelProvider']>(async () => ({
+                ok: false,
+                error: {
+                  kind: 'ConfigValidationError',
+                  findings: [
+                    buildFinding({ message: 'cannot read "/op/opencode.json": EACCES' }),
+                    buildFinding({ message: '"/op/config.json": provider is not an object' }),
+                  ],
+                },
+              })),
+            }),
+            answers: setupAnswers({ firstModel: ['acme/model-a', clack.CANCEL] }),
+          }),
+          expected:
+            'Can\'t read your OpenCode config.\ncannot read "/op/opencode.json": EACCES\n"/op/config.json": provider is not an object\nUpdate your OpenCode settings. Press Enter to retry, or Ctrl-C to cancel.',
+          composedLines: [0, 3],
+        },
+        {
+          description: 'a provider that cannot be copied',
+          build: () => ({
+            operations: operationsWithModelCheck({
+              checkModelAccess: vi.fn<ProgramOperations['checkModelAccess']>(async () => ({
+                status: 'provider-rejected',
+                findings: [
+                  buildFinding({
+                    message:
+                      'options.apiKey of provider "acme" is not a {env:NAME} reference; tevu copies no credential value into a case: set api_key to a variable listed in agents.opencode.secrets',
+                  }),
+                ],
+              })),
+            }),
+            answers: setupAnswers({ firstModel: ['acme/model-a', clack.CANCEL] }),
+          }),
+          expected:
+            'Can\'t copy provider acme from your OpenCode config.\noptions.apiKey of provider "acme" is not a {env:NAME} reference; tevu copies no credential value into a case: set api_key to a variable listed in agents.opencode.secrets\nUpdate your OpenCode settings. Press Enter to retry, or Ctrl-C to cancel.',
+          composedLines: [0, 2],
+        },
+        {
+          description: 'a model the agent cannot find',
+          build: () => ({
+            operations: operationsWithModelCheck({
+              inspectModelProvider: inspectingProviders({
+                acme: definedProvider({ keyVariables: ['ACME_KEY'], apiKey: 'reference' }),
+              }),
+              checkModelAccess: vi.fn(async () => accessOutcome('not-listed')),
+            }),
+            answers: setupAnswers({ firstModel: ['acme/model-x', clack.CANCEL] }),
+          }),
+          expected:
+            "OpenCode can't find acme/model-x.\nUpdate your OpenCode settings or edit the model below. Press Enter to retry, or Ctrl-C to cancel.",
+          composedLines: [0, 1],
+        },
+        {
+          description: 'a listing that failed',
+          build: () => ({
+            operations: operationsWithModelCheck({
+              checkModelAccess: vi.fn<ProgramOperations['checkModelAccess']>(async () => ({
+                status: 'listing-failed',
+                detail: '"opencode models" exits with code 3',
+              })),
+            }),
+            answers: setupAnswers({ firstModel: ['acme/model-a', clack.CANCEL] }),
+          }),
+          expected:
+            'Can\'t list OpenCode models.\n"opencode models" exits with code 3\nPress Enter to retry, or Ctrl-C to cancel.',
+          composedLines: [0, 2],
+        },
+        {
+          description: 'a declared variable that is not set',
+          build: () => ({
+            operations: operationsWithModelCheck({
+              checkModelAccess: vi.fn(async () =>
+                accessOutcome('listed', { unsetVariables: ['ACME_KEY'] }),
+              ),
+            }),
+            answers: [...setupAnswers({ secrets: 'ACME_KEY' }), clack.CANCEL],
+          }),
+          expected: "ACME_KEY isn't set in this terminal. Runs will need it.",
+          composedLines: [0],
+        },
+        {
+          description: 'a model kept unchecked while one variable is not set',
+          build: () => ({
+            operations: operationsWithModelCheck({
+              checkModelAccess: vi.fn(async () =>
+                accessOutcome('not-listed', { unsetVariables: ['ACME_KEY'] }),
+              ),
+            }),
+            answers: [
+              ...setupAnswers({ secrets: 'ACME_KEY', firstModel: ['builtin/model-z'] }),
+              clack.CANCEL,
+            ],
+          }),
+          expected:
+            "builtin/model-z can't be checked while ACME_KEY isn't set in this terminal, so it is kept as entered.",
+          composedLines: [0],
+        },
+        {
+          description: 'a model kept unchecked while several variables are not set',
+          build: () => ({
+            operations: operationsWithModelCheck({
+              checkModelAccess: vi.fn(async () =>
+                accessOutcome('not-listed', { unsetVariables: ['ACME_KEY', 'ACME_BASE'] }),
+              ),
+            }),
+            answers: [
+              ...setupAnswers({ secrets: 'ACME_KEY ACME_BASE', firstModel: ['builtin/model-z'] }),
+              clack.CANCEL,
+            ],
+          }),
+          expected:
+            "builtin/model-z can't be checked while ACME_KEY, ACME_BASE aren't set in this terminal, so it is kept as entered.",
+          composedLines: [0],
+        },
+        {
+          description: 'a temporary directory that could not be removed',
+          build: () => ({
+            operations: createOperations({
+              loadConfig: vi.fn(async () => ({ ok: true as const, value: buildCriteriaConfig() })),
+              resolveReference: vi.fn(async () => ({
+                ok: true as const,
+                value: buildResolvedCommitReference(),
+              })),
+              draftCriteria: vi.fn(async () => ({
+                status: 'drafted' as const,
+                draft: { acceptance: ['a'], done: ['d'] },
+                retainedDirectory: '/tmp/tevu-call-xyz',
+              })),
+            }),
+            answers: [...READY_ANSWERS, clack.CANCEL],
+          }),
+          expected: "Couldn't remove a temporary directory.\n/tmp/tevu-call-xyz",
+          composedLines: [0],
+        },
+      ];
+
+      it.each(SCENARIOS)(
+        'prints the headline, detail lines, and next step for $description',
+        async ({ build, expected, composedLines }) => {
+          const { operations, answers } = build();
+          scriptAnswers(...answers);
+
+          await runCli(['task', 'add'], { operations });
+
+          const [headline = ''] = expected.split('\n');
+          const printed = clack.state.logs.find(
+            (log) => log.kind === 'warn' && log.message.startsWith(headline),
+          );
+          expect(printed?.message).toBe(expected);
+          const lines = printed?.message.split('\n') ?? [];
+          const colonCounts = composedLines.map(
+            (index) => (lines[index] ?? '').split(':').length - 1,
+          );
+          expect(Math.max(...colonCounts)).toBeLessThanOrEqual(1);
+        },
+      );
+    });
+
+    describe('agent command probe', () => {
+      it.each([
+        {
+          name: 'a missing prerequisite',
+          error: {
+            kind: 'PrerequisiteError' as const,
+            tool: 'nope',
+            expected: 'an executable command',
+            actual: 'not found',
+          },
+          detail: 'expected an executable command, actual not found',
+        },
+        {
+          name: 'a protocol failure',
+          error: {
+            kind: 'AgentProtocolError' as const,
+            agent: 'opencode',
+            context: { phase: 'probe' as const },
+            reason: '--version printed no version',
+          },
+          detail: '--version printed no version',
+        },
+      ])(
+        'prints the failure of $name and asks again with the failed command filled in',
+        async ({ error, detail }) => {
+          const probeAgent = vi
+            .fn<ProgramOperations['probeAgent']>()
+            .mockResolvedValueOnce({ ok: false, error })
+            .mockResolvedValue({ ok: true, value: buildCapabilityReport() });
+          const operations = operationsWithModelCheck({ probeAgent });
+          scriptAnswers(...setupAnswers({ command: ['nope', 'opencode'] }), clack.CANCEL);
+
+          await runCli(['task', 'add'], { operations });
+
+          expect(probeAgent.mock.calls).toEqual([
+            ['tevu.yaml', 'nope'],
+            ['tevu.yaml', 'opencode'],
+          ]);
+          expect(clack.state.logs).toContainEqual({
+            kind: 'warn',
+            message: `Can't run nope.\n${detail}\nFix the command below. Press Enter to retry, or Ctrl-C to cancel.`,
+          });
+          const asked = clack.state.prompts.filter((prompt) => prompt.message === 'Agent command');
+          expect(asked.map((prompt) => prompt.initialValue)).toEqual([undefined, 'nope']);
+          expect(clack.state.spinners.map((spinner) => spinner.label)).toContain('Checking nope');
+          expect(clack.state.spinners.map((spinner) => spinner.label)).toContain(
+            'Checking opencode',
+          );
+        },
+      );
+
+      it('stops asking once the probe passes and writes the command as typed', async () => {
+        const operations = operationsWithModelCheck();
+        scriptAnswers(...fullSetupAnswers({ command: ['./bin/opencode'] }));
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(vi.mocked(operations.probeAgent)).toHaveBeenCalledExactlyOnceWith(
+          'tevu.yaml',
+          './bin/opencode',
+        );
+        expect(requireAgentBlock(operations).command).toBe('./bin/opencode');
+      });
+    });
+
+    describe('provider copying and the API key variable question', () => {
+      it('copies a provider whose definition names a key variable without asking for one', async () => {
+        const operations = operationsWithModelCheck({
+          inspectModelProvider: inspectingProviders({
+            acme: definedProvider({ keyVariables: ['ACME_KEY'], apiKey: 'reference' }),
+          }),
+        });
+        scriptAnswers(
+          ...fullSetupAnswers({ firstModel: ['acme/model-a'], secondModel: ['acme/model-b'] }),
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.prompts.map((prompt) => prompt.message)).not.toContain(
+          'API key variable for acme',
+        );
+        expect(requireAgentBlock(operations)).toEqual({
+          command: 'opencode',
+          secrets: ['ACME_KEY'],
+          env: [],
+          providers: [{ id: 'acme' }],
+        });
+        expect(vi.mocked(operations.checkModelAccess)).toHaveBeenNthCalledWith(
+          1,
+          'tevu.yaml',
+          { command: 'opencode', secrets: ['ACME_KEY'], env: [], providers: [{ id: 'acme' }] },
+          'acme/model-a',
+        );
+      });
+
+      it('asks once for a definition with only other variables and remembers an empty answer for the next model', async () => {
+        const operations = operationsWithModelCheck({
+          inspectModelProvider: recordOperation(
+            'inspectModelProvider',
+            inspectingProviders({ acme: definedProvider({ otherVariables: ['ACME_BASE'] }) }),
+          ),
+          checkModelAccess: recordOperation('checkModelAccess', async () =>
+            accessOutcome('listed'),
+          ),
+        });
+        scriptAnswers(
+          ...fullSetupAnswers({
+            firstModel: ['acme/model-a', ''],
+            secondModel: ['acme/model-b'],
+          }),
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        const asked = clack.state.prompts.filter(
+          (prompt) => prompt.message === 'API key variable for acme',
+        );
+        expect(asked).toHaveLength(1);
+        expect(asked[0]).toMatchObject({ kind: 'text', placeholder: 'none', defaultValue: '' });
+        expect(requireAgentBlock(operations)).toEqual({
+          command: 'opencode',
+          secrets: ['ACME_BASE'],
+          env: [],
+          providers: [{ id: 'acme' }],
+        });
+        const { timeline } = clack.state;
+        const keyPrompt = timeline.indexOf('prompt:API key variable for acme');
+        expect(keyPrompt).toBeGreaterThan(timeline.indexOf('operation:inspectModelProvider:end'));
+        expect(keyPrompt).toBeLessThan(timeline.indexOf('operation:checkModelAccess:start'));
+      });
+
+      it('sets api_key and declares its name when the answer names a variable', async () => {
+        const operations = operationsWithModelCheck({
+          inspectModelProvider: inspectingProviders({
+            acme: definedProvider({ otherVariables: ['ACME_BASE'] }),
+          }),
+        });
+        scriptAnswers(
+          ...fullSetupAnswers({
+            firstModel: ['acme/model-a', 'ACME_KEY'],
+            secondModel: ['acme/model-b'],
+          }),
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(requireAgentBlock(operations)).toEqual({
+          command: 'opencode',
+          secrets: ['ACME_BASE', 'ACME_KEY'],
+          env: [],
+          providers: [{ id: 'acme', api_key: 'ACME_KEY' }],
+        });
+        expect(vi.mocked(operations.checkModelAccess)).toHaveBeenNthCalledWith(
+          1,
+          'tevu.yaml',
+          {
+            command: 'opencode',
+            secrets: ['ACME_BASE', 'ACME_KEY'],
+            env: [],
+            providers: [{ id: 'acme', api_key: 'ACME_KEY' }],
+          },
+          'acme/model-a',
+        );
+      });
+
+      it.each([
+        {
+          name: 'a literal apiKey and no key variable',
+          definition: definedProvider({ apiKey: 'value' }),
+        },
+        {
+          name: 'a literal apiKey beside a credential header variable',
+          definition: definedProvider({ keyVariables: ['ACME_HEADER_KEY'], apiKey: 'value' }),
+        },
+      ])('asks for the variable before checking the model for $name', async ({ definition }) => {
+        const operations = operationsWithModelCheck({
+          inspectModelProvider: inspectingProviders({ acme: definition }),
+          checkModelAccess: recordOperation('checkModelAccess', async () =>
+            accessOutcome('listed'),
+          ),
+        });
+        scriptAnswers(
+          ...fullSetupAnswers({
+            firstModel: ['acme/model-a', 'ACME_KEY'],
+            secondModel: ['acme/model-b'],
+          }),
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        const { timeline } = clack.state;
+        expect(timeline.indexOf('prompt:API key variable for acme')).toBeLessThan(
+          timeline.indexOf('operation:checkModelAccess:start'),
+        );
+        expect(requireAgentBlock(operations).providers).toEqual([
+          { id: 'acme', api_key: 'ACME_KEY' },
+        ]);
+      });
+
+      it.each([
+        {
+          name: 'a fixed name',
+          answer: 'PATH',
+          reason:
+            'PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract',
+        },
+        {
+          name: 'a non-secret variable',
+          answer: 'PLAIN_ONE',
+          reason: '"PLAIN_ONE" is already configured',
+        },
+        {
+          name: 'a Jira credential variable',
+          answer: 'JIRA_TOKEN',
+          reason: 'Jira credential variables must not also be passed to the agent',
+        },
+      ])('rejects $name as the key variable and asks again', async ({ answer, reason }) => {
+        const operations = operationsWithModelCheck({
+          inspectModelProvider: inspectingProviders({ acme: definedProvider() }),
+        });
+        scriptAnswers(
+          ...fullSetupAnswers({
+            env: 'PLAIN_ONE',
+            jira: [true, 'https://example.atlassian.net', 'JIRA_EMAIL', 'JIRA_TOKEN'],
+            firstModel: ['acme/model-a', { invalid: answer }, 'ACME_KEY'],
+            secondModel: ['acme/model-b'],
+          }),
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.rejections).toEqual([
+          { kind: 'text', message: 'API key variable for acme', reason },
+        ]);
+        expect(requireAgentBlock(operations).providers).toEqual([
+          { id: 'acme', api_key: 'ACME_KEY' },
+        ]);
+      });
+    });
+
+    describe('model check retries', () => {
+      it('prints the not-listed message, asks the same question with the previous answer, and drops what the refused answer added', async () => {
+        const operations = operationsWithModelCheck({
+          inspectModelProvider: inspectingProviders({
+            other: definedProvider({ keyVariables: ['OTHER_KEY'], apiKey: 'reference' }),
+            acme: definedProvider({ keyVariables: ['ACME_KEY'], apiKey: 'reference' }),
+          }),
+          checkModelAccess: vi.fn(async (_configPath, _agent, model) =>
+            accessOutcome(model === 'other/model-x' ? 'not-listed' : 'listed'),
+          ),
+        });
+        scriptAnswers(
+          ...fullSetupAnswers({
+            firstModel: ['other/model-x', 'acme/model-a'],
+            secondModel: ['acme/model-b'],
+          }),
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message:
+            "OpenCode can't find other/model-x.\nUpdate your OpenCode settings or edit the model below. Press Enter to retry, or Ctrl-C to cancel.",
+        });
+        const asked = clack.state.prompts.filter((prompt) => prompt.message === 'Model');
+        expect(asked.map((prompt) => prompt.initialValue)).toEqual([
+          undefined,
+          'other/model-x',
+          undefined,
+        ]);
+        expect(requireAgentBlock(operations)).toEqual({
+          command: 'opencode',
+          secrets: ['ACME_KEY'],
+          env: [],
+          providers: [{ id: 'acme' }],
+        });
+        expect(requireCreateTaskCall(operations).bootstrap?.models[0]?.model).toBe('acme/model-a');
+      });
+
+      it('asks for a variable after a not-listed result for an undefined provider and checks again with the answer', async () => {
+        const checkModelAccess = vi.fn<ProgramOperations['checkModelAccess']>(
+          async (_configPath, agent) =>
+            accessOutcome(agent.secrets.includes('BUILTIN_KEY') ? 'listed' : 'not-listed'),
+        );
+        const operations = operationsWithModelCheck({ checkModelAccess });
+        scriptAnswers(
+          ...fullSetupAnswers({
+            firstModel: ['builtin/model-z', 'BUILTIN_KEY'],
+            secondModel: ['builtin/model-y'],
+          }),
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(
+          clack.state.prompts.filter((prompt) => prompt.message === 'API key variable for builtin'),
+        ).toHaveLength(1);
+        expect(checkModelAccess.mock.calls.map(([, , model]) => model)).toEqual([
+          'builtin/model-z',
+          'builtin/model-z',
+          'builtin/model-y',
+        ]);
+        expect(requireAgentBlock(operations)).toEqual({
+          command: 'opencode',
+          secrets: ['BUILTIN_KEY'],
+          env: [],
+        });
+      });
+
+      it('refuses the model and asks it again when the variable answer for an undefined provider is empty', async () => {
+        const operations = operationsWithModelCheck({
+          checkModelAccess: vi.fn(async (_configPath, _agent, model) =>
+            accessOutcome(model === 'builtin/model-z' ? 'not-listed' : 'listed'),
+          ),
+        });
+        scriptAnswers(
+          ...fullSetupAnswers({
+            firstModel: ['builtin/model-z', '', 'builtin/model-y'],
+            secondModel: ['builtin/model-x'],
+          }),
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message:
+            "OpenCode can't find builtin/model-z.\nUpdate your OpenCode settings or edit the model below. Press Enter to retry, or Ctrl-C to cancel.",
+        });
+        const asked = clack.state.prompts.filter((prompt) => prompt.message === 'Model');
+        expect(asked[1]?.initialValue).toBe('builtin/model-z');
+        expect(requireCreateTaskCall(operations).bootstrap?.models[0]?.model).toBe(
+          'builtin/model-y',
+        );
+      });
+
+      it('keeps a not-listed model of an undefined provider while a declared variable is unset, without asking for a key variable', async () => {
+        const operations = operationsWithModelCheck({
+          checkModelAccess: vi.fn(async () =>
+            accessOutcome('not-listed', { unsetVariables: ['BUILTIN_KEY'] }),
+          ),
+        });
+        scriptAnswers(
+          ...fullSetupAnswers({
+            secrets: 'BUILTIN_KEY',
+            firstModel: ['builtin/model-z'],
+            secondModel: ['builtin/model-y'],
+          }),
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        const unchecked = clack.state.logs.filter((log) => log.kind === 'warn');
+        expect(unchecked.map((log) => log.message)).toEqual([
+          "builtin/model-z can't be checked while BUILTIN_KEY isn't set in this terminal, so it is kept as entered.",
+          "builtin/model-y can't be checked while BUILTIN_KEY isn't set in this terminal, so it is kept as entered.",
+        ]);
+        expect(clack.state.prompts.map((prompt) => prompt.message)).not.toContain(
+          'API key variable for builtin',
+        );
+        expect(
+          requireCreateTaskCall(operations).bootstrap?.models.map((model) => model.model),
+        ).toEqual(['builtin/model-z', 'builtin/model-y']);
+        expect(requireAgentBlock(operations).secrets).toEqual(['BUILTIN_KEY']);
+      });
+
+      it('declares the variable named after a not-listed result and keeps the model unchecked when that variable is unset', async () => {
+        const operations = operationsWithModelCheck({
+          checkModelAccess: vi.fn(async (_configPath, agent) =>
+            accessOutcome('not-listed', {
+              unsetVariables: agent.secrets.includes('BUILTIN_KEY') ? ['BUILTIN_KEY'] : [],
+            }),
+          ),
+        });
+        scriptAnswers(
+          ...fullSetupAnswers({
+            firstModel: ['builtin/model-z', 'BUILTIN_KEY'],
+            secondModel: ['builtin/model-y'],
+          }),
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(requireAgentBlock(operations).secrets).toEqual(['BUILTIN_KEY']);
+        expect(
+          requireCreateTaskCall(operations).bootstrap?.models.map((model) => model.model),
+        ).toEqual(['builtin/model-z', 'builtin/model-y']);
+      });
+
+      it('prints each unset variable once across the models of one run', async () => {
+        const operations = operationsWithModelCheck({
+          checkModelAccess: vi.fn(async () =>
+            accessOutcome('listed', { unsetVariables: ['ACME_KEY', 'ACME_BASE'] }),
+          ),
+        });
+        scriptAnswers(...fullSetupAnswers({ secrets: 'ACME_KEY ACME_BASE' }));
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(
+          clack.state.logs.filter((log) => log.kind === 'warn').map((log) => log.message),
+        ).toEqual([
+          "ACME_KEY isn't set in this terminal. Runs will need it.",
+          "ACME_BASE isn't set in this terminal. Runs will need it.",
+        ]);
+      });
+
+      it('counts a name the unchecked line printed as printed', async () => {
+        const checkModelAccess = vi
+          .fn<ProgramOperations['checkModelAccess']>()
+          .mockResolvedValueOnce(accessOutcome('not-listed', { unsetVariables: ['BUILTIN_KEY'] }))
+          .mockResolvedValue(accessOutcome('listed', { unsetVariables: ['BUILTIN_KEY'] }));
+        const operations = operationsWithModelCheck({ checkModelAccess });
+        scriptAnswers(...fullSetupAnswers({ secrets: 'BUILTIN_KEY' }));
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.logs.filter((log) => log.kind === 'warn')).toHaveLength(1);
+      });
+
+      it('warns about a call directory it could not remove after a model check', async () => {
+        const operations = operationsWithModelCheck({
+          checkModelAccess: vi.fn(async () =>
+            accessOutcome('listed', { retainedDirectory: '/tmp/tevu-call-xyz' }),
+          ),
+        });
+        scriptAnswers(...fullSetupAnswers({ secondModel: ['provider/model-b'] }));
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: "Couldn't remove a temporary directory.\n/tmp/tevu-call-xyz",
+        });
+      });
+
+      it.each(['first', 'second'] as const)(
+        'ends with exit 130, one cancel line, and no write when the check is cancelled on the %s model',
+        async (position) => {
+          const checkModelAccess = vi
+            .fn<ProgramOperations['checkModelAccess']>()
+            .mockResolvedValue(accessOutcome('listed'));
+          if (position === 'first') {
+            checkModelAccess.mockResolvedValueOnce({ status: 'cancelled' });
+          } else {
+            checkModelAccess
+              .mockResolvedValueOnce(accessOutcome('listed'))
+              .mockResolvedValueOnce({ status: 'cancelled' });
+          }
+          const operations = operationsWithModelCheck({ checkModelAccess });
+          scriptAnswers(...fullSetupAnswers());
+
+          const { code, err } = await runCli(['task', 'add'], { operations });
+
+          expect(code).toBe(130);
+          expect(err).toEqual([]);
+          expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+          expectNoWrites(operations);
+        },
+      );
+
+      it.each([
+        {
+          name: 'an inspection failure',
+          build: (): Partial<ProgramOperations> => ({
+            inspectModelProvider: vi
+              .fn<ProgramOperations['inspectModelProvider']>()
+              .mockResolvedValueOnce({
+                ok: false,
+                error: {
+                  kind: 'ConfigValidationError',
+                  findings: [buildFinding({ message: 'cannot read "/op/opencode.json": EACCES' })],
+                },
+              })
+              .mockResolvedValue({
+                ok: true,
+                value: { provider: 'provider', definition: { defined: false } },
+              }),
+          }),
+        },
+        {
+          name: 'a rejected provider',
+          build: (): Partial<ProgramOperations> => ({
+            checkModelAccess: vi
+              .fn<ProgramOperations['checkModelAccess']>()
+              .mockResolvedValueOnce({
+                status: 'provider-rejected',
+                findings: [
+                  buildFinding({ message: 'options.apiKey of provider "provider" is a literal' }),
+                ],
+              })
+              .mockResolvedValue(accessOutcome('listed')),
+          }),
+        },
+        {
+          name: 'a failed listing',
+          build: (): Partial<ProgramOperations> => ({
+            checkModelAccess: vi
+              .fn<ProgramOperations['checkModelAccess']>()
+              .mockResolvedValueOnce({
+                status: 'listing-failed',
+                detail: '"opencode models" exits with code 3',
+              })
+              .mockResolvedValue(accessOutcome('listed')),
+          }),
+        },
+      ])(
+        'asks the model question again with the previous answer after $name and accepts a later answer',
+        async ({ build }) => {
+          const operations = operationsWithModelCheck(build());
+          scriptAnswers(
+            ...fullSetupAnswers({ firstModel: ['provider/model-a', 'provider/model-c'] }),
+          );
+
+          const { code } = await runCli(['task', 'add'], { operations });
+
+          expect(code).toBe(0);
+          const asked = clack.state.prompts.filter((prompt) => prompt.message === 'Model');
+          expect(asked.slice(0, 2).map((prompt) => prompt.initialValue)).toEqual([
+            undefined,
+            'provider/model-a',
+          ]);
+          expect(requireCreateTaskCall(operations).bootstrap?.models[0]?.model).toBe(
+            'provider/model-c',
+          );
+        },
+      );
+    });
+
+    describe('written configuration and review of copied providers', () => {
+      const ACME_DEFINITION = definedProvider({ otherVariables: ['ACME_BASE'] });
+
+      it('renders and re-parses the bootstrap answers with the providers and the declared secrets', async () => {
+        const operations = operationsWithModelCheck({
+          inspectModelProvider: inspectingProviders({ acme: ACME_DEFINITION }),
+        });
+        scriptAnswers(
+          ...fullSetupAnswers({
+            secrets: 'EXTRA_KEY',
+            firstModel: ['acme/model-a', 'ACME_KEY'],
+            secondModel: ['acme/model-b'],
+          }),
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        const parsed = renderAndParseBootstrap(requireCreateTaskCall(operations));
+        expect(parsed.agents.opencode).toMatchObject({
+          secrets: ['EXTRA_KEY', 'ACME_BASE', 'ACME_KEY'],
+          providers: [{ id: 'acme', api_key: 'ACME_KEY' }],
+        });
+      });
+
+      it('lists the copied providers and their key variables on the review line', async () => {
+        const operations = operationsWithModelCheck({
+          inspectModelProvider: inspectingProviders({
+            acme: ACME_DEFINITION,
+            other: definedProvider({ keyVariables: ['OTHER_KEY'], apiKey: 'reference' }),
+          }),
+        });
+        scriptAnswers(
+          ...fullSetupAnswers({
+            firstModel: ['acme/model-a', 'ACME_KEY'],
+            secondModel: ['other/model-b'],
+          }),
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        const review = clack.state.notes.find((note) => note.title === 'Review');
+        expect(review?.message.split('\n')).toContain(
+          '  agents.opencode.providers: acme (api_key ACME_KEY), other',
+        );
+      });
+
+      it('shows none on the review line when no provider was copied', async () => {
+        const operations = operationsWithModelCheck();
+        scriptAnswers(...fullSetupAnswers());
+
+        await runCli(['task', 'add'], { operations });
+
+        const review = clack.state.notes.find((note) => note.title === 'Review');
+        expect(review?.message.split('\n')).toContain('  agents.opencode.providers: (none)');
+        expect(requireAgentBlock(operations)).not.toHaveProperty('providers');
+      });
+    });
+
+    describe('criteria drafting (AC-1 to AC-6, AC-12, AC-17)', () => {
+      it('never calls draftCriteria when roles.criteria is not declared, telling the operator to enter the criteria (C1)', async () => {
+        const operations = createOperations({
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+        });
+        scriptAnswers(...READY_ANSWERS, ...taskInterviewAnswers('repo-1').slice(10), true);
 
         const { code } = await runCli(['task', 'add'], { operations });
 
         expect(code).toBe(0);
         expect(operations.draftCriteria).not.toHaveBeenCalled();
+        expect(clack.state.logs).toContainEqual({
+          kind: 'info',
+          message: 'No criteria model set. Enter the criteria yourself.',
+        });
+        expect(clack.state.spinners).not.toContainEqual(
+          expect.objectContaining({ label: 'Drafting criteria' }),
+        );
       });
 
       it('hands draftCriteria the same captured bootstrap answers createTask writes when no configuration exists yet', async () => {
@@ -3305,26 +5263,7 @@ describe('tevu CLI', () => {
           draftCriteria,
         });
         scriptAnswers(
-          '/tmp/bench-artifacts',
-          '4',
-          '10m',
-          '5s',
-          '',
-          'opencode',
-          false,
-          false,
-          false,
-          'alpha',
-          'path',
-          '../repos/alpha',
-          false,
-          'c1',
-          'provider/model-a',
-          'high',
-          'c2',
-          'provider/model-b',
-          'low',
-          false,
+          ...BOOTSTRAP_ANSWERS,
           false,
           true,
           'openai/criteria-model',
@@ -3397,11 +5336,88 @@ describe('tevu CLI', () => {
         ]);
       });
 
-      it('falls back to the check questions with no drafted text reaching createTask when the draft fails, warning about a retained call directory (F4, C4)', async () => {
+      it('prints one result line after the draft and names no model, effort, or configuration key', async () => {
+        const config = buildCriteriaConfig();
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria: vi.fn(async () => ({
+            status: 'drafted' as const,
+            draft: { acceptance: ['a'], done: ['d'] },
+            retainedDirectory: null,
+          })),
+        });
+        scriptAnswers(...READY_ANSWERS, 'accept', false, false, true);
+
+        await runCli(['task', 'add'], { operations });
+
+        const logMessages = clack.state.logs.map((log) => log.message);
+        expect(clack.state.logs).toContainEqual({ kind: 'success', message: 'Criteria drafted' });
+        expect(
+          logMessages.filter((message) => /openai|criteria-model|effort|roles\./i.test(message)),
+        ).toEqual([]);
+        expect(clack.state.spinners).toContainEqual(
+          expect.objectContaining({ label: 'Drafting criteria' }),
+        );
+      });
+
+      it('titles the review note and asks the review questions with the terse labels', async () => {
+        const config = buildCriteriaConfig();
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria: vi.fn(async () => ({
+            status: 'drafted' as const,
+            draft: {
+              acceptance: [`This touches commit ${REFERENCE_HASH.slice(0, 7)} directly.`],
+              done: ['The change is documented for users.'],
+            },
+            retainedDirectory: null,
+          })),
+        });
+        scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL);
+
+        await runCli(['task', 'add'], { operations });
+
+        const draftNote = clack.state.notes.find((note) => note.title === 'Drafted criteria');
+        expect(draftNote?.message.split('\n')[0]).toBe(
+          'Agents see every item. Keep outcomes, not details of the reference solution.',
+        );
+        const prompts = clack.state.prompts.filter(
+          (prompt) => prompt.message === 'What next?' || prompt.message === 'Add to',
+        );
+        expect(prompts.map((prompt) => prompt.message)).toEqual(['What next?', 'Add to']);
+        expect(prompts[0]?.options).toEqual([
+          {
+            label: 'Accept',
+            hint: '1 item names the reference solution; edit or remove it',
+            disabled: true,
+          },
+          { label: 'Edit an item', hint: undefined, disabled: false },
+          { label: 'Remove an item', hint: undefined, disabled: false },
+          { label: 'Add an item', hint: undefined, disabled: false },
+          { label: 'Write my own instead', hint: undefined, disabled: false },
+        ]);
+        expect(prompts[1]?.options?.slice(0, 2).map((option) => option.label)).toEqual([
+          'Acceptance criteria',
+          'Definition of Done',
+        ]);
+      });
+
+      it('falls back to the check questions with no drafted text reaching createTask when the draft fails, warning about a retained call directory', async () => {
         const config = buildCriteriaConfig();
         const draftCriteria = vi.fn(async () => ({
           status: 'failed' as const,
-          reason: 'the criteria call failed: ModelCallError (failed): synthetic failure',
+          failure: {
+            cause: 'call-failed' as const,
+            detail: 'ModelCallError (failed): synthetic failure',
+          },
           retainedDirectory: '/tmp/tevu-call-xyz',
         }));
         const operations = createOperations({
@@ -3432,13 +5448,14 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(clack.state.logs).toContainEqual({
           kind: 'warn',
-          message:
-            'Criteria draft failed: the criteria call failed: ModelCallError (failed): synthetic failure; write the acceptance criteria and Definition of Done by hand.',
+          message: draftFailureMessage([
+            'The OpenCode call failed.',
+            'ModelCallError (failed): synthetic failure',
+          ]),
         });
         expect(clack.state.logs).toContainEqual({
           kind: 'warn',
-          message:
-            'The criteria call directory could not be removed; it remains at "/tmp/tevu-call-xyz".',
+          message: "Couldn't remove a temporary directory.\n/tmp/tevu-call-xyz",
         });
         const task = requireCreateTaskCall(operations).task;
         expect(task.checks.acceptance).toEqual([
@@ -3447,6 +5464,65 @@ describe('tevu CLI', () => {
         expect(task.checks.done).toEqual([
           { id: 'dod-1', description: 'README documents the button', manual: true },
         ]);
+      });
+
+      it.each(DRAFT_FAILURE_CASES)(
+        'prints the cause of $name and continues with the check questions',
+        async ({ failure, lines }) => {
+          const operations = createOperations({
+            loadConfig: vi.fn(async () => ({ ok: true as const, value: buildCriteriaConfig() })),
+            resolveReference: vi.fn(async () => ({
+              ok: true as const,
+              value: buildResolvedCommitReference(),
+            })),
+            draftCriteria: vi.fn(async () => ({
+              status: 'failed' as const,
+              failure,
+              retainedDirectory: null,
+            })),
+          });
+          scriptAnswers(...READY_ANSWERS, ...taskInterviewAnswers('repo-1').slice(10), true);
+
+          const { code } = await runCli(['task', 'add'], { operations });
+
+          expect(code).toBe(0);
+          const warnings = clack.state.logs.filter((log) => log.kind === 'warn');
+          expect(warnings).toEqual([{ kind: 'warn', message: draftFailureMessage(lines) }]);
+          const messages = clack.state.prompts.map((prompt) => prompt.message);
+          expect(messages.slice(messages.indexOf('Acceptance check ID'))).toContain(
+            'Definition of Done check ID',
+          );
+          expect(requireCreateTaskCall(operations).task.checks.acceptance).toEqual([
+            { id: 'acc-1', description: 'Export produces a CSV', manual: true },
+          ]);
+        },
+      );
+
+      it('names the configuration path exactly as the wizard received it when the model is unavailable', async () => {
+        const operations = createOperations({
+          locateConfig: vi.fn(async () => ({ ok: true as const, value: '/work/bench/tevu.yaml' })),
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: buildCriteriaConfig() })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria: vi.fn(async () => ({
+            status: 'failed' as const,
+            failure: { cause: 'model-unavailable' as const, model: 'acme/model-a' },
+            retainedDirectory: null,
+          })),
+        });
+        scriptAnswers(...READY_ANSWERS, clack.CANCEL);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: draftFailureMessage([
+            "OpenCode can't find acme/model-a in tevu's environment.",
+            'Add its provider to agents.opencode.providers in /work/bench/tevu.yaml.',
+          ]),
+        });
       });
 
       it('discards the draft for the by-hand fallback when the operator chooses it in the review (E11)', async () => {
@@ -3512,7 +5588,8 @@ describe('tevu CLI', () => {
         const { code, err } = await runCli(['task', 'add'], { operations });
 
         expect(code).toBe(130);
-        expect(err[0]).toBe('Cancelled.');
+        expect(err).toEqual([]);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
         expect(operations.createTask).not.toHaveBeenCalled();
       });
 
@@ -3521,7 +5598,7 @@ describe('tevu CLI', () => {
         const draftCriteria = vi.fn(async () => ({
           status: 'drafted' as const,
           draft: {
-            acceptance: [`This touches commit ${HASH.slice(0, 7)} directly.`],
+            acceptance: [`This touches commit ${REFERENCE_HASH.slice(0, 7)} directly.`],
             done: ['The change is documented for users.'],
           },
           retainedDirectory: null,
@@ -3615,7 +5692,7 @@ describe('tevu CLI', () => {
           ...READY_ANSWERS,
           'edit',
           'acceptance:0',
-          { invalid: `This touches commit ${HASH.slice(0, 7)} directly.` },
+          { invalid: `This touches commit ${REFERENCE_HASH.slice(0, 7)} directly.` },
           'Corrected wording without the identity.',
           'accept',
           false,
@@ -3628,8 +5705,8 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(clack.state.rejections).toContainEqual({
           kind: 'text',
-          message: 'Edited item',
-          reason: `the item names reference commit ${HASH.slice(0, 7)}; tevu validate rejects a task whose agent prompt contains it`,
+          message: 'Item',
+          reason: `the item names reference commit ${REFERENCE_HASH.slice(0, 7)}; tevu validate rejects a task whose agent prompt contains it`,
         });
         const task = requireCreateTaskCall(operations).task;
         expect(task.checks.acceptance).toEqual([
@@ -3643,8 +5720,8 @@ describe('tevu CLI', () => {
           status: 'drafted' as const,
           draft: {
             acceptance: [
-              `First item touches commit ${HASH.slice(0, 7)}.`,
-              `Second item touches commit ${HASH.slice(0, 7)}.`,
+              `First item touches commit ${REFERENCE_HASH.slice(0, 7)}.`,
+              `Second item touches commit ${REFERENCE_HASH.slice(0, 7)}.`,
             ],
             done: ['Clean done item.'],
           },
@@ -3766,9 +5843,9 @@ describe('tevu CLI', () => {
           'command',
           'The test suite passes',
           true,
-          '["npm","test"]',
+          'npm test',
           '',
-          '0',
+          '',
           '',
           false,
           true,
@@ -3785,13 +5862,13 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(clack.state.rejections).toContainEqual({
           kind: 'text',
-          message: 'New acceptance check ID',
+          message: 'Acceptance check ID',
           reason: '"acceptance-1" is already used',
         });
         const task = requireCreateTaskCall(operations).task;
         expect(task.checks.acceptance).toEqual([
           { id: 'acceptance-1', description: 'The export button appears on the table view.' },
-          { id: 'acceptance-extra', description: 'The test suite passes', run: ['npm', 'test'] },
+          { id: 'acceptance-extra', description: 'The test suite passes', run: 'npm test' },
         ]);
         expect(task.checks.done).toEqual([
           { id: 'done-1', description: 'The change is documented for users.' },
@@ -3832,7 +5909,7 @@ describe('tevu CLI', () => {
       ];
     }
 
-    it('asks only the ID, kind, description, and required questions for a graded check, with no command sub-questions', async () => {
+    it('asks only the ID, type, criterion, and required questions for a graded check, with no command sub-questions', async () => {
       const operations = createOperations();
       scriptAnswers(...gradedTaskInterviewAnswers('repo-1'), true);
 
@@ -3840,12 +5917,15 @@ describe('tevu CLI', () => {
 
       expect(code).toBe(0);
       const messages = clack.state.prompts.map((prompt) => prompt.message);
-      expect(messages).toContain('How is "acc-1" checked?');
-      expect(messages).toContain(
-        'Description of "acc-1" (the criterion the grader grades against)',
-      );
-      expect(messages).toContain('Is "acc-1" required?');
-      expect(messages).not.toContain('Command for "acc-1" as a JSON array, e.g. ["npm","test"]');
+      const checkStart = messages.indexOf('Acceptance check ID');
+      expect(messages.slice(checkStart, checkStart + 5)).toEqual([
+        'Acceptance check ID',
+        'Check type',
+        'Criterion',
+        'Required?',
+        'Add another acceptance check?',
+      ]);
+      expect(messages).not.toContain('Command');
       expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task).toMatchObject({
         checks: {
           acceptance: [{ id: 'acc-1', description: 'Export produces a CSV' }],

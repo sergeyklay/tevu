@@ -2006,6 +2006,183 @@ describe('OpenCode adapter listModels over an injected fake process', () => {
   });
 });
 
+function buildCompletion(
+  overrides: Partial<Extract<ManagedProcessResult, { launched: true }>>,
+): ManagedProcessResult {
+  return {
+    launched: true,
+    exitCode: 0,
+    signal: null,
+    startedAt: '2026-01-01T00:00:00.000Z',
+    endedAt: '2026-01-01T00:00:01.000Z',
+    durationMs: 1000,
+    timedOut: false,
+    cancelled: false,
+    terminationStage: 'none',
+    stdout: { text: '', totalBytes: 0, truncated: false },
+    stderr: { text: '', totalBytes: 0, truncated: false },
+    ...overrides,
+  };
+}
+
+function buildOpenCodeAdapter(
+  overrides: Partial<OpenCodeAdapterDependencies> = {},
+): ReturnType<typeof createOpenCodeAdapter> {
+  return createOpenCodeAdapter(
+    {
+      agent: 'opencode',
+      executable: 'fake-opencode',
+      providers: [],
+      declaredVariables: { secrets: [], env: [] },
+    },
+    buildDependencies(overrides),
+  );
+}
+
+describe('OpenCode adapter listModels cancellation over an injected fake process', () => {
+  it('hands the signal it receives to the process request', async () => {
+    const requests: ManagedProcessRequest[] = [];
+    const cancellation = new AbortController().signal;
+    const adapter = buildOpenCodeAdapter({ runProcess: buildFakeRunner('acme/model-a', requests) });
+
+    await adapter.listModels(buildModelCallEnvironment(), cancellation);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.argv).toEqual(['fake-opencode', 'models']);
+    expect(requests[0]?.cancellation).toBe(cancellation);
+  });
+
+  it('reports a cancelled outcome when the process was cancelled', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: buildFixedResultRunner(
+        buildCompletion({ exitCode: null, signal: 'SIGTERM', cancelled: true }),
+      ),
+    });
+
+    const listing = await adapter.listModels(
+      buildModelCallEnvironment(),
+      new AbortController().signal,
+    );
+
+    expect(listing).toEqual({ outcome: 'cancelled' });
+  });
+
+  it('reports a cancelled outcome when the signal was already aborted before launch', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: buildFixedResultRunner({ launched: false, reason: 'cancelled before launch' }),
+    });
+
+    const listing = await adapter.listModels(buildModelCallEnvironment(), AbortSignal.abort());
+
+    expect(listing).toEqual({ outcome: 'cancelled' });
+  });
+});
+
+describe('OpenCode adapter callModel failures over an injected fake process', () => {
+  const ERROR_SESSION = 'ses-error-0001';
+
+  function buildCallInput(): Parameters<ReturnType<typeof createOpenCodeAdapter>['callModel']>[0] {
+    return {
+      role: 'criteria',
+      model: 'acme/model-a',
+      effort: 'high',
+      prompt: 'synthetic prompt',
+      environment: buildModelCallEnvironment(),
+      timeoutMs: 10_000,
+      terminationGraceMs: 250,
+      cancellation: new AbortController().signal,
+    };
+  }
+
+  function buildErrorEvents(message: string): string {
+    const event = {
+      type: 'error',
+      timestamp: 1,
+      sessionID: ERROR_SESSION,
+      error: { name: 'UnknownError', data: { message } },
+    };
+    return `${JSON.stringify(event)}\n`;
+  }
+
+  function buildRunRunner(stdout: string, exitCode: number): ManagedProcessRunner {
+    return async (request) => {
+      request.onStdout?.(stdout);
+      return buildCompletion({
+        exitCode,
+        stdout: { text: stdout, totalBytes: stdout.length, truncated: false },
+      });
+    };
+  }
+
+  it('carries the first line of the agent message on a non-zero exit and leaves the reason text as before', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: buildRunRunner(
+        buildErrorEvents('Unexpected server error.\nCheck server logs for details.'),
+        1,
+      ),
+    });
+
+    const outcome = await adapter.callModel(buildCallInput());
+
+    expect(outcome).toEqual({
+      ok: false,
+      error: {
+        kind: 'ModelCallError',
+        role: 'criteria',
+        agent: 'opencode',
+        cause: 'failed',
+        reason: 'run process exited with code 1: Unexpected server error.',
+        agentMessage: 'Unexpected server error.',
+      },
+    });
+  });
+
+  it('carries the agent message when the run exits cleanly but reported an error', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: buildRunRunner(buildErrorEvents('Model not found: acme/model-a.'), 0),
+    });
+
+    const outcome = await adapter.callModel(buildCallInput());
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: {
+        cause: 'failed',
+        reason: 'run reported an error: Model not found: acme/model-a.',
+        agentMessage: 'Model not found: acme/model-a.',
+      },
+    });
+  });
+
+  it('leaves the agent message absent when the failing run reported none', async () => {
+    const adapter = buildOpenCodeAdapter({ runProcess: buildRunRunner('', 3) });
+
+    const outcome = await adapter.callModel(buildCallInput());
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toMatchObject({
+      cause: 'failed',
+      reason: 'run process exited with code 3',
+    });
+    expect(outcome.error).not.toHaveProperty('agentMessage');
+  });
+
+  it('redacts a secret value out of the agent message', async () => {
+    const adapter = buildOpenCodeAdapter({
+      secrets: buildSecretRedactor(['sk-secret-value']),
+      runProcess: buildRunRunner(buildErrorEvents('Rejected key sk-secret-value for acme.'), 1),
+    });
+
+    const outcome = await adapter.callModel(buildCallInput());
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(JSON.stringify(outcome.error)).not.toContain('sk-secret-value');
+    expect(outcome.error).toHaveProperty('agentMessage');
+  });
+});
+
 describe('OpenCode adapter models command capability probe', () => {
   let noModelsExecutable: string;
 

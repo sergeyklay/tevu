@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { createArtifactStore, createConfigStore } from '@/adapters/artifact-store';
 import {
@@ -145,6 +145,7 @@ const AGENTS_REGISTRY: AgentRegistry = new Map<string, AgentAdapter>([
           ok: true,
           value: { agent: AGENT_NAME, configurationFiles: [], findings: [] },
         }),
+      inspectOperatorProvider: () => Promise.resolve({ ok: true, value: { defined: false } }),
       listModels: () => Promise.resolve({ outcome: 'listed', models: [] }),
       run: () => Promise.reject(new Error('unused in report regeneration')),
       exportSession: () => Promise.reject(new Error('unused in report regeneration')),
@@ -1284,6 +1285,189 @@ describe('evaluateChecks', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('a command check with a string run', () => {
+  const COMMAND_LINE = '  CI=1 npm test -- --run | tee "out log" && echo "a: #b"  ';
+
+  describe('with a fake process adapter', () => {
+    it('hands the string to /bin/sh -c exactly as written', async () => {
+      const { adapter, requests } = fakeEvaluatorProcess(() => succeeded(0));
+      const input = buildEvaluationInput({
+        checks: [commandCheck('acc-string', { run: COMMAND_LINE })],
+        processes: adapter,
+      });
+
+      await evaluateChecks(input);
+
+      expect(requests[0]?.argv).toEqual(['/bin/sh', '-c', COMMAND_LINE]);
+    });
+
+    it('runs an array without a shell and gives both forms the same directory, limits, and cancellation', async () => {
+      const controller = new AbortController();
+      const { adapter, requests } = fakeEvaluatorProcess(() => succeeded(0));
+      const input = buildEvaluationInput({
+        checks: [
+          commandCheck('acc-string', { run: 'npm test' }),
+          commandCheck('acc-array', { run: ['npm', 'test'] }),
+        ],
+        processes: adapter,
+        cancellation: controller.signal,
+      });
+
+      await evaluateChecks(input);
+
+      const [fromString, fromArray] = requests;
+      expect(fromArray?.argv).toEqual(['npm', 'test']);
+      expect({ ...fromString, argv: undefined }).toEqual({ ...fromArray, argv: undefined });
+    });
+  });
+
+  describe('with the real /bin/sh', () => {
+    async function withWorktree<T>(run: (worktree: string) => Promise<T>): Promise<T> {
+      const root = await mkdtemp(join(tmpdir(), 'tevu-eval-shell-'));
+      try {
+        return await run(root);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+
+    function buildShellInput(
+      worktree: string,
+      check: OrderedCheck,
+      overrides: Partial<CheckEvaluationInput> = {},
+    ): CheckEvaluationInput {
+      const base = buildEvaluationInput();
+      return buildEvaluationInput({
+        checks: [check],
+        processes: createEvaluatorProcessAdapter(() => []),
+        workspace: { ...base.workspace, worktreeDirectory: worktree },
+        environment: {
+          ...base.environment,
+          variables: {
+            ...base.environment.variables,
+            PATH: process.env['PATH'] ?? '/usr/bin:/bin',
+          },
+        },
+        ...overrides,
+      });
+    }
+
+    async function tickCount(worktree: string): Promise<number> {
+      const text = await readFile(join(worktree, 'ticks.log'), 'utf8').catch(() => '');
+      return text.split('\n').filter((line) => line.length > 0).length;
+    }
+
+    const BACKGROUND_TICKER = '(while :; do echo tick >> ticks.log; sleep 0.05; done) & wait';
+
+    it('expands a declared variable and leaves an undeclared parent variable empty', async () => {
+      const command = `printf '%s|%s' "$${ORDINARY_ENV_NAME}" "$TEVU_PARENT_SENTINEL"`;
+
+      const result = await withWorktree((worktree) =>
+        evaluateChecks(
+          buildShellInput(
+            worktree,
+            commandCheck('acc-env', { run: command, env: [ORDINARY_ENV_NAME] }),
+          ),
+        ),
+      );
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value[0]?.verdict).toBe('passed');
+      expect(result.value[0]?.evidence).toContain(`: ${ORDINARY_VALUE}|`);
+      expect(result.value[0]?.evidence).not.toContain(PARENT_SENTINEL);
+    });
+
+    it.each([
+      { command: 'true && false', exitCodes: [0], verdict: 'failed' },
+      { command: 'true && exit 3', exitCodes: [3], verdict: 'passed' },
+      { command: 'false | true', exitCodes: [0], verdict: 'passed' },
+      { command: 'true | false', exitCodes: [0], verdict: 'failed' },
+    ])(
+      'decides the verdict of "$command" from its shell status against exit_codes',
+      async ({ command, exitCodes, verdict }) => {
+        const result = await withWorktree((worktree) =>
+          evaluateChecks(
+            buildShellInput(
+              worktree,
+              commandCheck('acc-status', { run: command, exit_codes: exitCodes }),
+            ),
+          ),
+        );
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value[0]?.verdict).toBe(verdict);
+      },
+    );
+
+    it('exits 127 with the shell message as evidence when the command cannot be found', async () => {
+      const result = await withWorktree((worktree) =>
+        evaluateChecks(
+          buildShellInput(worktree, commandCheck('acc-missing', { run: 'tevu-no-such-command' })),
+        ),
+      );
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value[0]?.verdict).toBe('failed');
+      expect(result.value[0]?.evidence).toContain('exit code 127');
+      expect(result.value[0]?.evidence).toMatch(/tevu-no-such-command.*not found/);
+    });
+
+    it('finds the shell by its absolute path when the evaluator PATH does not hold it', async () => {
+      const result = await withWorktree((worktree) => {
+        const base = buildShellInput(worktree, commandCheck('acc-path', { run: 'echo ok' }));
+        return evaluateChecks({
+          ...base,
+          environment: {
+            ...base.environment,
+            variables: { ...base.environment.variables, PATH: '/tevu-synthetic/no-such-bin' },
+          },
+        });
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value[0]?.verdict).toBe('passed');
+    });
+
+    it('leaves no background process running after the check times out', async () => {
+      await withWorktree(async (worktree) => {
+        const check = commandCheck('acc-timeout', { run: BACKGROUND_TICKER, timeout: '1s' });
+
+        const result = await evaluateChecks(buildShellInput(worktree, check));
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value[0]?.evidence).toContain('timed out after 1000ms');
+        const ticksAtEnd = await tickCount(worktree);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        expect(ticksAtEnd).toBeGreaterThan(0);
+        expect(await tickCount(worktree)).toBe(ticksAtEnd);
+      });
+    });
+
+    it('leaves no background process running after the check is cancelled', async () => {
+      await withWorktree(async (worktree) => {
+        const controller = new AbortController();
+        const check = commandCheck('acc-cancel', { run: BACKGROUND_TICKER, timeout: '30s' });
+
+        const pending = evaluateChecks(
+          buildShellInput(worktree, check, { cancellation: controller.signal }),
+        );
+        await vi.waitFor(async () => expect(await tickCount(worktree)).toBeGreaterThan(0));
+        controller.abort();
+        await pending;
+
+        const ticksAtEnd = await tickCount(worktree);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        expect(await tickCount(worktree)).toBe(ticksAtEnd);
+      });
+    });
   });
 });
 

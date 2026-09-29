@@ -15,7 +15,7 @@ import {
   runManagedProcess,
 } from '@/adapters/process';
 
-import { callModelRole } from './model-call';
+import { callModelRole, listModelsInCallEnvironment } from './model-call';
 
 import type { OpenCodeAdapterDependencies } from '@/adapters/agents/opencode/opencode';
 import type {
@@ -25,8 +25,11 @@ import type {
   ManagedProcessRequest,
   ManagedProcessRunner,
   ModelCallDependencies,
+  ModelCallEnvironment,
+  ModelListing,
   ModelRoleCallRequest,
   ModelRoleName,
+  ParentEnvironmentSnapshot,
   ProviderSnapshot,
   SecretRedactor,
   TevuConfig,
@@ -745,5 +748,262 @@ describe('callModelRole providers resolution', () => {
     expectOk(result);
     expect(readProvidersCalls).toBe(0);
     expect(receivedFiles).toEqual([['opencode/opencode.json']]);
+  });
+});
+
+describe('listModelsInCallEnvironment', () => {
+  const AGENT_VARIABLES = { secrets: [], env: [] };
+  const SNAPSHOT: ParentEnvironmentSnapshot = {
+    path: '/usr/bin:/bin',
+    agentValues: {},
+    ordinaryEvaluatorValues: {},
+    secretValues: [],
+  };
+
+  type Spies = {
+    disposals: number;
+    listedEnvironments: ModelCallEnvironment[];
+    signals: unknown[];
+  };
+
+  function buildSpies(): Spies {
+    return { disposals: 0, listedEnvironments: [], signals: [] };
+  }
+
+  function buildEnvironment(
+    spies: Spies,
+    disposal: { ok: true; value: undefined } | { ok: false; error: TevuError } = {
+      ok: true,
+      value: undefined,
+    },
+  ): ModelCallEnvironment {
+    return {
+      rootDirectory: '/synthetic/call-root',
+      workingDirectory: '/synthetic/call-root/work',
+      homeDirectory: '/synthetic/call-root/agent/home',
+      variables: {},
+      async dispose() {
+        spies.disposals += 1;
+        return disposal as Awaited<ReturnType<ModelCallEnvironment['dispose']>>;
+      },
+    };
+  }
+
+  function buildEnvironments(
+    creation: ReturnType<EnvironmentAdapter['createModelCallEnvironment']>,
+  ): EnvironmentAdapter {
+    // The function under test calls only `createModelCallEnvironment`.
+    return { createModelCallEnvironment: () => creation } as unknown as EnvironmentAdapter;
+  }
+
+  function buildGit(
+    initialization: Awaited<ReturnType<GitWorkspaceAdapter['initializeEmptyRepository']>>,
+  ): Pick<GitWorkspaceAdapter, 'initializeEmptyRepository'> {
+    return { initializeEmptyRepository: async () => initialization };
+  }
+
+  function buildListingAgent(
+    spies: Spies,
+    listing: ModelListing = { outcome: 'listed', models: ['acme/model-a'] },
+  ): AgentAdapter {
+    // The function under test calls only `listModels`.
+    return {
+      async listModels(environment: ModelCallEnvironment, cancellation?: AbortSignal) {
+        spies.listedEnvironments.push(environment);
+        spies.signals.push(cancellation);
+        return listing;
+      },
+    } as unknown as AgentAdapter;
+  }
+
+  it('reports the environment creation failure with its operation and reason and never lists', async () => {
+    const spies = buildSpies();
+
+    const outcome = await listModelsInCallEnvironment(
+      buildListingAgent(spies),
+      { snapshot: SNAPSHOT, agentVariables: AGENT_VARIABLES, configurationFiles: [] },
+      {
+        environments: buildEnvironments(
+          Promise.resolve({
+            ok: false,
+            error: { kind: 'ArtifactError', operation: 'create-call-root', reason: 'disk full' },
+          }),
+        ),
+        git: buildGit({ ok: true, value: undefined }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      prepared: false,
+      reason: 'create-call-root: disk full',
+      retainedDirectory: null,
+    });
+    expect(spies.listedEnvironments).toEqual([]);
+  });
+
+  it('disposes the environment and reports the failure when the repository cannot be initialized', async () => {
+    const spies = buildSpies();
+
+    const outcome = await listModelsInCallEnvironment(
+      buildListingAgent(spies),
+      { snapshot: SNAPSHOT, agentVariables: AGENT_VARIABLES, configurationFiles: [] },
+      {
+        environments: buildEnvironments(
+          Promise.resolve({ ok: true, value: buildEnvironment(spies) }),
+        ),
+        git: buildGit({
+          ok: false,
+          error: { kind: 'ArtifactError', operation: 'git-init', reason: 'git is missing' },
+        }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      prepared: false,
+      reason: 'git-init: git is missing',
+      retainedDirectory: null,
+    });
+    expect(spies.disposals).toBe(1);
+    expect(spies.listedEnvironments).toEqual([]);
+  });
+
+  it('names the root directory as retained when disposal fails after a listing', async () => {
+    const spies = buildSpies();
+    const environment = buildEnvironment(spies, {
+      ok: false,
+      error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
+    });
+
+    const outcome = await listModelsInCallEnvironment(
+      buildListingAgent(spies),
+      { snapshot: SNAPSHOT, agentVariables: AGENT_VARIABLES, configurationFiles: [] },
+      {
+        environments: buildEnvironments(Promise.resolve({ ok: true, value: environment })),
+        git: buildGit({ ok: true, value: undefined }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      prepared: true,
+      listing: { outcome: 'listed', models: ['acme/model-a'] },
+      retainedDirectory: '/synthetic/call-root',
+    });
+  });
+
+  it('names the root directory as retained when disposal also fails after an initialization failure', async () => {
+    const spies = buildSpies();
+    const environment = buildEnvironment(spies, {
+      ok: false,
+      error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
+    });
+
+    const outcome = await listModelsInCallEnvironment(
+      buildListingAgent(spies),
+      { snapshot: SNAPSHOT, agentVariables: AGENT_VARIABLES, configurationFiles: [] },
+      {
+        environments: buildEnvironments(Promise.resolve({ ok: true, value: environment })),
+        git: buildGit({
+          ok: false,
+          error: { kind: 'ArtifactError', operation: 'git-init', reason: 'git is missing' },
+        }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      prepared: false,
+      reason: 'git-init: git is missing',
+      retainedDirectory: '/synthetic/call-root',
+    });
+  });
+
+  it('hands the signal and the prepared environment to the listing and reports no retained directory after a clean disposal', async () => {
+    const spies = buildSpies();
+    const environment = buildEnvironment(spies);
+    const cancellation = new AbortController().signal;
+
+    const outcome = await listModelsInCallEnvironment(
+      buildListingAgent(spies, { outcome: 'cancelled' }),
+      { snapshot: SNAPSHOT, agentVariables: AGENT_VARIABLES, configurationFiles: [], cancellation },
+      {
+        environments: buildEnvironments(Promise.resolve({ ok: true, value: environment })),
+        git: buildGit({ ok: true, value: undefined }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      prepared: true,
+      listing: { outcome: 'cancelled' },
+      retainedDirectory: null,
+    });
+    expect(spies.signals).toEqual([cancellation]);
+    expect(spies.listedEnvironments).toEqual([environment]);
+    expect(spies.disposals).toBe(1);
+  });
+
+  it.each([
+    { name: 'a timed-out', listing: { outcome: 'timed-out', limitMs: 120_000 } as ModelListing },
+    {
+      name: 'a failed',
+      listing: { outcome: 'failed', reason: 'exits with code 4' } as ModelListing,
+    },
+  ])('disposes the environment after $name listing', async ({ listing }) => {
+    const spies = buildSpies();
+
+    const outcome = await listModelsInCallEnvironment(
+      buildListingAgent(spies, listing),
+      { snapshot: SNAPSHOT, agentVariables: AGENT_VARIABLES, configurationFiles: [] },
+      {
+        environments: buildEnvironments(
+          Promise.resolve({ ok: true, value: buildEnvironment(spies) }),
+        ),
+        git: buildGit({ ok: true, value: undefined }),
+      },
+    );
+
+    expect(outcome).toMatchObject({ prepared: true, listing });
+    expect(spies.disposals).toBe(1);
+  });
+
+  it('lists inside a real empty repository holding the configuration files and removes the directory afterwards', async () => {
+    const environments = createEnvironmentAdapter();
+    const snapshot = environments.snapshotParent({
+      agents: { opencode: AGENT_VARIABLES },
+      ordinaryEvaluator: [],
+    });
+    const seen: { root: string; entries: string[]; config: string } = {
+      root: '',
+      entries: [],
+      config: '',
+    };
+    // The function under test calls only `listModels`.
+    const agent = {
+      async listModels(environment: ModelCallEnvironment): Promise<ModelListing> {
+        seen.root = environment.rootDirectory;
+        seen.entries = existsSync(join(environment.workingDirectory, '.git')) ? ['.git'] : [];
+        seen.config = readFileSync(
+          join(environment.homeDirectory, '.config', 'opencode', 'opencode.json'),
+          'utf8',
+        );
+        return { outcome: 'listed', models: [] };
+      },
+    } as unknown as AgentAdapter;
+
+    const outcome = await listModelsInCallEnvironment(
+      agent,
+      {
+        snapshot: expectOk(snapshot),
+        agentVariables: AGENT_VARIABLES,
+        configurationFiles: [{ relativePath: 'opencode/opencode.json', text: '{"provider":{}}\n' }],
+      },
+      {
+        environments,
+        git: createGitWorkspaceAdapter({ workspacesDirectory: join(tempRoot, 'workspaces') }),
+      },
+    );
+
+    expect(outcome).toMatchObject({ prepared: true, retainedDirectory: null });
+    expect(seen.entries).toEqual(['.git']);
+    expect(seen.config).toBe('{"provider":{}}\n');
+    expect(existsSync(seen.root)).toBe(false);
   });
 });

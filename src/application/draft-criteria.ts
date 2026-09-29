@@ -16,17 +16,21 @@ import { durationMs } from '@/config/schema';
 import { codeFenceFor, decodeReplyObject } from '@/domain/model-text';
 
 import { collectBaseSecretNames } from './create-task';
+import { checkModelAccess } from './model-access';
 import { callModelRole, describeModelCallFailure } from './model-call';
 
+import type { AgentDraft } from './model-access';
 import type { ResolvedReferenceSolution } from './reference-solution';
 import type { RepositoryInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentRegistry,
   EnvironmentAdapter,
   GitWorkspaceAdapter,
+  ModelRole,
   PullRequestReader,
   Redactor,
   TevuConfig,
+  TevuError,
 } from '@/domain/types';
 
 /** Both drafted lists in reply order, each item normalized per the reply grammar. */
@@ -44,10 +48,20 @@ export type CriteriaDraftRequest = {
   description: string;
 };
 
+/** Why a criteria draft failed; every text is redacted or composed from IDs and names. */
+export type CriteriaDraftFailure =
+  | { cause: 'changes-unreadable'; detail: string }
+  | { cause: 'prompt-unredactable' }
+  | { cause: 'variables-unset'; names: readonly string[] }
+  | { cause: 'model-unavailable'; model: string }
+  | { cause: 'timed-out'; limit: string }
+  | { cause: 'call-failed'; agentMessage?: string; detail: string }
+  | { cause: 'reply-invalid'; defect: string };
+
 /** Outcome of one criteria-drafting call; a failure or cancellation drafts nothing to review. */
 export type CriteriaDraftOutcome =
   | { status: 'drafted'; draft: CriteriaDraft; retainedDirectory: string | null }
-  | { status: 'failed'; reason: string; retainedDirectory: string | null }
+  | { status: 'failed'; failure: CriteriaDraftFailure; retainedDirectory: string | null }
   | { status: 'cancelled' };
 
 /** Effects injected into the criteria-drafting use case. */
@@ -199,6 +213,18 @@ export async function draftCriteria(
       : resolveBootstrapModelCallConfig(request.configuration.answers, request.configPath);
   dependencies.registerSecrets(collectBaseSecretNames(source));
 
+  const criteriaRole = callConfig.roles?.criteria;
+  const roleAgent = criteriaRole === undefined ? undefined : callConfig.agents[criteriaRole.agent];
+  if (roleAgent !== undefined) {
+    const unset = dependencies.environments.unsetVariables([
+      ...roleAgent.secrets,
+      ...roleAgent.env,
+    ]);
+    if (unset.length > 0) {
+      return draftFailure({ cause: 'variables-unset', names: unset });
+    }
+  }
+
   const changes = await readReferenceChanges(request, dependencies);
   if (changes.status !== 'read') {
     return changes;
@@ -221,15 +247,11 @@ export async function draftCriteria(
   try {
     redacted = dependencies.redact(prompt);
   } catch {
-    return failedToDraft(
-      'the criteria prompt could not be redacted; the criteria model was not called',
-    );
+    return draftFailure({ cause: 'prompt-unredactable' });
   }
   // The redactor is injected; a non-string result must fail closed.
   if (typeof (redacted as unknown) !== 'string') {
-    return failedToDraft(
-      'the criteria prompt could not be redacted; the criteria model was not called',
-    );
+    return draftFailure({ cause: 'prompt-unredactable' });
   }
 
   const result = await callModelRole(
@@ -247,17 +269,30 @@ export async function draftCriteria(
     },
   );
   if (!result.ok) {
-    if (result.error.kind === 'CancellationError') {
+    const { error } = result;
+    if (error.kind === 'CancellationError') {
       return { status: 'cancelled' };
     }
-    return failedToDraft(`the criteria call failed: ${describeModelCallFailure(result.error)}`);
+    if (error.kind === 'ModelCallError' && error.cause === 'timed-out') {
+      return draftFailure({ cause: 'timed-out', limit: callConfig.run.timeout });
+    }
+    if (error.kind === 'ModelCallError' && error.cause === 'failed') {
+      return explainFailedCall(error, criteriaRole, roleAgent, request.configPath, dependencies);
+    }
+    return draftFailure({
+      cause: 'call-failed',
+      ...(error.kind === 'ModelCallError' && error.agentMessage !== undefined
+        ? { agentMessage: error.agentMessage }
+        : {}),
+      detail: describeModelCallFailure(error),
+    });
   }
 
   const parsed = parseCriteriaReply(result.value.text);
   if (!parsed.ok) {
     return {
       status: 'failed',
-      reason: `the criteria reply is not valid: ${parsed.defect}`,
+      failure: { cause: 'reply-invalid', defect: parsed.defect },
       retainedDirectory: result.value.retainedDirectory,
     };
   }
@@ -268,10 +303,39 @@ export async function draftCriteria(
   };
 }
 
+/**
+ * Tells a model the agent cannot resolve from a call that failed for another
+ * reason: the call already failed, so the extra model listing costs nothing
+ * when a draft succeeds.
+ */
+async function explainFailedCall(
+  error: Extract<TevuError, { kind: 'ModelCallError' }>,
+  role: ModelRole | undefined,
+  agent: AgentDraft | undefined,
+  configPath: string,
+  dependencies: CriteriaDraftDependencies,
+): Promise<CriteriaDraftOutcome> {
+  const callFailed = draftFailure({
+    cause: 'call-failed',
+    ...(error.agentMessage === undefined ? {} : { agentMessage: error.agentMessage }),
+    detail: error.reason,
+  });
+  if (role === undefined || agent === undefined) {
+    return callFailed;
+  }
+  const access = await checkModelAccess({ configPath, agent, model: role.model }, dependencies);
+  if (access.status === 'cancelled') {
+    return { status: 'cancelled' };
+  }
+  return access.status === 'not-listed'
+    ? draftFailure({ cause: 'model-unavailable', model: role.model })
+    : callFailed;
+}
+
 /** Outcome of reading the reference's changes: the diff text, or the outcome `draftCriteria` should return directly. */
 type ReferenceChangesOutcome =
   | { status: 'read'; value: string }
-  | { status: 'failed'; reason: string; retainedDirectory: null }
+  | Extract<CriteriaDraftOutcome, { status: 'failed' }>
   | { status: 'cancelled' };
 
 async function readReferenceChanges(
@@ -287,7 +351,7 @@ async function readReferenceChanges(
       dependencies.managedCloneRoot,
     );
     if (directory === undefined) {
-      return failedToReadChanges(
+      return changesUnreadable(
         'a GitHub repository entry needs XDG_CACHE_HOME or HOME set to an absolute path for its managed clone',
       );
     }
@@ -296,7 +360,7 @@ async function readReferenceChanges(
       reference.commits[0],
     );
     if (!diffed.ok) {
-      return failedToReadChanges(`${diffed.error.operation}: ${diffed.error.reason}`);
+      return changesUnreadable(`${diffed.error.operation}: ${diffed.error.reason}`);
     }
     return { status: 'read', value: diffed.value };
   }
@@ -306,21 +370,17 @@ async function readReferenceChanges(
     if (diffed.error.kind === 'CancellationError') {
       return { status: 'cancelled' };
     }
-    return failedToReadChanges(diffed.error.reason);
+    return changesUnreadable(diffed.error.reason);
   }
   return { status: 'read', value: diffed.value };
 }
 
-function failedToReadChanges(
-  detail: string,
-): Extract<ReferenceChangesOutcome, { status: 'failed' }> {
-  return {
-    status: 'failed',
-    reason: `the reference solution's changes cannot be read: ${detail}`,
-    retainedDirectory: null,
-  };
+function changesUnreadable(detail: string): Extract<ReferenceChangesOutcome, { status: 'failed' }> {
+  return draftFailure({ cause: 'changes-unreadable', detail });
 }
 
-function failedToDraft(reason: string): Extract<CriteriaDraftOutcome, { status: 'failed' }> {
-  return { status: 'failed', reason, retainedDirectory: null };
+function draftFailure(
+  failure: CriteriaDraftFailure,
+): Extract<CriteriaDraftOutcome, { status: 'failed' }> {
+  return { status: 'failed', failure, retainedDirectory: null };
 }

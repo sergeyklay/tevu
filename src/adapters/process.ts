@@ -363,6 +363,9 @@ export function createEnvironmentAdapter(): EnvironmentAdapter {
     ): TevuResult<ParentEnvironmentSnapshot, 'PrerequisiteError'> {
       return snapshotParentEnvironment(names);
     },
+    unsetVariables(names: readonly string[]): string[] {
+      return names.filter((name) => process.env[name] === undefined);
+    },
     async createCaseEnvironments(
       workspace: CaseWorkspace,
       snapshot: ParentEnvironmentSnapshot,

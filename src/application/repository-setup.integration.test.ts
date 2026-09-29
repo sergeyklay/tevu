@@ -232,6 +232,9 @@ function buildDirectEditAgent(): AgentAdapter {
     async readProviders() {
       return { ok: true, value: { agent: 'opencode', configurationFiles: [], findings: [] } };
     },
+    async inspectOperatorProvider() {
+      return { ok: true, value: { defined: false } };
+    },
     async listModels() {
       return { outcome: 'listed', models: [] };
     },

@@ -130,7 +130,7 @@ tasks:
           description: The CSV contains the visible rows and correctly escapes values.
         - id: tests
           description: The repository's test suite passes.
-          run: [npm, test]        # executable and literal arguments, no shell
+          run: npm test           # runs as /bin/sh -c; [npm, test] runs without a shell
           # timeout: 2m           # defaults to run.check_timeout
           # exit_codes: [0]       # exit codes that count as a pass; defaults to [0]
           # env: [NODE_OPTIONS]   # ordinary variables this check receives
@@ -276,7 +276,7 @@ A graded check needs a description with non-whitespace text, since `roles.grader
 
 | Field | Contract |
 | --- | --- |
-| `run` | Non-empty array: executable followed by literal arguments, no shell |
+| `run` | A string with at least one non-blank character, which tevu runs as `/bin/sh -c <run>`, or a non-empty array of an executable followed by literal arguments, run without a shell. Any other value is rejected |
 | `timeout` | Duration; defaults to `run.check_timeout`. Rejected when both are absent |
 | `exit_codes` | Non-empty array of integer exit codes; defaults to `[0]` |
 | `env` | Variable names available to the command; defaults to `[]` |
@@ -286,14 +286,14 @@ For example, a task whose target repository uses `npm test` can define:
 ```yaml
 id: tests
 description: The repository's test suite passes.
-run: [npm, test]
+run: npm test          # or [npm, test] to run without a shell
 # timeout: 2m           # defaults to run.check_timeout
 # exit_codes: [0]       # exit codes that count as a pass; defaults to [0]
 # env: [NODE_OPTIONS]   # variables this check receives
 # required: false       # checks are required unless stated otherwise
 ```
 
-Commands run sequentially in the case workspace. Arguments are passed directly, without a shell. A target task's test command is independent of tevu's own product-test runner. The solution patch is captured before checks run, relative to the state `before_agent` left when the repository declares one; restore and overlay then run, followed by `setup.before_checks` when declared, so command checks see the restored and overlaid worktree rather than the state the agent left. Ignore rules never hide a change to a tracked path, meaning a path in the [patch base](#repository-setup) when one was recorded and in `base_commit` otherwise.
+Commands run sequentially in the case workspace. A string `run` is stored as written and runs as `/bin/sh -c <run>`, with the absolute path `/bin/sh` never looked up on `PATH`. The shell receives only the check's evaluator environment (see [Fixed evaluator environment](#fixed-evaluator-environment)), so `$VAR` expands from the fixed variables and the names in `env`, and any other name expands to empty text; the shell finds commands on that environment's `PATH`. The check passes or fails on the shell's exit status, the status of the last command it ran, compared with `exit_codes`; a command the shell cannot find exits `127`. Timeout and cancellation end the shell's whole process group, background commands included. An array `run` starts its executable directly, with arguments passed literally, without a shell. A target task's test command is independent of tevu's own product-test runner. The solution patch is captured before checks run, relative to the state `before_agent` left when the repository declares one; restore and overlay then run, followed by `setup.before_checks` when declared, so command checks see the restored and overlaid worktree rather than the state the agent left. Ignore rules never hide a change to a tracked path, meaning a path in the [patch base](#repository-setup) when one was recorded and in `base_commit` otherwise.
 
 ### Graded checks
 
@@ -326,7 +326,7 @@ An entry in `repositories` may declare `setup`, which prepares every case that u
 | `setup.timeout` | Duration; limit for one setup command; required whenever `setup` is present, with no fallback to `run.check_timeout` |
 | `setup.env` | Variable names passed as-is to this repository's setup commands; default `[]` |
 
-At least one of `before_agent` and `before_checks` must hold a command. A setup command is the same shape as a check's `run`: a non-empty executable followed by literal string arguments, no shell.
+At least one of `before_agent` and `before_checks` must hold a command. A setup command takes the array form only: a non-empty executable followed by literal string arguments, no shell, the same as an array `run`.
 
 A case with `setup` declared runs these steps, in order: seal the case and build its environments; run `before_agent` and, on success, record the worktree as the patch base, when the repository declares `before_agent`; run the agent; capture the solution patch, relative to the patch base when one was recorded, otherwise relative to the case's synthetic root commit; restore and overlay; run `before_checks`, when the repository declares it; run the checks. Each setup command's environment is the fixed evaluator environment plus `setup.env`, built the same way a check's environment is, and its working directory is the case worktree. Commands of one phase run sequentially in declared order; no agent secret or `agents.opencode.env`/`agents.opencode.secrets` value is ever present.
 
@@ -383,7 +383,7 @@ A model call's agent process receives the same treatment: the case agent variabl
 
 ### Case executables
 
-A case executable is the first element of a command a case would start: an agent's `command`, the first element of each `setup.before_agent` and `setup.before_checks` command, and the first element of each command check's `run`. `tevu validate` probes every case executable before any case starts; `tevu run` and `tevu run --dry-run` run the same check as part of validation, also before any case starts.
+A case executable is the first element of a command a case would start: an agent's `command`, the first element of each `setup.before_agent` and `setup.before_checks` command, the first element of each array `run`, and the leading word of each string `run`. A leading word is the first run of non-blank characters after any spaces and tabs, and counts only when it holds nothing but ASCII letters, digits, `_`, `-`, `.`, `/`, and `+`. `tevu validate` probes every case executable before any case starts; `tevu run` and `tevu run --dry-run` run the same check as part of validation, also before any case starts.
 
 For each case executable, tevu starts `<executable> --version` once in a replica of its case environment, and, only when that run does not exit 0 before a 10-second limit, once more in tevu's own environment with the withheld names removed.
 
@@ -398,7 +398,7 @@ Both runs share one working directory: a path entry's own directory for its setu
 
 The parent run omits these names even when tevu's own environment sets them: every configured agent's `secrets` names, the variable `trackers.jira.token` references, and `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN`. It still gives the executable every other variable of tevu's own environment, the operator's HOME included, so a started executable may use the network, write files, or install the toolchain a version file names, on its own, in a path entry's directory or elsewhere.
 
-tevu does not judge a case executable that is a relative path containing a `/`, since it resolves inside a case worktree that does not exist during validation; one whose `--version` does not exit 0 in the parent run from its working directory, including a tool with no `--version` option, a version selected only by a version file inside a GitHub entry's repository or, for the agent command, inside a repository; a replica run that reaches the 10-second limit; or a command the agent or a case executable starts itself.
+tevu does not judge a string `run` without such a leading word, for example `CI=1 npm test`, `(cd app && npm test)`, or `"$NODE" test.js`; a case executable that is a relative path containing a `/`, since it resolves inside a case worktree that does not exist during validation; one whose `--version` does not exit 0 in the parent run from its working directory, including a tool with no `--version` option, a version selected only by a version file inside a GitHub entry's repository or, for the agent command, inside a repository; a replica run that reaches the 10-second limit; or a command the agent or a case executable starts itself.
 
 An error finding appears at `agents.<name>.command`, `repositories.<repo-id>.setup.<phase>.<index>`, or `tasks.<task-id>.checks.<collection>.<check-id>.run`, and makes the configuration invalid. Its message names the executable, why the replica run failed, and two remedies: declare the variable it reads, if a case does not already give it one; or, for a version-manager shim, start tevu with the real executable's directory before the shim directory on PATH.
 
@@ -433,11 +433,15 @@ Every copied definition is checked before it reaches a case. A value at a key na
 
 A definition that checks cleanly but references no `secrets` variable draws a warning naming the provider: tevu cannot tell a provider that needs no key from one whose key sits in the OpenCode login store, which it never copies. Set `api_key` when the key is in the login store; a provider that genuinely needs no key can ignore the warning.
 
+The setup interview of `tevu task add` fills this list. For each model it asks, it takes the provider from the text before the model's first `/`, copies that provider when the operator's global configuration defines it, and declares in `secrets` every variable the definition references. When the definition names no key variable or holds a literal `options.apiKey`, the interview asks for the variable that holds the key and writes it as `api_key`. A provider that configuration does not define needs no copy; a built-in provider resolves when its key variable is declared in `secrets` and set in the terminal.
+
 `run.json` records the SHA-256 of every configuration file tevu writes into an agent's homes, never the file's text; see [Results](results.md#run-manifest).
 
 ### Model resolution
 
 `tevu validate` lists every model the agent resolves, in an environment built like a case agent's own (its own home, the agent's declared variables, the copied providers, and an empty Git repository as working directory), without starting a model session, then reports every model entry and declared role whose model is not among them, by the entry or role's identifier, before any case starts. An unresolved model entry is always an error; an unresolved `roles.grader` is an error only when a configured task declares a graded check, a warning otherwise; an unresolved `roles.criteria` is always a warning. `tevu run` and `tevu run --dry-run` run this same check through their own `tevu validate` call.
+
+The setup interview of `tevu task add` runs the same listing for each model it asks and refuses a model the agent does not list. A listed model proves declaration, not reachability: a wrong base URL or key still lists. A model of a provider the operator's configuration does not define, which is missing from the listing while a declared variable is unset in the terminal, is kept as entered with a warning; run `tevu validate` with every variable set to check it.
 
 A provider only a task's tracked `opencode.json` defines, or that it disables, is not visible to this check, since the check's environment holds an empty Git repository rather than the task's own tree. A model entry or role that depends on such a provider is reported as unresolved even though the case itself would see it; define the provider in `agents.opencode.providers` too, or accept that this configuration is not supported by `tevu validate`.
 

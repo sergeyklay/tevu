@@ -13,6 +13,7 @@ import {
 import { gradedChecksOf } from '@/evaluation/grading';
 
 import { buildEnvironmentVariableNames } from './environment-variable-names';
+import { listModelsInCallEnvironment } from './model-call';
 import {
   describePullRequestInPrompt,
   describeReferenceCommitInPrompt,
@@ -217,42 +218,24 @@ async function collectAgentModelListingFindings(
   snapshot: ParentEnvironmentSnapshot,
   configurationFiles: readonly AgentConfigurationFile[],
 ): Promise<ValidationFinding[]> {
-  const environmentResult = await dependencies.environments.createModelCallEnvironment(
-    snapshot,
-    agentVariables,
-    configurationFiles,
+  const result = await listModelsInCallEnvironment(
+    adapter,
+    { snapshot, agentVariables, configurationFiles },
+    dependencies,
   );
-  if (!environmentResult.ok) {
-    return [
-      modelAgentFinding(
-        name,
-        `the model listing environment could not be prepared: ${environmentResult.error.operation}: ${environmentResult.error.reason}`,
-      ),
-    ];
-  }
-  const environment = environmentResult.value;
-  const initialized = await dependencies.git.initializeEmptyRepository(
-    environment.workingDirectory,
-  );
-  const listing = initialized.ok ? await adapter.listModels(environment) : null;
-  const removal = await environment.dispose();
-
-  const findings: ValidationFinding[] = [];
-  if (!initialized.ok) {
-    findings.push(
-      modelAgentFinding(
-        name,
-        `the model listing environment could not be prepared: ${initialized.error.operation}: ${initialized.error.reason}`,
-      ),
-    );
-  } else if (listing !== null) {
-    findings.push(...describeModelListingOutcome(config, name, listing));
-  }
-  if (!removal.ok) {
+  const findings = result.prepared
+    ? describeModelListingOutcome(config, name, result.listing)
+    : [
+        modelAgentFinding(
+          name,
+          `the model listing environment could not be prepared: ${result.reason}`,
+        ),
+      ];
+  if (result.retainedDirectory !== null) {
     findings.push({
       severity: 'warning',
       identifier: `agents.${name}`,
-      message: `model listing directory could not be removed; retained at "${environment.rootDirectory}"`,
+      message: `model listing directory could not be removed; retained at "${result.retainedDirectory}"`,
     });
   }
   return findings;
@@ -277,11 +260,12 @@ function describeModelListingOutcome(
       ),
     ];
   }
-  if (listing.outcome === 'failed') {
+  if (listing.outcome === 'failed' || listing.outcome === 'cancelled') {
+    const reason = listing.outcome === 'failed' ? listing.reason : 'is cancelled';
     return [
       modelAgentFinding(
         name,
-        `"${command} models" ${listing.reason} in an environment built like a case agent's, so the models of agent "${name}" could not be checked`,
+        `"${command} models" ${reason} in an environment built like a case agent's, so the models of agent "${name}" could not be checked`,
       ),
     ];
   }
@@ -499,9 +483,14 @@ function buildCaseExecutableLocations(
         if (!('run' in check)) {
           continue;
         }
+        const executable =
+          typeof check.run === 'string' ? leadingPlainWord(check.run) : check.run[0];
+        if (executable === undefined) {
+          continue;
+        }
         locations.push({
           identifier: `tasks.${task.id}.checks.${category}.${check.id}.run`,
-          executable: check.run[0],
+          executable,
           additions: pickValues(snapshot.ordinaryEvaluatorValues, check.env),
           ...(workingDirectory === undefined ? {} : { workingDirectory }),
           declared: `tasks.${task.id}.checks.${category}.${check.id}.env`,
@@ -511,6 +500,17 @@ function buildCaseExecutableLocations(
   }
 
   return locations;
+}
+
+/**
+ * The command a shell-string check starts with, when it is a plain word.
+ *
+ * Any other first word (an assignment, a subshell, a quoted or expanded
+ * name) is not the executable the shell will look up, so tevu does not judge it.
+ */
+function leadingPlainWord(run: string): string | undefined {
+  const word = /^[ \t]*(\S+)/.exec(run)?.[1];
+  return word !== undefined && /^[A-Za-z0-9_\-./+]+$/.test(word) ? word : undefined;
 }
 
 function pickValues(

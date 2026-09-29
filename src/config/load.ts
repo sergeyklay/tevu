@@ -179,7 +179,7 @@ function resolveConfigPath(configDirectory: string, target: string): string {
 }
 
 /** Resolves one agent's `command`: a value containing a path separator resolves against `configDirectory`; any other value is a bare executable name, left unchanged. */
-function resolveAgentCommand(command: string, configDirectory: string): string {
+export function resolveAgentCommand(command: string, configDirectory: string): string {
   return command.includes(path.sep) ? resolveConfigPath(configDirectory, command) : command;
 }
 
