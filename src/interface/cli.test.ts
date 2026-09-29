@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createGitHubPullRequestReader } from '@/adapters/trackers/github-issues';
 import { resolveReferenceSolution } from '@/application/reference-solution';
@@ -54,6 +54,7 @@ import type {
 
 const clack = vi.hoisted(() => {
   const CANCEL = Symbol('clack-cancel');
+  const ESCAPE = Symbol('clack-escape');
   const state = {
     prompts: [] as Array<{
       kind: string;
@@ -71,8 +72,16 @@ const clack = vi.hoisted(() => {
     outros: [] as string[],
     spinners: [] as Array<{ label: string; handleSignals: boolean | undefined }>,
     timeline: [] as string[],
+    sectionedSelects: [] as Array<{
+      message: string;
+      sections: ReadonlyArray<{
+        heading?: string;
+        options: ReadonlyArray<{ value: string; label: string }>;
+      }>;
+      back: { value: string; label: string };
+    }>,
   };
-  return { CANCEL, state };
+  return { CANCEL, ESCAPE, state };
 });
 
 vi.mock('@clack/prompts', () => {
@@ -114,6 +123,11 @@ vi.mock('@clack/prompts', () => {
       const answer = clack.state.answers.shift();
       if (answer === undefined) {
         throw new Error(`no scripted answer left for ${kind}: ${options.message}`);
+      }
+      if (answer === clack.ESCAPE) {
+        throw new Error(
+          `Escape is scripted only at sectionedSelect prompts, not at ${kind}: ${options.message}`,
+        );
       }
       if (isInterruption(answer)) {
         answer();
@@ -184,6 +198,43 @@ vi.mock('@clack/prompts', () => {
     isCancel: (value: unknown) => value === clack.CANCEL,
   };
 });
+
+vi.mock('./sectioned-select', () => ({
+  sectionedSelect: async (options: {
+    message: string;
+    sections: (typeof clack.state.sectionedSelects)[number]['sections'];
+    back: { value: string; label: string };
+    signal?: AbortSignal;
+  }): Promise<unknown> => {
+    const isAborted = (): boolean => options.signal?.aborted === true;
+    clack.state.sectionedSelects.push({
+      message: options.message,
+      sections: options.sections,
+      back: options.back,
+    });
+    for (;;) {
+      clack.state.timeline.push(`prompt:${options.message}`);
+      if (isAborted()) {
+        return clack.CANCEL;
+      }
+      const answer = clack.state.answers.shift();
+      if (answer === undefined) {
+        throw new Error(`no scripted answer left for sectionedSelect: ${options.message}`);
+      }
+      if (answer === clack.ESCAPE) {
+        return options.back.value;
+      }
+      if (typeof answer === 'function') {
+        answer();
+        if (isAborted()) {
+          return clack.CANCEL;
+        }
+        continue;
+      }
+      return answer;
+    }
+  },
+}));
 
 vi.mock('yocto-spinner', () => ({
   default: (options: { text?: string; handleSignals?: boolean }) => {
@@ -1277,6 +1328,11 @@ describe('tevu CLI', () => {
     clack.state.outros = [];
     clack.state.spinners = [];
     clack.state.timeline = [];
+    clack.state.sectionedSelects = [];
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   describe('command surface', () => {
@@ -3210,8 +3266,6 @@ describe('tevu CLI', () => {
             pullRequest: {
               number: 128,
               url: 'https://github.com/octo/app/pull/128',
-              title: 'Add export button',
-              body: 'Implement CSV export for the current view.',
               state: 'MERGED',
               headRefOid: headHash,
               baseRefName: 'main',
@@ -3337,8 +3391,6 @@ describe('tevu CLI', () => {
             pullRequest: {
               number: 128,
               url: 'https://github.com/octo/app/pull/128',
-              title: 'Add export button',
-              body: 'Implement CSV export for the current view.',
               state: 'OPEN',
               headRefOid: headHash,
               baseRefName: 'main',
@@ -3428,8 +3480,6 @@ describe('tevu CLI', () => {
           },
           pullRequest: {
             key: 'octo/app#128',
-            title: 'Add export button',
-            body: 'Implement CSV export for the current view.',
             state: 'merged' as const,
             targetBranch: 'main',
             noProposedBase,
@@ -4371,8 +4421,6 @@ describe('tevu CLI', () => {
                   },
                   pullRequest: {
                     key: 'octo/app#128',
-                    title: 'Add export button',
-                    body: 'Implement CSV export for the current view.',
                     state: 'merged',
                     targetBranch: 'main',
                     noProposedBase: 'first commit aaaaaaa has no parent',
@@ -5223,6 +5271,34 @@ describe('tevu CLI', () => {
     });
 
     describe('criteria drafting (AC-1 to AC-6, AC-12, AC-17)', () => {
+      function operationsDrafting(draft: {
+        acceptance: string[];
+        done: string[];
+      }): ProgramOperations {
+        return createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: buildCriteriaConfig() })),
+          resolveReference: vi.fn(async () => ({
+            ok: true as const,
+            value: buildResolvedCommitReference(),
+          })),
+          draftCriteria: vi.fn(async () => ({
+            status: 'drafted' as const,
+            draft,
+            retainedDirectory: null,
+          })),
+        });
+      }
+
+      function draftNotes(): string[] {
+        return clack.state.notes
+          .filter((note) => note.title === 'Drafted criteria')
+          .map((note) => note.message);
+      }
+
+      function promptCount(message: string): number {
+        return clack.state.prompts.filter((prompt) => prompt.message === message).length;
+      }
+
       it('never calls draftCriteria when roles.criteria is not declared, telling the operator to enter the criteria (C1)', async () => {
         const operations = createOperations({
           resolveReference: vi.fn(async () => ({
@@ -5325,6 +5401,7 @@ describe('tevu CLI', () => {
           configuration: { kind: 'loaded', config },
           repository: { id: 'repo-1', path: '../repos/fixture' },
           reference: buildResolvedCommitReference(),
+          prompt: 'Implement CSV export for the current view.',
           description: 'Export the current view as CSV.',
         });
         const task = requireCreateTaskCall(operations).task;
@@ -5389,10 +5466,8 @@ describe('tevu CLI', () => {
         expect(draftNote?.message.split('\n')[0]).toBe(
           'Agents see every item. Keep outcomes, not details of the reference solution.',
         );
-        const prompts = clack.state.prompts.filter(
-          (prompt) => prompt.message === 'What next?' || prompt.message === 'Add to',
-        );
-        expect(prompts.map((prompt) => prompt.message)).toEqual(['What next?', 'Add to']);
+        const prompts = clack.state.prompts.filter((prompt) => prompt.message === 'What next?');
+        expect(prompts.map((prompt) => prompt.message)).toEqual(['What next?']);
         expect(prompts[0]?.options).toEqual([
           {
             label: 'Accept',
@@ -5404,10 +5479,21 @@ describe('tevu CLI', () => {
           { label: 'Add an item', hint: undefined, disabled: false },
           { label: 'Write my own instead', hint: undefined, disabled: false },
         ]);
-        expect(prompts[1]?.options?.slice(0, 2).map((option) => option.label)).toEqual([
-          'Acceptance criteria',
-          'Definition of Done',
+        expect(clack.state.sectionedSelects).toStrictEqual([
+          {
+            message: 'Add to',
+            sections: [
+              {
+                options: [
+                  { value: 'acceptance', label: 'Acceptance Criteria' },
+                  { value: 'done', label: 'Definition of Done' },
+                ],
+              },
+            ],
+            back: { value: 'back', label: 'Back to the review' },
+          },
         ]);
+        expect(clack.state.prompts.map((prompt) => prompt.message)).not.toContain('Add to');
       });
 
       it('falls back to the check questions with no drafted text reaching createTask when the draft fails, warning about a retained call directory', async () => {
@@ -5879,6 +5965,290 @@ describe('tevu CLI', () => {
         expect(reviewNote?.message).toContain('acceptance-extra');
         expect(reviewNote?.message).toContain('done-1');
         expect(reviewNote?.message).toContain('done-extra');
+      });
+
+      it('lets an empty drafted Definition of Done list through Accept and asks for one required check', async () => {
+        const operations = operationsDrafting({ acceptance: ['A1'], done: [] });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'accept',
+          false,
+          'dod-1',
+          'manual',
+          'README documents the button',
+          true,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(draftNotes()[0]?.split('\n').at(-1)).toBe('  (none)');
+        const whatNext = clack.state.prompts.find((prompt) => prompt.message === 'What next?');
+        expect(whatNext?.options?.[0]).toEqual({
+          label: 'Accept',
+          hint: undefined,
+          disabled: false,
+        });
+        const messages = clack.state.prompts.map((prompt) => prompt.message);
+        expect(messages[messages.indexOf('Definition of Done check ID') - 1]).toBe(
+          'Add another acceptance check?',
+        );
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([{ id: 'acceptance-1', description: 'A1' }]);
+        expect(task.checks.done).toEqual([
+          { id: 'dod-1', description: 'README documents the button', manual: true },
+        ]);
+      });
+
+      it('asks Item to edit and Item to remove through the sectioned select with headed sections and back to the review', async () => {
+        const operations = operationsDrafting({ acceptance: ['A1', 'A2'], done: ['D1'] });
+        scriptAnswers(...READY_ANSWERS, 'edit', 'back', 'remove', 'back', clack.CANCEL);
+        const expectedSections = [
+          {
+            heading: 'Acceptance Criteria',
+            options: [
+              { value: 'acceptance:0', label: 'A1' },
+              { value: 'acceptance:1', label: 'A2' },
+            ],
+          },
+          { heading: 'Definition of Done', options: [{ value: 'done:0', label: 'D1' }] },
+        ];
+        const expectedBack = { value: 'back', label: 'Back to the review' };
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.sectionedSelects).toEqual([
+          { message: 'Item to edit', sections: expectedSections, back: expectedBack },
+          { message: 'Item to remove', sections: expectedSections, back: expectedBack },
+        ]);
+        const messages = clack.state.prompts.map((prompt) => prompt.message);
+        expect(messages).not.toContain('Item to edit');
+        expect(messages).not.toContain('Item to remove');
+        expect(promptCount('What next?')).toBe(3);
+        expect(promptCount('Item')).toBe(0);
+      });
+
+      it('labels an item with its redacted text at Item to edit', async () => {
+        const operations = operationsDrafting({ acceptance: ['uses SECRET-X'], done: [] });
+        scriptAnswers(...READY_ANSWERS, 'edit', 'back', clack.CANCEL);
+
+        await runCli(['task', 'add'], {
+          operations,
+          redact: (text) => text.replaceAll('SECRET-X', '[redacted]'),
+        });
+
+        expect(clack.state.sectionedSelects[0]?.sections[0]?.options).toEqual([
+          { value: 'acceptance:0', label: 'uses [redacted]' },
+        ]);
+      });
+
+      it('edits the second acceptance item at Item to edit and removes the first Definition of Done item at Item to remove', async () => {
+        const operations = operationsDrafting({ acceptance: ['A1', 'A2'], done: ['D1'] });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'edit',
+          'acceptance:1',
+          'A2 edited',
+          'remove',
+          'done:0',
+          'accept',
+          false,
+          'dod-1',
+          'manual',
+          'README documents the button',
+          true,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([
+          { id: 'acceptance-1', description: 'A1' },
+          { id: 'acceptance-2', description: 'A2 edited' },
+        ]);
+        expect(task.checks.done).toEqual([
+          { id: 'dod-1', description: 'README documents the button', manual: true },
+        ]);
+      });
+
+      it('cancels the wizard when the item select is cancelled with Ctrl-C at Item to edit', async () => {
+        const operations = operationsDrafting({ acceptance: ['A1'], done: ['D1'] });
+        scriptAnswers(...READY_ANSWERS, 'edit', clack.CANCEL);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(130);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(operations.createTask).not.toHaveBeenCalled();
+      });
+
+      it('passes an empty options array for a list with no items to Item to edit', async () => {
+        const operations = operationsDrafting({ acceptance: [], done: ['D1'] });
+        scriptAnswers(...READY_ANSWERS, 'edit', 'back', clack.CANCEL);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.sectionedSelects[0]?.sections).toEqual([
+          { heading: 'Acceptance Criteria', options: [] },
+          { heading: 'Definition of Done', options: [{ value: 'done:0', label: 'D1' }] },
+        ]);
+      });
+
+      it('Escape returns from the item select to the review', async () => {
+        const operations = operationsDrafting({ acceptance: ['A1', 'A2'], done: ['D1'] });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'edit',
+          clack.ESCAPE,
+          'remove',
+          clack.ESCAPE,
+          'accept',
+          false,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.sectionedSelects.map((call) => call.message)).toEqual([
+          'Item to edit',
+          'Item to remove',
+        ]);
+        expect(promptCount('What next?')).toBe(3);
+        expect(promptCount('Item')).toBe(0);
+        const notes = draftNotes();
+        expect(notes).toHaveLength(3);
+        expect(new Set(notes).size).toBe(1);
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([
+          { id: 'acceptance-1', description: 'A1' },
+          { id: 'acceptance-2', description: 'A2' },
+        ]);
+        expect(task.checks.done).toEqual([{ id: 'done-1', description: 'D1' }]);
+      });
+
+      it('Ctrl-C at Item to remove cancels', async () => {
+        const operations = operationsDrafting({ acceptance: ['A1', 'A2'], done: ['D1'] });
+        scriptAnswers(...READY_ANSWERS, 'edit', clack.ESCAPE, 'remove', clack.CANCEL);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(130);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(operations.createTask).not.toHaveBeenCalled();
+      });
+
+      it('lays out the Drafted criteria note with a blank line before Definition of Done', async () => {
+        vi.stubEnv('FORCE_COLOR', '0');
+        const operations = operationsDrafting({ acceptance: ['A1'], done: ['D1'] });
+        scriptAnswers(...READY_ANSWERS, clack.CANCEL);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(draftNotes()[0]?.split('\n')).toEqual([
+          'Agents see every item. Keep outcomes, not details of the reference solution.',
+          '',
+          'Acceptance Criteria',
+          '  1. A1',
+          '',
+          'Definition of Done',
+          '  1. D1',
+        ]);
+      });
+
+      it('wraps each heading of the Drafted criteria note in bold under color', async () => {
+        vi.stubEnv('FORCE_COLOR', '1');
+        const operations = operationsDrafting({ acceptance: ['A1'], done: ['D1'] });
+        scriptAnswers(...READY_ANSWERS, clack.CANCEL);
+
+        await runCli(['task', 'add'], { operations });
+
+        const lines = draftNotes()[0]?.split('\n') ?? [];
+        expect(lines.map((line) => stripVTControlCharacters(line))).toEqual([
+          'Agents see every item. Keep outcomes, not details of the reference solution.',
+          '',
+          'Acceptance Criteria',
+          '  1. A1',
+          '',
+          'Definition of Done',
+          '  1. D1',
+        ]);
+        expect(lines[2]).toBe('\u001b[1mAcceptance Criteria\u001b[22m');
+        expect(lines[5]).toBe('\u001b[1mDefinition of Done\u001b[22m');
+      });
+
+      it('adds an item to each list through Add to', async () => {
+        const operations = operationsDrafting({ acceptance: ['A1'], done: ['D1'] });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'add',
+          'done',
+          'D2',
+          'add',
+          'acceptance',
+          'A2',
+          'add',
+          'back',
+          'accept',
+          false,
+          false,
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.sectionedSelects.map((call) => call.message)).toEqual([
+          'Add to',
+          'Add to',
+          'Add to',
+        ]);
+        expect(promptCount('What next?')).toBe(4);
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([
+          { id: 'acceptance-1', description: 'A1' },
+          { id: 'acceptance-2', description: 'A2' },
+        ]);
+        expect(task.checks.done).toEqual([
+          { id: 'done-1', description: 'D1' },
+          { id: 'done-2', description: 'D2' },
+        ]);
+      });
+
+      it('Escape at Add to returns to the review', async () => {
+        const operations = operationsDrafting({ acceptance: ['A1'], done: ['D1'] });
+        scriptAnswers(...READY_ANSWERS, 'add', clack.ESCAPE, 'accept', false, false, true);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.sectionedSelects.map((call) => call.message)).toEqual(['Add to']);
+        expect(promptCount('What next?')).toBe(2);
+        expect(promptCount('New acceptance criterion')).toBe(0);
+        expect(promptCount('New Definition of Done item')).toBe(0);
+        const notes = draftNotes();
+        expect(notes).toHaveLength(2);
+        expect(new Set(notes).size).toBe(1);
+        const task = requireCreateTaskCall(operations).task;
+        expect(task.checks.acceptance).toEqual([{ id: 'acceptance-1', description: 'A1' }]);
+        expect(task.checks.done).toEqual([{ id: 'done-1', description: 'D1' }]);
+      });
+
+      it('Ctrl-C at Add to cancels', async () => {
+        const operations = operationsDrafting({ acceptance: ['A1'], done: ['D1'] });
+        scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(130);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(operations.createTask).not.toHaveBeenCalled();
       });
     });
   });

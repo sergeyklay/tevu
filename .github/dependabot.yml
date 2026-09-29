@@ -20,6 +20,11 @@ updates:
         update-types:
           - version-update:semver-major
     groups:
+      clack:
+        applies-to: version-updates
+        patterns:
+          - '@clack/core'
+          - '@clack/prompts'
       bun-minor-patch:
         applies-to: version-updates
         patterns:
