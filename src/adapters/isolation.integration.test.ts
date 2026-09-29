@@ -16,7 +16,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import process from 'node:process';
 import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -706,6 +706,55 @@ async function sourceFingerprint(repositoryPath: string): Promise<{
   return { head: head.stdout, status: status.stdout, objects: objects.stdout };
 }
 
+const LFS_VERSION_LINE = 'version https://git-lfs.github.com/spec/v1';
+const LFS_FIXTURE_POINTER_LINES = [
+  LFS_VERSION_LINE,
+  `oid sha256:${'0'.repeat(64)}`,
+  'size 12',
+] as const;
+const LFS_FIXTURE_POINTER = `${LFS_FIXTURE_POINTER_LINES.join('\n')}\n`;
+const COMMENTED_ATTRIBUTES =
+  '# Assets moved off filter=lfs.\n   # filter=lfs diff=lfs merge=lfs -text\n\t# filter=lfs\n';
+
+async function commitAll(repositoryPath: string, message: string): Promise<string> {
+  await runGit(repositoryPath, ['add', '-A']);
+  await runGit(repositoryPath, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', message]);
+  return (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
+}
+
+async function writeTextFiles(
+  repositoryPath: string,
+  files: Readonly<Record<string, string>>,
+): Promise<void> {
+  for (const [path, content] of Object.entries(files)) {
+    await mkdir(join(repositoryPath, dirname(path)), { recursive: true });
+    await writeFile(join(repositoryPath, path), content);
+  }
+}
+
+async function writeMentionFiles(repositoryPath: string): Promise<void> {
+  await writeTextFiles(repositoryPath, {
+    'src/mentions.ts': [
+      "const SPEC_URL = 'https://git-lfs.github.com/spec';",
+      '// See https://git-lfs.github.com/spec/v1 for the pointer format.',
+      `const POINTER = '${LFS_FIXTURE_POINTER_LINES.join(String.raw`\n`)}${String.raw`\n`}';`,
+      '',
+    ].join('\n'),
+    'docs/pointer-format.md': [
+      'A pointer file looks like this:',
+      '',
+      '```',
+      ...LFS_FIXTURE_POINTER_LINES,
+      '```',
+      '',
+      'Nothing else belongs in the file.',
+      '',
+    ].join('\n'),
+    'notes/not-a-pointer.txt': `${LFS_VERSION_LINE}\nThis file is not a pointer.\n`,
+    'notes/long-mention.txt': `${LFS_VERSION_LINE}\n${'padding line\n'.repeat(100)}`,
+  });
+}
+
 describe('unsupported source rejection', () => {
   it('rejects a synthetic gitlink without disclosing the submodule path', async () => {
     const repositoryPath = await createBaseRepository('gitlink-source');
@@ -809,6 +858,141 @@ describe('unsupported source rejection', () => {
         reason: 'repository "repo-1": source tree configures unsupported Git LFS attributes',
       });
     }
+    expect(after).toEqual(before);
+  });
+
+  it('accepts a tree that only mentions the Git LFS specification URL', async () => {
+    const repositoryPath = await createBaseRepository('lfs-mention-source');
+    await writeMentionFiles(repositoryPath);
+    const commit = await commitAll(repositoryPath, 'synthetic lfs mention commit');
+    const before = await sourceFingerprint(repositoryPath);
+
+    const result = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: repositoryPath },
+      commit,
+    );
+    const after = await sourceFingerprint(repositoryPath);
+
+    expect(result).toEqual({
+      ok: true,
+      value: { repositoryId: 'repo-1', requestedCommit: commit, resolvedCommit: commit },
+    });
+    expect(after).toEqual(before);
+  });
+
+  it('counts only whole-content pointers in a tree that also holds mention files', async () => {
+    const repositoryPath = await createBaseRepository('lfs-mixed-source');
+    await runGit(repositoryPath, ['config', 'color.grep', 'always']);
+    await writeMentionFiles(repositoryPath);
+    await writeTextFiles(repositoryPath, {
+      'assets/model.bin': LFS_FIXTURE_POINTER,
+      'bin/tool': LFS_FIXTURE_POINTER,
+      'assets/texture.bin': LFS_FIXTURE_POINTER.replace(
+        '\noid',
+        `\next-0-foo sha256:${'a1b2c3d4'.repeat(8)}\noid`,
+      ),
+      'assets/crlf.bin': LFS_FIXTURE_POINTER.replaceAll('\n', '\r\n'),
+      'assets/unterminated.bin': LFS_FIXTURE_POINTER.slice(0, -1),
+      '.gitattributes': '*.bin binary\n',
+    });
+    await runGit(repositoryPath, ['add', '-A']);
+    await runGit(repositoryPath, ['add', '--chmod=+x', 'bin/tool']);
+    await runGit(repositoryPath, [
+      ...GIT_IDENTITY_FLAGS,
+      'commit',
+      '--quiet',
+      '-m',
+      'synthetic lfs mixed commit',
+    ]);
+    const commit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
+    const executableEntry = await runGit(repositoryPath, ['ls-tree', commit, 'bin/tool']);
+    const before = await sourceFingerprint(repositoryPath);
+
+    const result = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: repositoryPath },
+      commit,
+    );
+    const after = await sourceFingerprint(repositoryPath);
+
+    expect(executableEntry.stdout).toMatch(/^100755 blob /);
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: 'SourceMaterializationError',
+        taskId: 'repo-1',
+        reason: 'repository "repo-1": source tree contains 3 unsupported Git LFS pointer blobs',
+      },
+    });
+    expect(after).toEqual(before);
+  });
+
+  it('counts every path that holds a pointer blob, including a path containing a colon', async () => {
+    const repositoryPath = await createBaseRepository('lfs-shared-blob-source');
+    await writeTextFiles(repositoryPath, {
+      'shared/first.dat': LFS_FIXTURE_POINTER,
+      'shared/second.dat': LFS_FIXTURE_POINTER,
+      'we:ird.txt': LFS_FIXTURE_POINTER.replace('size 12', 'size 13'),
+    });
+    const commit = await commitAll(repositoryPath, 'synthetic lfs shared blob commit');
+
+    const result = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: repositoryPath },
+      commit,
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: 'SourceMaterializationError',
+        taskId: 'repo-1',
+        reason: 'repository "repo-1": source tree contains 3 unsupported Git LFS pointer blobs',
+      },
+    });
+  });
+
+  it('accepts Git LFS attributes that appear only in comment lines', async () => {
+    const repositoryPath = await createBaseRepository('lfs-commented-attributes-source');
+    await writeTextFiles(repositoryPath, {
+      '.gitattributes': `${COMMENTED_ATTRIBUTES}\n*.txt text\n`,
+    });
+    const commit = await commitAll(repositoryPath, 'synthetic commented attributes commit');
+    const before = await sourceFingerprint(repositoryPath);
+
+    const result = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: repositoryPath },
+      commit,
+    );
+    const after = await sourceFingerprint(repositoryPath);
+
+    expect(result).toEqual({
+      ok: true,
+      value: { repositoryId: 'repo-1', requestedCommit: commit, resolvedCommit: commit },
+    });
+    expect(after).toEqual(before);
+  });
+
+  it('rejects a Git LFS attribute rule that follows comment lines', async () => {
+    const repositoryPath = await createBaseRepository('lfs-rule-after-comments-source');
+    await writeTextFiles(repositoryPath, {
+      '.gitattributes': `${COMMENTED_ATTRIBUTES}\n*.txt text\n*.psd filter=lfs diff=lfs merge=lfs -text\n`,
+    });
+    const commit = await commitAll(repositoryPath, 'synthetic rule after comments commit');
+    const before = await sourceFingerprint(repositoryPath);
+
+    const result = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: repositoryPath },
+      commit,
+    );
+    const after = await sourceFingerprint(repositoryPath);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        kind: 'SourceMaterializationError',
+        taskId: 'repo-1',
+        reason: 'repository "repo-1": source tree configures unsupported Git LFS attributes',
+      },
+    });
     expect(after).toEqual(before);
   });
 });
