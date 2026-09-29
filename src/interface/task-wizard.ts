@@ -2,11 +2,13 @@
  * Interactive Clack wizards for `tevu task add` and `tevu assess`.
  *
  * Both wizards require an interactive TTY on stdin and stdout, ask one
- * question at a time with local re-prompting on invalid input, and return
- * typed inputs for the application use cases; the caller owns the only write.
+ * question at a time with local re-prompting on invalid input, and hand typed
+ * inputs to the application use cases. The assessment wizard returns its input
+ * and the caller owns the write; the task wizard triggers the single write
+ * itself through the injected `createTask` and retries it when it fails.
  * Every effect (configuration read, one-time Jira import, assessment context
- * read, wall clock, redaction) is an injected callback, so no concrete
- * adapter, filesystem, Git, or Jira transport enters this module.
+ * read, task creation, wall clock, redaction) is an injected callback, so no
+ * concrete adapter, filesystem, Git, or Jira transport enters this module.
  */
 
 import { styleText } from 'node:util';
@@ -28,12 +30,14 @@ import {
   parseGitHubRepository,
 } from '@/domain/github-reference';
 
+import { renderTevuError } from './render-error';
 import { sectionedSelect } from './sectioned-select';
 import { confirm, select, text } from './wizard-prompts';
 
 import type { StatusLine, StatusLineDisplay } from './status-line';
+import type { WaitInterrupt } from './wait-interrupt';
 import type { AssessableCheckSummary, AssessmentCaseContext } from '@/application/assess';
-import type { TaskWizardInput } from '@/application/create-task';
+import type { CreateTaskErrorKind, TaskWizardInput } from '@/application/create-task';
 import type {
   CriteriaDraft,
   CriteriaDraftFailure,
@@ -65,6 +69,7 @@ import type {
   JiraTrackerSettings,
   LoadConfigErrorKind,
   RepositoryDefinition,
+  TaskDefinition,
   TaskReference,
   TevuConfig,
   TevuError,
@@ -76,7 +81,8 @@ import type { Readable, Writable } from 'node:stream';
 
 /**
  * Interactive streams the wizards prompt on; both must be TTYs. A `signal`
- * makes every question resolve as cancelled once it aborts.
+ * makes every question resolve as cancelled once it aborts. The members after
+ * `statusLine` are set by `runTaskWizard` only.
  */
 type WizardIo = {
   input: Readable & { isTTY?: boolean };
@@ -84,7 +90,18 @@ type WizardIo = {
   signal?: AbortSignal;
   /** Drawn under every open question of this wizard run. */
   statusLine: StatusLine & StatusLineDisplay;
+  /** Words the exit question asked after a wait took a SIGINT and at a declined save. */
+  exitQuestion?: () => string;
+  /** Lets each wait take the first SIGINT instead of the command signal. */
+  waitInterrupt?: WaitInterrupt;
+  /** States what an exit loses, for the notice a wait prints on its first SIGINT. */
+  exitLoss?: () => string;
+  /** Redacts the notice a wait prints on its first SIGINT. */
+  redact?: (text: string) => string;
 };
+
+/** Facts of one task add run that the exit question reads. */
+type WizardProgress = { holdsCriteriaDraft: boolean };
 
 /** Command-line facts the task wizard starts from. */
 export type TaskWizardRequest = {
@@ -93,7 +110,7 @@ export type TaskWizardRequest = {
   githubIssueReference?: string;
 };
 
-/** Injected effects for the task wizard; it performs no write itself. */
+/** Injected effects for the task wizard; it triggers the single write through `createTask` and retries it on failure. */
 export type TaskWizardDependencies = {
   io: WizardIo;
   /** Aborts when the operator interrupts the command; an aborted signal cancels every open or next question. */
@@ -161,6 +178,19 @@ export type TaskWizardDependencies = {
     agent: AgentDraft,
     model: `${string}/${string}`,
   ) => Promise<ModelAccessOutcome>;
+  /** Inspects a base-commit answer the way the write pins it, so a refusal surfaces before the criteria draft. */
+  inspectBaseCommit: (
+    repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>,
+    baseCommit: string,
+    reference: TaskReference | undefined,
+  ) => Promise<TevuResult<void, 'SourceMaterializationError' | 'ConfigValidationError'>>;
+  /** Reports the findings the write would raise for an output directory and repository entries as answered. */
+  checkRepositoryPlacement: (
+    outputDirectory: string,
+    repositories: readonly Pick<RepositoryInput, 'id' | 'path' | 'github'>[],
+  ) => Promise<readonly ValidationFinding[]>;
+  /** Performs the single configuration write for the accepted review. */
+  createTask: (input: TaskWizardInput) => Promise<TevuResult<TaskDefinition, CreateTaskErrorKind>>;
 };
 
 /** Error kinds the task wizard can return. */
@@ -197,6 +227,7 @@ const ID_RULE = 'must match ^[a-z][a-z0-9-]{0,63}$';
 const ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 const FIXED_ENVIRONMENT_NAMES = new Set(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'CI']);
 const NEW_REPOSITORY_CHOICE = '__add-new-repository__';
+const OUTPUT_DIRECTORY_CHOICE = '__change-output-directory__';
 const GITHUB_GRAMMAR_MESSAGE =
   'github must be OWNER/REPO or https://HOST/OWNER/REPO, with a HOST of letters, digits, hyphens, and dots, and without surrounding spaces, user info, a port, a query, or a fragment';
 /** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
@@ -232,18 +263,31 @@ function warnLines(
 
 const WAIT_FRAMES = ['◒', '◐', '◓', '◑'];
 
+const SAVING_WAIT_LABEL = 'Saving task';
+
 /**
  * Runs one asynchronous step between questions behind a spinner row.
  *
  * Holds stdin with `stdin-discarder` so keys typed meanwhile never reach the
- * next question and Ctrl-C arrives as SIGINT, which the command's abort
- * signal already turns into cancellation. The spinner never installs its own
- * signal handlers: its default would exit the process before the cancelled
- * operation cleans up. Both stop in a `finally`, so no exit path leaves the
- * row, a hidden cursor, or raw mode behind. An aborted signal ends the wizard
- * whatever the operation returned.
+ * next question and Ctrl-C arrives as SIGINT. The spinner never installs its
+ * own signal handlers: its default would exit the process before the
+ * cancelled operation cleans up. Both stop in a `finally`, so no exit path
+ * leaves the row, a hidden cursor, or raw mode behind.
+ *
+ * The first SIGINT of a `task add` wait goes to the wait, not to the command
+ * signal, because the step cannot stop cleanly at that point: it keeps
+ * running, a notice states what a second Ctrl-C loses, and the exit question
+ * opens when the step ends. A second SIGINT aborts the command signal, which
+ * ends the wizard whatever the operation returned, unless `saved` reports the
+ * result as already written; then the result stands and no question opens.
  */
-async function runWait<T>(io: WizardIo, label: string, operation: () => Promise<T>): Promise<T> {
+async function runWait<T>(
+  io: WizardIo,
+  label: string,
+  operation: () => Promise<T>,
+  saved: (result: T) => boolean = () => false,
+): Promise<T> {
+  const held = openWaitInterrupt(io, label);
   // yocto-spinner joins the frame and the text with one space; Clack's rows use two.
   const spinner = yoctoSpinner({
     text: ` ${label}`,
@@ -253,18 +297,85 @@ async function runWait<T>(io: WizardIo, label: string, operation: () => Promise<
     spinner: { frames: WAIT_FRAMES },
   });
   let result: T;
+  let hasTakenInterrupt: boolean;
   try {
     stdinDiscarder.start();
     spinner.start();
     result = await operation();
   } finally {
+    hasTakenInterrupt = held?.close() === true;
     spinner.stop();
     stdinDiscarder.stop();
+  }
+  if (saved(result)) {
+    return result;
   }
   if (io.signal?.aborted === true) {
     throw new WizardCancelledError();
   }
+  if (hasTakenInterrupt && (await confirmExit(io))) {
+    throw new WizardCancelledError();
+  }
   return result;
+}
+
+/** Opens the wait's interrupt slot; absent unless the wizard can also ask the exit question. */
+function openWaitInterrupt(io: WizardIo, label: string): { close(): boolean } | undefined {
+  const { waitInterrupt, exitLoss, redact } = io;
+  if (waitInterrupt === undefined || exitLoss === undefined || redact === undefined) {
+    return undefined;
+  }
+  return waitInterrupt.open(() => {
+    const loss = exitLoss();
+    if (label === SAVING_WAIT_LABEL) {
+      warnLines(io, redact, {
+        headline: `Press Ctrl-C again to stop saving. If the save stops before the write, ${lowercaseInitial(loss)}`,
+        next: 'Otherwise tevu saves the task, or asks whether to exit if the save fails.',
+      });
+      return;
+    }
+    warnLines(io, redact, {
+      headline: `Press Ctrl-C again to exit now. ${loss}`,
+      next: 'Otherwise tevu asks whether to exit when this step ends.',
+    });
+  });
+}
+
+function lowercaseInitial(sentence: string): string {
+  return `${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}`;
+}
+
+/** What an exit loses: every answer so far, the criteria draft once one exists, and the file's fate. */
+function describeExitLoss(
+  progress: WizardProgress,
+  configPath: string,
+  isConfigFileMissing: boolean,
+): string {
+  const draft = progress.holdsCriteriaDraft ? ', including the criteria draft' : '';
+  const file = isConfigFileMissing ? 'is not created' : 'stays unchanged';
+  return `Every answer so far is lost${draft}, and ${configPath} ${file}.`;
+}
+
+/**
+ * Asks whether to exit and reports the answer; Ctrl-C at this question exits.
+ * It is asked with `confirm` directly, never through `ask`, so it cannot
+ * open another exit question.
+ */
+async function confirmExit(io: WizardIo): Promise<boolean> {
+  if (io.exitQuestion === undefined) {
+    throw new Error('unreachable: only a wizard with an exit question opens it');
+  }
+  const message = io.exitQuestion();
+  const answer = await withPromptSignal(io, (signal) =>
+    confirm({
+      message,
+      initialValue: false,
+      ...promptOptions(io),
+      statusLine: io.statusLine,
+      ...signal,
+    }),
+  );
+  return answer === true || isCancel(answer);
 }
 
 /** Internal control-flow sentinel; never crosses the module boundary. */
@@ -275,23 +386,25 @@ class WizardCancelledError extends Error {
 }
 
 /**
- * Runs the `tevu task add` interview and returns the typed wizard input.
+ * Runs the `tevu task add` interview, performs the single configuration write
+ * through `createTask`, and returns the created task.
  *
  * Fails before any question when stdin or stdout is not a TTY, when an
  * existing configuration is invalid or cannot be read, or when the
  * configuration directory does not exist. When the configuration file is
  * missing and its directory exists, it bootstraps every required top-level
  * setting, at least one repository, and at least two models before the first
- * task question. A Jira source is imported exactly once and displayed; the
- * snapshot travels inside the returned input so task creation never reads
- * Jira again. The final redacted review must be accepted before the input is
- * returned; the caller then delegates the single configuration write to
- * `createTask`.
+ * task question. An issue source is imported and displayed; the snapshot
+ * travels inside the input handed to `createTask`, so the write never reads
+ * the tracker again. After the final redacted review is accepted, a failed
+ * write is reported and offered again with the same input; every other
+ * recoverable failure re-asks its step, so only cancellation and defects end
+ * the interview.
  */
 export async function runTaskWizard(
   request: TaskWizardRequest,
   dependencies: TaskWizardDependencies,
-): Promise<TevuResult<TaskWizardInput, TaskWizardErrorKind>> {
+): Promise<TevuResult<TaskDefinition, TaskWizardErrorKind>> {
   const ttyFailure = requireInteractiveTty(dependencies.io);
   if (ttyFailure !== null) {
     return ttyFailure;
@@ -313,7 +426,16 @@ export async function runTaskWizard(
       },
     ]);
   }
-  const io: WizardIo = { ...dependencies.io, signal: dependencies.cancellation };
+  const progress: WizardProgress = { holdsCriteriaDraft: false };
+  const exitLoss = (): string =>
+    describeExitLoss(progress, request.configPath, existing.value === null);
+  const io: WizardIo = {
+    ...dependencies.io,
+    signal: dependencies.cancellation,
+    exitQuestion: () => `Exit without saving? ${exitLoss()}`,
+    exitLoss,
+    redact: dependencies.redact,
+  };
   const wizardDependencies: TaskWizardDependencies = { ...dependencies, io };
   intro('tevu task add', promptOptions(io));
   log.message(
@@ -325,7 +447,13 @@ export async function runTaskWizard(
       existing.value === null
         ? await interviewBootstrap(io, wizardDependencies, request.jiraIssueKey !== undefined)
         : undefined;
-    const input = await interviewTask(request, wizardDependencies, existing.value, bootstrap);
+    const input = await interviewTask(
+      request,
+      wizardDependencies,
+      existing.value,
+      bootstrap,
+      progress,
+    );
     if (!input.ok) {
       return input;
     }
@@ -333,8 +461,8 @@ export async function runTaskWizard(
       existing.value === null
         ? bootstrap?.roles?.grader !== undefined
         : existing.value.roles?.grader !== undefined;
-    await reviewAndConfirm(io, dependencies.redact, input.value, graderDeclared);
-    return input;
+    const created = await reviewAndSave(io, wizardDependencies, input.value, graderDeclared);
+    return { ok: true, value: created };
   } catch (error) {
     if (error instanceof WizardCancelledError) {
       cancel('Cancelled. Nothing was saved.', promptOptions(io));
@@ -541,11 +669,7 @@ async function interviewBootstrap(
   requireJira: boolean,
 ): Promise<Omit<TevuConfigInput, 'version' | 'tasks'>> {
   log.step('New configuration', promptOptions(io));
-  const outputDirectory = await askDefaultedText(io, {
-    message: 'Output directory',
-    defaultValue: 'runs',
-    validate: validateNonWhitespace,
-  });
+  let outputDirectory = await askOutputDirectory(io);
   const concurrency = await askInteger(io, 'Concurrent cases', 1, 32, 2);
   const timeout = await askDefaultedText(io, {
     message: 'Agent time limit',
@@ -569,7 +693,49 @@ async function interviewBootstrap(
   const env = await askVariableNames(io, 'Non-secret variable names', takenNames, isVariableSet);
   const agentNames = new Set([...secrets, ...env]);
   const jira = await interviewJiraSettings(io, requireJira, agentNames, isVariableSet);
-  const repositories = await interviewRepositories(io, dependencies);
+  let repositories = await interviewRepositories(io, dependencies);
+  for (;;) {
+    const findings = await runWait(io, 'Checking repositories', () =>
+      dependencies.checkRepositoryPlacement(outputDirectory, repositories),
+    );
+    if (findings.length === 0) {
+      break;
+    }
+    warnLines(io, dependencies.redact, {
+      headline: "Can't save the output directory and repository answers.",
+      details: describePlacementFindings(findings),
+      next: 'Choose an answer to change below, or press Ctrl-C to cancel.',
+    });
+    const choice = await askSelect<string>(io, {
+      message: 'Answer to change',
+      options: [
+        { value: OUTPUT_DIRECTORY_CHOICE, label: 'Output directory', hint: outputDirectory },
+        ...repositories.map((repository) => ({
+          value: repository.id,
+          label: `Repository ${repository.id}`,
+          hint: describeRepositorySource(repository),
+        })),
+      ],
+      initialValue: OUTPUT_DIRECTORY_CHOICE,
+    });
+    if (choice === OUTPUT_DIRECTORY_CHOICE) {
+      outputDirectory = await askOutputDirectory(io, outputDirectory);
+      continue;
+    }
+    const current = repositories.find((repository) => repository.id === choice);
+    if (current === undefined) {
+      throw new Error('unreachable: the answer select returns one of its own options');
+    }
+    const changed = await askRepositoryLocation(
+      io,
+      dependencies,
+      current.id,
+      repositoryPrefill(current),
+    );
+    repositories = repositories.map((repository) =>
+      repository.id === current.id ? changed : repository,
+    );
+  }
   const checkState: ModelCheckState = {
     agent: { command, secrets, env, providers: [] },
     keys: new Map(),
@@ -611,6 +777,16 @@ async function interviewBootstrap(
           },
         }),
   };
+}
+
+/** Asks the output directory, opening with `refused` filled in when the answer is asked again. */
+async function askOutputDirectory(io: WizardIo, refused?: string): Promise<string> {
+  return askDefaultedText(io, {
+    message: 'Output directory',
+    defaultValue: 'runs',
+    ...(refused === undefined ? {} : { initialValue: refused }),
+    validate: validateNonWhitespace,
+  });
 }
 
 /**
@@ -1052,22 +1228,50 @@ async function interviewRepositoryEntry(
   io: WizardIo,
   dependencies: TaskWizardDependencies,
   usedIds: ReadonlySet<string>,
+  prefill?: RepositoryPrefill,
 ): Promise<RepositoryDefinition> {
   const id = await askText(io, {
     message: 'Repository ID',
+    ...(prefill === undefined ? {} : { initialValue: prefill.id }),
     validate: validateId(usedIds),
   });
+  return askRepositoryLocation(io, dependencies, id, prefill);
+}
+
+/** The answers of one repository entry, to open its questions again with them filled in. */
+type RepositoryPrefill = { id: string; source: 'path' | 'github'; location: string };
+
+function repositoryPrefill(
+  repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>,
+): RepositoryPrefill {
+  return repository.github === undefined
+    ? { id: repository.id, source: 'path', location: repository.path ?? '' }
+    : { id: repository.id, source: 'github', location: repository.github };
+}
+
+/**
+ * Asks the source and location of the repository `id`. The location opens
+ * with the prefill's value only while the source stays the prefill's source.
+ */
+async function askRepositoryLocation(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+  id: string,
+  prefill: RepositoryPrefill | undefined,
+): Promise<RepositoryDefinition> {
   const source = await askSelect<'path' | 'github'>(io, {
     message: 'Repository source',
     options: [
       { value: 'path', label: 'Local path' },
       { value: 'github', label: 'GitHub, cloned by tevu' },
     ],
+    ...(prefill === undefined ? {} : { initialValue: prefill.source }),
   });
+  const location = prefill?.source === source ? prefill.location : undefined;
   if (source === 'path') {
-    return { id, path: await askLocalRepositoryPath(io, dependencies) };
+    return { id, path: await askLocalRepositoryPath(io, dependencies, location) };
   }
-  const github = await askGitHubRepository(io, dependencies);
+  const github = await askGitHubRepository(io, dependencies, location);
   return { id, path: managedCloneLocation(github), github: github.text };
 }
 
@@ -1075,8 +1279,13 @@ async function interviewRepositoryEntry(
 async function askLocalRepositoryPath(
   io: WizardIo,
   dependencies: TaskWizardDependencies,
+  initialAnswer: string | undefined,
 ): Promise<string> {
-  let answer = await askText(io, { message: 'Local path', validate: validateNonWhitespace });
+  let answer = await askText(io, {
+    message: 'Local path',
+    ...(initialAnswer === undefined ? {} : { initialValue: initialAnswer }),
+    validate: validateNonWhitespace,
+  });
   for (;;) {
     const path = answer;
     if (await runWait(io, `Checking ${path}`, () => dependencies.isGitRepository(path))) {
@@ -1102,8 +1311,9 @@ async function askLocalRepositoryPath(
 async function askGitHubRepository(
   io: WizardIo,
   dependencies: TaskWizardDependencies,
+  initialAnswer: string | undefined,
 ): Promise<ParsedGitHubRepository & { text: string }> {
-  let initialValue: string | undefined;
+  let initialValue = initialAnswer;
   for (;;) {
     const text = (
       await askText(io, {
@@ -1175,6 +1385,7 @@ async function interviewTask(
   dependencies: TaskWizardDependencies,
   existing: TevuConfig | null,
   bootstrap: Omit<TevuConfigInput, 'version' | 'tasks'> | undefined,
+  progress: WizardProgress,
 ): Promise<TevuResult<TaskWizardInput, 'IssueImportError'>> {
   const io = dependencies.io;
   log.step('New task', promptOptions(io));
@@ -1184,17 +1395,22 @@ async function interviewTask(
     return source;
   }
   const repositories = existing?.repositories ?? bootstrap?.repositories ?? [];
+  const outputDirectory = existing?.run.output_dir ?? bootstrap?.run.output_dir;
+  if (outputDirectory === undefined) {
+    throw new Error('unreachable: interviewTask always has an existing configuration or bootstrap');
+  }
   const { repo, newRepository, selectedRepository } = await selectTaskRepository(
     io,
     dependencies,
     repositories,
+    outputDirectory,
   );
   const resolvedReference = await interviewReferenceSolution(io, dependencies, selectedRepository);
   const baseCommitAnswer =
     resolvedReference === undefined || resolvedReference.proposedBase === undefined
       ? (await askText(io, { message: 'Base commit', validate: validateNonWhitespace })).trim()
       : await askBaseCommitWithProposal(io, resolvedReference);
-  const baseCommit = await ensureBaseCommitInClone(
+  const baseCommit = await settleBaseCommit(
     io,
     dependencies,
     selectedRepository,
@@ -1251,6 +1467,7 @@ async function interviewTask(
     usedCheckIds,
     validateCheckVariables,
     existing?.run.check_timeout ?? bootstrap?.run.check_timeout,
+    progress,
   );
   const task: TaskInput = {
     id: taskId,
@@ -1308,19 +1525,15 @@ async function interviewSource(
     return { ok: true, value: { source: undefined } };
   }
   if (kind === 'github') {
-    return interviewImportedSource(io, dependencies, 'github', async () => {
-      const reference =
-        request.githubIssueReference ??
-        (
-          await askText(io, {
-            message: 'GitHub issue',
-            validate: validateNonWhitespace,
-          })
-        ).trim();
-      return unwrapImportResult(
-        await runWait(io, 'Importing issue', () => dependencies.importGitHubIssue(reference)),
-      );
-    });
+    return {
+      ok: true,
+      value: await interviewImportedSource(io, dependencies, {
+        kind: 'github',
+        question: 'GitHub issue',
+        given: request.githubIssueReference,
+        importIssue: (reference) => dependencies.importGitHubIssue(reference),
+      }),
+    };
   }
   if (jiraSettings === undefined) {
     // Unreachable through prompts (the option is disabled), reachable only
@@ -1335,161 +1548,211 @@ async function interviewSource(
       },
     };
   }
-  return interviewImportedSource(io, dependencies, 'jira', async () => {
-    const issueKey =
-      request.jiraIssueKey ??
-      (
-        await askText(io, {
-          message: 'Jira issue key',
-          validate: validateNonWhitespace,
-        })
-      ).trim();
-    return unwrapImportResult(
-      await runWait(io, 'Importing issue', () =>
-        dependencies.importJiraIssue(jiraSettings, issueKey),
-      ),
-    );
-  });
-}
-
-/** Imports one tracker issue once, displays it, and builds its stored source block. */
-async function interviewImportedSource(
-  io: WizardIo,
-  dependencies: TaskWizardDependencies,
-  kind: 'jira' | 'github',
-  importIssue: () => Promise<TevuResult<IssueSnapshot, 'IssueImportError'>>,
-): Promise<TevuResult<SourceSelection, 'IssueImportError'>> {
-  const imported = await importIssue();
-  if (!imported.ok) {
-    return imported;
-  }
-  const importedAt = dependencies.now().toISOString();
-  note(
-    dependencies.redact(`${imported.value.summary}\n\n${imported.value.description}`),
-    `Imported ${imported.value.issueKey}`,
-    promptOptions(io),
-  );
   return {
     ok: true,
-    value: {
-      source: {
-        kind,
-        key: imported.value.issueKey,
-        url: imported.value.issueUrl,
-        imported_at: importedAt,
-        title: imported.value.summary,
-        body: imported.value.description,
-      },
-      importedTitle: imported.value.summary,
-    },
+    value: await interviewImportedSource(io, dependencies, {
+      kind: 'jira',
+      question: 'Jira issue key',
+      given: request.jiraIssueKey,
+      importIssue: (issueKey) => dependencies.importJiraIssue(jiraSettings, issueKey),
+    }),
   };
 }
 
-/** Picks the task repository from configured entries or captures a new one. */
-async function interviewRepositorySelection(
+/** One tracker the task can be imported from, and how to ask for and read its issue. */
+type IssueTracker = {
+  kind: 'jira' | 'github';
+  question: string;
+  /** The reference given on the command line, asked for otherwise. */
+  given: string | undefined;
+  importIssue: (
+    reference: string,
+  ) => Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>>;
+};
+
+/**
+ * Imports one tracker issue, displays it, and builds its stored source block.
+ *
+ * A failed import asks the reference again with itself filled in, and an empty
+ * answer then writes the task by hand instead, so no failure ends the
+ * interview.
+ */
+async function interviewImportedSource(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+  tracker: IssueTracker,
+): Promise<SourceSelection> {
+  let reference =
+    tracker.given ??
+    (await askText(io, { message: tracker.question, validate: validateNonWhitespace })).trim();
+  for (;;) {
+    const imported = unwrapImportResult(
+      await runWait(io, 'Importing issue', () => tracker.importIssue(reference)),
+    );
+    if (imported.ok) {
+      const importedAt = dependencies.now().toISOString();
+      note(
+        dependencies.redact(`${imported.value.summary}\n\n${imported.value.description}`),
+        `Imported ${imported.value.issueKey}`,
+        promptOptions(io),
+      );
+      return {
+        source: {
+          kind: tracker.kind,
+          key: imported.value.issueKey,
+          url: imported.value.issueUrl,
+          imported_at: importedAt,
+          title: imported.value.summary,
+          body: imported.value.description,
+        },
+        importedTitle: imported.value.summary,
+      };
+    }
+    const { status, reason } = imported.error;
+    warnLines(io, dependencies.redact, {
+      headline: `Can't import issue ${reference}.`,
+      details: [status === undefined ? reason : `status ${String(status)}: ${reason}`],
+      next: `Fix the issue below, or clear it to write the task yourself. ${RETRY_NEXT_STEP}`,
+    });
+    const answer = (
+      await askText(io, { message: tracker.question, initialValue: reference })
+    ).trim();
+    if (answer === '') {
+      return { source: undefined };
+    }
+    reference = answer;
+  }
+}
+
+/**
+ * Selects the task repository and checks it before any later question: a new
+ * entry must pass the placement check, and a GitHub entry's managed clone is
+ * ensured. A refusal warns and asks the repository again with the failed
+ * choice filled in. A refused new entry stays listed as its own option, so
+ * choosing it again re-runs the checks without asking its answers again, and
+ * only the entry finally returned is written.
+ */
+async function selectTaskRepository(
   io: WizardIo,
   dependencies: TaskWizardDependencies,
   // Accepts both a resolved `TevuConfig`'s repositories and a bootstrap
   // interview's, which never carry `setup`; only `id`, `path`, and `github` are read.
   repositories: readonly Pick<RepositoryInput, 'id' | 'path' | 'github'>[],
-): Promise<{ repo: string; newRepository?: RepositoryDefinition }> {
-  const choice = await askSelect<string>(io, {
-    message: 'Repository',
-    options: [
-      ...repositories.map((repository) => ({
-        value: repository.id,
-        label: repository.id,
-        hint:
-          repository.github === undefined ? (repository.path ?? '') : `GitHub ${repository.github}`,
-      })),
-      { value: NEW_REPOSITORY_CHOICE, label: 'Add a repository' },
-    ],
-  });
-  if (choice !== NEW_REPOSITORY_CHOICE) {
-    return { repo: choice };
-  }
-  const entry = await interviewRepositoryEntry(
-    io,
-    dependencies,
-    new Set(repositories.map((repository) => repository.id)),
-  );
-  return { repo: entry.id, newRepository: entry };
-}
-
-/** Recovers the full repository entry `interviewRepositorySelection` chose, by id or as a new entry. */
-function resolveSelectedRepository(
-  repositories: readonly Pick<RepositoryInput, 'id' | 'path' | 'github'>[],
-  repo: string,
-  newRepository: RepositoryDefinition | undefined,
-): Pick<RepositoryInput, 'id' | 'path' | 'github'> {
-  if (newRepository !== undefined) {
-    return newRepository;
-  }
-  const found = repositories.find((repository) => repository.id === repo);
-  if (found === undefined) {
-    throw new Error('unreachable: interviewRepositorySelection returns an id from its own options');
-  }
-  return found;
-}
-
-/**
- * Selects the task repository, ensuring a GitHub entry's managed clone right
- * after selection; a `ManagedCloneError` warns and re-asks the repository
- * select, keeping every earlier answer.
- */
-async function selectTaskRepository(
-  io: WizardIo,
-  dependencies: TaskWizardDependencies,
-  repositories: readonly Pick<RepositoryInput, 'id' | 'path' | 'github'>[],
+  outputDirectory: string,
 ): Promise<{
   repo: string;
   newRepository?: RepositoryDefinition;
   selectedRepository: Pick<RepositoryInput, 'id' | 'path' | 'github'>;
 }> {
+  const configuredIds = new Set(repositories.map((repository) => repository.id));
+  let refused: RepositoryDefinition | undefined;
+  let initial: string | undefined;
   for (;;) {
-    const selection = await interviewRepositorySelection(io, dependencies, repositories);
-    const selectedRepository = resolveSelectedRepository(
-      repositories,
-      selection.repo,
-      selection.newRepository,
-    );
-    const { github } = selectedRepository;
-    if (github === undefined) {
-      return { ...selection, selectedRepository };
-    }
-    const ensured = await runWait(io, 'Preparing repository', () =>
-      dependencies.ensureManagedCommits({ id: selectedRepository.id, github }, [], (line) =>
-        log.step(dependencies.redact(line), promptOptions(io)),
-      ),
-    );
-    if (ensured.ok) {
-      return { ...selection, selectedRepository };
-    }
-    if (ensured.error.kind === 'CancellationError') {
-      throw new WizardCancelledError();
-    }
-    warnLines(io, dependencies.redact, {
-      headline: `Can't use repository ${selectedRepository.id}.`,
-      details: [describeManagedCloneOrPrerequisiteFailure(ensured.error)],
+    const choice = await askSelect<string>(io, {
+      message: 'Repository',
+      options: [
+        ...repositories.map((repository) => ({
+          value: repository.id,
+          label: repository.id,
+          hint: describeRepositorySource(repository),
+        })),
+        ...(refused === undefined
+          ? []
+          : [
+              {
+                value: refused.id,
+                label: refused.id,
+                hint: `new, ${describeRepositorySource(refused)}`,
+              },
+            ]),
+        { value: NEW_REPOSITORY_CHOICE, label: 'Add a repository' },
+      ],
+      ...(initial === undefined ? {} : { initialValue: initial }),
     });
+    const newEntry =
+      choice === NEW_REPOSITORY_CHOICE
+        ? await interviewRepositoryEntry(
+            io,
+            dependencies,
+            configuredIds,
+            refused === undefined ? undefined : repositoryPrefill(refused),
+          )
+        : refused !== undefined && choice === refused.id
+          ? refused
+          : undefined;
+    const entry = newEntry ?? repositories.find((repository) => repository.id === choice);
+    if (entry === undefined) {
+      throw new Error('unreachable: the repository select returns one of its own options');
+    }
+
+    if (newEntry !== undefined) {
+      const findings = await runWait(io, 'Checking repositories', () =>
+        dependencies.checkRepositoryPlacement(outputDirectory, [...repositories, newEntry]),
+      );
+      if (findings.length > 0) {
+        warnLines(io, dependencies.redact, {
+          headline: `Can't add repository ${newEntry.id}.`,
+          details: describePlacementFindings(findings),
+          next: `Choose another repository below, or pick Add a repository to change the answers. ${RETRY_NEXT_STEP}`,
+        });
+        refused = newEntry;
+        initial = newEntry.id;
+        continue;
+      }
+    }
+
+    const { github } = entry;
+    if (github !== undefined) {
+      const ensured = await runWait(io, 'Preparing repository', () =>
+        dependencies.ensureManagedCommits({ id: entry.id, github }, [], (line) =>
+          log.step(dependencies.redact(line), promptOptions(io)),
+        ),
+      );
+      if (!ensured.ok) {
+        if (ensured.error.kind === 'CancellationError') {
+          throw new WizardCancelledError();
+        }
+        warnLines(io, dependencies.redact, {
+          headline: `Can't use repository ${entry.id}.`,
+          details: [describeManagedCloneOrPrerequisiteFailure(ensured.error)],
+          next: `Fix the cause or choose another repository below. ${RETRY_NEXT_STEP}`,
+        });
+        refused = newEntry ?? refused;
+        initial = entry.id;
+        continue;
+      }
+    }
+    return {
+      repo: entry.id,
+      ...(newEntry === undefined ? {} : { newRepository: newEntry }),
+      selectedRepository: entry,
+    };
   }
+}
+
+/** One `<identifier>: <message>` detail line per placement finding. */
+function describePlacementFindings(findings: readonly ValidationFinding[]): string[] {
+  return findings.map((finding) => `${finding.identifier}: ${finding.message}`);
 }
 
 /**
  * Interviews for the optional reference-solution answer, resolving it once
- * and re-asking on any failure other than cancellation.
+ * and re-asking with the failed identifier filled in on any failure other than
+ * cancellation; clearing the answer adds the task without a reference.
  */
 async function interviewReferenceSolution(
   io: WizardIo,
   dependencies: TaskWizardDependencies,
   repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>,
 ): Promise<ResolvedReferenceSolution | undefined> {
+  let refused: string | undefined;
   for (;;) {
     const identifier = (
       await askDefaultedText(io, {
         message: 'Reference PR or commit',
         defaultValue: '',
         placeholder: 'none',
+        ...(refused === undefined ? {} : { initialValue: refused }),
       })
     ).trim();
     if (identifier === '') {
@@ -1530,7 +1793,9 @@ async function interviewReferenceSolution(
     warnLines(io, dependencies.redact, {
       headline: "Can't resolve the reference.",
       details: [description],
+      next: `Fix the reference below, or clear it to add the task without one. ${RETRY_NEXT_STEP}`,
     });
+    refused = identifier;
   }
 }
 
@@ -1540,7 +1805,7 @@ async function interviewReferenceSolution(
  *
  * A commit still missing after the fetch keeps the answer unchanged for a
  * pull-request task whose answer is a full hash, per `resolveTaskBaseCommit`'s
- * own rule; any other answer is re-asked with itself as the default.
+ * own rule; any other answer is re-asked with itself filled in.
  */
 async function ensureBaseCommitInClone(
   io: WizardIo,
@@ -1567,6 +1832,7 @@ async function ensureBaseCommitInClone(
       warnLines(io, dependencies.redact, {
         headline: "Can't fetch the base commit.",
         details: [describeManagedCloneOrPrerequisiteFailure(ensured.error)],
+        next: BASE_COMMIT_NEXT_STEP,
       });
     } else if (ensured.value.missing.includes(answer)) {
       const keepsUnfetchedAnswer =
@@ -1580,17 +1846,59 @@ async function ensureBaseCommitInClone(
       warnLines(io, dependencies.redact, {
         headline: `Base commit ${answer} isn't in repository ${repository.id}.`,
         details: [`It can't be fetched from ${display}.`],
+        next: BASE_COMMIT_NEXT_STEP,
       });
     } else {
       return answer;
     }
-    answer = (
-      await askDefaultedText(io, {
-        message: 'Base commit',
-        defaultValue: answer,
-        validate: validateNonWhitespace,
-      })
-    ).trim();
+    answer = await askBaseCommitAgain(io, answer);
+  }
+}
+
+const BASE_COMMIT_NEXT_STEP = `Fix the base commit below. ${RETRY_NEXT_STEP}`;
+
+/** Asks the base commit again with the refused answer filled in. */
+async function askBaseCommitAgain(io: WizardIo, refused: string): Promise<string> {
+  return (
+    await askText(io, {
+      message: 'Base commit',
+      initialValue: refused,
+      validate: validateNonWhitespace,
+    })
+  ).trim();
+}
+
+/**
+ * Settles the base-commit answer: ensures a GitHub entry's clone holds it,
+ * then inspects it the way the write pins it, asking again with the refused
+ * answer filled in until both pass. Neither the criteria draft nor the write
+ * runs before an inspection succeeds.
+ */
+async function settleBaseCommit(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+  repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>,
+  resolvedReference: ResolvedReferenceSolution | undefined,
+  initialAnswer: string,
+): Promise<string> {
+  let answer = initialAnswer;
+  for (;;) {
+    answer = await ensureBaseCommitInClone(io, dependencies, repository, resolvedReference, answer);
+    const inspected = await runWait(io, 'Checking base commit', () =>
+      dependencies.inspectBaseCommit(repository, answer, resolvedReference?.reference),
+    );
+    if (inspected.ok) {
+      return answer;
+    }
+    warnLines(io, dependencies.redact, {
+      headline: `Can't use base commit ${answer}.`,
+      details:
+        inspected.error.kind === 'SourceMaterializationError'
+          ? [inspected.error.reason]
+          : inspected.error.findings.map((finding) => finding.message),
+      next: BASE_COMMIT_NEXT_STEP,
+    });
+    answer = await askBaseCommitAgain(io, answer);
   }
 }
 
@@ -1857,6 +2165,7 @@ async function interviewCriteria(
   usedCheckIds: Set<string>,
   validateCheckVariables: TextValidator,
   checkTimeout: string | undefined,
+  progress: WizardProgress,
 ): Promise<DraftedTaskChecks> {
   const byHand = async (): Promise<DraftedTaskChecks> => ({
     acceptance: await interviewChecks(
@@ -1877,38 +2186,26 @@ async function interviewCriteria(
     log.info('No criteria model set. Enter the criteria yourself.', promptOptions(io));
     return byHand();
   }
-  const outcome = await runWait(io, 'Drafting criteria', () =>
-    dependencies.draftCriteria({
+  const draft = await draftCriteriaUntilDone(
+    io,
+    dependencies,
+    configPath,
+    {
       configuration: currentConfiguration(existing, bootstrap),
       repository,
       reference: resolvedReference,
       prompt,
       description,
-    }),
+    },
+    progress,
   );
-  if (outcome.status === 'cancelled') {
-    throw new WizardCancelledError();
-  }
-  if (outcome.retainedDirectory !== null) {
-    warnRetainedDirectory(io, dependencies.redact, outcome.retainedDirectory);
-  }
-  if (outcome.status === 'failed') {
-    const { cause, details } = describeDraftFailure(outcome.failure, configPath);
-    warnLines(io, dependencies.redact, {
-      headline: "Couldn't draft criteria.",
-      details: [cause, ...details],
-      next: 'Enter the criteria yourself.',
-    });
+  if (draft === undefined) {
     return byHand();
   }
   log.success('Criteria drafted', promptOptions(io));
-  const review = await reviewDraft(
-    io,
-    dependencies.redact,
-    outcome.draft,
-    resolvedReference.reference,
-  );
+  const review = await reviewDraft(io, dependencies.redact, draft, resolvedReference.reference);
   if (review === 'by-hand') {
+    progress.holdsCriteriaDraft = false;
     return byHand();
   }
   const draftedAcceptance: CheckInput[] = review.acceptance.map((text, index) => ({
@@ -1940,6 +2237,71 @@ async function interviewCriteria(
       draftedDone,
     ),
   };
+}
+
+/**
+ * Drafts the criteria, and after a failure with a cause a retry can change,
+ * asks whether to draft again. Each retry is another paid model session, so it
+ * runs only after `Yes`. Resolves `undefined` when the operator writes the
+ * criteria by hand instead, or when the cause cannot change within this run.
+ */
+async function draftCriteriaUntilDone(
+  io: WizardIo,
+  dependencies: TaskWizardDependencies,
+  configPath: string,
+  request: Omit<CriteriaDraftRequest, 'configPath'>,
+  progress: WizardProgress,
+): Promise<CriteriaDraft | undefined> {
+  for (;;) {
+    const outcome = await runWait(io, 'Drafting criteria', async () => {
+      const drafting = await dependencies.draftCriteria(request);
+      progress.holdsCriteriaDraft = drafting.status === 'drafted';
+      return drafting;
+    });
+    if (outcome.status === 'cancelled') {
+      throw new WizardCancelledError();
+    }
+    if (outcome.retainedDirectory !== null) {
+      warnRetainedDirectory(io, dependencies.redact, outcome.retainedDirectory);
+    }
+    if (outcome.status === 'drafted') {
+      return outcome.draft;
+    }
+    const { cause, details } = describeDraftFailure(outcome.failure, configPath);
+    const isRetryable = isRetryableDraftCause(outcome.failure.cause);
+    warnLines(io, dependencies.redact, {
+      headline: "Couldn't draft criteria.",
+      details: [cause, ...details],
+      next: isRetryable
+        ? 'Press Enter to draft again, or choose No to enter the criteria yourself.'
+        : 'Enter the criteria yourself.',
+    });
+    if (!isRetryable) {
+      return undefined;
+    }
+    const wantsRetry = await askConfirm(io, {
+      message: 'Draft the criteria again?',
+      initialValue: true,
+    });
+    if (!wantsRetry) {
+      return undefined;
+    }
+  }
+}
+
+/** Holds for the causes another call can change; the others depend on the environment, redactor, or configuration this run already read. */
+function isRetryableDraftCause(cause: CriteriaDraftFailure['cause']): boolean {
+  switch (cause) {
+    case 'changes-unreadable':
+    case 'timed-out':
+    case 'call-failed':
+    case 'reply-invalid':
+      return true;
+    case 'variables-unset':
+    case 'prompt-unredactable':
+    case 'model-unavailable':
+      return false;
+  }
 }
 
 /** The cause line of a failed criteria draft and the lower-layer detail lines that follow it. */
@@ -2068,24 +2430,22 @@ async function reviewDraft(
       continue;
     }
 
-    const targetCollection = unwrap(
-      await withPromptSignal(io, (signal) =>
-        sectionedSelect({
-          message: 'Add to',
-          sections: [
-            {
-              options: [
-                { value: 'acceptance', label: 'Acceptance Criteria' },
-                { value: 'done', label: 'Definition of Done' },
-              ],
-            },
-          ],
-          back: DRAFT_REVIEW_BACK_OPTION,
-          ...promptOptions(io),
-          statusLine: io.statusLine,
-          ...signal,
-        }),
-      ),
+    const targetCollection = await ask(io, (signal) =>
+      sectionedSelect({
+        message: 'Add to',
+        sections: [
+          {
+            options: [
+              { value: 'acceptance', label: 'Acceptance Criteria' },
+              { value: 'done', label: 'Definition of Done' },
+            ],
+          },
+        ],
+        back: DRAFT_REVIEW_BACK_OPTION,
+        ...promptOptions(io),
+        statusLine: io.statusLine,
+        ...signal,
+      }),
     );
     if (targetCollection === 'back') {
       continue;
@@ -2110,7 +2470,7 @@ async function reviewDraft(
 /**
  * Selects one item to edit or remove, or `'back'`. The headings and the
  * back label are constants and item text passes through `redact`. Escape
- * resolves `back` inside the prompt, while Ctrl-C cancels through `unwrap`.
+ * resolves `back` inside the prompt, while Ctrl-C goes through `ask`.
  */
 async function selectDraftItem(
   io: WizardIo,
@@ -2119,32 +2479,30 @@ async function selectDraftItem(
   done: readonly string[],
   action: 'edit' | 'remove',
 ): Promise<DraftItemTarget | 'back'> {
-  const choice = unwrap(
-    await withPromptSignal(io, (signal) =>
-      sectionedSelect({
-        message: action === 'edit' ? 'Item to edit' : 'Item to remove',
-        sections: [
-          {
-            heading: 'Acceptance Criteria',
-            options: acceptance.map((text, index) => ({
-              value: `acceptance:${String(index)}`,
-              label: redact(text),
-            })),
-          },
-          {
-            heading: 'Definition of Done',
-            options: done.map((text, index) => ({
-              value: `done:${String(index)}`,
-              label: redact(text),
-            })),
-          },
-        ],
-        back: DRAFT_REVIEW_BACK_OPTION,
-        ...promptOptions(io),
-        statusLine: io.statusLine,
-        ...signal,
-      }),
-    ),
+  const choice = await ask(io, (signal) =>
+    sectionedSelect({
+      message: action === 'edit' ? 'Item to edit' : 'Item to remove',
+      sections: [
+        {
+          heading: 'Acceptance Criteria',
+          options: acceptance.map((text, index) => ({
+            value: `acceptance:${String(index)}`,
+            label: redact(text),
+          })),
+        },
+        {
+          heading: 'Definition of Done',
+          options: done.map((text, index) => ({
+            value: `done:${String(index)}`,
+            label: redact(text),
+          })),
+        },
+      ],
+      back: DRAFT_REVIEW_BACK_OPTION,
+      ...promptOptions(io),
+      statusLine: io.statusLine,
+      ...signal,
+    }),
   );
   if (choice === 'back') {
     return 'back';
@@ -2231,20 +2589,50 @@ function firstDraftBlockingReason(
     : `${String(namingCount)} items name the reference solution; edit or remove them`;
 }
 
-/** Shows the single credential-redacted review; declining cancels without a write. */
-async function reviewAndConfirm(
+/**
+ * Shows the single credential-redacted review and performs the one write once
+ * the operator accepts it.
+ *
+ * A failed write warns and asks `Save` again with the same input, so no
+ * answer is lost. Declining asks the exit question, and `No` asks `Save`
+ * again. A write that succeeded stands whatever the signal state.
+ */
+async function reviewAndSave(
   io: WizardIo,
-  redact: (textContent: string) => string,
+  dependencies: TaskWizardDependencies,
   input: TaskWizardInput,
   graderDeclared: boolean,
-): Promise<void> {
-  note(redact(renderTaskReview(input, graderDeclared)), 'Review', promptOptions(io));
-  const accepted = await askConfirm(io, {
-    message: `Save to ${input.configPath}?`,
-    initialValue: true,
-  });
-  if (!accepted) {
-    throw new WizardCancelledError();
+): Promise<TaskDefinition> {
+  note(dependencies.redact(renderTaskReview(input, graderDeclared)), 'Review', promptOptions(io));
+  for (;;) {
+    const accepted = await askConfirm(io, {
+      message: `Save to ${input.configPath}?`,
+      initialValue: true,
+    });
+    if (!accepted) {
+      if (await confirmExit(io)) {
+        throw new WizardCancelledError();
+      }
+      continue;
+    }
+    const saved = await runWait(
+      io,
+      SAVING_WAIT_LABEL,
+      () => dependencies.createTask(input),
+      (result) => result.ok,
+    );
+    if (saved.ok) {
+      return saved.value;
+    }
+    if (saved.error.kind === 'CancellationError') {
+      throw new WizardCancelledError();
+    }
+    const [firstLine = '', ...otherLines] = renderTevuError(saved.error, dependencies.redact);
+    warnLines(io, dependencies.redact, {
+      headline: `Couldn't save the task to ${input.configPath}.`,
+      details: [firstLine.replace(/^error: /, ''), ...otherLines],
+      next: 'Fix the cause, then press Enter to save again, or Ctrl-C to cancel.',
+    });
   }
 }
 
@@ -2428,7 +2816,7 @@ function promptOptions(io: WizardIo): { input: Readable; output: Writable } {
 }
 
 /**
- * Asks one Clack question with a signal that follows the wizard's cancellation
+ * Opens one Clack question with a signal that follows the wizard's cancellation
  * only while the question is open.
  *
  * Clack never removes the abort listener of a finished question, so handing
@@ -2437,11 +2825,11 @@ function promptOptions(io: WizardIo): { input: Readable; output: Writable } {
  */
 async function withPromptSignal<T>(
   io: WizardIo,
-  ask: (options: { signal?: AbortSignal }) => Promise<T>,
+  open: (options: { signal?: AbortSignal }) => Promise<T>,
 ): Promise<T> {
   const wizardSignal = io.signal;
   if (wizardSignal === undefined) {
-    return ask({});
+    return open({});
   }
   const questionController = new AbortController();
   const abortQuestion = (): void => questionController.abort();
@@ -2451,14 +2839,21 @@ async function withPromptSignal<T>(
     wizardSignal.addEventListener('abort', abortQuestion, { once: true });
   }
   try {
-    return await ask({ signal: questionController.signal });
+    return await open({ signal: questionController.signal });
   } finally {
     wizardSignal.removeEventListener('abort', abortQuestion);
   }
 }
 
-/** Maps a Clack cancellation to the internal sentinel the wizard entry points catch. */
-function unwrap<T>(value: T | typeof CANCEL_SYMBOL): T {
+/**
+ * Draws one question and resolves its answer; a cancelled question ends the
+ * wizard, because the question itself already asked for the second press.
+ */
+async function ask<T>(
+  io: WizardIo,
+  open: (signal: { signal?: AbortSignal }) => Promise<T | typeof CANCEL_SYMBOL>,
+): Promise<T> {
+  const value = await withPromptSignal(io, open);
   if (isCancel(value)) {
     throw new WizardCancelledError();
   }
@@ -2489,10 +2884,8 @@ async function askText(
     validate?: (value: string | undefined) => string | undefined;
   },
 ): Promise<string> {
-  return unwrap(
-    await withPromptSignal(io, (signal) =>
-      text({ ...options, ...promptOptions(io), statusLine: io.statusLine, ...signal }),
-    ),
+  return ask(io, (signal) =>
+    text({ ...options, ...promptOptions(io), statusLine: io.statusLine, ...signal }),
   );
 }
 
@@ -2529,10 +2922,8 @@ async function askConfirm(
   io: WizardIo,
   options: { message: string; initialValue: boolean },
 ): Promise<boolean> {
-  return unwrap(
-    await withPromptSignal(io, (signal) =>
-      confirm({ ...options, ...promptOptions(io), statusLine: io.statusLine, ...signal }),
-    ),
+  return ask(io, (signal) =>
+    confirm({ ...options, ...promptOptions(io), statusLine: io.statusLine, ...signal }),
   );
 }
 
@@ -2544,10 +2935,8 @@ async function askSelect<Value extends string>(
     initialValue?: Value;
   },
 ): Promise<Value> {
-  return unwrap(
-    await withPromptSignal(io, (signal) =>
-      select<Value>({ ...options, ...promptOptions(io), statusLine: io.statusLine, ...signal }),
-    ),
+  return ask(io, (signal) =>
+    select<Value>({ ...options, ...promptOptions(io), statusLine: io.statusLine, ...signal }),
   );
 }
 

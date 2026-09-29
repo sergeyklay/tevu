@@ -12,7 +12,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildTerminal, replayScreen } from './__fixtures__/terminal.fixtures';
-import { ESCAPE_EXIT_HINT } from './escape-exit';
+import { EXIT_HINT } from './exit-press';
 import { createStatusLine } from './status-line';
 import { confirm, select, text } from './wizard-prompts';
 
@@ -53,6 +53,7 @@ type Running = {
 
 const ESC = '\u001b';
 const ESCAPE_MESSAGE = 'Press Esc again to exit';
+const CTRL_C_MESSAGE = 'Press Ctrl-C again to exit';
 
 const ENTER: Press = ['\r', { name: 'return' }];
 const UP: Press = [undefined, { name: 'up' }];
@@ -68,9 +69,9 @@ const COLORS = [
   {
     level: '1',
     shown: `  ${ESC}[2m${ESCAPE_MESSAGE}${ESC}[22m`,
-    idle: `  ${ESC}[2m${ESCAPE_EXIT_HINT}${ESC}[22m`,
+    idle: `  ${ESC}[2m${EXIT_HINT}${ESC}[22m`,
   },
-  { level: '0', shown: `  ${ESCAPE_MESSAGE}`, idle: `  ${ESCAPE_EXIT_HINT}` },
+  { level: '0', shown: `  ${ESCAPE_MESSAGE}`, idle: `  ${EXIT_HINT}` },
 ];
 
 const SELECT_OPTIONS: Option<string>[] = [
@@ -265,41 +266,60 @@ function expectFrameMatchesStock(
 
 /** The status line row an exit prompt draws on `terminal` while no message is shown, without its newline. */
 function idleRowOn(terminal: Terminal): string {
-  return createStatusLine().row('active', terminal.output, ESCAPE_EXIT_HINT).slice(0, -1);
+  return createStatusLine().row('active', terminal.output, EXIT_HINT).slice(0, -1);
 }
 
+/**
+ * Runs the stock prompt to the end first, then ours on the same steps, because
+ * an open exit prompt removes Clack's cancel aliases for every prompt. Ours
+ * gets a second Ctrl-C after each one, since its first only asks for it.
+ */
 async function expectMatchesStock(
   subject: Case,
   tamper: (bytes: string) => string = (bytes) => bytes,
 ): Promise<void> {
-  const oursTerminal = buildTerminal();
   const stockTerminal = buildTerminal();
+  const stock = track(stockTerminal, createStatusLine(), subject.stock(stockTerminal));
+  const stockFrame = (): { screen: ReturnType<typeof replayScreen>; settled: boolean } => ({
+    screen: replayScreen(stockTerminal.output.text),
+    settled: stock.state.settled,
+  });
+  await flush();
+  const stockFrames = [stockFrame()];
+  for (const step of subject.steps) {
+    apply(stockTerminal, step);
+    await flush();
+    stockFrames.push(stockFrame());
+  }
+  const stockValue = await stock.result;
+
+  const oursTerminal = buildTerminal();
   const ours = track(
     oursTerminal,
     createStatusLine(),
     subject.ours(oursTerminal, createStatusLine()),
   );
-  const stock = track(stockTerminal, createStatusLine(), subject.stock(stockTerminal));
-  const compare = (label: string): void => {
+  const compare = (label: string, index: number): void => {
     expectFrameMatchesStock(
       label,
       subject.message,
       idleRowOn(oursTerminal),
       { screen: replayScreen(tamper(oursTerminal.output.text)), settled: ours.state.settled },
-      { screen: replayScreen(stockTerminal.output.text), settled: stock.state.settled },
+      stockFrames[index]!,
     );
   };
-
   await flush();
-  compare('first frame');
+  compare('first frame', 0);
   for (const [index, step] of subject.steps.entries()) {
     apply(oursTerminal, step);
-    apply(stockTerminal, step);
+    if (step === CTRL_C) {
+      apply(oursTerminal, step);
+    }
     await flush();
-    compare(`after step ${String(index + 1)}`);
+    compare(`after step ${String(index + 1)}`, index + 1);
   }
 
-  const [oursValue, stockValue] = await Promise.all([ours.result, stock.result]);
+  const oursValue = await ours.result;
   if (isCancel(stockValue)) {
     expect(isCancel(oursValue)).toBe(true);
   } else {
@@ -320,6 +340,7 @@ beforeEach(() => {
 afterEach(async () => {
   for (const running of openRuns.splice(0)) {
     if (!running.state.settled) {
+      apply(running.terminal, CTRL_C);
       apply(running.terminal, CTRL_C);
     }
   }
@@ -358,7 +379,7 @@ describe('the stock comparison', () => {
 
   it('fails for a port that draws other text in the reserved row', async () => {
     await expect(
-      expectMatchesStock(typed!, (bytes) => bytes.replace(ESCAPE_EXIT_HINT, 'Esc to exit')),
+      expectMatchesStock(typed!, (bytes) => bytes.replace(EXIT_HINT, 'Esc to exit')),
     ).rejects.toThrow();
   });
 });
@@ -387,7 +408,7 @@ describe('select list window', () => {
       track(stockAtSameRows, statusLine, stockSelect({ ...options, ...stockAtSameRows }));
       await flush();
 
-      const idleRow = `  ${ESCAPE_EXIT_HINT}\n`;
+      const idleRow = `  ${EXIT_HINT}\n`;
       expect(ours.output.text).toBe(`${stock.output.text}${idleRow}`);
       expect(ours.output.text).toContain('...');
       expect(ours.output.text).not.toBe(`${stockAtSameRows.output.text}${idleRow}`);
@@ -425,8 +446,8 @@ describe.each(KINDS)('$name prompt Escape', (kind) => {
     });
 
     it('draws the screen one Ctrl-C draws and resolves the cancel value on a second Escape at 799 ms', async () => {
-      const running = await startPrepared(kind);
       const stock = await startStock(kind, [...kind.prepare, CTRL_C]);
+      const running = await startPrepared(kind);
 
       apply(running.terminal, ESCAPE);
       await flush();
@@ -490,16 +511,44 @@ describe.each(KINDS)('$name prompt Escape', (kind) => {
     expect(screenOf(running).rows.at(-2)).toBe(`  ${ESCAPE_MESSAGE}`);
   });
 
-  it('resolves the cancel value on the first Ctrl-C with no window open', async () => {
+  it('keeps the prompt open and shows the Ctrl-C confirmation on the first Ctrl-C', async () => {
     const running = await startPrepared(kind);
 
     apply(running.terminal, CTRL_C);
     await flush();
 
-    expect(isCancel(await running.result)).toBe(true);
+    expect(running.state.settled).toBe(false);
+    expect(screenOf(running).rows.at(-2)).toBe(`  ${CTRL_C_MESSAGE}`);
   });
 
-  it('resolves the cancel value on the first Ctrl-C with the window open', async () => {
+  it('draws the screen one stock Ctrl-C draws and resolves the cancel value on a second Ctrl-C at 799 ms', async () => {
+    const stock = await startStock(kind, [...kind.prepare, CTRL_C]);
+    const running = await startPrepared(kind);
+
+    apply(running.terminal, CTRL_C);
+    await flush();
+    await vi.advanceTimersByTimeAsync(799);
+    apply(running.terminal, CTRL_C);
+    await flush();
+
+    expect(isCancel(await running.result)).toBe(true);
+    expect(screenOf(running)).toEqual(screenOf(stock));
+  });
+
+  it('keeps the prompt open when the second Ctrl-C comes after the window expired', async () => {
+    const running = await startPrepared(kind);
+    apply(running.terminal, CTRL_C);
+    await flush();
+    await vi.advanceTimersByTimeAsync(800);
+
+    apply(running.terminal, CTRL_C);
+    await flush();
+
+    expect(running.state.settled).toBe(false);
+    expect(screenOf(running).rows.at(-2)).toBe(`  ${CTRL_C_MESSAGE}`);
+  });
+
+  it('shows the Ctrl-C confirmation instead of cancelling on a Ctrl-C after a first Escape', async () => {
     const running = await startPrepared(kind);
     apply(running.terminal, ESCAPE);
     await flush();
@@ -507,7 +556,8 @@ describe.each(KINDS)('$name prompt Escape', (kind) => {
     apply(running.terminal, CTRL_C);
     await flush();
 
-    expect(isCancel(await running.result)).toBe(true);
+    expect(running.state.settled).toBe(false);
+    expect(screenOf(running).rows.at(-2)).toBe(`  ${CTRL_C_MESSAGE}`);
   });
 });
 
@@ -539,6 +589,35 @@ describe.each(KINDS)('$name prompt Escape over raw bytes', (kind) => {
 
     expect(afterFirst).toBe(`  ${ESCAPE_MESSAGE}`);
     expect(isCancel(await running.result)).toBe(true);
+  });
+});
+
+describe.each(KINDS)('$name prompt Ctrl-C over raw bytes', (kind) => {
+  function wait(milliseconds: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
+
+  it('keeps reading keys after the first Ctrl-C byte and cancels on the second', async () => {
+    const running = await startPrepared(kind);
+
+    running.terminal.input.push('\u0003');
+    await wait(10);
+    const afterFirst = screenOf(running).rows.at(-2);
+    running.terminal.input.push('\u0003');
+
+    expect(afterFirst).toBe(`  ${CTRL_C_MESSAGE}`);
+    expect(isCancel(await running.result)).toBe(true);
+  });
+});
+
+describe('text prompt typing after a first Ctrl-C byte', () => {
+  it('adds the keys typed after it to the answer', async () => {
+    const running = await startPrepared(KINDS[0]!);
+
+    running.terminal.input.push('\u0003');
+    running.terminal.input.push('x\r');
+
+    expect(await running.result).toBe('runsx');
   });
 });
 
@@ -580,10 +659,11 @@ describe('confirm prompt keys during the Escape window', () => {
 describe('settle paths', () => {
   const PATHS: ReadonlyArray<{ name: string; keys: readonly Step[] }> = [
     { name: 'Enter', keys: [ENTER] },
-    { name: 'Ctrl-C', keys: [CTRL_C] },
+    { name: 'two Ctrl-Cs', keys: [CTRL_C, CTRL_C] },
     { name: 'two Escapes', keys: [ESCAPE, ESCAPE] },
     { name: 'Enter after a first Escape', keys: [ESCAPE, ENTER] },
-    { name: 'Ctrl-C after a first Escape', keys: [ESCAPE, CTRL_C] },
+    { name: 'Enter after a first Ctrl-C', keys: [CTRL_C, ENTER] },
+    { name: 'two Ctrl-Cs after a first Escape', keys: [ESCAPE, CTRL_C, CTRL_C] },
   ];
   const settleCases = KINDS.flatMap((kind) =>
     PATHS.map((path) => ({ kind, kindName: kind.name, pathName: path.name, keys: path.keys })),
@@ -601,16 +681,17 @@ describe('settle paths', () => {
     running.statusLine.show('later');
 
     expect(settings.aliases.get('escape')).toBe('cancel');
+    expect(settings.aliases.get('\u0003')).toBe('cancel');
     expect(vi.getTimerCount()).toBe(0);
     expect(running.terminal.output.chunks).toHaveLength(written);
     expect(resized).not.toHaveBeenCalled();
   }
 
   it.each(settleCases)(
-    'restores the alias, stops the timer, and leaves no row for the $kindName prompt settled by $pathName',
+    'restores the aliases, stops the timer, and leaves no row for the $kindName prompt settled by $pathName',
     async ({ kind, keys }) => {
       const running = await startPrepared(kind);
-      const aliasWhileOpen = settings.aliases.has('escape');
+      const aliasWhileOpen = settings.aliases.has('escape') || settings.aliases.has('\u0003');
 
       await applyAll(running.terminal, keys);
       await running.result;

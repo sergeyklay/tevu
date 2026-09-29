@@ -136,15 +136,61 @@ export async function resolveConfig(
   };
 
   const findings = [
-    ...missingManagedCloneRootFindings(config, managedCloneRoot),
-    ...(await collectSeparationFindings(resolved)),
-    ...(await collectManagedCloneOverlapFindings(resolved, managedCloneRoot)),
+    ...(await checkRepositoryPlacement(
+      { outputDirectory: config.run.output_dir, repositories: config.repositories },
+      configPath,
+      managedCloneRoot,
+    )),
+    ...(await collectOverlayFindings(resolved)),
   ];
   if (findings.length > 0) {
     return { ok: false, error: { kind: 'ConfigValidationError', findings } };
   }
 
   return { ok: true, value: resolved };
+}
+
+/**
+ * Reports the `run.output_dir` and `repositories.*` findings for an output
+ * directory and repository entries as answered, before any configuration
+ * exists to load: a missing managed-clone root, an output directory that
+ * overlaps a repository, and a path entry that overlaps the managed-clone
+ * root, in that order.
+ *
+ * `outputDirectory` is absolute or relative to the configuration file's
+ * directory. {@link resolveConfig} reports these same findings first, so the
+ * answers and the saved file agree.
+ */
+export async function checkRepositoryPlacement(
+  draft: {
+    outputDirectory: string;
+    repositories: readonly Pick<RepositoryInput, 'id' | 'path' | 'github'>[];
+  },
+  configPath: string,
+  managedCloneRoot: string | undefined,
+): Promise<ValidationFinding[]> {
+  const configDirectory = path.dirname(path.resolve(configPath));
+  const located = draft.repositories.flatMap((repository): RepositoryDefinition[] => {
+    const location =
+      resolveRepositoryPath(repository, configDirectory, managedCloneRoot) ?? repository.path;
+    return location === undefined
+      ? []
+      : [
+          {
+            id: repository.id,
+            path: location,
+            ...(repository.github === undefined ? {} : { github: repository.github }),
+          },
+        ];
+  });
+  return [
+    ...missingManagedCloneRootFindings(draft.repositories, managedCloneRoot),
+    ...(await collectOutputSeparationFindings(
+      resolveConfigPath(configDirectory, draft.outputDirectory),
+      located,
+    )),
+    ...(await collectManagedCloneOverlapFindings(located, managedCloneRoot)),
+  ];
 }
 
 /**
@@ -271,13 +317,13 @@ function repositoryPathIdentifier(repository: RepositoryDefinition): string {
 
 /** A GitHub entry with no managed-clone root: `resolveRepositoryPath` cannot locate its clone. */
 function missingManagedCloneRootFindings(
-  config: TevuConfig,
+  repositories: readonly Pick<RepositoryInput, 'id' | 'github'>[],
   managedCloneRoot: string | undefined,
 ): ValidationFinding[] {
   if (managedCloneRoot !== undefined) {
     return [];
   }
-  return config.repositories
+  return repositories
     .filter((repository) => repository.github !== undefined)
     .map((repository) => ({
       severity: 'error' as const,
@@ -293,16 +339,16 @@ function missingManagedCloneRootFindings(
  * resolution: tevu never writes to a repository declared by `path`.
  */
 async function collectManagedCloneOverlapFindings(
-  config: TevuConfig,
+  repositories: readonly RepositoryDefinition[],
   managedCloneRoot: string | undefined,
 ): Promise<ValidationFinding[]> {
-  const hasGitHubEntry = config.repositories.some((repository) => repository.github !== undefined);
+  const hasGitHubEntry = repositories.some((repository) => repository.github !== undefined);
   if (!hasGitHubEntry || managedCloneRoot === undefined) {
     return [];
   }
   const rootReal = await canonicalRealPath(managedCloneRoot);
   const findings: ValidationFinding[] = [];
-  for (const repository of config.repositories) {
+  for (const repository of repositories) {
     if (repository.github !== undefined) {
       continue;
     }
@@ -321,13 +367,14 @@ async function collectManagedCloneOverlapFindings(
   return findings;
 }
 
-async function collectSeparationFindings(config: TevuConfig): Promise<ValidationFinding[]> {
+async function collectOutputSeparationFindings(
+  outputDirectory: string,
+  repositories: readonly RepositoryDefinition[],
+): Promise<ValidationFinding[]> {
   const findings: ValidationFinding[] = [];
-  const outputReal = await canonicalRealPath(config.run.output_dir);
-  const repositoryReals: { id: string; real: string }[] = [];
-  for (const repository of config.repositories) {
+  const outputReal = await canonicalRealPath(outputDirectory);
+  for (const repository of repositories) {
     const repositoryReal = await canonicalRealPath(repository.path);
-    repositoryReals.push({ id: repository.id, real: repositoryReal });
     if (isSamePathOrInside(repositoryReal, outputReal)) {
       findings.push({
         severity: 'error',
@@ -341,6 +388,17 @@ async function collectSeparationFindings(config: TevuConfig): Promise<Validation
         message: `repository "${repository.id}" overlaps the run output directory after real-path resolution`,
       });
     }
+  }
+  return findings;
+}
+
+/** Flags a task overlay that lies inside, contains, or overlaps a repository or the run output directory. */
+async function collectOverlayFindings(config: TevuConfig): Promise<ValidationFinding[]> {
+  const findings: ValidationFinding[] = [];
+  const outputReal = await canonicalRealPath(config.run.output_dir);
+  const repositoryReals: { id: string; real: string }[] = [];
+  for (const repository of config.repositories) {
+    repositoryReals.push({ id: repository.id, real: await canonicalRealPath(repository.path) });
   }
 
   for (const task of config.tasks) {

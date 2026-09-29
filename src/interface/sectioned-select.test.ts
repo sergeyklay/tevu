@@ -145,6 +145,9 @@ function renderRaw(
   });
 }
 
+// An open prompt suspends Clack's global Ctrl-C alias, so each test's prompts are settled after it.
+const openInputs: Readable[] = [];
+
 function start(overrides: Partial<Options> = {}): {
   input: Readable;
   output: FakeOutput;
@@ -152,6 +155,7 @@ function start(overrides: Partial<Options> = {}): {
   writtenSince: (mark: number) => string;
 } {
   const { input, output } = createStreams();
+  openInputs.push(input);
   const result = sectionedSelect({
     message: 'Item to edit',
     sections: buildItemSections(),
@@ -185,7 +189,7 @@ async function choose(
   return result;
 }
 
-const IDLE_ROW = '  Esc to go back · Ctrl-C to exit';
+const IDLE_ROW = '  Esc to go back · Ctrl-C twice to exit';
 
 const EDIT_FRAME = activeFrame('Item to edit', [
   'Acceptance Criteria',
@@ -201,7 +205,11 @@ beforeEach(() => {
   vi.stubEnv('FORCE_COLOR', '0');
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const input of openInputs.splice(0)) {
+    press(input, CTRL_C, CTRL_C);
+  }
+  await flush();
   vi.unstubAllEnvs();
 });
 
@@ -420,8 +428,24 @@ describe('sectionedSelect navigation', () => {
 });
 
 describe('sectionedSelect cancel', () => {
-  it('resolves the cancel value on Ctrl-C after moving down', async () => {
-    const value = await choose([DOWN, CTRL_C]);
+  it('keeps the prompt open and shows the confirmation on the first Ctrl-C', async () => {
+    const { input, output, result } = start();
+    let settled = false;
+    void result.then(() => {
+      settled = true;
+    });
+
+    press(input, CTRL_C);
+    await flush();
+
+    expect(settled).toBe(false);
+    expect(replayScreen(output.text).rows.at(-2)).toBe('  Press Ctrl-C again to exit');
+    press(input, CTRL_C);
+    await result;
+  });
+
+  it('resolves the cancel value on a second Ctrl-C after moving down', async () => {
+    const value = await choose([DOWN, CTRL_C, CTRL_C]);
 
     expect(isCancel(value)).toBe(true);
   });
@@ -506,8 +530,10 @@ describe('sectionedSelect Escape', () => {
 });
 
 describe('sectionedSelect Ctrl-C and escape sequences over raw bytes', () => {
-  it('resolves the cancel value and draws the cancel frame on the Ctrl-C byte', async () => {
+  it('resolves the cancel value and draws the cancel frame on the second Ctrl-C byte', async () => {
     const { input, output, result } = start();
+    input.push('\u0003');
+    await flush();
     const mark = output.text.length;
 
     input.push('\u0003');
@@ -570,11 +596,28 @@ describe('sectionedSelect with an unheaded section', () => {
       { name: 'Ctrl-C', presses: [CTRL_C] },
       { name: 'Down, Ctrl-C', presses: [DOWN, CTRL_C] },
     ])(
+      // The stock prompt runs first because ours removes Clack's global Ctrl-C alias while open,
+      // and ours gets a second Ctrl-C after each one, since its first only asks for it.
       'draws the screens of select plus one reserved row and resolves the same value for $name',
       async ({ presses }) => {
-        const ours = createStreams();
         const stock = createStreams();
         const settled = { ours: false, stock: false };
+        const stockResult = select({ message: 'Add to', options: stockOptions, ...stock }).then(
+          (value) => {
+            settled.stock = true;
+            return value;
+          },
+        );
+        await flush();
+        const stockScreens = [{ screen: replayScreen(stock.output.text), settled: settled.stock }];
+        for (const keypress of presses) {
+          press(stock.input, keypress);
+          await flush();
+          stockScreens.push({ screen: replayScreen(stock.output.text), settled: settled.stock });
+        }
+        const stockValue = await stockResult;
+
+        const ours = createStreams();
         const oursResult = sectionedSelect({
           message: 'Add to',
           sections: buildAddToSections(),
@@ -585,18 +628,12 @@ describe('sectionedSelect with an unheaded section', () => {
           settled.ours = true;
           return value;
         });
-        const stockResult = select({ message: 'Add to', options: stockOptions, ...stock }).then(
-          (value) => {
-            settled.stock = true;
-            return value;
-          },
-        );
-        const expectSameScreens = (label: string): void => {
+        const expectSameScreens = (label: string, index: number): void => {
           const oursScreen = replayScreen(ours.output.text);
-          const stockScreen = replayScreen(stock.output.text);
+          const { screen: stockScreen, settled: stockSettled } = stockScreens[index]!;
           expect(stockScreen.rows.join('\n'), label).toContain('Add to');
-          expect(settled.ours, label).toBe(settled.stock);
-          if (settled.stock) {
+          expect(settled.ours, label).toBe(stockSettled);
+          if (stockSettled) {
             expect(oursScreen, label).toEqual(stockScreen);
             return;
           }
@@ -609,14 +646,16 @@ describe('sectionedSelect with an unheaded section', () => {
         };
 
         await flush();
-        expectSameScreens('first frame');
+        expectSameScreens('first frame', 0);
         for (const [index, keypress] of presses.entries()) {
           press(ours.input, keypress);
-          press(stock.input, keypress);
+          if (keypress === CTRL_C) {
+            press(ours.input, keypress);
+          }
           await flush();
-          expectSameScreens(`after key ${String(index + 1)}`);
+          expectSameScreens(`after key ${String(index + 1)}`, index + 1);
         }
-        const [oursValue, stockValue] = await Promise.all([oursResult, stockResult]);
+        const oursValue = await oursResult;
 
         if (isCancel(stockValue)) {
           expect(isCancel(oursValue)).toBe(true);
@@ -696,7 +735,7 @@ describe('sectionedSelect status line', () => {
 
   it.each([
     { name: 'Enter', presses: [ENTER] },
-    { name: 'Ctrl-C', presses: [CTRL_C] },
+    { name: 'two Ctrl-Cs', presses: [CTRL_C, CTRL_C] },
   ])('leaves no status line row under the final frame after $name', async ({ presses }) => {
     const statusLine = createStatusLine();
     const { input, output, result } = start({ statusLine });
@@ -780,7 +819,7 @@ describe('sectionedSelect status line on a short terminal', () => {
 describe('sectionedSelect after an exit prompt from the wizard prompts', () => {
   it.each([
     { name: 'submits', presses: [ENTER] },
-    { name: 'is cancelled by Ctrl-C', presses: [CTRL_C] },
+    { name: 'is cancelled by two Ctrl-Cs', presses: [CTRL_C, CTRL_C] },
   ])('resolves back on one Escape once a text prompt $name', async ({ presses }) => {
     const exit = createStreams();
     const exitResult = text({

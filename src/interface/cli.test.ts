@@ -15,6 +15,7 @@ import { TevuConfigSchema } from '@/config/schema';
 import { CONFIG_TEMPLATE } from '@/config/template';
 
 import { createProgram, runProgram } from './program';
+import { createWaitInterrupt } from './wait-interrupt';
 
 import type {
   BenchmarkExecutionHooks,
@@ -57,10 +58,11 @@ type AskOptions = {
   placeholder?: string;
   defaultValue?: string;
   initialValue?: unknown;
-  options?: Array<{ label?: string; hint?: string; disabled?: boolean }>;
+  options?: Array<{ value?: unknown; label?: string; hint?: string; disabled?: boolean }>;
   signal?: AbortSignal;
   statusLine?: unknown;
   validate?: (value: string | undefined) => string | undefined;
+  onCancel?: (typed: string) => void;
 };
 
 const clack = vi.hoisted(() => {
@@ -73,6 +75,8 @@ const clack = vi.hoisted(() => {
       placeholder: string | undefined;
       defaultValue: string | undefined;
       initialValue: unknown;
+      /** The label of the option a select question opens on. */
+      initialLabel: string | undefined;
       options: Array<{ label: string; hint: string | undefined; disabled: boolean }> | undefined;
     }>,
     notes: [] as Array<{ message: string; title: string | undefined }>,
@@ -97,26 +101,40 @@ const clack = vi.hoisted(() => {
     typeof value === 'object' && value !== null && 'invalid' in value;
   const isAborted = (signal: AbortSignal | undefined): boolean => signal?.aborted === true;
   const isInterruption = (value: unknown): value is () => void => typeof value === 'function';
+  const isTypedCancel = (value: unknown): value is { cancelTyped: string } =>
+    typeof value === 'object' && value !== null && 'cancelTyped' in value;
+  const isLabelPick = (value: unknown): value is { pickLabel: string } =>
+    typeof value === 'object' && value !== null && 'pickLabel' in value;
+  /** A scripted choice at a select question, named by the label of the option it takes. */
+  const pickLabel = (label: string): { pickLabel: string } => ({ pickLabel: label });
+  /** A scripted Ctrl-C at a text question that holds `typed`, reported through `onCancel` first. */
+  const cancelTyped = (typed: string): { cancelTyped: string } => ({ cancelTyped: typed });
   const applyDefault = (kind: string, options: AskOptions, answer: unknown): unknown =>
     kind === 'text' && answer === '' && options.defaultValue !== undefined
       ? options.defaultValue
       : answer;
   const ask = async (kind: string, options: AskOptions): Promise<unknown> => {
+    let isEscapeConsumed = false;
     for (;;) {
-      state.prompts.push({
-        kind,
-        message: options.message,
-        placeholder: options.placeholder,
-        defaultValue: options.defaultValue,
-        initialValue: options.initialValue,
-        options: options.options?.map((option) => ({
-          label: option.label ?? '',
-          hint: option.hint,
-          disabled: option.disabled === true,
-        })),
-      });
-      state.statusLines.push({ message: options.message, statusLine: options.statusLine });
-      state.timeline.push(`prompt:${options.message}`);
+      if (!isEscapeConsumed) {
+        state.prompts.push({
+          kind,
+          message: options.message,
+          placeholder: options.placeholder,
+          defaultValue: options.defaultValue,
+          initialValue: options.initialValue,
+          initialLabel: options.options?.find((option) => option.value === options.initialValue)
+            ?.label,
+          options: options.options?.map((option) => ({
+            label: option.label ?? '',
+            hint: option.hint,
+            disabled: option.disabled === true,
+          })),
+        });
+        state.statusLines.push({ message: options.message, statusLine: options.statusLine });
+        state.timeline.push(`prompt:${options.message}`);
+      }
+      isEscapeConsumed = false;
       if (isAborted(options.signal)) {
         return CANCEL;
       }
@@ -125,9 +143,19 @@ const clack = vi.hoisted(() => {
         throw new Error(`no scripted answer left for ${kind}: ${options.message}`);
       }
       if (answer === ESCAPE) {
-        throw new Error(
-          `Escape is scripted only at sectionedSelect prompts, not at ${kind}: ${options.message}`,
-        );
+        isEscapeConsumed = true;
+        continue;
+      }
+      if (isTypedCancel(answer)) {
+        options.onCancel?.(answer.cancelTyped);
+        return CANCEL;
+      }
+      if (isLabelPick(answer)) {
+        const picked = options.options?.find((option) => option.label === answer.pickLabel);
+        if (picked === undefined) {
+          throw new Error(`no option labelled "${answer.pickLabel}" at ${options.message}`);
+        }
+        return picked.value;
       }
       if (isInterruption(answer)) {
         answer();
@@ -147,7 +175,7 @@ const clack = vi.hoisted(() => {
       return applyDefault(kind, options, answer);
     }
   };
-  return { CANCEL, ESCAPE, state, ask };
+  return { CANCEL, ESCAPE, cancelTyped, pickLabel, state, ask };
 });
 
 vi.mock('@clack/prompts', () => {
@@ -164,6 +192,7 @@ vi.mock('@clack/prompts', () => {
         placeholder: undefined,
         defaultValue: undefined,
         initialValue: undefined,
+        initialLabel: undefined,
         options: undefined,
       });
       clack.state.timeline.push('intro');
@@ -663,6 +692,8 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
       throw new Error('ensureManagedCommits should not be called without a scripted GitHub entry');
     }),
     checkGitHubRepository: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    inspectBaseCommit: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    checkRepositoryPlacement: vi.fn(async () => []),
     isGitRepository: vi.fn(async () => true),
     unsetVariables: vi.fn(unsetPrefixedVariables),
     draftCriteria: vi.fn(async () => {
@@ -743,6 +774,7 @@ function createDependencies(overrides: Partial<ProgramDependencies> = {}): Progr
     now: () => FIXED_NOW,
     redact: (text) => text,
     cancellation: new AbortController().signal,
+    waitInterrupt: createWaitInterrupt(),
     ...overrides,
   };
 }
@@ -949,6 +981,13 @@ function taskAnswersWithAcceptanceCheck(
   ];
 }
 
+const EXIT_QUESTION =
+  'Exit without saving? Every answer so far is lost, and tevu.yaml stays unchanged.';
+const EXIT_QUESTION_NEW_FILE =
+  'Exit without saving? Every answer so far is lost, and tevu.yaml is not created.';
+const EXIT_QUESTION_WITH_DRAFT =
+  'Exit without saving? Every answer so far is lost, including the criteria draft, and tevu.yaml stays unchanged.';
+
 const REFERENCE_HASH = '0123456789abcdef0123456789abcdef01234567';
 const REFERENCE_PARENT = 'fedcba9876543210fedcba9876543210fedcba98';
 
@@ -1039,26 +1078,32 @@ const DRAFT_FAILURE_CASES: Array<{
   name: string;
   failure: CriteriaDraftFailure;
   lines: string[];
+  /** Whether the wizard offers `Draft the criteria again?` for this cause. */
+  retryable: boolean;
 }> = [
   {
     name: 'unreadable changes',
     failure: { cause: 'changes-unreadable', detail: 'git-diff: bad object' },
     lines: ["The reference solution's changes can't be read.", 'git-diff: bad object'],
+    retryable: true,
   },
   {
     name: 'an unredactable prompt',
     failure: { cause: 'prompt-unredactable' },
     lines: ["The prompt couldn't be redacted, so the model wasn't called."],
+    retryable: false,
   },
   {
     name: 'one unset variable',
     failure: { cause: 'variables-unset', names: ['ACME_KEY'] },
     lines: ["ACME_KEY isn't set in this terminal."],
+    retryable: false,
   },
   {
     name: 'several unset variables',
     failure: { cause: 'variables-unset', names: ['ACME_KEY', 'ACME_BASE'] },
     lines: ["ACME_KEY, ACME_BASE aren't set in this terminal."],
+    retryable: false,
   },
   {
     name: "the operator's model missing from the environment",
@@ -1067,11 +1112,13 @@ const DRAFT_FAILURE_CASES: Array<{
       "OpenCode can't find litellm/anthropic/claude-opus-5 in tevu's environment.",
       'Add its provider to agents.opencode.providers in tevu.yaml.',
     ],
+    retryable: false,
   },
   {
     name: 'a timeout',
     failure: { cause: 'timed-out', limit: '10m' },
     lines: ["The model didn't answer within 10m."],
+    retryable: true,
   },
   {
     name: 'a failure that carries the agent message',
@@ -1081,21 +1128,27 @@ const DRAFT_FAILURE_CASES: Array<{
       detail: 'run process exited with code 1: Unexpected server error.',
     },
     lines: ['OpenCode reported "Unexpected server error. Check server logs for details.".'],
+    retryable: true,
   },
   {
     name: 'a failure without an agent message',
     failure: { cause: 'call-failed', detail: 'ModelCallError (failed): synthetic failure' },
     lines: ['The OpenCode call failed.', 'ModelCallError (failed): synthetic failure'],
+    retryable: true,
   },
   {
     name: 'an invalid reply',
     failure: { cause: 'reply-invalid', defect: 'done is not an array' },
     lines: ["The model's reply wasn't a usable list."],
+    retryable: true,
   },
 ];
 
-function draftFailureMessage(lines: readonly string[]): string {
-  return ["Couldn't draft criteria.", ...lines, 'Enter the criteria yourself.'].join('\n');
+function draftFailureMessage(lines: readonly string[], retryable = false): string {
+  const nextStep = retryable
+    ? 'Press Enter to draft again, or choose No to enter the criteria yourself.'
+    : 'Enter the criteria yourself.';
+  return ["Couldn't draft criteria.", ...lines, nextStep].join('\n');
 }
 
 /**
@@ -1340,20 +1393,51 @@ const APPLY_FAILURE_CASES: Array<{
   },
 ];
 
-describe('tevu CLI', () => {
-  beforeEach(() => {
-    clack.state.prompts = [];
-    clack.state.notes = [];
-    clack.state.logs = [];
-    clack.state.rejections = [];
-    clack.state.answers = [];
-    clack.state.cancels = [];
-    clack.state.outros = [];
-    clack.state.spinners = [];
-    clack.state.timeline = [];
-    clack.state.sectionedSelects = [];
-    clack.state.statusLines = [];
+function resetClackState(): void {
+  clack.state.prompts = [];
+  clack.state.notes = [];
+  clack.state.logs = [];
+  clack.state.rejections = [];
+  clack.state.answers = [];
+  clack.state.cancels = [];
+  clack.state.outros = [];
+  clack.state.spinners = [];
+  clack.state.timeline = [];
+  clack.state.sectionedSelects = [];
+  clack.state.statusLines = [];
+}
+
+/** Runs `task add` on a script and returns the prompts it drew, leaving the recorded state clean. */
+async function drawnPrompts(
+  answers: readonly unknown[],
+  operations: ProgramOperations = createOperations(),
+): Promise<typeof clack.state.prompts> {
+  scriptAnswers(...answers);
+  await runCli(['task', 'add'], { operations });
+  const prompts = clack.state.prompts;
+  resetClackState();
+  return prompts;
+}
+
+/** Operations for a configuration that declares `roles.criteria` and a reference that resolves and drafts. */
+function criteriaOperations(overrides: Partial<ProgramOperations> = {}): ProgramOperations {
+  return createOperations({
+    loadConfig: vi.fn(async () => ({ ok: true as const, value: buildCriteriaConfig() })),
+    resolveReference: vi.fn(async () => ({
+      ok: true as const,
+      value: buildResolvedCommitReference(),
+    })),
+    draftCriteria: vi.fn(async () => ({
+      status: 'drafted' as const,
+      draft: { acceptance: ['a'], done: ['d'] },
+      retainedDirectory: null,
+    })),
+    ...overrides,
   });
+}
+
+describe('tevu CLI', () => {
+  beforeEach(resetClackState);
 
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -2786,7 +2870,7 @@ describe('tevu CLI', () => {
       expect(clack.state.logs).toContainEqual({
         kind: 'warn',
         message:
-          "Can't use repository repo-1.\ncloning github.com/octo/app failed: git clone exited with code 128",
+          "Can't use repository repo-1.\ncloning github.com/octo/app failed: git clone exited with code 128\nFix the cause or choose another repository below. Press Enter to retry, or Ctrl-C to cancel.",
       });
       expect(ensureManagedCommits).toHaveBeenCalledWith(
         { repository: { id: 'repo-1', github: 'octo/app' }, revisions: [] },
@@ -3202,7 +3286,7 @@ describe('tevu CLI', () => {
 
     it('cancels at the review confirmation without calling createTask', async () => {
       const operations = createOperations();
-      scriptAnswers(...taskInterviewAnswers('repo-1'), false);
+      scriptAnswers(...taskInterviewAnswers('repo-1'), false, true);
 
       const { code, err } = await runCli(['task', 'add'], { operations });
 
@@ -3391,7 +3475,8 @@ describe('tevu CLI', () => {
       });
       expect(clack.state.logs).toContainEqual({
         kind: 'warn',
-        message: "Can't resolve the reference.\nthe answer does not name a commit",
+        message:
+          "Can't resolve the reference.\nthe answer does not name a commit\nFix the reference below, or clear it to add the task without one. Press Enter to retry, or Ctrl-C to cancel.",
       });
       expect(clack.state.notes).toContainEqual({
         title: 'Reference solution',
@@ -4144,22 +4229,22 @@ describe('tevu CLI', () => {
         {
           where: 'a setup prompt',
           exists: false,
-          answers: () => ['/tmp/bench-artifacts', clack.CANCEL],
+          answers: () => ['/tmp/bench-artifacts', clack.CANCEL, true],
         },
         {
           where: 'a task prompt',
           exists: true,
-          answers: () => ['manual', clack.CANCEL],
+          answers: () => ['manual', clack.CANCEL, true],
         },
         {
           where: 'the draft review',
           exists: true,
-          answers: () => [...READY_ANSWERS, clack.CANCEL],
+          answers: () => [...READY_ANSWERS, clack.CANCEL, true],
         },
         {
           where: 'the save confirmation',
           exists: true,
-          answers: () => [...taskInterviewAnswers('repo-1'), false],
+          answers: () => [...taskInterviewAnswers('repo-1'), false, true],
         },
       ])(
         'ends with exit 130 and one cancel line when the operator cancels at $where',
@@ -4226,6 +4311,10 @@ describe('tevu CLI', () => {
         expect(code).toBe(130);
         expect(err).toEqual([]);
         expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
+          'tevu task add',
+          'Task source',
+        ]);
         expect(operations.createTask).not.toHaveBeenCalled();
       });
 
@@ -4252,22 +4341,1437 @@ describe('tevu CLI', () => {
         expect(clack.state.cancels).toEqual([]);
         expect(clack.state.timeline.at(-1)).toBe('outro');
       });
+    });
 
-      it('reports a failed write as an error with exit 1 and no closing line', async () => {
+    describe('Escape at a question', () => {
+      const SCRIPT = [...taskInterviewAnswers('repo-1'), true];
+
+      it.each([
+        { kind: 'select', at: 0 },
+        { kind: 'text', at: 3 },
+        { kind: 'confirm', at: 9 },
+      ])('ignores Escape at a $kind question and asks nothing extra', async ({ kind, at }) => {
+        const baseline = createOperations();
+        const baselinePrompts = await drawnPrompts(SCRIPT, baseline);
+        const operations = createOperations();
+        scriptAnswers(...SCRIPT.slice(0, at), clack.ESCAPE, ...SCRIPT.slice(at));
+
+        const { code, err } = await runCli(['task', 'add'], { operations });
+
+        expect(baselinePrompts[at + 1]?.kind).toBe(kind);
+        expect(code).toBe(0);
+        expect(err).toEqual([]);
+        expect(clack.state.cancels).toEqual([]);
+        expect(clack.state.prompts).toEqual(baselinePrompts);
+        expect(requireCreateTaskCall(operations)).toEqual(requireCreateTaskCall(baseline));
+      });
+
+      it('ignores Escape at What next? of the draft review', async () => {
+        const script = [...READY_ANSWERS, 'accept', false, false, true];
+        const baseline = criteriaOperations();
+        const baselinePrompts = await drawnPrompts(script, baseline);
+        const operations = criteriaOperations();
+        scriptAnswers(...READY_ANSWERS, clack.ESCAPE, ...script.slice(READY_ANSWERS.length));
+
+        const { code, err } = await runCli(['task', 'add'], { operations });
+
+        expect(baselinePrompts.find((prompt) => prompt.message === 'What next?')?.kind).toBe(
+          'select',
+        );
+        expect(code).toBe(0);
+        expect(err).toEqual([]);
+        expect(clack.state.cancels).toEqual([]);
+        expect(clack.state.prompts).toEqual(baselinePrompts);
+        expect(requireCreateTaskCall(operations)).toEqual(requireCreateTaskCall(baseline));
+      });
+    });
+
+    describe('the exit question', () => {
+      function exitPrompts(): typeof clack.state.prompts {
+        return clack.state.prompts.filter((prompt) => prompt.message.startsWith('Exit without'));
+      }
+
+      it.each([
+        {
+          name: 'an existing file',
+          exists: true,
+          answers: [...taskInterviewAnswers('repo-1'), false],
+          expected: EXIT_QUESTION,
+        },
+        {
+          name: 'a file that is not created',
+          exists: false,
+          answers: fullSetupAnswers().slice(0, -1).concat(false),
+          expected: EXIT_QUESTION_NEW_FILE,
+        },
+      ])('asks with No selected for $name', async ({ exists, answers, expected }) => {
+        const operations = createOperations({ configExists: vi.fn(async () => exists) });
+        scriptAnswers(...answers, true);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(130);
+        expect(exitPrompts()).toEqual([
+          expect.objectContaining({ kind: 'confirm', message: expected, initialValue: false }),
+        ]);
+        expect(clack.state.prompts.at(-1)?.message).toBe(expected);
+      });
+
+      it('names the path exactly as the wizard received it', async () => {
+        const operations = createOperations();
+        scriptAnswers(...taskInterviewAnswers('repo-1'), false, true);
+
+        await runCli(['task', 'add', '--config', 'suites/tevu.yaml'], { operations });
+
+        expect(exitPrompts().map((prompt) => prompt.message)).toEqual([
+          'Exit without saving? Every answer so far is lost, and suites/tevu.yaml stays unchanged.',
+        ]);
+      });
+
+      it('ends with one cancel line, exit 130, and no write on Ctrl-C at the exit question', async () => {
+        const operations = createOperations();
+        scriptAnswers(...taskInterviewAnswers('repo-1'), false, clack.CANCEL);
+
+        const { code, err } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(130);
+        expect(err).toEqual([]);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(clack.state.prompts.at(-1)?.message).toBe(EXIT_QUESTION);
+        expectNoWrites(operations);
+      });
+
+      it('ends at a cancelled question with exit 130 and no exit question', async () => {
+        const operations = createOperations();
+        scriptAnswers(clack.CANCEL);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(130);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(exitPrompts()).toEqual([]);
+        expectNoWrites(operations);
+      });
+    });
+
+    describe('cancellation without the exit question', () => {
+      it('cancels an assess question at once with exit 130', async () => {
+        const operations = createOperations();
+        scriptAnswers(clack.CANCEL);
+
+        const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
+
+        expect(code).toBe(130);
+        expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
+          'tevu assess run-1 case-1',
+          'Assessor name',
+        ]);
+      });
+
+      it('ends a task add wait that the signal aborted without an exit question', async () => {
+        const controller = new AbortController();
         const operations = createOperations({
-          createTask: vi.fn(async () => ({
-            ok: false as const,
-            error: artifactError('write-config', 'disk full'),
-          })),
+          resolveReference: vi.fn(async () => {
+            controller.abort();
+            return { ok: true as const, value: buildResolvedCommitReference() };
+          }),
         });
+        scriptAnswers('manual', 'repo-1', 'HEAD~3');
+
+        const { code } = await runCli(['task', 'add'], {
+          operations,
+          cancellation: controller.signal,
+        });
+
+        expect(code).toBe(130);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
+          'tevu task add',
+          'Task source',
+          'Repository',
+          'Reference PR or commit',
+        ]);
+      });
+    });
+
+    describe('the early base-commit check', () => {
+      const REPOSITORY = { id: 'repo-1', path: '../repos/fixture' };
+      const WARNING_LAST_LINE =
+        'Fix the base commit below. Press Enter to retry, or Ctrl-C to cancel.';
+
+      function refusedOnce(
+        error: Extract<
+          Awaited<ReturnType<ProgramOperations['inspectBaseCommit']>>,
+          { ok: false }
+        >['error'],
+      ): ReturnType<typeof vi.fn<ProgramOperations['inspectBaseCommit']>> {
+        return vi
+          .fn<ProgramOperations['inspectBaseCommit']>()
+          .mockResolvedValueOnce({ ok: false, error })
+          .mockResolvedValue({ ok: true, value: undefined });
+      }
+
+      async function baselineInput(script: readonly unknown[]): Promise<TaskWizardInput> {
+        const operations = createOperations();
+        scriptAnswers(...script);
+        await runCli(['task', 'add'], { operations });
+        const input = requireCreateTaskCall(operations);
+        resetClackState();
+        return input;
+      }
+
+      it('warns, asks Base commit again with the answer filled in before Task ID, and keeps every earlier answer', async () => {
+        const answers = taskInterviewAnswers('repo-1');
+        const baseline = await baselineInput([...answers, true]);
+        const inspectBaseCommit = refusedOnce({
+          kind: 'SourceMaterializationError',
+          taskId: 'repo-1',
+          reason: 'commit bad123 does not resolve to exactly one commit',
+        });
+        const operations = createOperations({ inspectBaseCommit });
+        scriptAnswers(...answers.slice(0, 3), 'bad123', 'abc123', ...answers.slice(4), true);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        const messages = clack.state.prompts.map((prompt) => prompt.message);
+        const askedAgain = clack.state.prompts.filter((prompt) => prompt.message === 'Base commit');
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: `Can't use base commit bad123.\ncommit bad123 does not resolve to exactly one commit\n${WARNING_LAST_LINE}`,
+        });
+        expect(askedAgain.map((prompt) => prompt.initialValue)).toEqual([undefined, 'bad123']);
+        expect(askedAgain[1]?.defaultValue).toBeUndefined();
+        expect(messages.lastIndexOf('Base commit')).toBeLessThan(messages.indexOf('Task ID'));
+        expect(inspectBaseCommit.mock.calls).toEqual([
+          ['tevu.yaml', REPOSITORY, 'bad123', undefined],
+          ['tevu.yaml', REPOSITORY, 'abc123', undefined],
+        ]);
+        expect(requireCreateTaskCall(operations)).toEqual(baseline);
+      });
+
+      it('lists each finding message of a configuration refusal as a detail line', async () => {
+        const inspectBaseCommit = refusedOnce({
+          kind: 'ConfigValidationError',
+          findings: [
+            buildFinding({ severity: 'error', message: 'first finding' }),
+            buildFinding({ severity: 'error', message: 'second finding' }),
+          ],
+        });
+        const operations = createOperations({ inspectBaseCommit });
+        const answers = taskInterviewAnswers('repo-1');
+        scriptAnswers(...answers.slice(0, 4), 'abc123', ...answers.slice(4), true);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: `Can't use base commit abc123.\nfirst finding\nsecond finding\n${WARNING_LAST_LINE}`,
+        });
+      });
+
+      it('runs an edited answer through the inspection as a new answer', async () => {
+        const inspectBaseCommit = refusedOnce({
+          kind: 'SourceMaterializationError',
+          taskId: 'repo-1',
+          reason: 'no such commit',
+        });
+        const operations = createOperations({ inspectBaseCommit });
+        const answers = taskInterviewAnswers('repo-1');
+        scriptAnswers(...answers.slice(0, 3), 'bad123', 'good456', ...answers.slice(4), true);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(inspectBaseCommit.mock.calls.map(([, , baseCommit]) => baseCommit)).toEqual([
+          'bad123',
+          'good456',
+        ]);
+        expect(requireCreateTaskCall(operations).task.base_commit).toBe('good456');
+      });
+
+      it('runs neither draftCriteria nor createTask before an inspection succeeds', async () => {
+        const inspectBaseCommit = refusedOnce({
+          kind: 'SourceMaterializationError',
+          taskId: 'repo-1',
+          reason: 'no such commit',
+        });
+        const operations = criteriaOperations({ inspectBaseCommit });
+        scriptAnswers(
+          'manual',
+          'repo-1',
+          'HEAD~3',
+          'bad123',
+          ...READY_ANSWERS.slice(3),
+          'accept',
+          false,
+          false,
+          true,
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        const lastInspection = Math.max(...inspectBaseCommit.mock.invocationCallOrder);
+        const [draftStart = 0] = vi.mocked(operations.draftCriteria).mock.invocationCallOrder;
+        const [saveStart = 0] = vi.mocked(operations.createTask).mock.invocationCallOrder;
+        expect(inspectBaseCommit).toHaveBeenCalledTimes(2);
+        expect(draftStart).toBeGreaterThan(lastInspection);
+        expect(saveStart).toBeGreaterThan(lastInspection);
+      });
+
+      it('inspects a GitHub entry only after its clone holds the answer', async () => {
+        const ensureManagedCommits = recordOperation('ensureManagedCommits', async () => ({
+          ok: true as const,
+          value: { missing: [] },
+        }));
+        const inspectBaseCommit = recordOperation('inspectBaseCommit', async () => ({
+          ok: true as const,
+          value: undefined,
+        }));
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({
+            ok: true as const,
+            value: buildGitHubRepositoryConfig(),
+          })),
+          ensureManagedCommits,
+          inspectBaseCommit,
+        });
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(
+          clack.state.timeline.filter(
+            (event) => event.startsWith('operation:') && event.endsWith(':start'),
+          ),
+        ).toEqual([
+          'operation:ensureManagedCommits:start',
+          'operation:ensureManagedCommits:start',
+          'operation:inspectBaseCommit:start',
+        ]);
+        expect(clack.state.spinners.map((spinner) => spinner.label)).toEqual([
+          'Preparing repository',
+          'Fetching base commit',
+          'Checking base commit',
+          'Saving task',
+        ]);
+      });
+
+      it('asks Base commit again with the answer filled in after a failed fetch, then fetches it again', async () => {
+        const ensureManagedCommits = vi
+          .fn<ProgramOperations['ensureManagedCommits']>()
+          .mockResolvedValueOnce({ ok: true, value: { missing: [] } })
+          .mockResolvedValueOnce({ ok: false, error: managedCloneFailure() })
+          .mockResolvedValue({ ok: true, value: { missing: [] } });
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({
+            ok: true as const,
+            value: buildGitHubRepositoryConfig(),
+          })),
+          ensureManagedCommits,
+        });
+        const answers = taskInterviewAnswers('repo-1');
+        scriptAnswers(...answers.slice(0, 4), 'abc123', ...answers.slice(4), true);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        const asked = clack.state.prompts.filter((prompt) => prompt.message === 'Base commit');
+        expect(code).toBe(0);
+        expect(asked.map((prompt) => prompt.initialValue)).toEqual([undefined, 'abc123']);
+        expect(asked[1]?.defaultValue).toBeUndefined();
+        expect(ensureManagedCommits.mock.calls.map(([request]) => request.revisions)).toEqual([
+          [],
+          ['abc123'],
+          ['abc123'],
+        ]);
+      });
+
+      it('inspects the full hash of a pull-request task that the clone does not hold, as typed', async () => {
+        const fullHash = 'd'.repeat(40);
+        const reference = {
+          kind: 'pull-request' as const,
+          identifier: 'octo/app#128',
+          commits: ['a'.repeat(40)],
+        };
+        const inspectBaseCommit = vi
+          .fn<ProgramOperations['inspectBaseCommit']>()
+          .mockResolvedValue({ ok: true, value: undefined });
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({
+            ok: true as const,
+            value: buildGitHubRepositoryConfig(),
+          })),
+          ensureManagedCommits: vi
+            .fn<ProgramOperations['ensureManagedCommits']>()
+            .mockResolvedValueOnce({ ok: true, value: { missing: [] } })
+            .mockResolvedValueOnce({ ok: true, value: { missing: [fullHash] } }),
+          resolveReference: vi.fn<ProgramOperations['resolveReference']>().mockResolvedValue({
+            ok: true,
+            value: {
+              reference,
+              pullRequest: {
+                key: 'octo/app#128',
+                state: 'merged',
+                targetBranch: 'main',
+                noProposedBase: 'first commit aaaaaaa has no parent',
+              },
+            },
+          }),
+          inspectBaseCommit,
+        });
+        const answers = taskInterviewAnswers('repo-1');
+        scriptAnswers(...answers.slice(0, 2), 'octo/app#128', fullHash, ...answers.slice(4), true);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(inspectBaseCommit).toHaveBeenCalledExactlyOnceWith(
+          'tevu.yaml',
+          expect.objectContaining({ id: 'repo-1', github: 'octo/app' }),
+          fullHash,
+          reference,
+        );
+        expect(
+          clack.state.prompts.filter((prompt) => prompt.message === 'Base commit'),
+        ).toHaveLength(1);
+        expect(requireCreateTaskCall(operations).task.base_commit).toBe(fullHash);
+      });
+    });
+
+    describe('repository recovery', () => {
+      const NEW_ENTRY_ANSWERS = ['manual', clack.pickLabel('Add a repository')];
+      const PLACEMENT_FINDING = buildFinding({
+        severity: 'error',
+        identifier: 'repositories.new-repo.github',
+        message:
+          'repository "new-repo" overlaps the run output directory after real-path resolution',
+      });
+      const PLACEMENT_LAST_LINE =
+        'Choose another repository below, or pick Add a repository to change the answers. Press Enter to retry, or Ctrl-C to cancel.';
+
+      function repositoryPrompts(): typeof clack.state.prompts {
+        return clack.state.prompts.filter((prompt) => prompt.message === 'Repository');
+      }
+
+      it('asks Repository again after a failed clone of a new entry, lists the entry as its own option, and reuses it', async () => {
+        const ensureManagedCommits = vi
+          .fn<ProgramOperations['ensureManagedCommits']>()
+          .mockResolvedValueOnce({ ok: false, error: managedCloneFailure() })
+          .mockResolvedValue({ ok: true, value: { missing: [] } });
+        const operations = createOperations({ ensureManagedCommits });
+        scriptAnswers(
+          ...NEW_ENTRY_ANSWERS,
+          'new-repo',
+          'github',
+          'octo/app',
+          clack.pickLabel('new-repo'),
+          ...taskInterviewAnswers('repo-1').slice(2),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        const messages = clack.state.prompts.map((prompt) => prompt.message);
+        const [, second] = repositoryPrompts();
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: `Can't use repository new-repo.\ncloning github.com/octo/app failed: git clone exited with code 128\nFix the cause or choose another repository below. Press Enter to retry, or Ctrl-C to cancel.`,
+        });
+        expect(second?.initialLabel).toBe('new-repo');
+        expect(second?.options).toEqual([
+          { label: 'repo-1', hint: '../repos/fixture', disabled: false },
+          { label: 'new-repo', hint: 'new, GitHub octo/app', disabled: false },
+          { label: 'Add a repository', hint: undefined, disabled: false },
+        ]);
+        expect(messages.filter((message) => message === 'Repository ID')).toHaveLength(1);
+        expect(ensureManagedCommits.mock.calls.map(([request]) => request).slice(0, 2)).toEqual([
+          { repository: { id: 'new-repo', github: 'octo/app' }, revisions: [] },
+          { repository: { id: 'new-repo', github: 'octo/app' }, revisions: [] },
+        ]);
+        expect(requireCreateTaskCall(operations)).toMatchObject({
+          newRepository: { id: 'new-repo', github: 'octo/app' },
+          task: { repo: 'new-repo' },
+        });
+      });
+
+      it('asks Repository again with the configured entry as its initial value and no added option after a failed clone', async () => {
+        const ensureManagedCommits = vi
+          .fn<ProgramOperations['ensureManagedCommits']>()
+          .mockResolvedValueOnce({ ok: false, error: managedCloneFailure() })
+          .mockResolvedValue({ ok: true, value: { missing: [] } });
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({
+            ok: true as const,
+            value: buildGitHubRepositoryConfig(),
+          })),
+          ensureManagedCommits,
+        });
+        scriptAnswers(
+          'manual',
+          'repo-1',
+          'repo-1',
+          ...taskInterviewAnswers('repo-1').slice(2),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        const [first, second] = repositoryPrompts();
+        const messages = clack.state.prompts.map((prompt) => prompt.message);
+        expect(code).toBe(0);
+        expect(second?.initialLabel).toBe('repo-1');
+        expect(second?.options).toEqual(first?.options);
+        expect(messages.indexOf('Reference PR or commit')).toBeGreaterThan(
+          messages.lastIndexOf('Repository'),
+        );
+        expect(requireCreateTaskCall(operations).newRepository).toBeUndefined();
+      });
+
+      it('checks a new entry before it prepares the clone, and asks Repository again on findings', async () => {
+        const checkRepositoryPlacement = vi
+          .fn<ProgramOperations['checkRepositoryPlacement']>()
+          .mockResolvedValueOnce([PLACEMENT_FINDING])
+          .mockResolvedValue([]);
+        const operations = createOperations({
+          checkRepositoryPlacement,
+          ensureManagedCommits: vi.fn(async () => ({ ok: true as const, value: { missing: [] } })),
+        });
+        scriptAnswers(
+          ...NEW_ENTRY_ANSWERS,
+          'new-repo',
+          'github',
+          'octo/app',
+          clack.pickLabel('new-repo'),
+          ...taskInterviewAnswers('repo-1').slice(2),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        const timeline = clack.state.timeline;
+        const [, second] = repositoryPrompts();
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: `Can't add repository new-repo.\nrepositories.new-repo.github: repository "new-repo" overlaps the run output directory after real-path resolution\n${PLACEMENT_LAST_LINE}`,
+        });
+        expect(second?.initialLabel).toBe('new-repo');
+        expect(second?.options?.map((option) => option.label)).toEqual([
+          'repo-1',
+          'new-repo',
+          'Add a repository',
+        ]);
+        expect(checkRepositoryPlacement.mock.calls).toEqual([
+          [
+            'tevu.yaml',
+            '/tmp/artifacts',
+            [
+              expect.objectContaining({ id: 'repo-1' }),
+              expect.objectContaining({ id: 'new-repo', github: 'octo/app' }),
+            ],
+          ],
+          [
+            'tevu.yaml',
+            '/tmp/artifacts',
+            [
+              expect.objectContaining({ id: 'repo-1' }),
+              expect.objectContaining({ id: 'new-repo', github: 'octo/app' }),
+            ],
+          ],
+        ]);
+        expect(
+          clack.state.spinners
+            .map((spinner) => spinner.label)
+            .filter((label) => ['Checking repositories', 'Preparing repository'].includes(label)),
+        ).toEqual(['Checking repositories', 'Checking repositories', 'Preparing repository']);
+        expect(timeline.lastIndexOf('prompt:Repository')).toBeLessThan(
+          timeline.indexOf('spinner:start:Preparing repository'),
+        );
+        expect(requireCreateTaskCall(operations).newRepository).toMatchObject({ id: 'new-repo' });
+      });
+
+      it('leaves a configured entry unchecked for placement', async () => {
+        const operations = createOperations();
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(operations.checkRepositoryPlacement).not.toHaveBeenCalled();
+      });
+
+      it('opens the repository questions with the refused entry filled in after Add a repository', async () => {
+        const checkRepositoryPlacement = vi
+          .fn<ProgramOperations['checkRepositoryPlacement']>()
+          .mockResolvedValueOnce([PLACEMENT_FINDING])
+          .mockResolvedValue([]);
+        const operations = createOperations({
+          checkRepositoryPlacement,
+          ensureManagedCommits: vi.fn(async () => ({ ok: true as const, value: { missing: [] } })),
+        });
+        scriptAnswers(
+          ...NEW_ENTRY_ANSWERS,
+          'new-repo',
+          'github',
+          'octo/app',
+          clack.pickLabel('Add a repository'),
+          'new-repo',
+          'github',
+          'octo/other',
+          ...taskInterviewAnswers('repo-1').slice(2),
+          true,
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        const asked = (message: string): unknown[] =>
+          clack.state.prompts
+            .filter((prompt) => prompt.message === message)
+            .map((prompt) => prompt.initialValue ?? prompt.initialLabel);
+        expect(asked('Repository ID')).toEqual([undefined, 'new-repo']);
+        expect(asked('Repository source')).toEqual([undefined, 'github']);
+        expect(asked('GitHub repository')).toEqual([undefined, 'octo/app']);
+      });
+
+      it('asks Answer to change after setup placement findings, before Model entry ID, and sends a changed output directory on', async () => {
+        const checkRepositoryPlacement = vi
+          .fn<ProgramOperations['checkRepositoryPlacement']>()
+          .mockResolvedValueOnce([
+            buildFinding({
+              severity: 'error',
+              identifier: 'run.output_dir',
+              message:
+                'run.output_dir must be outside repository "alpha" after real-path resolution',
+            }),
+          ])
+          .mockResolvedValue([]);
+        const operations = createOperations({
+          configExists: vi.fn(async () => false),
+          checkRepositoryPlacement,
+        });
+        scriptAnswers(
+          ...BOOTSTRAP_ANSWERS.slice(0, 13),
+          clack.pickLabel('Output directory'),
+          '/tmp/other-artifacts',
+          ...BOOTSTRAP_ANSWERS.slice(13),
+          false,
+          false,
+          ...taskInterviewAnswers('alpha'),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        const messages = clack.state.prompts.map((prompt) => prompt.message);
+        const change = clack.state.prompts.find((prompt) => prompt.message === 'Answer to change');
+        const outputPrompts = clack.state.prompts.filter(
+          (prompt) => prompt.message === 'Output directory',
+        );
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message:
+            'Can\'t save the output directory and repository answers.\nrun.output_dir: run.output_dir must be outside repository "alpha" after real-path resolution\nChoose an answer to change below, or press Ctrl-C to cancel.',
+        });
+        expect(messages.indexOf('Answer to change')).toBe(
+          messages.indexOf('Add another repository?') + 1,
+        );
+        expect(messages.indexOf('Answer to change')).toBeLessThan(
+          messages.indexOf('Model entry ID'),
+        );
+        expect(change?.options).toEqual([
+          { label: 'Output directory', hint: '/tmp/bench-artifacts', disabled: false },
+          { label: 'Repository alpha', hint: '../repos/alpha', disabled: false },
+        ]);
+        expect(change?.initialLabel).toBe('Output directory');
+        expect(outputPrompts.map((prompt) => prompt.initialValue)).toEqual([
+          undefined,
+          '/tmp/bench-artifacts',
+        ]);
+        expect(outputPrompts[1]?.defaultValue).toBe('runs');
+        expect(checkRepositoryPlacement.mock.calls).toEqual([
+          ['tevu.yaml', '/tmp/bench-artifacts', [{ id: 'alpha', path: '../repos/alpha' }]],
+          ['tevu.yaml', '/tmp/other-artifacts', [{ id: 'alpha', path: '../repos/alpha' }]],
+        ]);
+        expect(requireCreateTaskCall(operations).bootstrap?.run.output_dir).toBe(
+          '/tmp/other-artifacts',
+        );
+      });
+
+      it('re-asks source and location of a changed setup repository with their current values and keeps its ID', async () => {
+        const checkRepositoryPlacement = vi
+          .fn<ProgramOperations['checkRepositoryPlacement']>()
+          .mockResolvedValueOnce([
+            buildFinding({
+              severity: 'error',
+              identifier: 'repositories.alpha.path',
+              message:
+                'repository "alpha" overlaps the run output directory after real-path resolution',
+            }),
+          ])
+          .mockResolvedValue([]);
+        const operations = createOperations({
+          configExists: vi.fn(async () => false),
+          checkRepositoryPlacement,
+        });
+        scriptAnswers(
+          ...BOOTSTRAP_ANSWERS.slice(0, 13),
+          clack.pickLabel('Repository alpha'),
+          'path',
+          '../repos/alpha-fixed',
+          ...BOOTSTRAP_ANSWERS.slice(13),
+          false,
+          false,
+          ...taskInterviewAnswers('alpha'),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        const promptsAfterChange = clack.state.prompts.slice(
+          clack.state.prompts.findIndex((prompt) => prompt.message === 'Answer to change') + 1,
+        );
+        const [source, location] = promptsAfterChange;
+        expect(code).toBe(0);
+        expect(source).toMatchObject({ message: 'Repository source', initialValue: 'path' });
+        expect(location).toMatchObject({ message: 'Local path', initialValue: '../repos/alpha' });
+        expect(promptsAfterChange.map((prompt) => prompt.message)).not.toContain('Repository ID');
+        expect(requireCreateTaskCall(operations).bootstrap?.repositories).toEqual([
+          { id: 'alpha', path: '../repos/alpha-fixed' },
+        ]);
+      });
+    });
+
+    describe('issue and reference recovery', () => {
+      const GITHUB_ISSUE = 'octo/repo#42';
+      const IMPORT_LAST_LINE =
+        'Fix the issue below, or clear it to write the task yourself. Press Enter to retry, or Ctrl-C to cancel.';
+      const AFTER_IMPORT = taskInterviewAnswers('repo-1').slice(1);
+
+      function failedGitHubImport(
+        overrides: { status?: number; reason?: string } = {},
+      ): Awaited<ReturnType<ProgramOperations['importGitHubIssue']>> {
+        return {
+          ok: false,
+          error: {
+            kind: 'IssueImportError',
+            tracker: 'github-issue',
+            reference: GITHUB_ISSUE,
+            reason: 'not found',
+            ...overrides,
+          },
+        };
+      }
+
+      it.each([
+        {
+          name: 'a GitHub issue given with --github',
+          argv: ['task', 'add', '--github', GITHUB_ISSUE],
+          question: 'GitHub issue',
+        },
+        {
+          name: 'a GitHub issue asked for',
+          argv: ['task', 'add'],
+          question: 'GitHub issue',
+          prefix: ['github', GITHUB_ISSUE],
+        },
+      ])(
+        'warns, asks the issue again with the reference filled in, and retries on Enter for $name',
+        async ({ argv, question, prefix }) => {
+          const importGitHubIssue = vi
+            .fn<ProgramOperations['importGitHubIssue']>()
+            .mockResolvedValueOnce(failedGitHubImport({ status: 404 }))
+            .mockResolvedValue({ ok: true, value: buildJiraIssueSnapshot() });
+          const operations = createOperations({ importGitHubIssue });
+          scriptAnswers(...(prefix ?? []), GITHUB_ISSUE, ...AFTER_IMPORT, true);
+
+          const { code } = await runCli(argv, { operations });
+
+          const asked = clack.state.prompts.filter((prompt) => prompt.message === question);
+          expect(code).toBe(0);
+          expect(clack.state.logs).toContainEqual({
+            kind: 'warn',
+            message: `Can't import issue ${GITHUB_ISSUE}.\nstatus 404: not found\n${IMPORT_LAST_LINE}`,
+          });
+          expect(asked.at(-1)?.initialValue).toBe(GITHUB_ISSUE);
+          expect(importGitHubIssue.mock.calls).toEqual([[GITHUB_ISSUE], [GITHUB_ISSUE]]);
+          expect(requireCreateTaskCall(operations).task.source).toMatchObject({ kind: 'github' });
+        },
+      );
+
+      it('prints the reason alone when the import error carries no status', async () => {
+        const operations = createOperations({
+          importGitHubIssue: vi
+            .fn<ProgramOperations['importGitHubIssue']>()
+            .mockResolvedValueOnce(failedGitHubImport({ reason: 'gh is not signed in' }))
+            .mockResolvedValue({ ok: true, value: buildJiraIssueSnapshot() }),
+        });
+        scriptAnswers(GITHUB_ISSUE, ...AFTER_IMPORT, true);
+
+        await runCli(['task', 'add', '--github', GITHUB_ISSUE], { operations });
+
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: `Can't import issue ${GITHUB_ISSUE}.\ngh is not signed in\n${IMPORT_LAST_LINE}`,
+        });
+      });
+
+      it('retries a Jira issue given with --jira the same way', async () => {
+        const jiraSettings = buildJiraTrackerSettings();
+        const importJiraIssue = vi
+          .fn<ProgramOperations['importJiraIssue']>()
+          .mockResolvedValueOnce({
+            ok: false,
+            error: {
+              kind: 'IssueImportError',
+              tracker: 'jira-cloud',
+              reference: 'TEVU-42',
+              status: 401,
+              reason: 'unauthorized',
+            },
+          })
+          .mockResolvedValue({ ok: true, value: buildJiraIssueSnapshot() });
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({
+            ok: true as const,
+            value: buildTevuConfig({ trackers: { jira: jiraSettings } }),
+          })),
+          importJiraIssue,
+        });
+        scriptAnswers('TEVU-43', ...AFTER_IMPORT, true);
+
+        const { code } = await runCli(['task', 'add', '--jira', 'TEVU-42'], { operations });
+
+        const asked = clack.state.prompts.filter((prompt) => prompt.message === 'Jira issue key');
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: `Can't import issue TEVU-42.\nstatus 401: unauthorized\n${IMPORT_LAST_LINE}`,
+        });
+        expect(asked.map((prompt) => prompt.initialValue)).toEqual(['TEVU-42']);
+        expect(importJiraIssue.mock.calls).toEqual([
+          [jiraSettings, 'TEVU-42'],
+          [jiraSettings, 'TEVU-43'],
+        ]);
+      });
+
+      it('continues without a source when the issue answer is cleared after a failure', async () => {
+        const importGitHubIssue = vi
+          .fn<ProgramOperations['importGitHubIssue']>()
+          .mockResolvedValue(failedGitHubImport());
+        const operations = createOperations({ importGitHubIssue });
+        scriptAnswers('', ...AFTER_IMPORT, true);
+
+        const { code } = await runCli(['task', 'add', '--github', GITHUB_ISSUE], { operations });
+
+        expect(code).toBe(0);
+        expect(importGitHubIssue).toHaveBeenCalledOnce();
+        expect(clack.state.rejections).toEqual([]);
+        expect(requireCreateTaskCall(operations).task).not.toHaveProperty('source');
+        expect(clack.state.prompts.find((prompt) => prompt.message === 'Title')?.initialValue).toBe(
+          undefined,
+        );
+      });
+
+      it('still refuses an empty issue answer before any failure', async () => {
+        const operations = createOperations();
+        scriptAnswers('github', { invalid: '  ' }, GITHUB_ISSUE, ...AFTER_IMPORT, true);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.rejections).toEqual([
+          expect.objectContaining({ kind: 'text', message: 'GitHub issue' }),
+        ]);
+      });
+
+      it('asks Reference PR or commit again with the identifier filled in after a failed resolution', async () => {
+        const resolveReference = vi
+          .fn<ProgramOperations['resolveReference']>()
+          .mockResolvedValueOnce({
+            ok: false,
+            error: {
+              kind: 'ReferenceResolutionError',
+              reason: 'the answer does not name a commit',
+            },
+          })
+          .mockResolvedValue({ ok: true, value: buildResolvedCommitReference() });
+        const operations = createOperations({ resolveReference });
+        const answers = taskInterviewAnswers('repo-1');
+        scriptAnswers(...answers.slice(0, 2), 'bad-ref', 'bad-ref', ...answers.slice(3), true);
+
+        await runCli(['task', 'add'], { operations });
+
+        const asked = clack.state.prompts.filter(
+          (prompt) => prompt.message === 'Reference PR or commit',
+        );
+        expect(asked.map((prompt) => prompt.initialValue)).toEqual([undefined, 'bad-ref']);
+        expect(resolveReference).toHaveBeenCalledTimes(2);
+      });
+
+      it('adds the task without a reference when the identifier is cleared after a failure', async () => {
+        const resolveReference = vi.fn<ProgramOperations['resolveReference']>().mockResolvedValue({
+          ok: false,
+          error: { kind: 'ReferenceResolutionError', reason: 'the answer does not name a commit' },
+        });
+        const operations = createOperations({ resolveReference });
+        const answers = taskInterviewAnswers('repo-1');
+        scriptAnswers(...answers.slice(0, 2), 'bad-ref', '', ...answers.slice(3), true);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(resolveReference).toHaveBeenCalledOnce();
+        expect(requireCreateTaskCall(operations).task).not.toHaveProperty('reference');
+      });
+    });
+
+    describe('the criteria draft retry', () => {
+      const RETRYABLE = DRAFT_FAILURE_CASES.filter(({ retryable }) => retryable);
+      const FALL_BACK = DRAFT_FAILURE_CASES.filter(({ retryable }) => !retryable);
+
+      function failsOnce(
+        failure: CriteriaDraftFailure,
+      ): ReturnType<typeof vi.fn<ProgramOperations['draftCriteria']>> {
+        return vi
+          .fn<ProgramOperations['draftCriteria']>()
+          .mockResolvedValueOnce({ status: 'failed', failure, retainedDirectory: null })
+          .mockResolvedValue({
+            status: 'drafted',
+            draft: { acceptance: ['Retried acceptance.'], done: ['Retried done.'] },
+            retainedDirectory: null,
+          });
+      }
+
+      it.each(RETRYABLE)(
+        'asks Draft the criteria again? after $name and drafts once more on Yes',
+        async ({ failure }) => {
+          const draftCriteria = failsOnce(failure);
+          const operations = criteriaOperations({ draftCriteria });
+          scriptAnswers(...READY_ANSWERS, true, 'accept', false, false, true);
+
+          const { code } = await runCli(['task', 'add'], { operations });
+
+          const retry = clack.state.prompts.find(
+            (prompt) => prompt.message === 'Draft the criteria again?',
+          );
+          expect(code).toBe(0);
+          expect(retry).toMatchObject({ kind: 'confirm', initialValue: true });
+          expect(draftCriteria).toHaveBeenCalledTimes(2);
+          expect(draftCriteria.mock.calls[1]).toEqual(draftCriteria.mock.calls[0]);
+          expect(
+            clack.state.spinners.filter((spinner) => spinner.label === 'Drafting criteria'),
+          ).toHaveLength(2);
+          expect(requireCreateTaskCall(operations).task.checks.acceptance).toEqual([
+            { id: 'acceptance-1', description: 'Retried acceptance.' },
+          ]);
+        },
+      );
+
+      it.each(RETRYABLE)(
+        'continues with the hand-written check questions and drafts no more after No for $name',
+        async ({ failure }) => {
+          const draftCriteria = failsOnce(failure);
+          const operations = criteriaOperations({ draftCriteria });
+          scriptAnswers(...READY_ANSWERS, false, ...taskInterviewAnswers('repo-1').slice(10), true);
+
+          const { code } = await runCli(['task', 'add'], { operations });
+
+          const messages = clack.state.prompts.map((prompt) => prompt.message);
+          expect(code).toBe(0);
+          expect(draftCriteria).toHaveBeenCalledOnce();
+          expect(messages).toContain('Acceptance check ID');
+          expect(messages).not.toContain('What next?');
+          expect(requireCreateTaskCall(operations).task.checks.acceptance).toEqual([
+            { id: 'acc-1', description: 'Export produces a CSV', manual: true },
+          ]);
+        },
+      );
+
+      it.each(FALL_BACK)('never asks to draft again after $name', async ({ failure }) => {
+        const draftCriteria = failsOnce(failure);
+        const operations = criteriaOperations({ draftCriteria });
+        scriptAnswers(...READY_ANSWERS, ...taskInterviewAnswers('repo-1').slice(10), true);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(draftCriteria).toHaveBeenCalledOnce();
+        expect(clack.state.prompts.map((prompt) => prompt.message)).not.toContain(
+          'Draft the criteria again?',
+        );
+      });
+    });
+
+    describe('Ctrl-C during a wait', () => {
+      const NOTICE =
+        'Press Ctrl-C again to exit now. Every answer so far is lost, and tevu.yaml stays unchanged.\nOtherwise tevu asks whether to exit when this step ends.';
+      const SAVING_NOTICE =
+        'Press Ctrl-C again to stop saving. If the save stops before the write, every answer so far is lost, and tevu.yaml stays unchanged.\nOtherwise tevu saves the task, or asks whether to exit if the save fails.';
+      const BEFORE_REFERENCE = taskInterviewAnswers('repo-1').slice(0, 2);
+      const AFTER_REFERENCE = taskInterviewAnswers('repo-1').slice(3);
+
+      function noticeLogs(): typeof clack.state.logs {
+        return clack.state.logs.filter((log) => log.message.startsWith('Press Ctrl-C again'));
+      }
+
+      function eventsAfter(marker: string): string[] {
+        return clack.state.timeline.slice(clack.state.timeline.indexOf(marker) + 1);
+      }
+
+      function referenceTaking(
+        waitInterrupt: ReturnType<typeof createWaitInterrupt>,
+        taken: boolean[],
+      ): ProgramOperations['resolveReference'] {
+        return vi.fn<ProgramOperations['resolveReference']>(async () => {
+          taken.push(waitInterrupt.take(), waitInterrupt.take());
+          return { ok: true as const, value: buildResolvedCommitReference() };
+        });
+      }
+
+      it('keeps the wait running, prints the notice once, and opens the exit question when the step ends', async () => {
+        const waitInterrupt = createWaitInterrupt();
+        const controller = new AbortController();
+        const taken: boolean[] = [];
+        const operations = createOperations({
+          resolveReference: referenceTaking(waitInterrupt, taken),
+        });
+        scriptAnswers(
+          ...BEFORE_REFERENCE,
+          'HEAD~3',
+          false,
+          ...READY_ANSWERS.slice(3),
+          ...AFTER_REFERENCE.slice(7),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], {
+          operations,
+          waitInterrupt,
+          cancellation: controller.signal,
+        });
+
+        const stopped = eventsAfter('spinner:start:Resolving reference');
+        expect(code).toBe(0);
+        expect(taken).toEqual([true, false]);
+        expect(controller.signal.aborted).toBe(false);
+        expect(noticeLogs()).toEqual([{ kind: 'warn', message: NOTICE }]);
+        expect(stopped.indexOf('log:warn')).toBeLessThan(
+          stopped.indexOf('spinner:stop:Resolving reference'),
+        );
+        expect(
+          eventsAfter('spinner:stop:Resolving reference').find((event) =>
+            event.startsWith('prompt:'),
+          ),
+        ).toBe(`prompt:${EXIT_QUESTION}`);
+        expect(
+          clack.state.prompts.find((prompt) => prompt.message === EXIT_QUESTION),
+        ).toMatchObject({ kind: 'confirm', initialValue: false });
+      });
+
+      it('continues as the same script without the take when the exit question is answered No', async () => {
+        const script = [
+          ...BEFORE_REFERENCE,
+          'HEAD~3',
+          ...READY_ANSWERS.slice(3),
+          ...AFTER_REFERENCE.slice(7),
+          true,
+        ];
+        const baseline = createOperations({
+          resolveReference: referenceTaking(createWaitInterrupt(), []),
+        });
+        scriptAnswers(...script);
+        await runCli(['task', 'add'], { operations: baseline });
+        resetClackState();
+        const waitInterrupt = createWaitInterrupt();
+        const operations = createOperations({
+          resolveReference: referenceTaking(waitInterrupt, []),
+        });
+        scriptAnswers(
+          ...BEFORE_REFERENCE,
+          'HEAD~3',
+          false,
+          ...READY_ANSWERS.slice(3),
+          ...AFTER_REFERENCE.slice(7),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations, waitInterrupt });
+
+        expect(code).toBe(0);
+        expect(requireCreateTaskCall(operations)).toEqual(requireCreateTaskCall(baseline));
+      });
+
+      it('ends with one cancel line and exit 130 when the exit question is answered Yes', async () => {
+        const waitInterrupt = createWaitInterrupt();
+        const operations = createOperations({
+          resolveReference: referenceTaking(waitInterrupt, []),
+        });
+        scriptAnswers(...BEFORE_REFERENCE, 'HEAD~3', true);
+
+        const { code, err } = await runCli(['task', 'add'], { operations, waitInterrupt });
+
+        expect(code).toBe(130);
+        expect(err).toEqual([]);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(clack.state.prompts.at(-1)?.message).toBe(EXIT_QUESTION);
+        expectNoWrites(operations);
+      });
+
+      it('asks the exit question before the warning of a step that failed', async () => {
+        const waitInterrupt = createWaitInterrupt();
+        const resolveReference = vi
+          .fn<ProgramOperations['resolveReference']>()
+          .mockImplementationOnce(async () => {
+            waitInterrupt.take();
+            return {
+              ok: false,
+              error: {
+                kind: 'ReferenceResolutionError',
+                reason: 'the answer does not name a commit',
+              },
+            };
+          });
+        const operations = createOperations({ resolveReference });
+        scriptAnswers(...BEFORE_REFERENCE, 'bad-ref', false, '', ...AFTER_REFERENCE, true);
+
+        await runCli(['task', 'add'], { operations, waitInterrupt });
+
+        const afterWait = eventsAfter('spinner:stop:Resolving reference');
+        expect(afterWait.slice(0, 4)).toEqual([
+          'discarder:stop',
+          `prompt:${EXIT_QUESTION}`,
+          'log:warn',
+          'prompt:Reference PR or commit',
+        ]);
+        expect(clack.state.logs.map((log) => log.message.split('\n')[0])).toEqual(
+          expect.arrayContaining([NOTICE.split('\n')[0], "Can't resolve the reference."]),
+        );
+      });
+
+      it('names the criteria draft in the exit question after a draft wait that returned a draft', async () => {
+        const waitInterrupt = createWaitInterrupt();
+        const draftCriteria = vi.fn<ProgramOperations['draftCriteria']>(async () => {
+          waitInterrupt.take();
+          return {
+            status: 'drafted' as const,
+            draft: { acceptance: ['a'], done: ['d'] },
+            retainedDirectory: null,
+          };
+        });
+        const operations = criteriaOperations({ draftCriteria });
+        scriptAnswers(...READY_ANSWERS, false, 'accept', false, false, true);
+
+        const { code } = await runCli(['task', 'add'], { operations, waitInterrupt });
+
+        const afterWait = eventsAfter('spinner:stop:Drafting criteria');
+        expect(code).toBe(0);
+        expect(noticeLogs()).toEqual([{ kind: 'warn', message: NOTICE }]);
+        expect(
+          clack.state.prompts.some((prompt) => prompt.message === EXIT_QUESTION_WITH_DRAFT),
+        ).toBe(true);
+        expect(afterWait.indexOf(`prompt:${EXIT_QUESTION_WITH_DRAFT}`)).toBeLessThan(
+          afterWait.indexOf('log:success'),
+        );
+      });
+
+      it('takes a Ctrl-C during each later wait separately', async () => {
+        const waitInterrupt = createWaitInterrupt();
+        const taken: boolean[] = [];
+        const operations = createOperations({
+          resolveReference: referenceTaking(waitInterrupt, taken),
+          inspectBaseCommit: vi.fn(async () => {
+            taken.push(waitInterrupt.take());
+            return { ok: true as const, value: undefined };
+          }),
+        });
+        scriptAnswers(
+          ...BEFORE_REFERENCE,
+          'HEAD~3',
+          false,
+          ...READY_ANSWERS.slice(3, 4),
+          false,
+          ...READY_ANSWERS.slice(4),
+          ...AFTER_REFERENCE.slice(7),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations, waitInterrupt });
+
+        expect(code).toBe(0);
+        expect(taken).toEqual([true, false, true]);
+        expect(noticeLogs()).toHaveLength(2);
+      });
+
+      describe('during Saving task', () => {
+        function savingTaking(
+          waitInterrupt: ReturnType<typeof createWaitInterrupt>,
+          result: Awaited<ReturnType<ProgramOperations['createTask']>>,
+        ): ProgramOperations['createTask'] {
+          return vi.fn<ProgramOperations['createTask']>(async () => {
+            waitInterrupt.take();
+            return result;
+          });
+        }
+
+        it('prints the saving notice and lets an ok save stand without an exit question', async () => {
+          const waitInterrupt = createWaitInterrupt();
+          const createTask = savingTaking(waitInterrupt, {
+            ok: true,
+            value: buildMaterializedTask({ id: 'task-2' }),
+          });
+          const operations = createOperations({ createTask });
+          scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+          const { code } = await runCli(['task', 'add'], { operations, waitInterrupt });
+
+          expect(code).toBe(0);
+          expect(noticeLogs()).toEqual([{ kind: 'warn', message: SAVING_NOTICE }]);
+          expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
+          expect(clack.state.cancels).toEqual([]);
+          expect(clack.state.prompts.map((prompt) => prompt.message)).not.toContain(EXIT_QUESTION);
+        });
+
+        it('states the criteria draft in the saving notice once a draft is held', async () => {
+          const waitInterrupt = createWaitInterrupt();
+          const createTask = savingTaking(waitInterrupt, {
+            ok: true,
+            value: buildMaterializedTask({ id: 'task-2' }),
+          });
+          const operations = criteriaOperations({ createTask });
+          scriptAnswers(...READY_ANSWERS, 'accept', false, false, true);
+
+          await runCli(['task', 'add'], { operations, waitInterrupt });
+
+          expect(noticeLogs().map((log) => log.message)).toEqual([
+            SAVING_NOTICE.replace('lost, and', 'lost, including the criteria draft, and'),
+          ]);
+        });
+
+        it('warns after the exit question when the save failed and No continues', async () => {
+          const waitInterrupt = createWaitInterrupt();
+          const createTask = vi
+            .fn<ProgramOperations['createTask']>()
+            .mockImplementationOnce(async () => {
+              waitInterrupt.take();
+              return { ok: false, error: artifactError('write-config', 'disk full') };
+            })
+            .mockResolvedValue({ ok: true, value: buildMaterializedTask({ id: 'task-2' }) });
+          const operations = createOperations({ createTask });
+          scriptAnswers(...taskInterviewAnswers('repo-1'), true, false, true);
+
+          const { code } = await runCli(['task', 'add'], { operations, waitInterrupt });
+
+          const afterWait = eventsAfter('spinner:stop:Saving task');
+          expect(code).toBe(0);
+          expect(afterWait.filter((event) => event !== 'discarder:stop').slice(0, 3)).toEqual([
+            `prompt:${EXIT_QUESTION}`,
+            'log:warn',
+            'prompt:Save to tevu.yaml?',
+          ]);
+          expect(createTask).toHaveBeenCalledTimes(2);
+          expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
+        });
+
+        it('ends cancelled without the failure warning when Yes answers the exit question after a failed save', async () => {
+          const waitInterrupt = createWaitInterrupt();
+          const createTask = savingTaking(waitInterrupt, {
+            ok: false,
+            error: artifactError('write-config', 'disk full'),
+          });
+          const operations = createOperations({ createTask });
+          scriptAnswers(...taskInterviewAnswers('repo-1'), true, true);
+
+          const { code, err } = await runCli(['task', 'add'], { operations, waitInterrupt });
+
+          expect(code).toBe(130);
+          expect(err).toEqual([]);
+          expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+          expect(clack.state.logs.map((log) => log.message)).not.toContainEqual(
+            expect.stringContaining("Couldn't save the task"),
+          );
+        });
+      });
+    });
+
+    describe('the save loop', () => {
+      const SAVE_PROMPT = 'Save to tevu.yaml?';
+      const SAVE_LAST_LINE = 'Fix the cause, then press Enter to save again, or Ctrl-C to cancel.';
+
+      function failsThenSaves(
+        error: Extract<
+          Awaited<ReturnType<ProgramOperations['createTask']>>,
+          { ok: false }
+        >['error'],
+      ): ReturnType<typeof vi.fn<ProgramOperations['createTask']>> {
+        return vi
+          .fn<ProgramOperations['createTask']>()
+          .mockResolvedValueOnce({ ok: false, error })
+          .mockResolvedValue({ ok: true, value: buildMaterializedTask({ id: 'task-2' }) });
+      }
+
+      it('warns, asks Save again with Yes selected, and saves the same input on Yes', async () => {
+        const createTask = failsThenSaves(artifactError('write-config', 'disk full'));
+        const operations = createOperations({ createTask });
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true, true);
+
+        const { code, err } = await runCli(['task', 'add'], { operations });
+
+        const savePrompts = clack.state.prompts.filter((prompt) => prompt.message === SAVE_PROMPT);
+        expect(code).toBe(0);
+        expect(err).toEqual([]);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: `Couldn't save the task to tevu.yaml.\nartifact operation "write-config" failed: disk full\n${SAVE_LAST_LINE}`,
+        });
+        expect(savePrompts.map((prompt) => prompt.initialValue)).toEqual([true, true]);
+        expect(createTask).toHaveBeenCalledTimes(2);
+        expect(createTask.mock.calls[1]).toEqual(createTask.mock.calls[0]);
+        expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
+        expect(clack.state.cancels).toEqual([]);
+      });
+
+      it('keeps every rendered line of a multi-line error as a detail line', async () => {
+        const createTask = failsThenSaves({
+          kind: 'ConfigValidationError',
+          findings: [
+            buildFinding({ severity: 'error', identifier: 'tasks', message: 'the file changed' }),
+          ],
+        });
+        const operations = createOperations({ createTask });
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true, true);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(clack.state.logs).toContainEqual({
+          kind: 'warn',
+          message: `Couldn't save the task to tevu.yaml.\nthe configuration is invalid\n  error tasks: the file changed\n${SAVE_LAST_LINE}`,
+        });
+      });
+
+      it('redacts a secret that the write error quotes', async () => {
+        const createTask = failsThenSaves(artifactError('write-config', 'rejected token hunter2'));
+        const operations = createOperations({ createTask });
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true, true);
+
+        await runCli(['task', 'add'], {
+          operations,
+          redact: (text) => text.replaceAll('hunter2', '[redacted]'),
+        });
+
+        const warning = clack.state.logs.find((log) =>
+          log.message.startsWith("Couldn't save the task"),
+        );
+        expect(warning?.message).toContain('rejected token [redacted]');
+        expect(warning?.message).not.toContain('hunter2');
+      });
+
+      it('retries on every failure until a save stands', async () => {
+        const createTask = vi
+          .fn<ProgramOperations['createTask']>()
+          .mockResolvedValueOnce({ ok: false, error: artifactError('write-config', 'disk full') })
+          .mockResolvedValueOnce({ ok: false, error: artifactError('write-config', 'disk full') })
+          .mockResolvedValue({ ok: true, value: buildMaterializedTask({ id: 'task-2' }) });
+        const operations = createOperations({ createTask });
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true, true, true);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(createTask).toHaveBeenCalledTimes(3);
+      });
+
+      it('ends cancelled on Ctrl-C at the Save question after a failed save', async () => {
+        const createTask = failsThenSaves(artifactError('write-config', 'disk full'));
+        const operations = createOperations({ createTask });
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true, clack.CANCEL);
+
+        const { code, err } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(130);
+        expect(err).toEqual([]);
+        expect(createTask).toHaveBeenCalledOnce();
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+      });
+
+      it('asks the exit question after No at the Save question, and Save again after No there', async () => {
+        const operations = createOperations();
+        scriptAnswers(...taskInterviewAnswers('repo-1'), false, false, true);
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        const messages = clack.state.prompts.map((prompt) => prompt.message);
+        expect(code).toBe(0);
+        expect(messages.slice(-3)).toEqual([SAVE_PROMPT, EXIT_QUESTION, SAVE_PROMPT]);
+        expect(operations.createTask).toHaveBeenCalledOnce();
+      });
+
+      it('ends with one cancel line, exit 130, and no write on Yes at the exit question', async () => {
+        const operations = createOperations();
+        scriptAnswers(...taskInterviewAnswers('repo-1'), false, true);
+
+        const { code, err } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(130);
+        expect(err).toEqual([]);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(clack.state.prompts.at(-1)?.message).toBe(EXIT_QUESTION);
+        expectNoWrites(operations);
+      });
+
+      it('prints the added line and exits 0 for an ok save when the signal aborted during Saving task', async () => {
+        const controller = new AbortController();
+        const createTask = vi.fn<ProgramOperations['createTask']>(async () => {
+          controller.abort();
+          return { ok: true, value: buildMaterializedTask({ id: 'task-2' }) };
+        });
+        const operations = createOperations({ createTask });
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+        const { code, err } = await runCli(['task', 'add'], {
+          operations,
+          cancellation: controller.signal,
+        });
+
+        expect(code).toBe(0);
+        expect(err).toEqual([]);
+        expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
+        expect(clack.state.cancels).toEqual([]);
+      });
+
+      it('ends cancelled without a failure warning when the signal aborted and the save failed', async () => {
+        const controller = new AbortController();
+        const createTask = vi.fn<ProgramOperations['createTask']>(async () => {
+          controller.abort();
+          return { ok: false, error: artifactError('write-config', 'interrupted') };
+        });
+        const operations = createOperations({ createTask });
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+        const { code } = await runCli(['task', 'add'], {
+          operations,
+          cancellation: controller.signal,
+        });
+
+        expect(code).toBe(130);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+        expect(clack.state.logs.map((log) => log.message)).not.toContainEqual(
+          expect.stringContaining("Couldn't save the task"),
+        );
+        expect(clack.state.prompts.map((prompt) => prompt.message)).not.toContain(EXIT_QUESTION);
+      });
+
+      it('ends cancelled when the write reports a cancellation', async () => {
+        const createTask = vi.fn<ProgramOperations['createTask']>(async () => ({
+          ok: false,
+          error: { kind: 'CancellationError', activeCaseIds: [] },
+        }));
+        const operations = createOperations({ createTask });
         scriptAnswers(...taskInterviewAnswers('repo-1'), true);
 
         const { code, err } = await runCli(['task', 'add'], { operations });
 
-        expect(code).toBe(1);
-        expect(err).toEqual(['error: artifact operation "write-config" failed: disk full']);
-        expect(clack.state.outros).toEqual([]);
-        expect(clack.state.cancels).toEqual([]);
+        expect(code).toBe(130);
+        expect(err).toEqual([]);
+        expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
       });
     });
 
@@ -4315,7 +5819,7 @@ describe('tevu CLI', () => {
                   : { ok: true as const, value: buildJiraIssueSnapshot() };
               }),
             }),
-            answers: ['repo-1', clack.CANCEL],
+            answers: ['repo-1', clack.CANCEL, true],
           }),
         },
         {
@@ -4335,7 +5839,7 @@ describe('tevu CLI', () => {
                   : { ok: true as const, value: { missing: [] } };
               }),
             }),
-            answers: ['manual', 'repo-1', clack.CANCEL],
+            answers: ['manual', 'repo-1', clack.CANCEL, true],
           }),
         },
         {
@@ -4357,7 +5861,7 @@ describe('tevu CLI', () => {
                   : { ok: true as const, value: buildResolvedCommitReference() };
               }),
             }),
-            answers: ['manual', 'repo-1', 'HEAD~3', clack.CANCEL],
+            answers: ['manual', 'repo-1', 'HEAD~3', clack.CANCEL, true],
           }),
         },
         {
@@ -4382,7 +5886,7 @@ describe('tevu CLI', () => {
                     ? { ok: true as const, value: { missing: [] } }
                     : fetchBaseCommit(),
               }),
-              answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL],
+              answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL, true],
             };
           },
         },
@@ -4412,7 +5916,66 @@ describe('tevu CLI', () => {
                     };
               }),
             }),
-            answers: [...READY_ANSWERS, clack.CANCEL],
+            answers: [...READY_ANSWERS, clack.CANCEL, true],
+          }),
+        },
+        {
+          label: 'Checking base commit',
+          operation: 'inspectBaseCommit',
+          argv: ['task', 'add'],
+          build: (outcome, controller) => ({
+            operations: createOperations({
+              inspectBaseCommit: recordOperation('inspectBaseCommit', async () => {
+                applyOutcome(outcome, controller);
+                return outcome === 'returns an error'
+                  ? {
+                      ok: false as const,
+                      error: {
+                        kind: 'SourceMaterializationError' as const,
+                        taskId: 'repo-1',
+                        reason: 'no such commit',
+                      },
+                    }
+                  : { ok: true as const, value: undefined };
+              }),
+            }),
+            answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL, true],
+          }),
+        },
+        {
+          label: 'Checking repositories',
+          operation: 'checkRepositoryPlacement',
+          argv: ['task', 'add'],
+          build: (outcome, controller) => ({
+            operations: createOperations({
+              checkRepositoryPlacement: recordOperation('checkRepositoryPlacement', async () => {
+                applyOutcome(outcome, controller);
+                return outcome === 'returns an error' ? [buildFinding({ severity: 'error' })] : [];
+              }),
+            }),
+            answers: [
+              'manual',
+              clack.pickLabel('Add a repository'),
+              'new-repo',
+              'path',
+              '../repos/new',
+              clack.CANCEL,
+              true,
+            ],
+          }),
+        },
+        {
+          label: 'Checking repositories',
+          operation: 'checkRepositoryPlacement',
+          argv: ['task', 'add'],
+          build: (outcome, controller) => ({
+            operations: operationsWithModelCheck({
+              checkRepositoryPlacement: recordOperation('checkRepositoryPlacement', async () => {
+                applyOutcome(outcome, controller);
+                return outcome === 'returns an error' ? [buildFinding({ severity: 'error' })] : [];
+              }),
+            }),
+            answers: [...BOOTSTRAP_ANSWERS.slice(0, 13), clack.CANCEL, true],
           }),
         },
         {
@@ -4436,7 +5999,7 @@ describe('tevu CLI', () => {
                   : { ok: true as const, value: buildCapabilityReport() };
               }),
             }),
-            answers: [...BOOTSTRAP_ANSWERS.slice(0, 6), clack.CANCEL],
+            answers: [...BOOTSTRAP_ANSWERS.slice(0, 6), clack.CANCEL, true],
           }),
         },
         {
@@ -4467,7 +6030,7 @@ describe('tevu CLI', () => {
                 },
               ),
             }),
-            answers: [...BOOTSTRAP_ANSWERS.slice(0, 15), clack.CANCEL],
+            answers: [...BOOTSTRAP_ANSWERS.slice(0, 15), clack.CANCEL, true],
           }),
         },
         {
@@ -4483,7 +6046,7 @@ describe('tevu CLI', () => {
                   : accessOutcome('listed');
               }),
             }),
-            answers: [...BOOTSTRAP_ANSWERS.slice(0, 15), clack.CANCEL],
+            answers: [...BOOTSTRAP_ANSWERS.slice(0, 15), clack.CANCEL, true],
           }),
         },
       ];
@@ -4553,6 +6116,42 @@ describe('tevu CLI', () => {
           expect(afterWait).toEqual(['cancel']);
         });
       });
+
+      describe('Saving task', () => {
+        function savingOperations(outcome: WaitOutcome): ProgramOperations {
+          return createOperations({
+            createTask: recordOperation('createTask', async () => {
+              if (outcome === 'throws') {
+                throw new Error('boom');
+              }
+              return outcome === 'returns an error'
+                ? { ok: false as const, error: artifactError('write-config', 'disk full') }
+                : { ok: true as const, value: buildMaterializedTask({ id: 'task-2' }) };
+            }),
+          });
+        }
+
+        it.each(['succeeds', 'returns an error', 'throws'] as const)(
+          'holds stdin and shows the spinner around the operation when it %s',
+          async (outcome) => {
+            const operations = savingOperations(outcome);
+            scriptAnswers(
+              ...taskInterviewAnswers('repo-1'),
+              true,
+              ...(outcome === 'returns an error' ? [clack.CANCEL, true] : []),
+            );
+
+            const [settled] = await Promise.allSettled([runCli(['task', 'add'], { operations })]);
+
+            expect(settled.status).toBe(outcome === 'throws' ? 'rejected' : 'fulfilled');
+            expect(clack.state.spinners).toContainEqual({
+              label: 'Saving task',
+              handleSignals: false,
+            });
+            expectWaitAroundOperation('Saving task', 'createTask');
+          },
+        );
+      });
     });
 
     describe('warnings', () => {
@@ -4579,9 +6178,9 @@ describe('tevu CLI', () => {
                 .fn<ProgramOperations['ensureManagedCommits']>()
                 .mockResolvedValueOnce({ ok: false, error: managedCloneFailure() }),
             }),
-            answers: ['manual', 'repo-1', clack.CANCEL],
+            answers: ['manual', 'repo-1', clack.CANCEL, true],
           }),
-          expected: `Can't use repository repo-1.\n${CLONE_FAILURE_DETAIL}`,
+          expected: `Can't use repository repo-1.\n${CLONE_FAILURE_DETAIL}\nFix the cause or choose another repository below. Press Enter to retry, or Ctrl-C to cancel.`,
           composedLines: [0],
         },
         {
@@ -4596,10 +6195,11 @@ describe('tevu CLI', () => {
                 },
               }),
             }),
-            answers: ['manual', 'repo-1', 'bad-ref', clack.CANCEL],
+            answers: ['manual', 'repo-1', 'bad-ref', clack.CANCEL, true],
           }),
-          expected: "Can't resolve the reference.\nthe answer does not name a commit",
-          composedLines: [0],
+          expected:
+            "Can't resolve the reference.\nthe answer does not name a commit\nFix the reference below, or clear it to add the task without one. Press Enter to retry, or Ctrl-C to cancel.",
+          composedLines: [0, 2],
         },
         {
           description: 'reference commits that could not be fetched',
@@ -4623,7 +6223,7 @@ describe('tevu CLI', () => {
                 },
               }),
             }),
-            answers: ['manual', 'repo-1', 'octo/app#128', clack.CANCEL],
+            answers: ['manual', 'repo-1', 'octo/app#128', clack.CANCEL, true],
           }),
           expected: "Can't fetch some reference commits.\ncommit aaaaaaa could not be fetched",
           composedLines: [0],
@@ -4641,10 +6241,10 @@ describe('tevu CLI', () => {
                 .mockResolvedValueOnce({ ok: true, value: { missing: [] } })
                 .mockResolvedValueOnce({ ok: false, error: managedCloneFailure() }),
             }),
-            answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL],
+            answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL, true],
           }),
-          expected: `Can't fetch the base commit.\n${CLONE_FAILURE_DETAIL}`,
-          composedLines: [0],
+          expected: `Can't fetch the base commit.\n${CLONE_FAILURE_DETAIL}\nFix the base commit below. Press Enter to retry, or Ctrl-C to cancel.`,
+          composedLines: [0, 2],
         },
         {
           description: 'a base commit missing from the repository',
@@ -4659,13 +6259,13 @@ describe('tevu CLI', () => {
                 .mockResolvedValueOnce({ ok: true, value: { missing: [] } })
                 .mockResolvedValueOnce({ ok: true, value: { missing: ['abc123'] } }),
             }),
-            answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL],
+            answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL, true],
           }),
           expected:
-            "Base commit abc123 isn't in repository repo-1.\nIt can't be fetched from github.com/octo/app.",
-          composedLines: [0],
+            "Base commit abc123 isn't in repository repo-1.\nIt can't be fetched from github.com/octo/app.\nFix the base commit below. Press Enter to retry, or Ctrl-C to cancel.",
+          composedLines: [0, 2],
         },
-        ...DRAFT_FAILURE_CASES.map(({ name, failure, lines }) => ({
+        ...DRAFT_FAILURE_CASES.map(({ name, failure, lines, retryable }) => ({
           description: `a failed criteria draft with ${name}`,
           build: () => ({
             operations: createOperations({
@@ -4680,9 +6280,9 @@ describe('tevu CLI', () => {
                 retainedDirectory: null,
               })),
             }),
-            answers: [...READY_ANSWERS, clack.CANCEL],
+            answers: [...READY_ANSWERS, clack.CANCEL, true],
           }),
-          expected: draftFailureMessage(lines),
+          expected: draftFailureMessage(lines, retryable),
           composedLines: [0, 1, lines.length + 1],
         })),
         {
@@ -4699,7 +6299,7 @@ describe('tevu CLI', () => {
                 },
               }),
             }),
-            answers: setupAnswers({ command: ['nope', clack.CANCEL] }),
+            answers: setupAnswers({ command: ['nope', clack.CANCEL, true] }),
           }),
           expected:
             "Can't run nope.\nexpected an executable command, actual not found\nFix the command below. Press Enter to retry, or Ctrl-C to cancel.",
@@ -4720,7 +6320,7 @@ describe('tevu CLI', () => {
                 },
               })),
             }),
-            answers: setupAnswers({ firstModel: ['acme/model-a', clack.CANCEL] }),
+            answers: setupAnswers({ firstModel: ['acme/model-a', clack.CANCEL, true] }),
           }),
           expected:
             'Can\'t read your OpenCode config.\ncannot read "/op/opencode.json": EACCES\n"/op/config.json": provider is not an object\nUpdate your OpenCode settings. Press Enter to retry, or Ctrl-C to cancel.',
@@ -4740,7 +6340,7 @@ describe('tevu CLI', () => {
                 ],
               })),
             }),
-            answers: setupAnswers({ firstModel: ['acme/model-a', clack.CANCEL] }),
+            answers: setupAnswers({ firstModel: ['acme/model-a', clack.CANCEL, true] }),
           }),
           expected:
             'Can\'t copy provider acme from your OpenCode config.\noptions.apiKey of provider "acme" is not a {env:NAME} reference; tevu copies no credential value into a case: set api_key to a variable listed in agents.opencode.secrets\nUpdate your OpenCode settings. Press Enter to retry, or Ctrl-C to cancel.',
@@ -4755,7 +6355,7 @@ describe('tevu CLI', () => {
               }),
               checkModelAccess: vi.fn(async () => accessOutcome('not-listed')),
             }),
-            answers: setupAnswers({ firstModel: ['acme/model-x', clack.CANCEL] }),
+            answers: setupAnswers({ firstModel: ['acme/model-x', clack.CANCEL, true] }),
           }),
           expected:
             "OpenCode can't find acme/model-x.\nUpdate your OpenCode settings or edit the model below. Press Enter to retry, or Ctrl-C to cancel.",
@@ -4770,7 +6370,7 @@ describe('tevu CLI', () => {
                 detail: '"opencode models" exits with code 3',
               })),
             }),
-            answers: setupAnswers({ firstModel: ['acme/model-a', clack.CANCEL] }),
+            answers: setupAnswers({ firstModel: ['acme/model-a', clack.CANCEL, true] }),
           }),
           expected:
             'Can\'t list OpenCode models.\n"opencode models" exits with code 3\nPress Enter to retry, or Ctrl-C to cancel.',
@@ -4784,7 +6384,7 @@ describe('tevu CLI', () => {
                 accessOutcome('listed', { unsetVariables: ['ACME_KEY'] }),
               ),
             }),
-            answers: [...setupAnswers({ secrets: 'ACME_KEY' }), clack.CANCEL],
+            answers: [...setupAnswers({ secrets: 'ACME_KEY' }), clack.CANCEL, true],
           }),
           expected: "ACME_KEY isn't set in this terminal. Runs will need it.",
           composedLines: [0],
@@ -4800,6 +6400,7 @@ describe('tevu CLI', () => {
             answers: [
               ...setupAnswers({ secrets: 'ACME_KEY', firstModel: ['builtin/model-z'] }),
               clack.CANCEL,
+              true,
             ],
           }),
           expected:
@@ -4817,6 +6418,7 @@ describe('tevu CLI', () => {
             answers: [
               ...setupAnswers({ secrets: 'ACME_KEY ACME_BASE', firstModel: ['builtin/model-z'] }),
               clack.CANCEL,
+              true,
             ],
           }),
           expected:
@@ -4838,7 +6440,7 @@ describe('tevu CLI', () => {
                 retainedDirectory: '/tmp/tevu-call-xyz',
               })),
             }),
-            answers: [...READY_ANSWERS, clack.CANCEL],
+            answers: [...READY_ANSWERS, clack.CANCEL, true],
           }),
           expected: "Couldn't remove a temporary directory.\n/tmp/tevu-call-xyz",
           composedLines: [0],
@@ -5715,6 +7317,7 @@ describe('tevu CLI', () => {
         });
         scriptAnswers(
           ...READY_ANSWERS,
+          false,
           'acc-1',
           'manual',
           'Export produces a CSV',
@@ -5733,10 +7336,10 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(clack.state.logs).toContainEqual({
           kind: 'warn',
-          message: draftFailureMessage([
-            'The OpenCode call failed.',
-            'ModelCallError (failed): synthetic failure',
-          ]),
+          message: draftFailureMessage(
+            ['The OpenCode call failed.', 'ModelCallError (failed): synthetic failure'],
+            true,
+          ),
         });
         expect(clack.state.logs).toContainEqual({
           kind: 'warn',
@@ -5753,7 +7356,7 @@ describe('tevu CLI', () => {
 
       it.each(DRAFT_FAILURE_CASES)(
         'prints the cause of $name and continues with the check questions',
-        async ({ failure, lines }) => {
+        async ({ failure, lines, retryable }) => {
           const operations = createOperations({
             loadConfig: vi.fn(async () => ({ ok: true as const, value: buildCriteriaConfig() })),
             resolveReference: vi.fn(async () => ({
@@ -5766,13 +7369,20 @@ describe('tevu CLI', () => {
               retainedDirectory: null,
             })),
           });
-          scriptAnswers(...READY_ANSWERS, ...taskInterviewAnswers('repo-1').slice(10), true);
+          scriptAnswers(
+            ...READY_ANSWERS,
+            ...(retryable ? [false] : []),
+            ...taskInterviewAnswers('repo-1').slice(10),
+            true,
+          );
 
           const { code } = await runCli(['task', 'add'], { operations });
 
           expect(code).toBe(0);
           const warnings = clack.state.logs.filter((log) => log.kind === 'warn');
-          expect(warnings).toEqual([{ kind: 'warn', message: draftFailureMessage(lines) }]);
+          expect(warnings).toEqual([
+            { kind: 'warn', message: draftFailureMessage(lines, retryable) },
+          ]);
           const messages = clack.state.prompts.map((prompt) => prompt.message);
           expect(messages.slice(messages.indexOf('Acceptance check ID'))).toContain(
             'Definition of Done check ID',

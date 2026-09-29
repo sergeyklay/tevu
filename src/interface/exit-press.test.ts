@@ -3,12 +3,12 @@
 import { Writable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createEscapeExit, ESCAPE_EXIT_HINT } from './escape-exit';
+import { createExitPresses, EXIT_HINT } from './exit-press';
 import { createStatusLine } from './status-line';
 
 const MESSAGE = 'Press Esc again to exit';
 const SHOWN_ROW = `  ${MESSAGE}\n`;
-const IDLE_ROW = `  ${ESCAPE_EXIT_HINT}\n`;
+const IDLE_ROW = `  ${EXIT_HINT}\n`;
 
 function setup(): { statusLine: ReturnType<typeof createStatusLine>; row: () => string } {
   const statusLine = createStatusLine();
@@ -17,7 +17,7 @@ function setup(): { statusLine: ReturnType<typeof createStatusLine>; row: () => 
       callback();
     },
   });
-  return { statusLine, row: () => statusLine.row('active', output, ESCAPE_EXIT_HINT) };
+  return { statusLine, row: () => statusLine.row('active', output, EXIT_HINT) };
 }
 
 beforeEach(() => {
@@ -30,12 +30,36 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-describe('createEscapeExit', () => {
+describe('createExitPresses', () => {
+  it('shows the Ctrl-C confirmation on a first Ctrl-C and returns second on the next one', () => {
+    const { statusLine, row } = setup();
+    const exitPresses = createExitPresses(statusLine);
+
+    const first = exitPresses.press('ctrl-c');
+    const shown = row();
+    const second = exitPresses.press('ctrl-c');
+
+    expect(first).toBe('first');
+    expect(shown).toBe('  Press Ctrl-C again to exit\n');
+    expect(second).toBe('second');
+  });
+
+  it('opens a new window when the other key follows a first press', () => {
+    const { statusLine, row } = setup();
+    const exitPresses = createExitPresses(statusLine);
+    exitPresses.press('escape');
+
+    const press = exitPresses.press('ctrl-c');
+
+    expect(press).toBe('first');
+    expect(row()).toBe('  Press Ctrl-C again to exit\n');
+  });
+
   it('shows the confirmation and returns first on the first press', () => {
     const { statusLine, row } = setup();
-    const escapeExit = createEscapeExit(statusLine);
+    const exitPresses = createExitPresses(statusLine);
 
-    const press = escapeExit.press();
+    const press = exitPresses.press('escape');
 
     expect(press).toBe('first');
     expect(row()).toBe(SHOWN_ROW);
@@ -43,11 +67,11 @@ describe('createEscapeExit', () => {
 
   it('returns second and leaves the confirmation shown on a press at 799 ms', () => {
     const { statusLine, row } = setup();
-    const escapeExit = createEscapeExit(statusLine);
-    escapeExit.press();
+    const exitPresses = createExitPresses(statusLine);
+    exitPresses.press('escape');
 
     vi.advanceTimersByTime(799);
-    const press = escapeExit.press();
+    const press = exitPresses.press('escape');
 
     expect(press).toBe('second');
     expect(row()).toBe(SHOWN_ROW);
@@ -55,11 +79,11 @@ describe('createEscapeExit', () => {
 
   it('stops the timer on the second press so the confirmation stays shown past 800 ms', () => {
     const { statusLine, row } = setup();
-    const escapeExit = createEscapeExit(statusLine);
-    escapeExit.press();
+    const exitPresses = createExitPresses(statusLine);
+    exitPresses.press('escape');
     vi.advanceTimersByTime(799);
 
-    escapeExit.press();
+    exitPresses.press('escape');
     vi.advanceTimersByTime(5000);
 
     expect(vi.getTimerCount()).toBe(0);
@@ -68,8 +92,8 @@ describe('createEscapeExit', () => {
 
   it('keeps the confirmation shown until 800 ms have passed', () => {
     const { statusLine, row } = setup();
-    const escapeExit = createEscapeExit(statusLine);
-    escapeExit.press();
+    const exitPresses = createExitPresses(statusLine);
+    exitPresses.press('escape');
 
     vi.advanceTimersByTime(799);
 
@@ -78,12 +102,12 @@ describe('createEscapeExit', () => {
 
   it('clears the confirmation at 800 ms and counts the next press as first', () => {
     const { statusLine, row } = setup();
-    const escapeExit = createEscapeExit(statusLine);
-    escapeExit.press();
+    const exitPresses = createExitPresses(statusLine);
+    exitPresses.press('escape');
 
     vi.advanceTimersByTime(800);
     const emptied = row();
-    const press = escapeExit.press();
+    const press = exitPresses.press('escape');
 
     expect(emptied).toBe(IDLE_ROW);
     expect(press).toBe('first');
@@ -92,13 +116,13 @@ describe('createEscapeExit', () => {
 
   it('starts a new 800 ms window on the first press after an expired one', () => {
     const { statusLine, row } = setup();
-    const escapeExit = createEscapeExit(statusLine);
-    escapeExit.press();
+    const exitPresses = createExitPresses(statusLine);
+    exitPresses.press('escape');
     vi.advanceTimersByTime(800);
-    escapeExit.press();
+    exitPresses.press('escape');
 
     vi.advanceTimersByTime(799);
-    const press = escapeExit.press();
+    const press = exitPresses.press('escape');
 
     expect(press).toBe('second');
     expect(row()).toBe(SHOWN_ROW);
@@ -107,10 +131,10 @@ describe('createEscapeExit', () => {
   describe('dispose', () => {
     it('stops the running timer and clears the confirmation while the window is open', () => {
       const { statusLine, row } = setup();
-      const escapeExit = createEscapeExit(statusLine);
-      escapeExit.press();
+      const exitPresses = createExitPresses(statusLine);
+      exitPresses.press('escape');
 
-      escapeExit.dispose();
+      exitPresses.dispose();
 
       expect(vi.getTimerCount()).toBe(0);
       expect(row()).toBe(IDLE_ROW);
@@ -118,24 +142,24 @@ describe('createEscapeExit', () => {
 
     it('clears the confirmation after the second press', () => {
       const { statusLine, row } = setup();
-      const escapeExit = createEscapeExit(statusLine);
-      escapeExit.press();
-      escapeExit.press();
+      const exitPresses = createExitPresses(statusLine);
+      exitPresses.press('escape');
+      exitPresses.press('escape');
 
-      escapeExit.dispose();
+      exitPresses.dispose();
 
       expect(row()).toBe(IDLE_ROW);
     });
 
     it('changes nothing when the window is closed', () => {
       const { statusLine, row } = setup();
-      const escapeExit = createEscapeExit(statusLine);
+      const exitPresses = createExitPresses(statusLine);
       const resize = vi.fn();
       const output = new Writable();
       output.on('resize', resize);
       statusLine.follow(output);
 
-      escapeExit.dispose();
+      exitPresses.dispose();
 
       expect(row()).toBe(IDLE_ROW);
       expect(resize).not.toHaveBeenCalled();
@@ -143,29 +167,29 @@ describe('createEscapeExit', () => {
 
     it('leaves a message another source showed after the confirmation', () => {
       const { statusLine, row } = setup();
-      const escapeExit = createEscapeExit(statusLine);
-      escapeExit.press();
+      const exitPresses = createExitPresses(statusLine);
+      exitPresses.press('escape');
       statusLine.show('other');
 
-      escapeExit.dispose();
+      exitPresses.dispose();
 
       expect(row()).toBe('  other\n');
     });
 
     it('starts a fresh window on the next press after a dispose', () => {
       const { statusLine } = setup();
-      const escapeExit = createEscapeExit(statusLine);
-      escapeExit.press();
-      escapeExit.dispose();
+      const exitPresses = createExitPresses(statusLine);
+      exitPresses.press('escape');
+      exitPresses.dispose();
 
-      expect(escapeExit.press()).toBe('first');
+      expect(exitPresses.press('escape')).toBe('first');
     });
   });
 
   it('leaves a message another source showed after the confirmation when the timer fires', () => {
     const { statusLine, row } = setup();
-    const escapeExit = createEscapeExit(statusLine);
-    escapeExit.press();
+    const exitPresses = createExitPresses(statusLine);
+    exitPresses.press('escape');
     statusLine.show('other');
 
     vi.advanceTimersByTime(800);

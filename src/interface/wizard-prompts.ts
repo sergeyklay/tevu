@@ -1,7 +1,7 @@
 /**
  * The `text`, `confirm`, and `select` prompts of the wizards: the frames
- * `@clack/prompts` draws, plus the status line row, with Escape asking for a
- * second press before it cancels.
+ * `@clack/prompts` draws, plus the status line row, with Escape and Ctrl-C
+ * each asking for a second press before they cancel.
  *
  * Clack builds each frame inside a closure it does not expose, so the frames
  * are ported here; entry points are {@link text}, {@link confirm}, and
@@ -9,7 +9,7 @@
  */
 
 import { styleText } from 'node:util';
-import { ConfirmPrompt, SelectPrompt, settings, TextPrompt, wrapTextWithPrefix } from '@clack/core';
+import { ConfirmPrompt, SelectPrompt, TextPrompt, wrapTextWithPrefix } from '@clack/core';
 import {
   formatInstructionFooter,
   limitOptions,
@@ -22,7 +22,13 @@ import {
   symbolBar,
 } from '@clack/prompts';
 
-import { createEscapeExit, ESCAPE_EXIT_HINT } from './escape-exit';
+import {
+  createExitPresses,
+  EXIT_HINT,
+  exitKeyOf,
+  keepReadingAfterCtrlC,
+  suspendCancelAliases,
+} from './exit-press';
 
 import type { StatusLine, StatusLineDisplay } from './status-line';
 import type { Prompt, State } from '@clack/core';
@@ -41,7 +47,7 @@ type WizardPromptContext = {
  * Asks for a line of text and resolves it, drawing the status line row under
  * every open frame.
  *
- * Ctrl-C, a second Escape within the window, and an aborted `signal` resolve
+ * A second Escape or Ctrl-C within the window and an aborted `signal` resolve
  * the cancel value that `isCancel` from `@clack/prompts` accepts.
  *
  * @throws {Error} If the prompt settles without a value, which cannot happen
@@ -75,7 +81,7 @@ export async function text(
           : styleText(['inverse', 'hidden'], '_');
       const typed = this.userInput ? this.userInputWithCursor : placeholderCell;
       const answer = this.value ?? '';
-      return `${textFrame(this.state, title, typed, answer, this.error)}${statusLine.row(this.state, output, ESCAPE_EXIT_HINT)}`;
+      return `${textFrame(this.state, title, typed, answer, this.error)}${statusLine.row(this.state, output, EXIT_HINT)}`;
     },
   });
   return openExitPrompt('text', prompt, output, statusLine);
@@ -85,8 +91,8 @@ export async function text(
  * Asks a yes/no question and resolves the answer, drawing the status line row
  * under every open frame.
  *
- * `Yes` and `No` show side by side; `y` and `n` submit. Ctrl-C, a second
- * Escape within the window, and an aborted `signal` resolve the cancel value.
+ * `Yes` and `No` show side by side; `y` and `n` submit. A second Escape or
+ * Ctrl-C within the window and an aborted `signal` resolve the cancel value.
  *
  * @throws {Error} If the prompt settles without a value, which cannot happen
  *   because `ConfirmPrompt` always holds a boolean.
@@ -111,7 +117,7 @@ export async function confirm(
         `${symbol(this.state)}  `,
       )}\n`;
       const answer = this.value ? 'Yes' : 'No';
-      return `${confirmFrame(this.state, title, answer, this.value === true)}${statusLine.row(this.state, output, ESCAPE_EXIT_HINT)}`;
+      return `${confirmFrame(this.state, title, answer, this.value === true)}${statusLine.row(this.state, output, EXIT_HINT)}`;
     },
   });
   return openExitPrompt('confirm', prompt, output, statusLine);
@@ -121,9 +127,9 @@ export async function confirm(
  * Asks the operator to pick one option and resolves its `value`, drawing the
  * status line row under every open frame.
  *
- * The row counts against the terminal rows the option list may use. Ctrl-C, a
- * second Escape within the window, and an aborted `signal` resolve the cancel
- * value.
+ * The row counts against the terminal rows the option list may use. A second
+ * Escape or Ctrl-C within the window and an aborted `signal` resolve the
+ * cancel value.
  *
  * @throws {Error} If the prompt settles without a value, which cannot happen
  *   while the caller passes at least one option.
@@ -150,7 +156,7 @@ export async function select<Value extends string>(
         `${symbolBar(this.state) ?? ''}  `,
         `${symbol(this.state)}  `,
       )}\n`;
-      const row = statusLine.row(this.state, output, ESCAPE_EXIT_HINT);
+      const row = statusLine.row(this.state, output, EXIT_HINT);
       const chosen = this.options[this.cursor];
       const guide = `${styleText('gray', S_BAR)}  `;
       if (this.state === 'submit') {
@@ -179,8 +185,8 @@ export async function select<Value extends string>(
 }
 
 /**
- * Runs `prompt` with Escape routed through the Escape window and the status
- * line followed for as long as the prompt is open.
+ * Runs `prompt` with Escape and Ctrl-C routed through the exit window and the
+ * status line followed for as long as the prompt is open.
  */
 async function openExitPrompt<Value>(
   kind: string,
@@ -188,18 +194,19 @@ async function openExitPrompt<Value>(
   output: Writable,
   statusLine: StatusLine & StatusLineDisplay,
 ): Promise<Value | typeof CANCEL_SYMBOL> {
-  const escapeExit = createEscapeExit(statusLine);
-  prompt.on('key', (_char, key) => {
-    if (key.name === 'escape' && escapeExit.press() === 'second') {
+  const exitPresses = createExitPresses(statusLine);
+  prompt.on('key', (char, key) => {
+    const exitKey = exitKeyOf(char, key);
+    if (exitKey !== undefined && exitPresses.press(exitKey) === 'second') {
       prompt.state = 'cancel';
     }
   });
-  const previousAlias = settings.aliases.get('escape');
-  // With the alias, Clack cancels once the `key` listener returns, and at `confirm` it flips the answer first.
-  settings.aliases.delete('escape');
+  // With the aliases, Clack cancels once the `key` listener returns, and at `confirm` Escape flips the answer first.
+  const restoreAliases = suspendCancelAliases(['escape', 'ctrl-c']);
   let value: Value | typeof CANCEL_SYMBOL | undefined;
   try {
     const settled = prompt.prompt();
+    keepReadingAfterCtrlC(prompt);
     const stopFollowing = statusLine.follow(output);
     try {
       value = await settled;
@@ -207,10 +214,8 @@ async function openExitPrompt<Value>(
       stopFollowing();
     }
   } finally {
-    escapeExit.dispose();
-    if (previousAlias !== undefined) {
-      settings.aliases.set('escape', previousAlias);
-    }
+    exitPresses.dispose();
+    restoreAliases();
   }
   if (value === undefined) {
     throw new Error(`unreachable: ${kind} prompt settled without a value`);

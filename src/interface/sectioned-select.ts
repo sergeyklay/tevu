@@ -19,7 +19,14 @@ import {
   symbolBar,
 } from '@clack/prompts';
 
-import type { StatusLineDisplay } from './status-line';
+import {
+  createExitPresses,
+  exitKeyOf,
+  keepReadingAfterCtrlC,
+  suspendCancelAliases,
+} from './exit-press';
+
+import type { StatusLine, StatusLineDisplay } from './status-line';
 import type { State } from '@clack/core';
 import type { CANCEL_SYMBOL } from '@clack/prompts';
 import type { Readable, Writable } from 'node:stream';
@@ -40,10 +47,10 @@ type SectionedSelectOptions = {
   /** Aborting it resolves the cancel value, as for `select` from @clack/prompts. */
   signal?: AbortSignal;
   /** Drawn as the last row of every open frame. */
-  statusLine: StatusLineDisplay;
+  statusLine: StatusLine & StatusLineDisplay;
 };
 
-const BACK_HINT = 'Esc to go back · Ctrl-C to exit';
+const BACK_HINT = 'Esc to go back · Ctrl-C twice to exit';
 
 type Row = {
   kind: 'heading' | 'blank' | 'option';
@@ -106,8 +113,8 @@ export function renderSectionedSelect(
 /**
  * Asks the operator to pick one option and resolves its `value`.
  *
- * Escape resolves `back.value` after drawing the submit frame on `back`;
- * Ctrl-C and an aborted `signal` resolve the cancel value that `isCancel`
+ * Escape resolves `back.value` after drawing the submit frame on `back`; a
+ * second Ctrl-C within the window and an aborted `signal` resolve the cancel value that `isCancel`
  * from `@clack/prompts` accepts.
  *
  * @throws {Error} If the prompt settles without a value, which cannot happen
@@ -137,21 +144,32 @@ export async function sectionedSelect(
       });
     },
   });
-  // Escape and Ctrl-C both end the prompt as a cancel, and `key` is emitted
-  // before that, so it is the only place the two can be told apart.
-  prompt.on('key', (_char, key) => {
-    if (key.name === 'escape') {
+  const exitPresses = createExitPresses(statusLine);
+  // Escape ends the prompt as a cancel through Clack's alias, and `key` is
+  // emitted before that, so it is the only place Escape can be told apart.
+  prompt.on('key', (char, key) => {
+    const exitKey = exitKeyOf(char, key);
+    if (exitKey === 'escape') {
       escaped = true;
+    } else if (exitKey === 'ctrl-c' && exitPresses.press(exitKey) === 'second') {
+      prompt.state = 'cancel';
     }
   });
 
-  const settled = prompt.prompt();
-  const stopFollowing = statusLine.follow(output);
+  const restoreAliases = suspendCancelAliases(['ctrl-c']);
   let result: string | typeof CANCEL_SYMBOL | undefined;
   try {
-    result = await settled;
+    const settled = prompt.prompt();
+    keepReadingAfterCtrlC(prompt);
+    const stopFollowing = statusLine.follow(output);
+    try {
+      result = await settled;
+    } finally {
+      stopFollowing();
+    }
   } finally {
-    stopFollowing();
+    exitPresses.dispose();
+    restoreAliases();
   }
   if (escaped) {
     return back.value;
