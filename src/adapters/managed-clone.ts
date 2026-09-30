@@ -407,7 +407,12 @@ function describeLfsFetchFailure(
   display: string,
 ): string {
   let reason = `git lfs fetch exited with code ${exitCode}`;
-  const excerpt = stderrExcerpt(stderr, 'batch response: ');
+  // git-lfs 3.8 opens stderr with a "Fetching reference <sha>" progress line.
+  const withoutProgress = stderr
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('Fetching reference '))
+    .join('\n');
+  const excerpt = stderrExcerpt(withoutProgress, 'batch response: ');
   if (excerpt.length > 0) {
     reason += `: ${excerpt}`;
   }
