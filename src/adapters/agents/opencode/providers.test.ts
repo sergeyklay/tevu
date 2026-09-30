@@ -8,10 +8,10 @@ import {
   inspectOpenCodeProvider,
   operatorOpenCodeDirectory,
   readOpenCodeProviders,
-} from './opencode-providers';
+} from './providers';
 
 import type { OpenCodeAdapterDependencies, OpenCodeAdapterSettings } from './opencode';
-import type { AgentProviderSetting } from '@/domain/types';
+import type { AgentProviderSetting, CopiedProvider } from '@/domain/types';
 
 type OperatorDirectories = OpenCodeAdapterDependencies['operatorDirectories'];
 
@@ -107,7 +107,7 @@ describe('readOpenCodeProviders', () => {
 
     expect(result).toEqual({
       ok: true,
-      value: { agent: 'opencode', configurationFiles: [], findings: [] },
+      value: { agent: 'opencode', configurationFiles: [], findings: [], copiedProviders: [] },
     });
   });
 
@@ -812,5 +812,163 @@ describe('inspectOpenCodeProvider', () => {
       expect(copied.ok).toBe(false);
       expect(inspected).toEqual(copied);
     });
+  });
+});
+
+describe('readOpenCodeProviders copied providers', () => {
+  const { operatorDirectories, writeConfigFile, writeOpencodeJson } = useOperatorConfigDirectory();
+
+  async function readCopiedProviders(
+    settings: OpenCodeAdapterSettings,
+  ): Promise<readonly CopiedProvider[]> {
+    const result = await readOpenCodeProviders(settings, operatorDirectories());
+    if (!result.ok) {
+      throw new Error('providers must be read');
+    }
+    return result.value.copiedProviders;
+  }
+
+  const PRICE = { input: 1, output: 2 };
+
+  it('lists one entry per copied provider in settings.providers order, not configuration order', async () => {
+    await writeOpencodeJson({
+      provider: { acme: { models: {} }, zeta: { models: {} }, other: { models: {} } },
+    });
+    const settings = buildSettings({
+      providers: buildProviders({ id: 'zeta' }, { id: 'acme' }),
+    });
+
+    const copiedProviders = await readCopiedProviders(settings);
+
+    expect(copiedProviders).toEqual([
+      { id: 'zeta', pricedModels: [] },
+      { id: 'acme', pricedModels: [] },
+    ]);
+  });
+
+  it('sorts the priced models by UTF-16 code unit, not by locale', async () => {
+    await writeOpencodeJson({
+      provider: {
+        acme: {
+          models: {
+            b: { cost: PRICE },
+            B: { cost: PRICE },
+            a: { cost: PRICE },
+            Z: { cost: PRICE },
+          },
+        },
+      },
+    });
+    const settings = buildSettings({ providers: buildProviders({ id: 'acme' }) });
+
+    const copiedProviders = await readCopiedProviders(settings);
+
+    expect(copiedProviders).toEqual([{ id: 'acme', pricedModels: ['B', 'Z', 'a', 'b'] }]);
+  });
+
+  it('counts a zero price as a price and ignores every other price field', async () => {
+    await writeOpencodeJson({
+      provider: {
+        acme: {
+          models: {
+            free: { cost: { input: 0, output: 0 } },
+            tiered: {
+              cost: { input: 1, output: 2, cache_read: 3, tiers: [], context_over_200k: {} },
+            },
+            'cache-only': { cost: { cache_read: 1, cache_write: 1 } },
+          },
+        },
+      },
+    });
+    const settings = buildSettings({ providers: buildProviders({ id: 'acme' }) });
+
+    const copiedProviders = await readCopiedProviders(settings);
+
+    expect(copiedProviders).toEqual([{ id: 'acme', pricedModels: ['free', 'tiered'] }]);
+  });
+
+  it.each([
+    { name: 'no cost', model: {} },
+    { name: 'a null cost', model: { cost: null } },
+    { name: 'a string cost', model: { cost: 'free' } },
+    { name: 'an array cost', model: { cost: [1, 2] } },
+    { name: 'a cost without input', model: { cost: { output: 2 } } },
+    { name: 'a cost without output', model: { cost: { input: 1 } } },
+    { name: 'a string input', model: { cost: { input: '1', output: 2 } } },
+    { name: 'a null output', model: { cost: { input: 1, output: null } } },
+    { name: 'a model that is not an object', model: 'acme-large' },
+    { name: 'a model that is an array', model: [{ cost: PRICE }] },
+  ])('leaves a model with $name out of the priced models', async ({ model }) => {
+    await writeOpencodeJson({
+      provider: { acme: { models: { unpriced: model, priced: { cost: PRICE } } } },
+    });
+    const settings = buildSettings({ providers: buildProviders({ id: 'acme' }) });
+
+    const copiedProviders = await readCopiedProviders(settings);
+
+    expect(copiedProviders).toEqual([{ id: 'acme', pricedModels: ['priced'] }]);
+  });
+
+  it('leaves out a model whose price is not a finite number', async () => {
+    await writeConfigFile(
+      'opencode.json',
+      '{ "provider": { "acme": { "models": { "huge": { "cost": { "input": 1e999, "output": 1 } }, "priced": { "cost": { "input": 1, "output": 1 } } } } } }',
+    );
+    const settings = buildSettings({ providers: buildProviders({ id: 'acme' }) });
+
+    const copiedProviders = await readCopiedProviders(settings);
+
+    expect(copiedProviders).toEqual([{ id: 'acme', pricedModels: ['priced'] }]);
+  });
+
+  it.each([
+    { name: 'no models', definition: { baseURL: 'https://acme.example.test' } },
+    { name: 'a models array', definition: { models: [{ cost: PRICE }] } },
+    { name: 'a models string', definition: { models: 'acme-large' } },
+    { name: 'a null models', definition: { models: null } },
+  ])('records no priced model for a definition with $name', async ({ definition }) => {
+    await writeOpencodeJson({ provider: { acme: definition } });
+    const settings = buildSettings({ providers: buildProviders({ id: 'acme' }) });
+
+    const copiedProviders = await readCopiedProviders(settings);
+
+    expect(copiedProviders).toEqual([{ id: 'acme', pricedModels: [] }]);
+  });
+
+  it('keeps the priced models of a definition whose api_key is substituted', async () => {
+    await writeOpencodeJson({
+      provider: {
+        acme: {
+          options: { apiKey: 'sk-host-sentinel-should-never-appear-471' },
+          models: { large: { cost: PRICE } },
+        },
+      },
+    });
+    const settings = buildSettings({
+      providers: buildProviders({ id: 'acme', api_key: 'ACME_KEY' }),
+      declaredVariables: { secrets: ['ACME_KEY'], env: [] },
+    });
+
+    const copiedProviders = await readCopiedProviders(settings);
+
+    expect(copiedProviders).toEqual([{ id: 'acme', pricedModels: ['large'] }]);
+  });
+
+  it('reads the prices from the definition merged across configuration files', async () => {
+    await writeConfigFile(
+      'config.json',
+      JSON.stringify({ provider: { acme: { models: { base: { cost: PRICE } } } } }),
+    );
+    await writeConfigFile(
+      'opencode.json',
+      JSON.stringify({
+        provider: { acme: { models: { base: { cost: PRICE }, added: { cost: PRICE } } } },
+      }),
+    );
+    const settings = buildSettings({ providers: buildProviders({ id: 'acme' }) });
+
+    const copiedProviders = await readCopiedProviders(settings);
+
+    expect(copiedProviders).toEqual([{ id: 'acme', pricedModels: ['added', 'base'] }]);
   });
 });

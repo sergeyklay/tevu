@@ -538,6 +538,7 @@ function buildRunResult(overrides: Partial<RunResult> = {}): RunResult {
         gitVersion: '2.47.0',
         agentVersions: { [AGENT_NAME]: '1.18.32' },
         agentConfigurationFiles: {},
+        copiedProviders: {},
       },
       execution: { concurrency: 2, caseTimeoutMs: 600000, repeat: { value: 1, source: 'config' } },
       cases: [identity],

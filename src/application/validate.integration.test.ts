@@ -117,7 +117,7 @@ function buildFakeAgentAdapter(
         overrides.readProviders ??
         vi.fn(async () => ({
           ok: true as const,
-          value: { agent: 'opencode', configurationFiles: [], findings: [] },
+          value: { agent: 'opencode', configurationFiles: [], findings: [], copiedProviders: [] },
         })),
       inspectOperatorProvider: vi.fn(async () => ({
         ok: true as const,
@@ -555,7 +555,12 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
     const { adapter } = buildFakeAgentAdapter({
       readProviders: vi.fn(async () => ({
         ok: true as const,
-        value: { agent: 'opencode', configurationFiles: acmeConfigurationFiles(), findings: [] },
+        value: {
+          agent: 'opencode',
+          configurationFiles: acmeConfigurationFiles(),
+          findings: [],
+          copiedProviders: [],
+        },
       })),
       listModels: buildDependentListModels(['acme/model-a']),
     });
@@ -595,7 +600,12 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
     const { adapter } = buildFakeAgentAdapter({
       readProviders: vi.fn(async () => ({
         ok: true as const,
-        value: { agent: 'opencode', configurationFiles: acmeConfigurationFiles(), findings: [] },
+        value: {
+          agent: 'opencode',
+          configurationFiles: acmeConfigurationFiles(),
+          findings: [],
+          copiedProviders: [],
+        },
       })),
       listModels: buildDependentListModels(['acme/model-a', 'acme/model-b']),
     });
@@ -630,7 +640,12 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
     const { adapter } = buildFakeAgentAdapter({
       readProviders: vi.fn(async () => ({
         ok: true as const,
-        value: { agent: 'opencode', configurationFiles: acmeConfigurationFiles(), findings: [] },
+        value: {
+          agent: 'opencode',
+          configurationFiles: acmeConfigurationFiles(),
+          findings: [],
+          copiedProviders: [],
+        },
       })),
       listModels: buildDependentListModels(['acme/model-a', 'acme/model-b']),
     });
@@ -673,6 +688,7 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
               message: 'provider "acme" names no variable listed in agents.opencode.secrets',
             },
           ],
+          copiedProviders: [],
         },
       })),
       listModels: buildDependentListModels(['acme/model-a', 'acme/model-b']),

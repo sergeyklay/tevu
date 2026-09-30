@@ -20,6 +20,7 @@ import { callModelRole, listModelsInCallEnvironment } from './model-call';
 import type { OpenCodeAdapterDependencies } from '@/adapters/agents/opencode/opencode';
 import type {
   AgentAdapter,
+  CopiedProvider,
   EnvironmentAdapter,
   GitWorkspaceAdapter,
   ManagedProcessRequest,
@@ -65,19 +66,26 @@ function buildSecretRedactor(secretValues: readonly string[]): SecretRedactor {
   return createSecretRedactor(() => secretValues, createRedactor(secretValues));
 }
 
-/** A redactor whose `redactValue` always fails, exercising a record-redaction failure mid-run. */
+/** A redactor whose `redactValue` fails after the copied providers pass, exercising a record-redaction failure mid-run. */
 function buildRecordRedactionFailingSecretRedactor(): SecretRedactor {
+  let calls = 0;
   return {
     secretValues: () => [],
     redactText: (text) => text,
-    redactValue: () => ({
-      ok: false,
-      error: {
-        kind: 'ArtifactError' as const,
-        operation: 'redact-record',
-        reason: 'record redaction failed',
-      },
-    }),
+    redactValue: (value) => {
+      calls += 1;
+      if (calls === 1) {
+        return { ok: true, value };
+      }
+      return {
+        ok: false,
+        error: {
+          kind: 'ArtifactError' as const,
+          operation: 'redact-record',
+          reason: 'record redaction failed',
+        },
+      };
+    },
   };
 }
 
@@ -632,6 +640,7 @@ describe('callModelRole providers resolution', () => {
         { relativePath: 'opencode/opencode.json', text: '{"provider":{"acme":{}}}\n' },
       ],
       findings: [],
+      copiedProviders: [],
     };
   }
 
@@ -711,7 +720,10 @@ describe('callModelRole providers resolution', () => {
       ...realAdapter,
       async readProviders() {
         readProvidersCalls += 1;
-        return { ok: true, value: { agent: 'opencode', configurationFiles: [], findings: [] } };
+        return {
+          ok: true,
+          value: { agent: 'opencode', configurationFiles: [], findings: [], copiedProviders: [] },
+        };
       },
     };
     const realEnvironments = createEnvironmentAdapter();
@@ -748,6 +760,85 @@ describe('callModelRole providers resolution', () => {
     expectOk(result);
     expect(readProvidersCalls).toBe(0);
     expect(receivedFiles).toEqual([['opencode/opencode.json']]);
+  });
+
+  describe('copied providers passed to the agent', () => {
+    const READ_PROVIDERS: readonly CopiedProvider[] = [
+      { id: 'read-proxy', pricedModels: ['read-large'] },
+    ];
+    const REQUEST_PROVIDERS: readonly CopiedProvider[] = [
+      { id: 'request-proxy', pricedModels: ['request-large'] },
+    ];
+
+    async function recordCopiedProviders(
+      requestProviders: ProviderSnapshot | undefined,
+    ): Promise<readonly (readonly CopiedProvider[])[]> {
+      const executable = await writeFakeExecutable('ok', 'reply-with-secret');
+      const realAdapter: AgentAdapter = createOpenCodeAdapter(
+        {
+          agent: 'opencode',
+          executable,
+          providers: [],
+          declaredVariables: { secrets: [], env: [] },
+        },
+        {
+          runProcess: runManagedProcess,
+          secrets: buildSecretRedactor([SECRET_VALUE]),
+          probeEnvironment: { PATH: process.env['PATH'] ?? '' },
+          probeDirectory: process.cwd(),
+          operatorDirectories: { home: undefined, xdgConfigHome: undefined },
+        },
+      );
+      const received: (readonly CopiedProvider[])[] = [];
+      const agent: AgentAdapter = {
+        ...realAdapter,
+        async readProviders() {
+          return {
+            ok: true,
+            value: { ...buildProviderSnapshot(), copiedProviders: READ_PROVIDERS },
+          };
+        },
+        async callModel(input) {
+          received.push(input.copiedProviders);
+          return realAdapter.callModel(input);
+        },
+      };
+      const modelCallDependencies: ModelCallDependencies = {
+        agents: new Map([['opencode', agent]]),
+        environments: createEnvironmentAdapter(),
+        git: createGitWorkspaceAdapter({ workspacesDirectory: join(tempRoot, 'workspaces') }),
+      };
+
+      const result = await callModelRole(
+        {
+          config: buildConfig(),
+          role: 'grader',
+          prompt: PROMPT,
+          timeoutMs: 10_000,
+          cancellation: new AbortController().signal,
+          ...(requestProviders === undefined ? {} : { providers: requestProviders }),
+        },
+        modelCallDependencies,
+      );
+
+      expectOk(result);
+      return received;
+    }
+
+    it('passes the copied providers of the snapshot it read when request.providers is absent', async () => {
+      const received = await recordCopiedProviders(undefined);
+
+      expect(received).toEqual([READ_PROVIDERS]);
+    });
+
+    it('passes the copied providers of request.providers, not of a snapshot it would read', async () => {
+      const received = await recordCopiedProviders({
+        ...buildProviderSnapshot(),
+        copiedProviders: REQUEST_PROVIDERS,
+      });
+
+      expect(received).toEqual([REQUEST_PROVIDERS]);
+    });
   });
 });
 

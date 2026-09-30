@@ -25,6 +25,7 @@ import type {
   CheckStateRequest,
   Clock,
   CommitLookup,
+  CopiedProvider,
   EnvironmentAdapter,
   EnvironmentVariableRecord,
   EvaluatorProcessAdapter,
@@ -601,7 +602,10 @@ function createHarness(config: TevuConfig) {
       if (agentState.providersError !== null) {
         return { ok: false, error: agentState.providersError };
       }
-      return { ok: true, value: { agent: 'fake-agent', configurationFiles: [], findings: [] } };
+      return {
+        ok: true,
+        value: { agent: 'fake-agent', configurationFiles: [], findings: [], copiedProviders: [] },
+      };
     },
     async inspectOperatorProvider() {
       return { ok: true, value: { defined: false } };
@@ -1296,6 +1300,7 @@ describe('runBenchmark', () => {
       gitVersion: '2.45.0-synthetic',
       agentVersions: { [AGENT_NAME]: '99.0.0-synthetic' },
       agentConfigurationFiles: { [AGENT_NAME]: [] },
+      copiedProviders: { [AGENT_NAME]: [] },
     });
     expect(manifest.configPath).toBe(CONFIG_PATH);
     expect(manifest.execution).toEqual({
@@ -1360,6 +1365,81 @@ describe('runBenchmark', () => {
     );
   });
 
+  describe('copied providers', () => {
+    const SECOND_AGENT_NAME = 'second-agent';
+    const FIRST_PROVIDERS = [{ id: 'alpha-proxy', pricedModels: ['alpha-large', 'alpha-small'] }];
+    const SECOND_PROVIDERS = [
+      { id: 'beta-proxy', pricedModels: [] },
+      { id: 'gamma-proxy', pricedModels: ['gamma-large'] },
+    ];
+
+    function buildTwoAgentHarness() {
+      const base = buildTevuConfig();
+      const config: TevuConfig = {
+        ...base,
+        agents: { ...base.agents, [SECOND_AGENT_NAME]: base.agents[AGENT_NAME]! },
+        models: base.models.map((model) =>
+          model.id === 'c2' ? { ...model, agent: SECOND_AGENT_NAME } : model,
+        ),
+      };
+      const harness = createHarness(config);
+      const baseAdapter = harness.dependencies.agents.get(AGENT_NAME)!;
+      const received = new Map<string, readonly CopiedProvider[]>();
+      const withProviders = (
+        agent: string,
+        copiedProviders: readonly CopiedProvider[],
+      ): AgentAdapter => ({
+        ...baseAdapter,
+        async readProviders() {
+          return {
+            ok: true,
+            value: { agent, configurationFiles: [], findings: [], copiedProviders },
+          };
+        },
+        normalizeMetrics(input) {
+          received.set(input.caseId, input.copiedProviders);
+          return baseAdapter.normalizeMetrics(input);
+        },
+      });
+      harness.dependencies.agents = new Map([
+        [AGENT_NAME, withProviders(AGENT_NAME, FIRST_PROVIDERS)],
+        [SECOND_AGENT_NAME, withProviders(SECOND_AGENT_NAME, SECOND_PROVIDERS)],
+      ]);
+      return { config, harness, received };
+    }
+
+    it('writes each read agent its own snapshot copiedProviders under the keys of agentConfigurationFiles, as a copy', async () => {
+      const { config, harness } = buildTwoAgentHarness();
+
+      const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+
+      const { tools } = unwrapOk(result).manifest;
+      expect(Object.keys(tools.copiedProviders)).toEqual(
+        Object.keys(tools.agentConfigurationFiles),
+      );
+      expect(tools.copiedProviders).toEqual({
+        [AGENT_NAME]: FIRST_PROVIDERS,
+        [SECOND_AGENT_NAME]: SECOND_PROVIDERS,
+      });
+      const recorded = tools.copiedProviders[AGENT_NAME]!;
+      expect(recorded).not.toBe(FIRST_PROVIDERS);
+      expect(recorded[0]).not.toBe(FIRST_PROVIDERS[0]);
+      expect(recorded[0]!.pricedModels).not.toBe(FIRST_PROVIDERS[0]!.pricedModels);
+    });
+
+    it('hands each case its own agent snapshot copiedProviders when normalizing metrics', async () => {
+      const { config, harness, received } = buildTwoAgentHarness();
+
+      const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+
+      unwrapOk(result);
+      expect(received.get('task-1--c1--1')).toEqual(FIRST_PROVIDERS);
+      expect(received.get('task-2--c1--1')).toEqual(FIRST_PROVIDERS);
+      expect(received.get('task-1--c2--1')).toEqual(SECOND_PROVIDERS);
+      expect(received.get('task-2--c2--1')).toEqual(SECOND_PROVIDERS);
+      expect(received.size).toBe(4);
+    });
+  });
   it('gives each attempt its own createIsolatedCase call with its own identity, and its own createCaseEnvironments call (AC-5, verification property 4)', async () => {
     const config = buildTevuConfig({
       run: buildRunSettings({ repeat: 2 }),
@@ -2514,7 +2594,12 @@ function buildRunManifest(overrides: Partial<RunManifest> = {}): RunManifest {
     startedAt: CLOCK_BASE,
     completedAt: null,
     host: { platform: 'linux', nodeVersion: 'v24.0.0-synthetic' },
-    tools: { gitVersion: '2.45.0-synthetic', agentVersions: {}, agentConfigurationFiles: {} },
+    tools: {
+      gitVersion: '2.45.0-synthetic',
+      agentVersions: {},
+      agentConfigurationFiles: {},
+      copiedProviders: {},
+    },
     execution: { concurrency: 1, caseTimeoutMs: 1_000, repeat: { value: 1, source: 'config' } },
     cases: [],
     ...overrides,

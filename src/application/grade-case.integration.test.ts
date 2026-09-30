@@ -236,7 +236,7 @@ async function gradeWithFakeExecutable(options: CallOptions) {
       timeoutMs: options.timeoutMs ?? 10_000,
       redact: options.redact ?? ((text: string) => text),
       cancellation: options.cancellation ?? new AbortController().signal,
-      providers: { agent: 'opencode', configurationFiles: [], findings: [] },
+      providers: { agent: 'opencode', configurationFiles: [], findings: [], copiedProviders: [] },
     },
     dependencies,
   );
@@ -431,7 +431,10 @@ describe('gradeCase providers forwarding', () => {
       ...realAdapter,
       async readProviders() {
         readProvidersCalls += 1;
-        return { ok: true, value: { agent: 'opencode', configurationFiles: [], findings: [] } };
+        return {
+          ok: true,
+          value: { agent: 'opencode', configurationFiles: [], findings: [], copiedProviders: [] },
+        };
       },
     };
     const realEnvironments = createEnvironmentAdapter();
@@ -457,7 +460,7 @@ describe('gradeCase providers forwarding', () => {
         timeoutMs: 10_000,
         redact: (text) => text,
         cancellation: new AbortController().signal,
-        providers: { agent: 'opencode', configurationFiles, findings: [] },
+        providers: { agent: 'opencode', configurationFiles, findings: [], copiedProviders: [] },
       },
       dependencies,
     );

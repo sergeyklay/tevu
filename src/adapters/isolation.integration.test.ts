@@ -2756,7 +2756,10 @@ function buildTrivialAgentAdapter(): AgentAdapter {
       };
     },
     async readProviders() {
-      return { ok: true, value: { agent: 'fake-agent', configurationFiles: [], findings: [] } };
+      return {
+        ok: true,
+        value: { agent: 'fake-agent', configurationFiles: [], findings: [], copiedProviders: [] },
+      };
     },
     async inspectOperatorProvider() {
       return { ok: true, value: { defined: false } };

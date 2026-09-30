@@ -250,7 +250,10 @@ function buildFakeAgentAdapter(
       };
     },
     async readProviders() {
-      return { ok: true, value: { agent: 'fake-agent', configurationFiles: [], findings: [] } };
+      return {
+        ok: true,
+        value: { agent: 'fake-agent', configurationFiles: [], findings: [], copiedProviders: [] },
+      };
     },
     async inspectOperatorProvider() {
       return { ok: true, value: { defined: false } };
@@ -525,7 +528,10 @@ describe('runBenchmark providers (AC-1, D10, D11)', () => {
       async readProviders() {
         readProvidersCalls += 1;
         timeline.push('readProviders');
-        return { ok: true, value: { agent: FAKE_AGENT_NAME, configurationFiles, findings: [] } };
+        return {
+          ok: true,
+          value: { agent: FAKE_AGENT_NAME, configurationFiles, findings: [], copiedProviders: [] },
+        };
       },
       async run(input) {
         const configPath = join(
@@ -709,7 +715,10 @@ describe('runBenchmark grading in the case flow', () => {
         };
       },
       async readProviders() {
-        return { ok: true, value: { agent: 'fake-agent', configurationFiles: [], findings: [] } };
+        return {
+          ok: true,
+          value: { agent: 'fake-agent', configurationFiles: [], findings: [], copiedProviders: [] },
+        };
       },
       async inspectOperatorProvider() {
         return { ok: true, value: { defined: false } };

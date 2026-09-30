@@ -72,7 +72,10 @@ export async function readOpenCodeProviders(
 ): Promise<TevuResult<ProviderSnapshot, 'ConfigValidationError'>> {
   const { agent, providers, declaredVariables } = settings;
   if (providers.length === 0) {
-    return { ok: true, value: { agent, configurationFiles: [], findings: [] } };
+    return {
+      ok: true,
+      value: { agent, configurationFiles: [], findings: [], copiedProviders: [] },
+    };
   }
 
   const blockIdentifier = `agents.${agent}.providers`;
@@ -147,8 +150,33 @@ export async function readOpenCodeProviders(
       agent,
       configurationFiles: [{ relativePath: 'opencode/opencode.json', text }],
       findings: warnings,
+      copiedProviders: listed.map(([id, definition]) => ({
+        id,
+        pricedModels: pricedModelKeys(definition),
+      })),
     },
   };
+}
+
+/**
+ * Lists the keys of `definition.models` whose value carries a `cost` with
+ * finite numeric `input` and `output`, in ascending UTF-16 code-unit order.
+ * OpenCode's other price fields are not consulted.
+ */
+function pricedModelKeys(definition: Record<string, unknown>): string[] {
+  const models = definition['models'];
+  if (!isPlainObject(models)) {
+    return [];
+  }
+  return Object.keys(models)
+    .filter((key) => {
+      const model = models[key];
+      const cost = isPlainObject(model) ? model['cost'] : undefined;
+      return (
+        isPlainObject(cost) && Number.isFinite(cost['input']) && Number.isFinite(cost['output'])
+      );
+    })
+    .sort();
 }
 
 /**

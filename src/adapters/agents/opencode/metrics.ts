@@ -9,15 +9,15 @@
 
 import { unavailableMetric } from '@/domain/types';
 
-import { decodeEvent, decodeExport } from './opencode-protocol';
+import { decodeEvent, decodeExport } from './protocol';
 
 import type {
   OpenCodeExport,
   OpenCodePart,
   OpenCodeRunEvent,
   ProtocolErrorShape,
-} from './opencode-protocol';
-import type { AgentMetrics, AgentMetricsInput, MetricValue } from '@/domain/types';
+} from './protocol';
+import type { AgentMetrics, AgentMetricsInput, CopiedProvider, MetricValue } from '@/domain/types';
 
 const EXPORT_SOURCE = 'root-session export';
 const EVENT_SOURCE = 'run events';
@@ -81,7 +81,7 @@ export function normalizeMetrics(input: AgentMetricsInput): NormalizeMetricsResu
     input.sessionId ?? sessionExport?.info.id ?? decodedEvents[0]?.sessionID ?? null;
 
   if (sessionExport !== null) {
-    return { ok: true, value: normalizeFromExport(sessionExport) };
+    return { ok: true, value: normalizeFromExport(sessionExport, input.copiedProviders) };
   }
   return {
     ok: true,
@@ -96,16 +96,19 @@ export function normalizeMetrics(input: AgentMetricsInput): NormalizeMetricsResu
 /** Accumulates one metric component, remembering the first malformed occurrence. */
 type ComponentSum = { total: number; malformed: string | null };
 
+function describeFieldDefect(field: string, value: unknown, messageId: string): string {
+  return value === undefined
+    ? `field "${field}" is absent in export message "${messageId}"`
+    : `field "${field}" is malformed in export message "${messageId}"`;
+}
+
 function addComponent(sum: ComponentSum, value: unknown, messageId: string, field: string): void {
   if (typeof value === 'number' && Number.isFinite(value)) {
     sum.total += value;
     return;
   }
   if (sum.malformed === null) {
-    sum.malformed =
-      value === undefined
-        ? `field "${field}" is absent in export message "${messageId}"`
-        : `field "${field}" is malformed in export message "${messageId}"`;
+    sum.malformed = describeFieldDefect(field, value, messageId);
   }
 }
 
@@ -119,7 +122,62 @@ function sumMetric(sum: ComponentSum, unit: MetricValue['unit']): MetricValue {
     : unavailableMetric(unit, sum.malformed);
 }
 
-export function normalizeFromExport(sessionExport: OpenCodeExport): AgentMetrics {
+type ExportAssistantInfo = Extract<
+  OpenCodeExport['messages'][number]['info'],
+  { role: 'assistant' }
+>;
+
+function providerModelKey(providerID: string, modelID: string): string {
+  return `${providerID}\u0000${modelID}`;
+}
+
+/**
+ * Names the first zero-cost message whose zero has no evidence of a price, or
+ * `undefined` when every zero is evidenced. A provider the agent block does
+ * not copy is evidenced by the agent's own model catalog, which tevu cannot
+ * see; a copied provider's model is evidenced by a price in its copied
+ * definition or by a non-zero cost for the same model elsewhere in the export.
+ */
+function describeUnevidencedZero(
+  zeroCostMessages: readonly ExportAssistantInfo[],
+  nonZeroModels: ReadonlySet<string>,
+  copiedProviders: readonly CopiedProvider[],
+): string | undefined {
+  const pricedModels = new Map<string, readonly string[]>(
+    copiedProviders.map((provider) => [provider.id, provider.pricedModels]),
+  );
+  for (const info of zeroCostMessages) {
+    const { providerID, modelID } = info;
+    if (!isNonEmptyString(providerID)) {
+      return describeFieldDefect('providerID', providerID, info.id);
+    }
+    const copiedModels = pricedModels.get(providerID);
+    if (copiedModels === undefined) {
+      continue;
+    }
+    if (!isNonEmptyString(modelID)) {
+      return describeFieldDefect('modelID', modelID, info.id);
+    }
+    if (
+      copiedModels.includes(modelID) ||
+      nonZeroModels.has(providerModelKey(providerID, modelID))
+    ) {
+      continue;
+    }
+    return `the copied definition of provider "${providerID}" defines no price for model "${modelID}"`;
+  }
+  return undefined;
+}
+
+/**
+ * Normalizes every `AgentMetrics` field from a decoded root-session export.
+ * A reported zero cost counts as measured only with evidence of a price for
+ * a provider listed in `copiedProviders`; otherwise `cost` is unavailable.
+ */
+export function normalizeFromExport(
+  sessionExport: OpenCodeExport,
+  copiedProviders: readonly CopiedProvider[],
+): AgentMetrics {
   const sums = {
     inputTokens: emptySum(),
     outputTokens: emptySum(),
@@ -134,6 +192,8 @@ export function normalizeFromExport(sessionExport: OpenCodeExport): AgentMetrics
   let toolCalls = 0;
   let skillCalls = 0;
   let skillMalformed: string | null = null;
+  const zeroCostMessages: ExportAssistantInfo[] = [];
+  const nonZeroModels = new Set<string>();
 
   const seenMessages = new Set<string>();
   const seenParts = new Set<string>();
@@ -162,6 +222,15 @@ export function normalizeFromExport(sessionExport: OpenCodeExport): AgentMetrics
       addComponent(sums.cacheReadTokens, info.tokens?.cache?.read, info.id, 'tokens.cache.read');
       addComponent(sums.cacheWriteTokens, info.tokens?.cache?.write, info.id, 'tokens.cache.write');
       addComponent(sums.cost, info.cost, info.id, 'cost');
+      if (info.cost === 0) {
+        zeroCostMessages.push(info);
+      } else if (
+        Number.isFinite(info.cost) &&
+        isNonEmptyString(info.providerID) &&
+        isNonEmptyString(info.modelID)
+      ) {
+        nonZeroModels.add(providerModelKey(info.providerID, info.modelID));
+      }
     }
 
     for (const part of message.parts) {
@@ -183,6 +252,11 @@ export function normalizeFromExport(sessionExport: OpenCodeExport): AgentMetrics
     }
   }
 
+  const unevidencedZero =
+    sums.cost.malformed === null && copiedProviders.length > 0
+      ? describeUnevidencedZero(zeroCostMessages, nonZeroModels, copiedProviders)
+      : undefined;
+
   return {
     inputTokens: sumMetric(sums.inputTokens, 'token'),
     outputTokens: sumMetric(sums.outputTokens, 'token'),
@@ -197,7 +271,10 @@ export function normalizeFromExport(sessionExport: OpenCodeExport): AgentMetrics
       skillMalformed === null
         ? measured(skillCalls, 'count', EXPORT_SOURCE)
         : unavailableMetric('count', skillMalformed),
-    cost: sumMetric(sums.cost, 'USD'),
+    cost:
+      unevidencedZero === undefined
+        ? sumMetric(sums.cost, 'USD')
+        : unavailableMetric('USD', unevidencedZero),
   };
 }
 

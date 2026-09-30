@@ -14,9 +14,9 @@ import { unavailableBenchmarkMetrics } from '@/domain/types';
 import { combineCaseMetrics } from '@/evaluation/metrics';
 
 import { createOpenCodeAdapter } from './opencode';
-import { decodeEvent, decodeExport } from './opencode-protocol';
+import { decodeEvent, decodeExport } from './protocol';
 
-import type { OpenCodeExport, OpenCodeRunEvent } from './opencode-protocol';
+import type { OpenCodeExport, OpenCodeRunEvent } from './protocol';
 import type { ModelDefinitionInput, TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentCapabilityReport,
@@ -327,7 +327,8 @@ function buildManifest(
     tools: {
       gitVersion: 'git version 2.45.0',
       agentVersions: { opencode: capabilities.detectedVersion },
-      agentConfigurationFiles: {},
+      agentConfigurationFiles: { opencode: [] },
+      copiedProviders: { opencode: [] },
     },
     execution: {
       concurrency: config.run.concurrency,
@@ -402,6 +403,7 @@ function buildSyntheticRecords(): SyntheticRecords {
     sessionId: 'ses-root-0001',
     sessionExport: decodedExport.value,
     events,
+    copiedProviders: [],
   });
   if (!alphaNormalized.ok) {
     throw new Error(`fixture metrics must normalize: ${alphaNormalized.error.reason}`);
@@ -945,4 +947,192 @@ describe('OpenCode report regeneration matches the pinned baseline', () => {
       }
     },
   );
+});
+
+describe('OpenCode report regeneration of copied providers', () => {
+  const UNPRICED = [{ id: 'acme-proxy', pricedModels: [] }];
+  const PRICED = [{ id: 'acme-proxy', pricedModels: ['acme-large'] }];
+  const NO_PRICE_REASON =
+    'the copied definition of provider "acme-proxy" defines no price for model "acme-large"';
+
+  async function editStoredManifest(
+    root: string,
+    runId: string,
+    edit: (manifest: { tools: Record<string, unknown> }) => void,
+  ): Promise<string> {
+    const runJsonPath = join(root, 'artifacts', runId, 'run.json');
+    const stored = JSON.parse(await readFile(runJsonPath, 'utf8')) as {
+      manifest: { tools: Record<string, unknown> };
+    };
+    edit(stored.manifest);
+    await writeFile(runJsonPath, JSON.stringify(stored, null, 2), 'utf8');
+    return runJsonPath;
+  }
+
+  async function replaceAlphaExport(root: string, runId: string, name: string): Promise<void> {
+    await writeFile(
+      caseFile(root, runId, 'task-1--alpha--1', 'session.json'),
+      readTextFixture(name),
+      'utf8',
+    );
+  }
+
+  function alphaCost(normalizedJson: string): unknown {
+    const report = JSON.parse(normalizedJson) as {
+      cases: Array<{ identity: { caseId: string }; metrics: { cost: unknown } }>;
+    };
+    return report.cases.find((entry) => entry.identity.caseId === 'task-1--alpha--1')?.metrics.cost;
+  }
+
+  it.each([
+    {
+      name: 'an unpriced model',
+      copiedProviders: UNPRICED,
+      expectedCost: {
+        value: null,
+        unit: 'USD',
+        availability: { status: 'unavailable', reason: NO_PRICE_REASON },
+        scope: 'root-session',
+      },
+    },
+    {
+      name: 'a priced model',
+      copiedProviders: PRICED,
+      expectedCost: {
+        value: 0,
+        unit: 'USD',
+        availability: { status: 'available', source: 'root-session export' },
+        scope: 'root-session',
+      },
+    },
+  ])(
+    'recomputes the case cost of $name from the copied providers the manifest records',
+    async ({ copiedProviders, expectedCost }) => {
+      const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-cost-'));
+      try {
+        const { runId, store } = await createSyntheticRun(root);
+        await editStoredManifest(root, runId, (manifest) => {
+          manifest.tools['copiedProviders'] = { opencode: copiedProviders };
+        });
+        await replaceAlphaExport(root, runId, 'session-unpriced.json');
+
+        const rebuilt = await rebuildReport(runId, store, AGENTS_REGISTRY);
+
+        expect(rebuilt.ok).toBe(true);
+        if (!rebuilt.ok) return;
+        expect(alphaCost(rebuilt.value.normalizedJson)).toEqual(expectedCost);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('reports the unavailable cost in the Markdown and returns identical bytes across two rebuilds', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-cost-bytes-'));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      await editStoredManifest(root, runId, (manifest) => {
+        manifest.tools['copiedProviders'] = { opencode: UNPRICED };
+      });
+      await replaceAlphaExport(root, runId, 'session-unpriced.json');
+
+      const first = await rebuildReport(runId, store, AGENTS_REGISTRY);
+      const second = await rebuildReport(runId, store, AGENTS_REGISTRY);
+
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(true);
+      if (!first.ok || !second.ok) return;
+      expect(first.value.markdown).toContain(`cost: unavailable: ${NO_PRICE_REASON}`);
+      expect(second.value.normalizedJson).toBe(first.value.normalizedJson);
+      expect(second.value.markdown).toBe(first.value.markdown);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { name: 'missing', copiedProviders: undefined },
+    { name: 'null', copiedProviders: null },
+    { name: 'a list', copiedProviders: [] },
+    { name: 'without an entry for the case agent', copiedProviders: {} },
+    { name: 'holding a non-list value', copiedProviders: { opencode: 'acme-proxy' } },
+    {
+      name: 'holding an entry without an id',
+      copiedProviders: { opencode: [{ pricedModels: [] }] },
+    },
+    {
+      name: 'holding an entry with an empty id',
+      copiedProviders: { opencode: [{ id: '', pricedModels: [] }] },
+    },
+    {
+      name: 'holding pricedModels that is not a list',
+      copiedProviders: { opencode: [{ id: 'acme-proxy', pricedModels: 'acme-large' }] },
+    },
+    {
+      name: 'holding pricedModels with a non-string model',
+      copiedProviders: { opencode: [{ id: 'acme-proxy', pricedModels: ['acme-large', 7] }] },
+    },
+  ])(
+    'refuses a run whose manifest has copiedProviders $name, before any write',
+    async ({ copiedProviders }) => {
+      const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-copied-'));
+      try {
+        const { runId, store } = await createSyntheticRun(root);
+        const runJsonPath = await editStoredManifest(root, runId, (manifest) => {
+          if (copiedProviders === undefined) {
+            delete manifest.tools['copiedProviders'];
+          } else {
+            manifest.tools['copiedProviders'] = copiedProviders;
+          }
+        });
+        const corrupted = await readFile(runJsonPath, 'utf8');
+        const reportPath = join(root, 'artifacts', runId, 'report.md');
+
+        const result = await rebuildReport(runId, store, AGENTS_REGISTRY);
+
+        expect(result).toMatchObject({
+          ok: false,
+          error: {
+            kind: 'ArtifactError',
+            reason: `stored manifest for run "${runId}" has a malformed shape or mismatched identity`,
+          },
+        });
+        expect(await readFile(runJsonPath, 'utf8')).toBe(corrupted);
+        expect(existsSync(reportPath)).toBe(false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses a case result whose agent has a registered adapter but no copiedProviders entry', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-own-key-'));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      const resultPath = caseFile(root, runId, 'task-1--alpha--1', 'result.json');
+      const stored = JSON.parse(await readFile(resultPath, 'utf8')) as {
+        identity: Record<string, unknown>;
+      };
+      stored.identity['agent'] = 'second-agent';
+      await writeFile(resultPath, JSON.stringify(stored, null, 2), 'utf8');
+      const registry: AgentRegistry = new Map([
+        ...AGENTS_REGISTRY,
+        ['second-agent', requireOpenCodeAdapter()],
+      ]);
+
+      const result = await rebuildReport(runId, store, registry);
+
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          kind: 'ArtifactError',
+          operation: 'rebuild-report',
+          reason:
+            'case "task-1--alpha--1" names agent "second-agent", which has no tools.copiedProviders entry in run.json',
+        },
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -50,6 +50,7 @@ import type {
   CheckResult,
   CheckStateRecord,
   CheckStateRequest,
+  CopiedProvider,
   EnvironmentVariableNames,
   GitWorkspaceAdapter,
   OverlaySnapshot,
@@ -279,6 +280,7 @@ export async function runBenchmark(
       gitVersion: host.value.gitVersion,
       agentVersions,
       agentConfigurationFiles: buildAgentConfigurationFileRecords(providers.value, dependencies),
+      copiedProviders: buildCopiedProviderRecords(providers.value),
     },
     execution: {
       concurrency: plan.concurrency,
@@ -462,6 +464,20 @@ function buildAgentConfigurationFileRecords(
     records[name] = snapshot.configurationFiles.map((file) => ({
       path: file.relativePath,
       sha256: dependencies.textDigest(file.text),
+    }));
+  }
+  return records;
+}
+
+/** Copies every read agent's copied providers into the record `run.json` stores, detached from the snapshot. */
+function buildCopiedProviderRecords(
+  providers: ReadonlyMap<string, ProviderSnapshot>,
+): Record<string, CopiedProvider[]> {
+  const records: Record<string, CopiedProvider[]> = {};
+  for (const [name, snapshot] of providers) {
+    records[name] = snapshot.copiedProviders.map((provider) => ({
+      id: provider.id,
+      pricedModels: [...provider.pricedModels],
     }));
   }
   return records;
@@ -1238,6 +1254,7 @@ function computeCaseMetrics(
     sessionExport: active.sessionExport,
     events: active.events,
     exportUnavailableReason: active.exportUnavailableReason,
+    copiedProviders: requireCaseAgentProviders(run, active.identity).copiedProviders,
   });
   return combineCaseMetrics({
     durationMs,
