@@ -69,12 +69,23 @@ type FakeEventRecord = { kind: 'tool' } | { kind: 'error' };
 
 type FakeRunOutcome = TevuResult<
   AgentRunResult,
-  'AgentProcessError' | 'AgentProtocolError' | 'CaseTimeoutError' | 'CancellationError'
+  | 'AgentProcessError'
+  | 'AgentProtocolError'
+  | 'AgentSessionError'
+  | 'CaseTimeoutError'
+  | 'CancellationError'
 >;
 
 type CaseRunFailure = Extract<
   TevuError,
-  { kind: 'AgentProcessError' | 'AgentProtocolError' | 'CaseTimeoutError' | 'CancellationError' }
+  {
+    kind:
+      | 'AgentProcessError'
+      | 'AgentProtocolError'
+      | 'AgentSessionError'
+      | 'CaseTimeoutError'
+      | 'CancellationError';
+  }
 >;
 
 type ExportFailure = Extract<TevuError, { kind: 'AgentProcessError' | 'AgentProtocolError' }>;
@@ -2047,6 +2058,39 @@ describe('runBenchmark', () => {
     const independentCase = caseResultOf(run, 'task-1--c2--1');
     expect(independentCase.lifecycle).toBe('completed');
     expect(independentCase.outcome).toBe('passed');
+  });
+
+  it('marks an unreadable workspace as process-failed after an agent session error and skips export, patch, and checks', async () => {
+    const config = buildTevuConfig({ tasks: [buildTask()] });
+    const harness = createHarness(config);
+    harness.git.unreadableCaseIds.add('task-1--c1--1');
+    harness.agent.scripts.set(
+      'task-1--c1--1',
+      failedRunScript(
+        { kind: 'AgentSessionError', agent: AGENT_NAME, caseId: 'task-1--c1--1' },
+        { withErrorEvent: true },
+      ),
+    );
+
+    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+
+    const run = unwrapOk(result);
+    const failedCase = caseResultOf(run, 'task-1--c1--1');
+    expect(failedCase.lifecycle).toBe('process-failed');
+    expect(failedCase.outcome).toBe('not-evaluated');
+    expect(failedCase.checks).toEqual([]);
+    expect(failedCase.failure?.error.kind).toBe('AgentSessionError');
+    expect(failedCase.artifacts.sessionExport).toBeNull();
+    expect(failedCase.artifacts.solutionPatch).toBeNull();
+    expect(failedCase.artifacts.checks).toBeNull();
+    expectAvailableMetric(failedCase.metrics.apiErrors, 1, 'count', 'run events');
+    expectUnavailableMetric(
+      failedCase.metrics.inputTokens,
+      `the workspace was unreadable after the failure: agent "${AGENT_NAME}" reported a session error`,
+    );
+    expect(harness.agent.exportCalls).not.toContain('session-task-1--c1--1');
+    expect(harness.timeline).not.toContain('patch:task-1--c1--1');
+    expect(run.exitCode).toBe(2);
   });
 
   it('times out, skips all checks, attempts the patch, and falls back to event metrics', async () => {

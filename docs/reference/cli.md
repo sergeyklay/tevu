@@ -89,4 +89,4 @@ The [assessment guide](../guides/assess-results.md) covers the workflow.
 | `2` | Benchmark evidence was retained, but a case timed out, had a runtime failure, or had failed or pending required checks |
 | `130` | The command was cancelled. Partial run artifacts are finalized when possible. `task add` writes nothing unless the save had already written the task |
 
-When several conditions apply, cancellation takes precedence, then incomplete evidence (`1`), then a degraded result (`2`). A model process can fail while its solution passes the acceptance checks; the run still returns `2`.
+When several conditions apply, cancellation takes precedence, then incomplete evidence (`1`), then a degraded result (`2`). A model process can fail while its solution passes the acceptance checks; the run still returns `2`. An agent that reports a session error and exits `0` is a runtime failure as well, so the run returns `2` even when its solution passes the acceptance checks.

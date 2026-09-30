@@ -198,6 +198,11 @@ export function eventIdentity(event: OpenCodeRunEvent, ordinal: number): string 
   return `${event.sessionID}\u0000${event.part.id}`;
 }
 
+/** Reports whether a decoded run event is an `error` event of the root session `rootSessionId`. */
+export function isRootSessionErrorEvent(event: OpenCodeRunEvent, rootSessionId: string): boolean {
+  return event.type === 'error' && event.sessionID === rootSessionId;
+}
+
 /**
  * Reports absent or malformed optional metric fields in a decoded export.
  * Informative only: metric normalization independently marks the affected

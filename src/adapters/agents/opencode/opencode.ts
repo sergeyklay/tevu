@@ -7,7 +7,7 @@
  */
 
 import { normalizeFromExport, normalizeMetrics as normalizeOpenCodeMetrics } from './metrics';
-import { decodeEvent, decodeExport } from './protocol';
+import { decodeEvent, decodeExport, isRootSessionErrorEvent } from './protocol';
 import { inspectOpenCodeProvider, readOpenCodeProviders } from './providers';
 
 import type { OpenCodeExport, ProtocolContext, ProtocolErrorShape } from './protocol';
@@ -108,7 +108,11 @@ export function createOpenCodeAdapter(
     ): Promise<
       TevuResult<
         AgentRunResult,
-        'AgentProcessError' | 'AgentProtocolError' | 'CaseTimeoutError' | 'CancellationError'
+        | 'AgentProcessError'
+        | 'AgentProtocolError'
+        | 'AgentSessionError'
+        | 'CaseTimeoutError'
+        | 'CancellationError'
       >
     > {
       return runCase(settings, dependencies, input);
@@ -149,8 +153,13 @@ export function createOpenCodeAdapter(
   };
 }
 
-/** Result of one stdout-consumption pass: the identified root session and the first protocol failure, if any. */
-type RunOutputResult = { sessionId: string | null; protocolFailure: ProtocolErrorShape | null };
+/** Result of one stdout-consumption pass: the identified root session, the first protocol failure, and the last root-session error event, if any. */
+type RunOutputResult = {
+  sessionId: string | null;
+  protocolFailure: ProtocolErrorShape | null;
+  /** Redacted record of the last delivered root-session `error` event; `null` when none was delivered. */
+  rootSessionError: { record: unknown } | null;
+};
 
 /**
  * Consumes one `run --format json` process's stdout: splits lines, decodes
@@ -173,6 +182,7 @@ function createRunOutputConsumer(
 ): { pushLine: (line: string) => void; flush: () => Promise<RunOutputResult> } {
   let sessionId: string | null = null;
   let protocolFailure: ProtocolErrorShape | null = null;
+  let rootSessionError: { record: unknown } | null = null;
   let deliveryStopped = false;
   let delivery: Promise<void> = Promise.resolve();
   let lineNumber = 0;
@@ -223,6 +233,10 @@ function createRunOutputConsumer(
     const delivered = await onRedactedEvent(redacted.value);
     if (!delivered) {
       deliveryStopped = true;
+      return;
+    }
+    if (isRootSessionErrorEvent(decoded.value, sessionId)) {
+      rootSessionError = { record: redacted.value };
     }
   };
 
@@ -233,7 +247,7 @@ function createRunOutputConsumer(
     async flush(): Promise<RunOutputResult> {
       splitter.flush();
       await delivery;
-      return { sessionId, protocolFailure };
+      return { sessionId, protocolFailure, rootSessionError };
     },
   };
 }
@@ -245,7 +259,11 @@ async function runCase(
 ): Promise<
   TevuResult<
     AgentRunResult,
-    'AgentProcessError' | 'AgentProtocolError' | 'CaseTimeoutError' | 'CancellationError'
+    | 'AgentProcessError'
+    | 'AgentProtocolError'
+    | 'AgentSessionError'
+    | 'CaseTimeoutError'
+    | 'CancellationError'
   >
 > {
   const caseId = input.identity.caseId;
@@ -304,7 +322,7 @@ async function runCase(
     onStderr: stderrLines.push,
   });
   stderrLines.flush();
-  const { sessionId, protocolFailure } = await consumer.flush();
+  const { sessionId, protocolFailure, rootSessionError } = await consumer.flush();
   await delivery;
 
   if (!outcome.launched) {
@@ -359,6 +377,18 @@ async function runCase(
       context,
       'run output did not identify a root session',
     );
+  }
+  if (rootSessionError !== null) {
+    const agentMessage = summary(rootSessionError.record);
+    return {
+      ok: false,
+      error: {
+        kind: 'AgentSessionError',
+        agent: settings.agent,
+        caseId,
+        ...(agentMessage === undefined ? {} : { agentMessage }),
+      },
+    };
   }
   return { ok: true, value: runResult };
 }

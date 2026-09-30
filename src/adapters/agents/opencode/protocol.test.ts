@@ -5,6 +5,7 @@ import {
   decodeEvent,
   decodeExport,
   eventIdentity,
+  isRootSessionErrorEvent,
   listMalformedOptionalMetricFields,
 } from './protocol';
 
@@ -33,6 +34,10 @@ function validFixtureEvents(): OpenCodeRunEvent[] {
     }
   }
   return events;
+}
+
+function buildErrorEvent(sessionID: string, error: unknown): OpenCodeRunEvent {
+  return { type: 'error', timestamp: 1, sessionID, error };
 }
 
 function malformedFixtureLines(): string[] {
@@ -184,6 +189,37 @@ describe('eventIdentity', () => {
 
     expect(eventIdentity(errorEvent, 0)).not.toBe(eventIdentity(errorEvent, 1));
     expect(eventIdentity(errorEvent, 2)).toBe(`${errorEvent.sessionID}\u0000error\u00002`);
+  });
+});
+
+describe('isRootSessionErrorEvent', () => {
+  const ROOT_SESSION = 'ses-root-0001';
+
+  it.each([
+    { payload: 'an object', error: { name: 'UnknownError', data: { message: 'boom' } } },
+    { payload: 'a string', error: 'boom' },
+    { payload: 'null', error: null },
+  ])('detects an error event of the root session whose error is $payload', ({ error }) => {
+    const event = buildErrorEvent(ROOT_SESSION, error);
+
+    expect(isRootSessionErrorEvent(event, ROOT_SESSION)).toBe(true);
+  });
+
+  it('does not detect an error event of another session', () => {
+    const event = buildErrorEvent('ses-sibling-0001', { name: 'UnknownError' });
+
+    expect(isRootSessionErrorEvent(event, ROOT_SESSION)).toBe(false);
+  });
+
+  it('does not detect a non-error event of the root session', () => {
+    const event: OpenCodeRunEvent = {
+      type: 'step_start',
+      timestamp: 1,
+      sessionID: ROOT_SESSION,
+      part: { id: 'prt-0001', sessionID: ROOT_SESSION, messageID: 'msg-1', type: 'step-start' },
+    };
+
+    expect(isRootSessionErrorEvent(event, ROOT_SESSION)).toBe(false);
   });
 });
 

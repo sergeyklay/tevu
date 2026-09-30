@@ -13,7 +13,9 @@ import { createOpenCodeAdapter } from './opencode';
 import type { OpenCodeAdapterDependencies } from './opencode';
 import type { OpenCodeExport, OpenCodePart } from './protocol';
 import type {
+  AgentAdapter,
   AgentMetrics,
+  AgentRunInput,
   AgentRunResult,
   AgentSessionExport,
   CopiedProvider,
@@ -24,6 +26,7 @@ import type {
   ModelCallEnvironment,
   RedactedCapture,
   SecretRedactor,
+  TevuError,
 } from '@/domain/types';
 
 const CASE_ID = 'task-1--alpha--1';
@@ -75,6 +78,28 @@ function buildDependencies(
     operatorDirectories: { home: undefined, xdgConfigHome: undefined },
     ...overrides,
   };
+}
+
+function buildErrorEvent(
+  overrides: Partial<{ sessionID: string; timestamp: number; error: unknown }> = {},
+) {
+  return {
+    type: 'error',
+    timestamp: 1,
+    sessionID: 'ses-root-0001',
+    error: { message: 'synthetic error' },
+    ...overrides,
+  };
+}
+
+/** Narrows a run outcome to its `AgentSessionError`, failing the test with the outcome otherwise. */
+function sessionErrorOf(
+  outcome: Awaited<ReturnType<AgentAdapter['run']>>,
+): Extract<TevuError, { kind: 'AgentSessionError' }> {
+  if (outcome.ok || outcome.error.kind !== 'AgentSessionError') {
+    throw new Error(`expected an AgentSessionError, got ${JSON.stringify(outcome)}`);
+  }
+  return outcome.error;
 }
 
 describe('normalizeMetrics from the root session export', () => {
@@ -149,13 +174,8 @@ describe('normalizeMetrics from the root session export', () => {
     }
   });
 
-  it('never adds event error counts to export error counts', () => {
-    const rootError = {
-      type: 'error',
-      timestamp: 9000,
-      sessionID: 'ses-root-0001',
-      error: { message: 'synthetic error' },
-    };
+  it('takes the larger of the export and event error counts instead of adding them', () => {
+    const rootError = buildErrorEvent({ timestamp: 9000 });
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
@@ -168,8 +188,8 @@ describe('normalizeMetrics from the root session export', () => {
     expect(normalized.ok).toBe(true);
     if (!normalized.ok) return;
     expect(normalized.value.apiErrors).toMatchObject({
-      value: 1,
-      availability: { status: 'available', source: 'root-session export' },
+      value: 2,
+      availability: { status: 'available', source: 'root-session export and run events' },
     });
   });
 
@@ -556,6 +576,30 @@ describe('normalizeMetrics event fallback', () => {
       availability: { status: 'available' },
     });
     expect(normalized.value.apiErrors).toMatchObject({ value: 1 });
+  });
+
+  it('does not count an error event of another session when the export is unavailable', () => {
+    const normalized = normalizeMetrics({
+      caseId: CASE_ID,
+      sessionId: 'ses-root-0001',
+      sessionExport: null,
+      events: [
+        buildErrorEvent({ sessionID: 'ses-child-0001' }),
+        buildErrorEvent(),
+        buildErrorEvent({ sessionID: 'ses-child-0001' }),
+      ],
+      exportUnavailableReason: 'root session export unavailable',
+      copiedProviders: [],
+    });
+
+    expect(normalized.ok).toBe(true);
+    if (!normalized.ok) return;
+    expect(normalized.value.apiErrors).toEqual({
+      value: 1,
+      unit: 'count',
+      availability: { status: 'available', source: 'run events' },
+      scope: 'root-session',
+    });
   });
 
   it('marks every export-derived metric unavailable when no root session could be identified', () => {
@@ -981,6 +1025,7 @@ describe('OpenCode adapter over a synthetic executable', () => {
     const recordPath = join(tempRoot, `record-run-${scriptCounter()}.json`);
     const delivered: unknown[] = [];
     const diagnostics: string[] = [];
+    let runResult: AgentRunResult | undefined;
     const adapter = createOpenCodeAdapter(
       {
         agent: 'opencode',
@@ -1010,14 +1055,16 @@ describe('OpenCode adapter over a synthetic executable', () => {
         diagnostics.push(line);
         return { ok: true, value: undefined };
       },
+      onProcess: (result) => {
+        runResult = result;
+      },
     });
 
-    expect(outcome.ok).toBe(true);
-    if (!outcome.ok) return;
-    expect(outcome.value.sessionId).toBe(SYNTHETIC_SESSION);
-    expect(outcome.value.parseFindings).toEqual([]);
-    expect(outcome.value.process.exitCode).toBe(0);
-    expect(outcome.value.process.terminationStage).toBe('none');
+    expect(sessionErrorOf(outcome).agent).toBe('opencode');
+    expect(runResult?.sessionId).toBe(SYNTHETIC_SESSION);
+    expect(runResult?.parseFindings).toEqual([]);
+    expect(runResult?.process.exitCode).toBe(0);
+    expect(runResult?.process.terminationStage).toBe('none');
     expect(delivered.map((event) => (event as { type: string }).type)).toEqual([
       'step_start',
       'tool_use',
@@ -1027,7 +1074,7 @@ describe('OpenCode adapter over a synthetic executable', () => {
 
     const normalized = normalizeMetrics({
       caseId: CASE_ID,
-      sessionId: outcome.value.sessionId,
+      sessionId: runResult?.sessionId ?? null,
       sessionExport: null,
       events: delivered,
       copiedProviders: [],
@@ -1664,7 +1711,7 @@ describe('credential-secret redaction on OpenCode stdout streams', () => {
       onDiagnostic: async () => ({ ok: true, value: undefined }),
     });
 
-    expect(outcome.ok).toBe(true);
+    expect(JSON.stringify(sessionErrorOf(outcome))).not.toContain(QUOTED_SECRET);
     const errorEvent = delivered[0] as { error?: { message?: unknown } };
     const message = String((errorEvent.error as { message?: unknown })['message']);
     expect(message).not.toContain(QUOTED_SECRET);
@@ -1675,6 +1722,7 @@ describe('credential-secret redaction on OpenCode stdout streams', () => {
     const worktree = join(tempRoot, 'worktree-secret-number');
     await mkdir(worktree, { recursive: true });
     const delivered: unknown[] = [];
+    let runResult: AgentRunResult | undefined;
     const adapter = createOpenCodeAdapter(
       {
         agent: 'opencode',
@@ -1698,11 +1746,13 @@ describe('credential-secret redaction on OpenCode stdout streams', () => {
         return { ok: true, value: undefined };
       },
       onDiagnostic: async () => ({ ok: true, value: undefined }),
+      onProcess: (result) => {
+        runResult = result;
+      },
     });
 
-    expect(outcome.ok).toBe(true);
-    if (!outcome.ok) return;
-    expect(outcome.value.parseFindings).toEqual([]);
+    expect(sessionErrorOf(outcome).agent).toBe('opencode');
+    expect(runResult?.parseFindings).toEqual([]);
     expect(delivered).toHaveLength(1);
     expect((delivered[0] as { type: string }).type).toBe('error');
     expect((delivered[0] as { timestamp: number }).timestamp).toBe(45);
@@ -2209,6 +2259,280 @@ describe('OpenCode adapter callModel failures over an injected fake process', ()
     if (outcome.ok) return;
     expect(JSON.stringify(outcome.error)).not.toContain('sk-secret-value');
     expect(outcome.error).toHaveProperty('agentMessage');
+  });
+});
+
+function buildRunInput(overrides: Partial<AgentRunInput> = {}): AgentRunInput {
+  return {
+    identity: IDENTITY,
+    prompt: 'synthetic benchmark prompt',
+    worktreeDirectory: '/synthetic/worktree',
+    environment: buildBareEnvironment(),
+    timeoutMs: 10_000,
+    terminationGraceMs: 250,
+    cancellation: new AbortController().signal,
+    onEvent: async () => ({ ok: true, value: undefined }),
+    onDiagnostic: async () => ({ ok: true, value: undefined }),
+    ...overrides,
+  };
+}
+
+function buildStepStartEvent() {
+  return {
+    type: 'step_start',
+    timestamp: 1,
+    sessionID: SYNTHETIC_SESSION,
+    part: { id: 'prt-s1', sessionID: SYNTHETIC_SESSION, messageID: 'msg-s1', type: 'step-start' },
+  };
+}
+
+function buildRootErrorEvent(error: unknown) {
+  return buildErrorEvent({ sessionID: SYNTHETIC_SESSION, timestamp: 2, error });
+}
+
+function toStdout(events: readonly unknown[]): string {
+  return events.map((event) => `${JSON.stringify(event)}\n`).join('');
+}
+
+/** Hands `stdout` to `onStdout` before settling with `outcome`, a clean zero exit by default. */
+function buildStdoutRunner(
+  stdout: string,
+  outcome: ManagedProcessResult = buildCompletion({}),
+): ManagedProcessRunner {
+  return async (request) => {
+    request.onStdout?.(stdout);
+    return outcome;
+  };
+}
+
+describe('OpenCode adapter AgentSessionError over an injected fake process', () => {
+  const UNKNOWN_ERROR_MESSAGE = 'Model not found: acme/model-a.';
+
+  it('resolves AgentSessionError with the agent message for a zero-exit run that delivered a root-session error event', async () => {
+    const events = [
+      buildStepStartEvent(),
+      buildRootErrorEvent({ name: 'UnknownError', data: { message: UNKNOWN_ERROR_MESSAGE } }),
+    ];
+    const delivered: unknown[] = [];
+    let runResult: AgentRunResult | undefined;
+    const adapter = buildOpenCodeAdapter({ runProcess: buildStdoutRunner(toStdout(events)) });
+
+    const outcome = await adapter.run(
+      buildRunInput({
+        onEvent: async (event) => {
+          delivered.push(event);
+          return { ok: true, value: undefined };
+        },
+        onProcess: (result) => {
+          runResult = result;
+        },
+      }),
+    );
+
+    expect(outcome).toEqual({
+      ok: false,
+      error: {
+        kind: 'AgentSessionError',
+        agent: 'opencode',
+        caseId: CASE_ID,
+        agentMessage: UNKNOWN_ERROR_MESSAGE,
+      },
+    });
+    expect(runResult?.process.exitCode).toBe(0);
+    expect(runResult?.sessionId).toBe(SYNTHETIC_SESSION);
+    expect(delivered).toEqual(events);
+  });
+
+  it('takes the AgentSessionError message from the last delivered root-session error event', async () => {
+    const events = [
+      buildRootErrorEvent({ name: 'UnknownError', data: { message: 'first failure' } }),
+      buildRootErrorEvent({ name: 'UnknownError', data: { message: 'second failure' } }),
+    ];
+    const adapter = buildOpenCodeAdapter({ runProcess: buildStdoutRunner(toStdout(events)) });
+
+    const outcome = await adapter.run(buildRunInput());
+
+    expect(sessionErrorOf(outcome).agentMessage).toBe('second failure');
+  });
+
+  it.each([
+    {
+      name: 'the first line of a multi-line data message',
+      error: {
+        name: 'UnknownError',
+        data: { message: 'Unexpected server error.\nCheck the logs.' },
+      },
+      expected: 'Unexpected server error.',
+    },
+    {
+      name: 'the error name when the data message is absent',
+      error: { name: 'ProviderAuthError' },
+      expected: 'ProviderAuthError',
+    },
+    {
+      name: 'the error name when the data message is empty',
+      error: { name: 'ProviderAuthError', data: { message: '' } },
+      expected: 'ProviderAuthError',
+    },
+  ])('derives the AgentSessionError message from $name', async ({ error, expected }) => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: buildStdoutRunner(toStdout([buildRootErrorEvent(error)])),
+    });
+
+    const outcome = await adapter.run(buildRunInput());
+
+    expect(sessionErrorOf(outcome).agentMessage).toBe(expected);
+  });
+
+  it.each([
+    { name: 'an empty object', error: {} },
+    { name: 'an empty name and data message', error: { name: '', data: { message: '' } } },
+    { name: 'a string', error: 'boom' },
+    { name: 'null', error: null },
+  ])(
+    'omits the AgentSessionError message when the error event carries $name',
+    async ({ error }) => {
+      const adapter = buildOpenCodeAdapter({
+        runProcess: buildStdoutRunner(toStdout([buildRootErrorEvent(error)])),
+      });
+
+      const outcome = await adapter.run(buildRunInput());
+
+      expect(sessionErrorOf(outcome)).not.toHaveProperty('agentMessage');
+    },
+  );
+
+  it('redacts a configured secret out of the AgentSessionError message', async () => {
+    const events = [
+      buildRootErrorEvent({
+        name: 'UnknownError',
+        data: { message: 'Rejected key sk-secret-value for acme.' },
+      }),
+    ];
+    const adapter = buildOpenCodeAdapter({
+      secrets: buildSecretRedactor(['sk-secret-value']),
+      runProcess: buildStdoutRunner(toStdout(events)),
+    });
+
+    const outcome = await adapter.run(buildRunInput());
+
+    const sessionError = sessionErrorOf(outcome);
+    expect(JSON.stringify(sessionError)).not.toContain('sk-secret-value');
+    expect(sessionError.agentMessage).toBe('Rejected key [REDACTED] for acme.');
+  });
+
+  describe('when an earlier outcome row applies', () => {
+    const stdout = toStdout([
+      buildStepStartEvent(),
+      buildRootErrorEvent({ name: 'UnknownError', data: { message: 'synthetic failure' } }),
+    ]);
+
+    it.each([
+      {
+        name: 'a process that was not launched',
+        stdout,
+        outcome: { launched: false, reason: 'spawn failed' } satisfies ManagedProcessResult,
+        expected: {
+          kind: 'AgentProcessError',
+          agent: 'opencode',
+          caseId: CASE_ID,
+          exitCode: null,
+          signal: null,
+        },
+      },
+      {
+        name: 'a cancellation',
+        stdout,
+        outcome: buildCompletion({ exitCode: null, signal: 'SIGTERM', cancelled: true }),
+        expected: { kind: 'CancellationError', activeCaseIds: [CASE_ID] },
+      },
+      {
+        name: 'a timeout',
+        stdout,
+        outcome: buildCompletion({ exitCode: null, signal: 'SIGKILL', timedOut: true }),
+        expected: { kind: 'CaseTimeoutError', caseId: CASE_ID, timeoutMs: 10_000 },
+      },
+      {
+        name: 'a protocol failure',
+        stdout: `${stdout}this stdout line is not JSON\n`,
+        outcome: buildCompletion({}),
+        expected: {
+          kind: 'AgentProtocolError',
+          agent: 'opencode',
+          context: { phase: 'case', caseId: CASE_ID },
+          line: 3,
+          reason: 'run output contains malformed JSON event framing',
+        },
+      },
+      {
+        name: 'a nonzero exit',
+        stdout,
+        outcome: buildCompletion({ exitCode: 7 }),
+        expected: {
+          kind: 'AgentProcessError',
+          agent: 'opencode',
+          caseId: CASE_ID,
+          exitCode: 7,
+          signal: null,
+        },
+      },
+      {
+        name: 'a signal exit',
+        stdout,
+        outcome: buildCompletion({ exitCode: null, signal: 'SIGKILL' }),
+        expected: {
+          kind: 'AgentProcessError',
+          agent: 'opencode',
+          caseId: CASE_ID,
+          exitCode: null,
+          signal: 'SIGKILL',
+        },
+      },
+    ])(
+      'keeps the result of $name ahead of AgentSessionError',
+      async ({ stdout, outcome, expected }) => {
+        const adapter = buildOpenCodeAdapter({ runProcess: buildStdoutRunner(stdout, outcome) });
+
+        const result = await adapter.run(buildRunInput());
+
+        expect(result).toEqual({ ok: false, error: expected });
+      },
+    );
+  });
+
+  it('resolves ok instead of AgentSessionError when every error event belongs to another session', async () => {
+    const events = [
+      buildStepStartEvent(),
+      buildErrorEvent({ sessionID: 'ses-child-0001', error: { name: 'UnknownError' } }),
+    ];
+    const adapter = buildOpenCodeAdapter({ runProcess: buildStdoutRunner(toStdout(events)) });
+
+    const outcome = await adapter.run(buildRunInput());
+
+    expect(outcome.ok).toBe(true);
+  });
+
+  it('resolves ok instead of AgentSessionError when onEvent rejected the root-session error event', async () => {
+    const events = [buildStepStartEvent(), buildRootErrorEvent({ name: 'UnknownError' })];
+    let deliveries = 0;
+    const adapter = buildOpenCodeAdapter({ runProcess: buildStdoutRunner(toStdout(events)) });
+
+    const outcome = await adapter.run(
+      buildRunInput({
+        onEvent: async () => {
+          deliveries += 1;
+          return deliveries === 1
+            ? { ok: true, value: undefined }
+            : {
+                ok: false,
+                error: { kind: 'ArtifactError', operation: 'append-event', reason: 'disk full' },
+              };
+        },
+      }),
+    );
+
+    expect(deliveries).toBe(2);
+    expect(outcome.ok).toBe(true);
   });
 });
 
@@ -2747,6 +3071,101 @@ describe('normalizeMetrics cost evidence for copied providers', () => {
   });
 });
 
+describe('normalizeMetrics combined API error count', () => {
+  const ROOT_SESSION = 'ses-root-0002';
+  const COMBINED_SOURCE = 'root-session export and run events';
+
+  function buildRootError() {
+    return buildErrorEvent({ sessionID: ROOT_SESSION });
+  }
+
+  function buildErroredAssistants(count: number): unknown[] {
+    return Array.from({ length: count }, (_, index) =>
+      buildAssistantMessage(`msg-a${index}`, {
+        error: { name: 'SyntheticProviderError', message: 'synthetic API error' },
+      }),
+    );
+  }
+
+  function expectedApiErrors(value: number) {
+    return {
+      value,
+      unit: 'count',
+      availability: { status: 'available', source: COMBINED_SOURCE },
+      scope: 'root-session',
+    };
+  }
+
+  function normalizeWithEvents(
+    sessionExport: unknown,
+    events: readonly unknown[],
+    sessionId: string | null = ROOT_SESSION,
+  ): AgentMetrics {
+    const normalized = normalizeMetrics({
+      caseId: CASE_ID,
+      sessionId,
+      sessionExport: sessionExport as AgentSessionExport,
+      events,
+      copiedProviders: [],
+    });
+    if (!normalized.ok) {
+      throw new Error(`export and events must normalize: ${normalized.error.reason}`);
+    }
+    return normalized.value;
+  }
+
+  it('counts a root-session error event that the export lacks and leaves every other metric as the export-only derivation', () => {
+    const sessionExport = buildExportOf();
+
+    const { apiErrors, ...metrics } = normalizeWithEvents(sessionExport, [buildRootError()]);
+    const { apiErrors: exportOnlyApiErrors, ...exportOnlyMetrics } = normalizeExport(
+      sessionExport,
+      [],
+    );
+
+    expect(apiErrors).toEqual(expectedApiErrors(1));
+    expect(exportOnlyApiErrors).toEqual(expectedApiErrors(0));
+    expect(metrics).toEqual(exportOnlyMetrics);
+  });
+
+  it.each([
+    { exportErrors: 0, eventErrors: 0, expected: 0 },
+    { exportErrors: 0, eventErrors: 1, expected: 1 },
+    { exportErrors: 1, eventErrors: 0, expected: 1 },
+    { exportErrors: 1, eventErrors: 1, expected: 1 },
+    { exportErrors: 1, eventErrors: 2, expected: 2 },
+    { exportErrors: 2, eventErrors: 1, expected: 2 },
+  ])(
+    'reports $expected available API errors for $exportErrors export errors and $eventErrors root-session error events',
+    ({ exportErrors, eventErrors, expected }) => {
+      const sessionExport = buildExportOf(...buildErroredAssistants(exportErrors));
+      const events = Array.from({ length: eventErrors }, buildRootError);
+
+      const { apiErrors } = normalizeWithEvents(sessionExport, events);
+
+      expect(apiErrors).toEqual(expectedApiErrors(expected));
+    },
+  );
+
+  it('ignores error events of other sessions while counting the root-session error events', () => {
+    const events = [
+      buildErrorEvent({ sessionID: 'ses-child-0001' }),
+      buildRootError(),
+      buildErrorEvent({ sessionID: 'ses-child-0001' }),
+    ];
+
+    const { apiErrors } = normalizeWithEvents(buildExportOf(), events);
+
+    expect(apiErrors).toEqual(expectedApiErrors(1));
+  });
+
+  it('counts the root-session error events of the export session when no session id is given', () => {
+    const { apiErrors } = normalizeWithEvents(buildExportOf(), [buildRootError()], null);
+
+    expect(apiErrors).toEqual(expectedApiErrors(1));
+  });
+});
+
 describe('OpenCode adapter cost evidence over an injected fake process', () => {
   const secretRedactor = buildSecretRedactor(['acme']);
 
@@ -2830,6 +3249,23 @@ describe('OpenCode adapter cost evidence over an injected fake process', () => {
         expect(outcome.value.metrics.cost).toEqual(expectedCost);
       },
     );
+
+    it('keeps API errors export-only for a successful result', async () => {
+      const adapter = buildOpenCodeAdapter({
+        runProcess: buildSessionRunner('session-priced.json'),
+      });
+
+      const outcome = await callModelWith(adapter, UNPRICED);
+
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.value.metrics.apiErrors).toEqual({
+        value: 1,
+        unit: 'count',
+        availability: { status: 'available', source: 'root-session export' },
+        scope: 'root-session',
+      });
+    });
 
     it('returns a protocol error without starting a process when the copied providers cannot be redacted', async () => {
       const calls: ManagedProcessRequest[] = [];

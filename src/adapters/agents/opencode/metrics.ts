@@ -9,7 +9,7 @@
 
 import { unavailableMetric } from '@/domain/types';
 
-import { decodeEvent, decodeExport } from './protocol';
+import { decodeEvent, decodeExport, isRootSessionErrorEvent } from './protocol';
 
 import type {
   OpenCodeExport,
@@ -21,6 +21,7 @@ import type { AgentMetrics, AgentMetricsInput, CopiedProvider, MetricValue } fro
 
 const EXPORT_SOURCE = 'root-session export';
 const EVENT_SOURCE = 'run events';
+const EXPORT_AND_EVENT_SOURCE = 'root-session export and run events';
 
 /**
  * Result of metric normalization, kept local rather than expressed through
@@ -81,7 +82,23 @@ export function normalizeMetrics(input: AgentMetricsInput): NormalizeMetricsResu
     input.sessionId ?? sessionExport?.info.id ?? decodedEvents[0]?.sessionID ?? null;
 
   if (sessionExport !== null) {
-    return { ok: true, value: normalizeFromExport(sessionExport, input.copiedProviders) };
+    const exportMetrics = normalizeFromExport(sessionExport, input.copiedProviders);
+    // An export always supplies `info.id`, so the fallback never replaces the resolved root session.
+    const exportRootSessionId = rootSessionId ?? sessionExport.info.id;
+    const eventErrors = decodedEvents.filter((event) =>
+      isRootSessionErrorEvent(event, exportRootSessionId),
+    ).length;
+    return {
+      ok: true,
+      value: {
+        ...exportMetrics,
+        apiErrors: measured(
+          Math.max(exportMetrics.apiErrors.value ?? 0, eventErrors),
+          'count',
+          EXPORT_AND_EVENT_SOURCE,
+        ),
+      },
+    };
   }
   return {
     ok: true,
@@ -294,11 +311,12 @@ function normalizeFromEvents(
   const seenParts = new Set<string>();
 
   for (const event of events) {
-    if (event.sessionID !== rootSessionId) {
+    if (isRootSessionErrorEvent(event, rootSessionId)) {
+      apiErrors += 1;
       continue;
     }
-    if (event.type === 'error') {
-      apiErrors += 1;
+    // Error events of other sessions are skipped here too; the type test narrows `event` to part events.
+    if (event.sessionID !== rootSessionId || event.type === 'error') {
       continue;
     }
     const identity = partEventIdentity(event.sessionID, event.part);
