@@ -150,6 +150,12 @@ export type TaskWizardDependencies = {
       'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'
     >
   >;
+  /** Ensures a GitHub entry's managed clone holds the Git LFS objects of one base commit, fetching the missing ones. */
+  ensureManagedLfsObjects: (
+    repository: { id: string; github: string },
+    revision: string,
+    onProgress: (line: string) => void,
+  ) => Promise<TevuResult<void, 'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'>>;
   now: () => Date;
   redact: (textContent: string) => string;
   /** Reads a GitHub repository's HEAD from its remote, proving it exists and is readable. */
@@ -1849,13 +1855,28 @@ async function ensureBaseCommitInClone(
         next: BASE_COMMIT_NEXT_STEP,
       });
     } else {
-      return answer;
+      const lfs = await runWait(io, 'Fetching Git LFS objects', () =>
+        dependencies.ensureManagedLfsObjects({ id: repository.id, github }, answer, (line) =>
+          log.step(dependencies.redact(line), promptOptions(io)),
+        ),
+      );
+      if (lfs.ok) {
+        return answer;
+      }
+      if (lfs.error.kind === 'CancellationError') {
+        throw new WizardCancelledError();
+      }
+      warnLines(io, dependencies.redact, {
+        headline: `Can't fetch the Git LFS objects of base commit ${answer}.`,
+        details: [describeManagedCloneOrPrerequisiteFailure(lfs.error)],
+        next: BASE_COMMIT_NEXT_STEP,
+      });
     }
     answer = await askBaseCommitAgain(io, answer);
   }
 }
 
-const BASE_COMMIT_NEXT_STEP = `Fix the base commit below. ${RETRY_NEXT_STEP}`;
+const BASE_COMMIT_NEXT_STEP = `Fix the cause or change the base commit below. ${RETRY_NEXT_STEP}`;
 
 /** Asks the base commit again with the refused answer filled in. */
 async function askBaseCommitAgain(io: WizardIo, refused: string): Promise<string> {

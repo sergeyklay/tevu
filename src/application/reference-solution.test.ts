@@ -40,6 +40,7 @@ function failingManagedCloneAdapter(): ManagedCloneAdapter {
     fetchCommits: fail,
     fetchBranchesAndTags: fail,
     checkRemote: fail,
+    fetchLfsObjects: fail,
   };
 }
 
@@ -527,6 +528,7 @@ function buildOkManagedCloneAdapter(
     fetchCommits: vi.fn(async () => ({ ok: true as const, value: undefined })),
     fetchBranchesAndTags: vi.fn(async () => ({ ok: true as const, value: undefined })),
     checkRemote: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    fetchLfsObjects: vi.fn(async () => ({ ok: true as const, value: undefined })),
     ...overrides,
   };
 }

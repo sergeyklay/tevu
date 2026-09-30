@@ -222,6 +222,10 @@ function buildFullGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspac
   return {
     ...buildGit(),
     resolveCommit: vi.fn(async () => ({ kind: 'not-found' as const })),
+    inspectLfsObjects: vi.fn(async (_repository: RepositoryDefinition, revision: string) => ({
+      ok: true as const,
+      value: { commit: revision, objectCount: 0, missingCount: 0 },
+    })),
     isAncestor: vi.fn(async () => null),
     snapshotPatchBase: vi.fn(async () => ({
       ok: false as const,

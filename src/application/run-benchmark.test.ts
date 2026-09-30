@@ -478,6 +478,9 @@ function createHarness(config: TevuConfig) {
       gitState.resolveCommitCalls.push({ repositoryId: repository.id, reference });
       return gitState.resolveCommitResult;
     },
+    async inspectLfsObjects(_repository, revision) {
+      return { ok: true, value: { commit: revision, objectCount: 0, missingCount: 0 } };
+    },
     async isAncestor(repository, ancestor, descendant) {
       gitState.isAncestorCalls.push({ repositoryId: repository.id, ancestor, descendant });
       return gitState.isAncestorResult;

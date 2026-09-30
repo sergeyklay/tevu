@@ -38,21 +38,30 @@ export type ManagedCloneAdapterOptions = {
 /** Names starting with `GIT_` that survive the network environment's stripping step. */
 const KEPT_GIT_PREFIXES = ['GIT_SSL_', 'GIT_HTTP_', 'GIT_PROXY_SSL_'];
 const GH_PROBE_TIMEOUT_MS = 30_000;
+const LFS_PROBE_TIMEOUT_MS = 30_000;
 const TERMINATION_GRACE_MS = 3_000;
+const LFS_RETRY_TEXT = 'retry once the cause is fixed; objects already fetched are kept';
+const LFS_MISSING_OBJECT_LINE = /^\[[0-9a-f]{64}\] .*: \[404\] /;
 
 /** Whether this adapter instance has already probed gh successfully. */
 type GhProbeState = { probed: boolean };
 
+/** Whether this adapter instance has already probed `git lfs version` successfully. */
+type LfsProbeState = { probed: boolean };
+
 /**
  * Creates the {@link ManagedCloneAdapter} implementation over the local git
  * CLI and gh. Probes gh at most once per instance, on the first `clone`,
- * `fetchCommits`, `fetchBranchesAndTags`, or `checkRemote` call;
- * `inspectClone` never probes gh or contacts the network.
+ * `fetchCommits`, `fetchBranchesAndTags`, `fetchLfsObjects`, or `checkRemote`
+ * call, and `git lfs version` at most once per instance, on the first
+ * `fetchLfsObjects` call; `inspectClone` never probes a tool or contacts the
+ * network.
  */
 export function createManagedCloneAdapter(
   options: ManagedCloneAdapterOptions,
 ): ManagedCloneAdapter {
   const ghProbeState: GhProbeState = { probed: false };
+  const lfsProbeState: LfsProbeState = { probed: false };
   return {
     inspectClone: (directory) => inspectCloneState(options, directory),
     clone: (directory, repository) => clone(options, ghProbeState, directory, repository),
@@ -61,6 +70,14 @@ export function createManagedCloneAdapter(
     fetchBranchesAndTags: (directory, repository) =>
       fetchBranchesAndTags(options, ghProbeState, directory, repository),
     checkRemote: (repository) => checkRemote(options, ghProbeState, repository),
+    fetchLfsObjects: (directory, repository, commit) =>
+      fetchLfsObjects(
+        options,
+        { gh: ghProbeState, lfs: lfsProbeState },
+        directory,
+        repository,
+        commit,
+      ),
   };
 }
 
@@ -242,6 +259,180 @@ async function fetchBranchesAndTags(
     '+refs/heads/*:refs/heads/*',
     '+refs/tags/*:refs/tags/*',
   ]);
+}
+
+/**
+ * Fetches every Git LFS object of `commit` into the clone in `directory`,
+ * under the clone lock. The endpoint is pinned to the clone URL so a tracked
+ * `.lfsconfig` cannot send the operator's credentials to another host, and
+ * the empty include and exclude filters keep a tracked `fetchexclude` from
+ * turning the fetch into a no-op.
+ */
+async function fetchLfsObjects(
+  options: ManagedCloneAdapterOptions,
+  probeStates: { gh: GhProbeState; lfs: LfsProbeState },
+  directory: string,
+  repository: ParsedGitHubRepository,
+  commit: string,
+): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>> {
+  const display = formatGitHubRepository(repository);
+  if (!isPlainHost(repository.host)) {
+    return managedCloneFailure('lfs-fetch', display, hostRuleReason(repository.host));
+  }
+  if (options.cancellation.aborted) {
+    return cancellationFailure();
+  }
+  const lfsProbed = await probeGitLfs(options, probeStates.lfs, display);
+  if (!lfsProbed.ok) {
+    return lfsProbed;
+  }
+
+  const lockPath = `${directory}.lock`;
+  const locked = await acquireLock(lockPath, 'lfs-fetch', display);
+  if (!locked.ok) {
+    return locked;
+  }
+  try {
+    const ghProbed = await probeGh(options, probeStates.gh, 'lfs-fetch', display);
+    if (!ghProbed.ok) {
+      return ghProbed;
+    }
+    const remote = (options.remoteUrl ?? defaultRemoteUrl)(repository);
+    const result = await options.runProcess({
+      argv: [
+        'git',
+        ...credentialHelperArgs(repository.host),
+        '-c',
+        `lfs.url=${remote}/info/lfs`,
+        'lfs',
+        'fetch',
+        '-I',
+        '',
+        '-X',
+        '',
+        remote,
+        commit,
+      ],
+      cwd: directory,
+      environment: networkGitEnvironment(options.parentEnvironment),
+      timeoutMs: GIT_COMMAND_TIMEOUT_MS,
+      terminationGraceMs: TERMINATION_GRACE_MS,
+      cancellation: options.cancellation,
+      secretValues: options.secretValues(),
+    });
+    if (options.cancellation.aborted || (result.launched && result.cancelled)) {
+      return cancellationFailure();
+    }
+    if (!result.launched) {
+      return managedCloneFailure(
+        'lfs-fetch',
+        display,
+        `git could not be started: ${result.code ?? result.reason}`,
+      );
+    }
+    if (result.timedOut) {
+      return managedCloneFailure(
+        'lfs-fetch',
+        display,
+        `git lfs fetch did not finish within 10 minutes; ${LFS_RETRY_TEXT}`,
+      );
+    }
+    if (result.exitCode === 0) {
+      return { ok: true, value: undefined };
+    }
+    if (result.exitCode === null) {
+      return managedCloneFailure(
+        'lfs-fetch',
+        display,
+        `git lfs fetch exited unexpectedly (signal ${result.signal ?? 'unknown'}); ${LFS_RETRY_TEXT}`,
+      );
+    }
+    return managedCloneFailure(
+      'lfs-fetch',
+      display,
+      describeLfsFetchFailure(result.exitCode, result.stderr.text, repository.host, display),
+    );
+  } finally {
+    await releaseLock(lockPath);
+  }
+}
+
+/** Runs `git lfs version` at most once per adapter instance, before the first Git LFS fetch. */
+async function probeGitLfs(
+  options: ManagedCloneAdapterOptions,
+  state: LfsProbeState,
+  display: string,
+): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>> {
+  if (state.probed) {
+    return { ok: true, value: undefined };
+  }
+  const result = await options.runProcess({
+    argv: ['git', 'lfs', 'version'],
+    cwd: tmpdir(),
+    environment: networkGitEnvironment(options.parentEnvironment),
+    timeoutMs: LFS_PROBE_TIMEOUT_MS,
+    terminationGraceMs: TERMINATION_GRACE_MS,
+    cancellation: options.cancellation,
+    secretValues: options.secretValues(),
+  });
+  if (options.cancellation.aborted || (result.launched && result.cancelled)) {
+    return cancellationFailure();
+  }
+  if (result.launched && result.timedOut) {
+    return managedCloneFailure(
+      'lfs-fetch',
+      display,
+      'git lfs version did not finish within 30 seconds',
+    );
+  }
+  if (!result.launched || result.exitCode !== 0 || !result.stdout.text.startsWith('git-lfs/')) {
+    return managedCloneFailure(
+      'lfs-fetch',
+      display,
+      'Git LFS is not installed or not on PATH; install it from https://git-lfs.com',
+    );
+  }
+  state.probed = true;
+  return { ok: true, value: undefined };
+}
+
+/**
+ * Builds the reason for a `git lfs fetch` that exited nonzero: the exit code,
+ * the most telling stderr line, and the next step the stderr calls for.
+ */
+function describeLfsFetchFailure(
+  exitCode: number,
+  stderr: string,
+  host: string,
+  display: string,
+): string {
+  let reason = `git lfs fetch exited with code ${exitCode}`;
+  // git-lfs 3.8 opens stderr with a "Fetching reference <sha>" progress line.
+  const withoutProgress = stderr
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('Fetching reference '))
+    .join('\n');
+  const excerpt = stderrExcerpt(withoutProgress, 'batch response: ');
+  if (excerpt.length > 0) {
+    reason += `: ${excerpt}`;
+  }
+  const lines = stderr.split('\n');
+  if (
+    lines.some(
+      (line) => line.includes('Authorization error:') || line.includes('Git credentials for '),
+    )
+  ) {
+    return `${reason}; ${authenticationReason(host)}`;
+  }
+  if (
+    lines.some(
+      (line) =>
+        LFS_MISSING_OBJECT_LINE.test(line.trim()) || line.includes('remote missing object '),
+    )
+  ) {
+    return `${reason}; ${display} does not have every Git LFS object of this commit; choose another base commit`;
+  }
+  return `${reason}; ${LFS_RETRY_TEXT}`;
 }
 
 /** Runs one `git ls-remote` for `repository`'s HEAD, with gh as the credential helper. */

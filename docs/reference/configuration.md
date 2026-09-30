@@ -266,7 +266,31 @@ Every configured source repository, a local path or a managed GitHub clone, is r
 
 The case contains no source remotes, later history, tags, stashes, or shared object database. Sibling cases have separate Git metadata and writable directories. The original repository and commit identity are retained separately from the synthetic commit.
 
-Submodules and Git LFS sources are unsupported. Project instructions tracked at the pinned commit remain task context. The [isolation explanation](../concepts/isolation.md) covers why these boundaries matter to a comparison.
+Submodules are unsupported, and so are Git LFS pointer entries that use Git LFS extensions (a pointer with an `ext-` line), because rebuilding their content needs the programs your own Git configuration names, which tevu never reads. A tree holding one is rejected with `repository "<id>": source tree contains 1 Git LFS pointer entry that uses Git LFS extensions; tevu cannot rebuild its content`, or, for `<k>` such entries, `repository "<id>": source tree contains <k> Git LFS pointer entries that use Git LFS extensions; tevu cannot rebuild their content`. Project instructions tracked at the pinned commit remain task context. The [isolation explanation](../concepts/isolation.md) covers why these boundaries matter to a comparison.
+
+A repository that stores files in Git LFS is otherwise an ordinary source. A Git LFS pointer entry is a regular-file entry (mode `100644` or `100755`) of the tree at `base_commit` whose whole blob is a Git LFS pointer under 1024 bytes: the `version https://git-lfs.github.com/spec/v1` line, an `oid sha256:` line, and a `size` line, each ending in a line feed, and nothing else. The blob decides, so `.gitattributes` does not: a pointer at a path no `filter=lfs` rule matches is materialized, and a `filter=lfs` path holding ordinary content is sealed unchanged.
+
+In the synthetic root commit, each pointer entry holds its Git LFS object's content at the same path with the same mode, as a checkout with Git LFS configured shows it. A pointer with `size 0` becomes an empty file, and tevu reads no object for it. Every other path matches `base_commit` byte for byte, `.gitattributes` included. That includes a tracked root `.lfsconfig`, which is kept byte-identical in the case: the Git LFS endpoint it names is visible inside the case, for example through `git lfs env` or by reading the file, while the case repository's own Git configuration and storage carry no Git LFS remote, credentials, or Git LFS configuration. A tree without pointer entries yields a synthetic tree equal to the pinned tree.
+
+tevu reads objects only from the repository's own Git LFS storage: the directory `lfs.storage` names in the repository's own configuration, resolved against the repository's common Git directory when relative, and `lfs` inside that directory when unset. Objects sit at `objects/<first two characters of the oid>/<next two>/<oid>`. Your global and system Git configuration and other repositories' storage are never read, so an object held only in an alternate repository's storage counts as missing.
+
+`tevu validate`, `tevu run`, and the `tevu task add` base-commit check require every object to be present with its pointer's size before any case starts, and read no object content. Sealing then checks each object's SHA-256 against the pointer's `oid`, and a mismatch fails that case only.
+
+Each sealing case reads every object twice and stores it twice, in its case repository and in its worktree, so disk use and sealing time grow with the Git LFS content of `base_commit` and with `run.concurrency`. Memory use does not grow with object size.
+
+tevu never fetches into, or writes to, a path entry's repository. When objects are missing, `tevu validate` reports the count and the command to run there yourself, and names installing Git LFS first when `git lfs version` fails:
+
+```
+error tasks.<id>.base_commit: repository "<id>": Git LFS objects not in "<path>/.git/lfs/objects": <missing> of <needed>; fetch them in "<path>" first, for example: git lfs fetch -I "" -X "" origin <commit>
+```
+
+An object file whose bytes do not match its pointer fails sealing of that case with the file named, and the fix is to delete that file and fetch it again:
+
+```
+repository "<id>": Git LFS object file "<path>/.git/lfs/objects/<xx>/<yy>/<oid>" does not match its pointer; delete the file, then fetch it again in "<path>", for example: git lfs fetch -I "" -X "" origin <commit>
+```
+
+For a GitHub entry both texts end with `tevu run --dry-run fetches them from <host>/<owner>/<repo>` (`fetches it again from` for a mismatch) in place of the `git lfs fetch` command; see [GitHub repositories](#github-repositories).
 
 ## Checks
 
@@ -347,6 +371,10 @@ A `github` entry names a repository on `github.com` or a GitHub Enterprise Serve
 tevu keeps one bare clone per lowercased `<host>/<owner>/<repo>`, shared by every entry and configuration that names it, at `<root>/<host>/<owner>/<repo>.git` under the managed-clone root: `$XDG_CACHE_HOME/tevu/repositories` when `XDG_CACHE_HOME` is set, non-empty, and absolute, otherwise `$HOME/.cache/tevu/repositories` under the same test, otherwise there is no root and every command that would need one reports a finding naming the unset variable. The clone holds full history, no `--depth` and no `--filter`, because sealing borrows objects through a temporary alternates link and the reference-solution ancestry checks walk history; its local configuration sets `gc.auto=0` and `maintenance.auto=false` so a concurrent fetch never drops an object or pack a reader needs, and it carries no `credential` configuration key. Deleting the managed-clone root is always safe: the next command that needs a clone creates it again.
 
 `tevu task add` clones a newly selected GitHub entry immediately and fetches its base-commit and reference-solution answers as they are typed. `tevu run` and `tevu run --dry-run` clone or fetch, once per GitHub entry a task names, before validation: first each entry's tasks' base commits, then each task's reference-solution commits, only for whatever `tevu validate`'s own commit resolution would not already find locally. `tevu validate`, `tevu assess`, `tevu report`, and `tevu config example` never themselves clone, fetch, or otherwise reach the network; a missing clone or a commit absent from it is reported as a validation finding naming the command that fixes it, covered in [Tasks](#tasks) and [Reference solution](#reference-solution). A case executable `tevu validate` starts may still reach the network on its own; see [Case executables](#case-executables).
+
+`tevu task add` (once per base-commit answer), `tevu run`, and `tevu run --dry-run` (in the same preparation step, once per distinct base commit of each entry) also fetch the Git LFS objects a base commit's tree lacks, when the clone does not hold them yet, and need Git LFS installed for it (`git lfs version` runs first, and its absence is reported with the install link). The command is `git lfs fetch -I "" -X "" <clone URL> <commit>` in the clone, with the same lock and the same 10-minute limit as a git fetch; the empty `-I` and `-X` clear any include or exclude rule a tracked `.lfsconfig` sets, and a fetch that ends without every object fails the command. `tevu validate` never fetches Git LFS objects and reports missing ones as a finding. gh's credential is offered only to the GitHub host, as for every other network git command.
+
+The Git LFS endpoint is pinned to `<clone URL>/info/lfs`, whatever a tracked `.lfsconfig` names: git-lfs sends its batch request only there and downloads from the addresses that response names. This keeps a repository from choosing the host that receives your credentials. Like git, git-lfs sends your `~/.netrc` entry for the GitHub host when that host asks for credentials. A repository whose Git LFS objects live only on another server therefore cannot be fetched into a managed clone; use a path entry, and fetch the objects in your own clone. git-lfs may add `lfs.*` keys to the clone's local configuration; none is a credential.
 
 A clone or fetch holds a `mkdir` lock directory (the clone's own path with `.lock` appended) for its duration, across processes; the lock never waits and is never removed automatically, so a command that finds one already present fails, naming the lock path, whether another tevu command is updating the clone or the lock is stale and needs the operator to remove it.
 

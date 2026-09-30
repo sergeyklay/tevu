@@ -35,7 +35,11 @@ import { createJiraCloudAdapter } from '@/adapters/trackers/jira-cloud';
 import { assessCase, readAssessmentContext, rebuildReport } from '@/application/assess';
 import { createTask, inspectTaskBaseCommit } from '@/application/create-task';
 import { draftCriteria } from '@/application/draft-criteria';
-import { ensureManagedCommits, prepareManagedRepositories } from '@/application/managed-clone';
+import {
+  ensureManagedCommits,
+  ensureManagedLfsObjects,
+  prepareManagedRepositories,
+} from '@/application/managed-clone';
 import { checkModelAccess, inspectModelProvider, probeAgent } from '@/application/model-access';
 import { resolveReferenceSolution } from '@/application/reference-solution';
 import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
@@ -48,7 +52,7 @@ import { runProgram } from '@/interface/program';
 import { createWaitInterrupt } from '@/interface/wait-interrupt';
 
 import type { JiraCloudSettings } from '@/adapters/trackers/jira-cloud';
-import type { ManagedCloneDependencies } from '@/application/managed-clone';
+import type { ManagedLfsDependencies } from '@/application/managed-clone';
 import type { ModelAccessDependencies } from '@/application/model-access';
 import type {
   AgentRegistry,
@@ -127,7 +131,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
 
   const managedCloneDependencies = (
     onProgress: (line: string) => void,
-  ): ManagedCloneDependencies => ({
+  ): ManagedLfsDependencies => ({
     clones,
     git: createSourceValidator(),
     managedCloneRoot: cloneRoot,
@@ -234,6 +238,8 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
       resolveReferenceSolution(request, { ...managedCloneDependencies(onProgress), pullRequests }),
     ensureManagedCommits: (request, onProgress) =>
       ensureManagedCommits(request, managedCloneDependencies(onProgress)),
+    ensureManagedLfsObjects: (request, onProgress) =>
+      ensureManagedLfsObjects(request, managedCloneDependencies(onProgress)),
     checkGitHubRepository: (repository) => clones.checkRemote(repository),
     isGitRepository: (configPath, repositoryPath) =>
       isGitRepository(path.resolve(path.dirname(path.resolve(configPath)), repositoryPath)),

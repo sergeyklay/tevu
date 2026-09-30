@@ -99,6 +99,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Check Git LFS
+        run: git lfs version
+
       - name: Run tests
         run: bun run test
 
