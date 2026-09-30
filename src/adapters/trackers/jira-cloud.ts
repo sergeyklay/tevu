@@ -191,7 +191,8 @@ export function createJiraCloudAdapter(
 /**
  * Projects an Atlassian Document Format value to plain text, preserving the
  * textual descendants of unsupported nodes and turning hard breaks and block
- * boundaries into newlines.
+ * boundaries into newlines. Link destinations stay in the text, because the
+ * plain text is the only place the operator can see where a link points.
  */
 function projectRichTextToPlainText(node: unknown): string {
   return nodeToText(node).trim();
@@ -220,7 +221,76 @@ const BLOCK_NODE_TYPES = new Set([
   'decisionItem',
   'expand',
   'nestedExpand',
+  'blockCard',
+  'embedCard',
 ]);
+
+const CARD_NODE_TYPES = new Set(['inlineCard', 'blockCard', 'embedCard']);
+
+const VISIBLE_URL_PREFIXES = ['https://', 'http://', 'mailto:'];
+
+function readDestination(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const destination = value.trim();
+  return destination.length > 0 ? destination : undefined;
+}
+
+function linkedTextOf(node: unknown): { text: string; destination: string } | undefined {
+  if (!isRecord(node) || typeof node['text'] !== 'string' || !Array.isArray(node['marks'])) {
+    return undefined;
+  }
+  const linkMark: unknown = node['marks'].find(
+    (mark: unknown) => isRecord(mark) && mark['type'] === 'link',
+  );
+  if (!isRecord(linkMark) || !isRecord(linkMark['attrs'])) {
+    return undefined;
+  }
+  const destination = readDestination(linkMark['attrs']['href']);
+  return destination === undefined ? undefined : { text: node['text'], destination };
+}
+
+function renderRun(label: string, destination: string): string {
+  const core = label.trim();
+  if (core.length === 0) {
+    return `${label}${destination}`;
+  }
+  const isShownAsDestination =
+    core === destination ||
+    VISIBLE_URL_PREFIXES.some(
+      (prefix) => destination.startsWith(prefix) && core === destination.slice(prefix.length),
+    );
+  if (isShownAsDestination) {
+    return label;
+  }
+  const leading = label.slice(0, label.length - label.trimStart().length);
+  const trailing = label.slice(label.trimEnd().length);
+  return `${leading}${core} (${destination})${trailing}`;
+}
+
+function projectSiblings(children: readonly unknown[]): string {
+  let output = '';
+  let index = 0;
+  while (index < children.length) {
+    const first = linkedTextOf(children[index]);
+    if (first === undefined) {
+      output += nodeToText(children[index]);
+      index += 1;
+      continue;
+    }
+    let label = first.text;
+    index += 1;
+    let next = linkedTextOf(children[index]);
+    while (next?.destination === first.destination) {
+      label += next.text;
+      index += 1;
+      next = linkedTextOf(children[index]);
+    }
+    output += renderRun(label, first.destination);
+  }
+  return output;
+}
 
 function nodeToText(node: unknown): string {
   if (typeof node === 'string') {
@@ -232,16 +302,23 @@ function nodeToText(node: unknown): string {
   if (node['type'] === 'hardBreak') {
     return '\n';
   }
+  const linked = linkedTextOf(node);
+  if (linked !== undefined) {
+    return renderRun(linked.text, linked.destination);
+  }
   if (typeof node['text'] === 'string') {
     return node['text'];
   }
+  const attrs = isRecord(node['attrs']) ? node['attrs'] : {};
+  const cardDestination = CARD_NODE_TYPES.has(String(node['type']))
+    ? readDestination(attrs['url'])
+    : undefined;
   const content = Array.isArray(node['content']) ? node['content'] : [];
-  if (content.length === 0) {
-    const attrs = isRecord(node['attrs']) ? node['attrs'] : {};
+  if (cardDestination === undefined && content.length === 0) {
     const attrText = attrs['text'] ?? attrs['shortName'];
     return typeof attrText === 'string' ? attrText : '';
   }
-  const text = content.map(nodeToText).join('');
+  const text = cardDestination ?? projectSiblings(content);
   return BLOCK_NODE_TYPES.has(String(node['type'])) && text.length > 0 && !text.endsWith('\n')
     ? `${text}\n`
     : text;

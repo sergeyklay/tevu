@@ -14,6 +14,11 @@ The issue sources `tevu task add` can import from: Jira Cloud and GitHub issues.
 - `tevu task add --jira` needs both variables at import time and needs `trackers.jira` in an existing configuration. Without it the command exits `1`. A new configuration takes the Jira settings during the setup interview.
 - Neither credential variable may appear in a check's `env` or in `setup.env`.
 - The import is read-only. It uses at most three requests, shared across redirects and retries, against the Jira Cloud REST API version 3.
+- The description is imported once as plain text, without its formatting.
+- Each paragraph, heading, list item, table cell, block card, and embedded card ends its line. A hard break starts a new line.
+- A smart link, shown inline, as a card, or embedded, is imported as its URL.
+- Linked text is imported as `text (URL)`, or as the text alone when the text is the URL itself or the URL without a leading `http://`, `https://`, or `mailto:`.
+- The import opens no linked page, and attachments and images are not imported.
 
 ## GitHub issues
 
