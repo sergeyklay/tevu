@@ -331,7 +331,7 @@ function buildFakeAgentAdapter(overrides: Partial<AgentAdapter> = {}): AgentAdap
     })),
     readProviders: vi.fn(async () => ({
       ok: true as const,
-      value: { agent: 'opencode', configurationFiles: [], findings: [] },
+      value: { agent: 'opencode', configurationFiles: [], findings: [], copiedProviders: [] },
     })),
     inspectOperatorProvider: vi.fn(async () => ({
       ok: true as const,

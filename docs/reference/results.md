@@ -50,9 +50,12 @@ An unavailable measurement is recorded as unavailable with a reason, never as ze
 Derivation:
 
 - Elapsed time comes from process timing for every agent.
-- The adapter named by a case's `agent` derives the other metrics from the case's saved records. For OpenCode, the root session export is the source. When it is unavailable, events supply only API errors, tool calls, and skill calls, filtered to the root session, and the other metrics are unavailable.
+- The adapter named by a case's `agent` derives the other metrics from the case's saved records and from `tools.copiedProviders` in `run.json`. For OpenCode, the root session export is the source. When it is unavailable, events supply only API errors, tool calls, and skill calls, filtered to the root session, and the other metrics are unavailable.
 - Records are counted once by identity.
 - A turn is an assistant record with a non-empty `finish` field. An API call is an assistant record with a `finish` or `error` field. An API error is an assistant record with an `error` field. Tool calls come from tool records, and skill calls from tool records for the `skill` tool.
+- Cost is the sum of the `cost` of the root session's assistant records. When the agent block copies at least one provider, a reported zero counts as measured only when the record's provider is not one the agent block copies, when the copied definition defines a price for the record's model (`models.<model>.cost` with numeric `input` and `output`), or when another assistant record of the same provider and model reports a non-zero cost. Otherwise `cost` is unavailable with the reason `the copied definition of provider "<provider>" defines no price for model "<model>"`. A zero-cost record without a usable `providerID`, or without a usable `modelID` for a copied provider, also makes `cost` unavailable, with a reason naming the field. Grader metrics follow the same rule.
+- A free model of a copied provider reads unavailable until its OpenCode provider definition sets `models.<model>.cost` with `input` `0` and `output` `0`, which makes its zero a measured one. Only the copied definition is evidence: a price set in a task repository's tracked `opencode.json` is not consulted.
+- A zero from a provider the agent block does not copy, an OpenCode built-in provider or one defined only in a task repository's tracked `opencode.json`, stays a measured `0 USD` even when nothing prices the model. A model of a provider defined only in a task repository's tracked `opencode.json` that sets no price still reads as `0 USD`.
 - A malformed export or event file makes every metric except a measured elapsed time unavailable and preserves an `AgentProtocolError`.
 
 Scope:

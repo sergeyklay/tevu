@@ -1294,6 +1294,24 @@ function describeManifestDefect(manifest: RunManifest): string | null {
   return null;
 }
 
+/** Holds for a decoded `RunManifest.tools.copiedProviders`: every value lists providers with a non-empty `id` and string `pricedModels`. */
+function isCopiedProvidersRecord(value: unknown): value is Record<string, unknown> {
+  return (
+    isRecord(value) &&
+    Object.values(value).every(
+      (providers) =>
+        Array.isArray(providers) &&
+        providers.every(
+          (provider) =>
+            isRecord(provider) &&
+            isNonEmptyString(provider['id']) &&
+            Array.isArray(provider['pricedModels']) &&
+            provider['pricedModels'].every((model) => typeof model === 'string'),
+        ),
+    )
+  );
+}
+
 function describeStoredManifestDefect(manifest: unknown, runId: string): string | null {
   if (
     !isRecord(manifest) ||
@@ -1302,6 +1320,7 @@ function describeStoredManifestDefect(manifest: unknown, runId: string): string 
     !Array.isArray(manifest['cases']) ||
     !isRecord(manifest['tools']) ||
     !isRecord(manifest['tools']['agentVersions']) ||
+    !isCopiedProvidersRecord(manifest['tools']['copiedProviders']) ||
     !isRecord(manifest['execution']) ||
     !isRepeatSetting(manifest['execution']['repeat']) ||
     !isNonEmptyString(manifest['configPath']) ||
@@ -1309,6 +1328,16 @@ function describeStoredManifestDefect(manifest: unknown, runId: string): string 
       (entry) => isRecord(entry) && isPositiveSafeInteger(entry['timeoutMs']),
     )
   ) {
+    return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
+  }
+  const copiedProviders = manifest['tools']['copiedProviders'];
+  const hasUnlistedAgent = manifest['cases'].some(
+    (entry) =>
+      isRecord(entry) &&
+      typeof entry['agent'] === 'string' &&
+      !Object.hasOwn(copiedProviders, entry['agent']),
+  );
+  if (hasUnlistedAgent) {
     return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
   }
   return null;

@@ -7,13 +7,16 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createRedactor, createSecretRedactor, runManagedProcess } from '@/adapters/process';
 
+import { exportMessageIdentity, exportPartIdentity, normalizeMetrics } from './metrics';
 import { createOpenCodeAdapter } from './opencode';
-import { exportMessageIdentity, exportPartIdentity, normalizeMetrics } from './opencode-metrics';
 
 import type { OpenCodeAdapterDependencies } from './opencode';
-import type { OpenCodeExport, OpenCodePart } from './opencode-protocol';
+import type { OpenCodeExport, OpenCodePart } from './protocol';
 import type {
+  AgentMetrics,
   AgentRunResult,
+  AgentSessionExport,
+  CopiedProvider,
   IsolatedEnvironment,
   ManagedProcessRequest,
   ManagedProcessResult,
@@ -81,6 +84,7 @@ describe('normalizeMetrics from the root session export', () => {
       sessionId: 'ses-root-0001',
       sessionExport: readJsonFixture('session-valid.json') as never,
       events: [],
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -114,6 +118,7 @@ describe('normalizeMetrics from the root session export', () => {
       sessionId: 'ses-root-0001',
       sessionExport: readJsonFixture('session-valid.json') as never,
       events: [],
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -134,6 +139,7 @@ describe('normalizeMetrics from the root session export', () => {
       sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -156,6 +162,7 @@ describe('normalizeMetrics from the root session export', () => {
       sessionId: 'ses-root-0001',
       sessionExport: readJsonFixture('session-valid.json') as never,
       events: [rootError, rootError],
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -188,6 +195,7 @@ describe('normalizeMetrics from the root session export', () => {
       sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -246,6 +254,7 @@ describe('normalizeMetrics from the root session export', () => {
       sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -296,6 +305,7 @@ describe('normalizeMetrics from the root session export', () => {
       sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -356,6 +366,7 @@ describe('normalizeMetrics from the root session export', () => {
       sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -388,6 +399,7 @@ describe('normalizeMetrics from the root session export', () => {
       sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(false);
@@ -413,6 +425,7 @@ describe('normalizeMetrics from the root session export', () => {
       sessionId: 'ses-root-0001',
       sessionExport: sessionExport as never,
       events: [],
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(false);
@@ -431,6 +444,7 @@ describe('normalizeMetrics event fallback', () => {
       sessionExport: null,
       events: readRawFixtureEvents('events-valid.jsonl'),
       exportUnavailableReason: 'root session export unavailable: process failure',
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -496,6 +510,7 @@ describe('normalizeMetrics event fallback', () => {
       sessionExport: null,
       events: [toolUse, toolUse, { ...toolUse, timestamp: 2 }],
       exportUnavailableReason: 'root session export unavailable',
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -531,6 +546,7 @@ describe('normalizeMetrics event fallback', () => {
       sessionExport: null,
       events: [childToolUse, rootError],
       exportUnavailableReason: 'root session export unavailable',
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -549,6 +565,7 @@ describe('normalizeMetrics event fallback', () => {
       sessionExport: null,
       events: [],
       exportUnavailableReason: 'root session export unavailable: process failure',
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -586,6 +603,7 @@ describe('normalizeMetrics event fallback', () => {
       sessionExport: null,
       events: [toolUse],
       exportUnavailableReason: 'root session export unavailable',
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(true);
@@ -611,6 +629,7 @@ describe('normalizeMetrics event fallback', () => {
       sessionId: 'ses-root-0001',
       sessionExport: null,
       events: [malformed],
+      copiedProviders: [],
     });
 
     expect(normalized.ok).toBe(false);
@@ -1011,6 +1030,7 @@ describe('OpenCode adapter over a synthetic executable', () => {
       sessionId: outcome.value.sessionId,
       sessionExport: null,
       events: delivered,
+      copiedProviders: [],
     });
     expect(normalized.ok).toBe(true);
 
@@ -1337,6 +1357,7 @@ describe('OpenCode adapter over a synthetic executable', () => {
       sessionId: SYNTHETIC_SESSION,
       sessionExport: exported.value,
       events: [],
+      copiedProviders: [],
     });
     expect(normalized.ok).toBe(true);
   });
@@ -2098,6 +2119,7 @@ describe('OpenCode adapter callModel failures over an injected fake process', ()
       timeoutMs: 10_000,
       terminationGraceMs: 250,
       cancellation: new AbortController().signal,
+      copiedProviders: [],
     };
   }
 
@@ -2283,6 +2305,7 @@ describe('OpenCode adapter export refusal over an injected fake process', () => 
           timeoutMs: 10_000,
           terminationGraceMs: 250,
           cancellation: new AbortController().signal,
+          copiedProviders: [],
         }),
     },
   ];
@@ -2408,6 +2431,494 @@ describe('OpenCode adapter export refusal over an injected fake process', () => 
 
       expect(fromIncomplete.ok).toBe(true);
       expect(fromIncomplete).toEqual(fromComplete);
+    });
+  });
+});
+
+const UNPRICED = [{ id: 'acme-proxy', pricedModels: [] }];
+const PRICED = [{ id: 'acme-proxy', pricedModels: ['acme-large'] }];
+const NO_PRICE_REASON =
+  'the copied definition of provider "acme-proxy" defines no price for model "acme-large"';
+
+function expectedUnavailableCost(reason: string) {
+  return {
+    value: null,
+    unit: 'USD',
+    availability: { status: 'unavailable', reason },
+    scope: 'root-session',
+  };
+}
+
+function expectedMeasuredCost(value: number) {
+  return {
+    value,
+    unit: 'USD',
+    availability: { status: 'available', source: 'root-session export' },
+    scope: 'root-session',
+  };
+}
+
+function normalizeExport(
+  sessionExport: unknown,
+  copiedProviders: readonly CopiedProvider[],
+): AgentMetrics {
+  const normalized = normalizeMetrics({
+    caseId: CASE_ID,
+    sessionId: null,
+    sessionExport: sessionExport as AgentSessionExport,
+    events: [],
+    copiedProviders,
+  });
+  if (!normalized.ok) {
+    throw new Error(`export must normalize: ${normalized.error.reason}`);
+  }
+  return normalized.value;
+}
+
+function normalizeFixture(name: string, copiedProviders: readonly CopiedProvider[]): AgentMetrics {
+  return normalizeExport(readJsonFixture(name), copiedProviders);
+}
+
+function buildAssistantMessage(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    info: {
+      id,
+      sessionID: 'ses-root-0002',
+      role: 'assistant',
+      parentID: 'msg-u1',
+      providerID: 'acme-proxy',
+      modelID: 'acme-large',
+      cost: 0,
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+      ...overrides,
+    },
+    parts: [],
+  };
+}
+
+function buildExportOf(...messages: unknown[]) {
+  return {
+    info: { id: 'ses-root-0002' },
+    messages: [
+      { info: { id: 'msg-u1', sessionID: 'ses-root-0002', role: 'user' }, parts: [] },
+      ...messages,
+    ],
+  };
+}
+
+describe('normalizeMetrics cost evidence for copied providers', () => {
+  it('reports the cost of an unpriced model of a copied provider as unavailable and leaves every other metric as measured', () => {
+    const { cost, ...metrics } = normalizeFixture('session-unpriced.json', UNPRICED);
+    const { cost: costWithoutEvidenceList, ...baseline } = normalizeFixture(
+      'session-unpriced.json',
+      [],
+    );
+
+    expect(cost).toEqual(expectedUnavailableCost(NO_PRICE_REASON));
+    expect(costWithoutEvidenceList).toEqual(expectedMeasuredCost(0));
+    expect(metrics).toEqual(baseline);
+  });
+
+  it.each([
+    { name: 'the copied definition prices the model', copiedProviders: PRICED },
+    { name: 'no provider is copied', copiedProviders: [] },
+    {
+      name: 'the export names a provider the block does not copy',
+      copiedProviders: [{ id: 'local-llm', pricedModels: [] }],
+    },
+  ])('keeps the reported zero as a measured cost when $name', ({ copiedProviders }) => {
+    const { cost } = normalizeFixture('session-unpriced.json', copiedProviders);
+
+    expect(cost).toEqual(expectedMeasuredCost(0));
+  });
+
+  it('keeps the summed cost when a later message of the same model reports a non-zero cost after an earlier zero', () => {
+    const { cost } = normalizeFixture('session-priced.json', UNPRICED);
+
+    expect(cost).toEqual(expectedMeasuredCost(0.0125));
+  });
+
+  it('keeps every current value of the valid fixture when no provider is copied', () => {
+    const { cost } = normalizeFixture('session-valid.json', []);
+
+    expect(cost).toEqual(expectedMeasuredCost(0.0125));
+  });
+
+  it('reports the valid fixture cost as unavailable when its zero-cost message names no provider', () => {
+    const { cost } = normalizeFixture('session-valid.json', UNPRICED);
+
+    expect(cost).toEqual(
+      expectedUnavailableCost('field "providerID" is absent in export message "msg-a2"'),
+    );
+  });
+
+  describe('identity defects on a zero-cost message', () => {
+    it.each([
+      {
+        name: 'an absent providerID',
+        overrides: { providerID: undefined },
+        reason: 'field "providerID" is absent in export message "msg-a1"',
+      },
+      {
+        name: 'a non-string providerID',
+        overrides: { providerID: 42 },
+        reason: 'field "providerID" is malformed in export message "msg-a1"',
+      },
+      {
+        name: 'an empty providerID',
+        overrides: { providerID: '' },
+        reason: 'field "providerID" is malformed in export message "msg-a1"',
+      },
+      {
+        name: 'an absent modelID',
+        overrides: { modelID: undefined },
+        reason: 'field "modelID" is absent in export message "msg-a1"',
+      },
+      {
+        name: 'a non-string modelID',
+        overrides: { modelID: 7 },
+        reason: 'field "modelID" is malformed in export message "msg-a1"',
+      },
+      {
+        name: 'an empty modelID',
+        overrides: { modelID: '' },
+        reason: 'field "modelID" is malformed in export message "msg-a1"',
+      },
+    ])('names the field and message for $name', ({ overrides, reason }) => {
+      const sessionExport = buildExportOf(buildAssistantMessage('msg-a1', overrides));
+
+      const { cost } = normalizeExport(sessionExport, UNPRICED);
+
+      expect(cost).toEqual(expectedUnavailableCost(reason));
+    });
+
+    it('does not judge a missing modelID when the provider is not copied', () => {
+      const sessionExport = buildExportOf(
+        buildAssistantMessage('msg-a1', { providerID: 'local-llm', modelID: undefined }),
+      );
+
+      const { cost } = normalizeExport(sessionExport, UNPRICED);
+
+      expect(cost).toEqual(expectedMeasuredCost(0));
+    });
+  });
+
+  describe('evidence of a price', () => {
+    it('reports a model the copied definition does not price even when it prices another model', () => {
+      const sessionExport = buildExportOf(
+        buildAssistantMessage('msg-a1', { modelID: 'acme-small' }),
+      );
+
+      const { cost } = normalizeExport(sessionExport, PRICED);
+
+      expect(cost).toEqual(
+        expectedUnavailableCost(
+          'the copied definition of provider "acme-proxy" defines no price for model "acme-small"',
+        ),
+      );
+    });
+
+    it('accepts a non-zero cost that precedes the zero in export order', () => {
+      const sessionExport = buildExportOf(
+        buildAssistantMessage('msg-a1', { cost: 0.5 }),
+        buildAssistantMessage('msg-a2'),
+      );
+
+      const { cost } = normalizeExport(sessionExport, UNPRICED);
+
+      expect(cost).toEqual(expectedMeasuredCost(0.5));
+    });
+
+    it.each([
+      { name: 'another model', overrides: { modelID: 'acme-small' } },
+      { name: 'another provider', overrides: { providerID: 'other-proxy' } },
+      { name: 'a message without a providerID', overrides: { providerID: undefined } },
+      { name: 'a message without a modelID', overrides: { modelID: undefined } },
+    ])('does not accept a non-zero cost reported by $name', ({ overrides }) => {
+      const sessionExport = buildExportOf(
+        buildAssistantMessage('msg-a1'),
+        buildAssistantMessage('msg-a2', { cost: 0.5, ...overrides }),
+      );
+
+      const { cost } = normalizeExport(sessionExport, UNPRICED);
+
+      expect(cost).toEqual(expectedUnavailableCost(NO_PRICE_REASON));
+    });
+
+    it('treats a negative zero as a zero cost', () => {
+      const sessionExport = buildExportOf(buildAssistantMessage('msg-a1', { cost: -0 }));
+
+      const { cost } = normalizeExport(sessionExport, UNPRICED);
+
+      expect(cost).toEqual(expectedUnavailableCost(NO_PRICE_REASON));
+    });
+  });
+
+  describe('message order and precedence', () => {
+    it.each([
+      {
+        name: 'an absent cost on a later message',
+        messages: [
+          buildAssistantMessage('msg-a1', { providerID: undefined }),
+          buildAssistantMessage('msg-a2', { cost: undefined }),
+        ],
+        reason: 'field "cost" is absent in export message "msg-a2"',
+      },
+      {
+        name: 'a malformed cost on a later message',
+        messages: [buildAssistantMessage('msg-a1'), buildAssistantMessage('msg-a2', { cost: 'x' })],
+        reason: 'field "cost" is malformed in export message "msg-a2"',
+      },
+      {
+        name: 'a malformed cost on an earlier message',
+        messages: [
+          buildAssistantMessage('msg-a1', { cost: 'x' }),
+          buildAssistantMessage('msg-a2', { providerID: undefined }),
+        ],
+        reason: 'field "cost" is malformed in export message "msg-a1"',
+      },
+    ])('lets $name take precedence over every identity reason', ({ messages, reason }) => {
+      const { cost } = normalizeExport(buildExportOf(...messages), UNPRICED);
+
+      expect(cost).toEqual(expectedUnavailableCost(reason));
+    });
+
+    it.each([
+      {
+        name: 'a no-price zero before an absent providerID',
+        messages: [
+          buildAssistantMessage('msg-a1'),
+          buildAssistantMessage('msg-a2', { providerID: undefined }),
+        ],
+        reason: NO_PRICE_REASON,
+      },
+      {
+        name: 'an absent providerID before a no-price zero',
+        messages: [
+          buildAssistantMessage('msg-a1', { providerID: undefined }),
+          buildAssistantMessage('msg-a2'),
+        ],
+        reason: 'field "providerID" is absent in export message "msg-a1"',
+      },
+      {
+        name: 'an absent modelID before a no-price zero',
+        messages: [
+          buildAssistantMessage('msg-a1', { modelID: undefined }),
+          buildAssistantMessage('msg-a2'),
+        ],
+        reason: 'field "modelID" is absent in export message "msg-a1"',
+      },
+      {
+        name: 'a zero of an uncopied provider before a no-price zero',
+        messages: [
+          buildAssistantMessage('msg-a1', { providerID: 'local-llm' }),
+          buildAssistantMessage('msg-a2', { modelID: 'acme-small' }),
+        ],
+        reason:
+          'the copied definition of provider "acme-proxy" defines no price for model "acme-small"',
+      },
+    ])('lets the earliest zero-cost message decide with $name', ({ messages, reason }) => {
+      const { cost } = normalizeExport(buildExportOf(...messages), UNPRICED);
+
+      expect(cost).toEqual(expectedUnavailableCost(reason));
+    });
+
+    it('judges a repeated message identity once, by its first occurrence', () => {
+      const sessionExport = buildExportOf(
+        buildAssistantMessage('msg-a1', { cost: 0.5 }),
+        buildAssistantMessage('msg-a1', { modelID: 'acme-small' }),
+      );
+
+      const { cost } = normalizeExport(sessionExport, UNPRICED);
+
+      expect(cost).toEqual(expectedMeasuredCost(0.5));
+    });
+
+    it('does not take a non-zero cost from a repeated message identity as evidence', () => {
+      const sessionExport = buildExportOf(
+        buildAssistantMessage('msg-a1'),
+        buildAssistantMessage('msg-a1', { cost: 0.5 }),
+      );
+
+      const { cost } = normalizeExport(sessionExport, UNPRICED);
+
+      expect(cost).toEqual(expectedUnavailableCost(NO_PRICE_REASON));
+    });
+  });
+});
+
+describe('OpenCode adapter cost evidence over an injected fake process', () => {
+  const secretRedactor = buildSecretRedactor(['acme']);
+
+  function buildCapture(text: string): RedactedCapture {
+    return { text, totalBytes: text.length, truncated: false, incomplete: false };
+  }
+
+  /** Answers `run` with one event naming the fixture's root session and `export` with the fixture. */
+  function buildSessionRunner(
+    name: string,
+    calls: ManagedProcessRequest[] = [],
+  ): ManagedProcessRunner {
+    const exportText = readTextFixture(name);
+    const { id } = (JSON.parse(exportText) as { info: { id: string } }).info;
+    return async (request) => {
+      calls.push(request);
+      if (request.argv[1] === 'export') {
+        return buildCompletion({ stdout: buildCapture(exportText) });
+      }
+      const line = `${JSON.stringify({
+        type: 'step_start',
+        timestamp: 1,
+        sessionID: id,
+        part: { id: 'prt-1', sessionID: id, messageID: 'msg-a1', type: 'step-start' },
+      })}\n`;
+      request.onStdout?.(line);
+      return buildCompletion({ stdout: buildCapture(line) });
+    };
+  }
+
+  function callModelWith(
+    adapter: ReturnType<typeof createOpenCodeAdapter>,
+    copiedProviders: readonly CopiedProvider[],
+  ) {
+    return adapter.callModel({
+      role: 'criteria',
+      model: 'acme/model-a',
+      effort: 'high',
+      prompt: 'synthetic prompt',
+      environment: buildModelCallEnvironment(),
+      timeoutMs: 10_000,
+      terminationGraceMs: 250,
+      cancellation: new AbortController().signal,
+      copiedProviders,
+    });
+  }
+
+  function redactedExportOf(name: string): AgentSessionExport {
+    const redacted = secretRedactor.redactValue(readJsonFixture(name));
+    if (!redacted.ok) {
+      throw new Error('fixture must redact');
+    }
+    return redacted.value as AgentSessionExport;
+  }
+
+  function redactedProviders(copiedProviders: readonly CopiedProvider[]): CopiedProvider[] {
+    const redacted = secretRedactor.redactValue(copiedProviders);
+    if (!redacted.ok) {
+      throw new Error('providers must redact');
+    }
+    return redacted.value as CopiedProvider[];
+  }
+
+  describe('callModel', () => {
+    it.each([
+      {
+        fixture: 'session-unpriced.json',
+        expectedCost: expectedUnavailableCost(NO_PRICE_REASON),
+      },
+      { fixture: 'session-priced.json', expectedCost: expectedMeasuredCost(0.0125) },
+    ])(
+      'returns the $fixture cost as $expectedCost.availability.status',
+      async ({ fixture, expectedCost }) => {
+        const adapter = buildOpenCodeAdapter({ runProcess: buildSessionRunner(fixture) });
+
+        const outcome = await callModelWith(adapter, UNPRICED);
+
+        expect(outcome.ok).toBe(true);
+        if (!outcome.ok) return;
+        expect(outcome.value.text).toBe('done');
+        expect(outcome.value.metrics.cost).toEqual(expectedCost);
+      },
+    );
+
+    it('returns a protocol error without starting a process when the copied providers cannot be redacted', async () => {
+      const calls: ManagedProcessRequest[] = [];
+      const adapter = buildOpenCodeAdapter({
+        runProcess: buildSessionRunner('session-unpriced.json', calls),
+        secrets: buildAlwaysFailingSecretRedactor(),
+      });
+
+      const outcome = await callModelWith(adapter, UNPRICED);
+
+      expect(outcome).toEqual({
+        ok: false,
+        error: {
+          kind: 'AgentProtocolError',
+          agent: 'opencode',
+          context: { phase: 'call', role: 'criteria' },
+          reason: 'copied providers redaction failed',
+        },
+      });
+      expect(calls).toHaveLength(0);
+    });
+  });
+
+  describe('normalizeMetrics', () => {
+    function normalizeRedactedExport(copiedProviders: readonly CopiedProvider[]) {
+      return buildOpenCodeAdapter({ secrets: secretRedactor }).normalizeMetrics({
+        caseId: CASE_ID,
+        sessionId: 'ses-root-0002',
+        sessionExport: redactedExportOf('session-unpriced.json'),
+        events: [],
+        copiedProviders,
+      });
+    }
+
+    function expectedRedactedReason(): string {
+      const provider = secretRedactor.redactText('acme-proxy');
+      const model = secretRedactor.redactText('acme-large');
+      return `the copied definition of provider "${provider}" defines no price for model "${model}"`;
+    }
+
+    it.each([
+      { name: 'raw', buildProviders: () => UNPRICED },
+      { name: 'already redacted', buildProviders: () => redactedProviders(UNPRICED) },
+    ])(
+      'reports the same unavailable cost for $name copied providers over a redacted export',
+      ({ buildProviders }) => {
+        const normalized = normalizeRedactedExport(buildProviders());
+
+        expect(normalized.ok).toBe(true);
+        if (!normalized.ok) return;
+        expect(normalized.value.cost).toEqual(expectedUnavailableCost(expectedRedactedReason()));
+        expect(expectedRedactedReason()).not.toContain('acme');
+      },
+    );
+
+    it('measures a zero when raw copied providers meet a redacted export without the adapter redaction', () => {
+      const normalized = normalizeMetrics({
+        caseId: CASE_ID,
+        sessionId: 'ses-root-0002',
+        sessionExport: redactedExportOf('session-unpriced.json'),
+        events: [],
+        copiedProviders: UNPRICED,
+      });
+
+      expect(normalized.ok).toBe(true);
+      if (!normalized.ok) return;
+      expect(normalized.value.cost).toEqual(expectedMeasuredCost(0));
+    });
+
+    it('returns a protocol error in the case context when the copied providers cannot be redacted', () => {
+      const adapter = buildOpenCodeAdapter({ secrets: buildAlwaysFailingSecretRedactor() });
+
+      const normalized = adapter.normalizeMetrics({
+        caseId: CASE_ID,
+        sessionId: null,
+        sessionExport: null,
+        events: [],
+        copiedProviders: UNPRICED,
+      });
+
+      expect(normalized).toEqual({
+        ok: false,
+        error: {
+          kind: 'AgentProtocolError',
+          agent: 'opencode',
+          context: { phase: 'case', caseId: CASE_ID },
+          reason: 'copied providers redaction failed',
+        },
+      });
     });
   });
 });

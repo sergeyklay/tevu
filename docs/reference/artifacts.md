@@ -47,6 +47,7 @@ Reports link to patches, transcripts, and complete evaluator output instead of e
 
 - `tools.agentVersions`: one detected version per agent in use.
 - `tools.agentConfigurationFiles`: one entry per agent whose providers the run read, each holding the relative path and SHA-256 of every configuration file tevu wrote into that agent's homes, never the file's text.
+- `tools.copiedProviders`: one entry per agent whose providers the run read, each listing the copied providers and the models whose copied definition defines a price, never a price or any other part of the definition. Regeneration uses it to recompute cost.
 
 ### Case identity
 
@@ -91,12 +92,12 @@ Artifacts remain until the operator deletes the run directory. There is no autom
 
 ## Regeneration
 
-`tevu report <run-id>` recomputes normalized results and Markdown from saved evidence, saved grades, and current assessments. It resolves each case's metrics through the adapter registered under that case's `agent`. It reads a case's `grading.json` only when the case's `artifacts.grading` is set. It never calls the grader, starts a model session, or contacts Git or an issue tracker. Unchanged source artifacts produce identical regenerated JSON and Markdown.
+`tevu report <run-id>` recomputes normalized results and Markdown from saved evidence, saved grades, and current assessments. It resolves each case's metrics through the adapter registered under that case's `agent`, from that agent's `tools.copiedProviders`. It reads a case's `grading.json` only when the case's `artifacts.grading` is set. It never calls the grader, starts a model session, or contacts Git or an issue tracker. Unchanged source artifacts produce identical regenerated JSON and Markdown.
 
 `tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. They refuse a run that lacks any of:
 
 - the current configuration snapshot layout;
-- `tools.agentVersions`, `execution.repeat`, or a non-empty string `configPath` in the manifest;
+- `tools.agentVersions`, `tools.copiedProviders` (with an entry for every case's `agent`), `execution.repeat`, or a non-empty string `configPath` in the manifest;
 - `agent`, `attempt`, `timeoutMs`, or `artifacts.grading` in a case result;
 - the `source` discriminator (`operator` or `grader`) in an assessment history entry.
 

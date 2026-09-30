@@ -50,6 +50,8 @@ export type OpenCodeExport = {
           sessionID: string;
           role: 'assistant';
           parentID: string;
+          providerID: string;
+          modelID: string;
           finish?: string;
           error?: unknown;
           cost: number;

@@ -230,7 +230,10 @@ function buildDirectEditAgent(): AgentAdapter {
       return { ok: true, value: buildAgentCapabilityReport() };
     },
     async readProviders() {
-      return { ok: true, value: { agent: 'opencode', configurationFiles: [], findings: [] } };
+      return {
+        ok: true,
+        value: { agent: 'opencode', configurationFiles: [], findings: [], copiedProviders: [] },
+      };
     },
     async inspectOperatorProvider() {
       return { ok: true, value: { defined: false } };

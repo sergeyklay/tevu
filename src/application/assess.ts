@@ -30,6 +30,7 @@ import type {
   CaseResult,
   CheckRecord,
   CheckResult,
+  CopiedProvider,
   GradeRecord,
   GraderIdentity,
   GradingArtifact,
@@ -388,6 +389,7 @@ async function rebuildRunDerived(
       tasksById,
       store,
       agents,
+      manifest.tools.copiedProviders,
     );
     if (!rebuilt.ok) {
       return rebuilt;
@@ -440,6 +442,7 @@ async function rebuildCaseResult(
   tasksById: ReadonlyMap<string, TaskRecord>,
   store: ArtifactStore,
   agents: AgentRegistry,
+  copiedProviders: Readonly<Record<string, readonly CopiedProvider[]>>,
 ): Promise<
   TevuResult<
     { result: CaseResult; assessment: AssessmentArtifact | null; grading: GradingArtifact | null },
@@ -457,6 +460,12 @@ async function rebuildCaseResult(
     return artifactFailure(
       'rebuild-report',
       `case "${caseId}" names agent "${String(agentName)}", which has no registered adapter`,
+    );
+  }
+  if (agentName === undefined || !Object.hasOwn(copiedProviders, agentName)) {
+    return artifactFailure(
+      'rebuild-report',
+      `case "${caseId}" names agent "${String(agentName)}", which has no tools.copiedProviders entry in run.json`,
     );
   }
 
@@ -510,6 +519,7 @@ async function rebuildCaseResult(
     events,
     sessionExport,
     exportUnavailableReason: EXPORT_ABSENT_REASON,
+    copiedProviders: copiedProviders[agentName],
   });
   if (!normalized.ok) {
     return normalized;

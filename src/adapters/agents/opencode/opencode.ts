@@ -6,14 +6,11 @@
  * decoders; no release string ever gates behavior.
  */
 
-import {
-  normalizeFromExport,
-  normalizeMetrics as normalizeOpenCodeMetrics,
-} from './opencode-metrics';
-import { decodeEvent, decodeExport } from './opencode-protocol';
-import { inspectOpenCodeProvider, readOpenCodeProviders } from './opencode-providers';
+import { normalizeFromExport, normalizeMetrics as normalizeOpenCodeMetrics } from './metrics';
+import { decodeEvent, decodeExport } from './protocol';
+import { inspectOpenCodeProvider, readOpenCodeProviders } from './providers';
 
-import type { OpenCodeExport, ProtocolContext, ProtocolErrorShape } from './opencode-protocol';
+import type { OpenCodeExport, ProtocolContext, ProtocolErrorShape } from './protocol';
 import type {
   AgentAdapter,
   AgentCapability,
@@ -25,6 +22,7 @@ import type {
   AgentRunResult,
   AgentSessionExport,
   CapabilityAvailability,
+  CopiedProvider,
   IsolatedEnvironment,
   ManagedProcessCompletion,
   ManagedProcessResult,
@@ -72,6 +70,7 @@ const PROBE_TERMINATION_GRACE_MS = 2_000;
 const EXPORT_TIMEOUT_MS = 120_000;
 const EXPORT_TERMINATION_GRACE_MS = 2_000;
 const EXPORT_MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
+const COPIED_PROVIDERS_REDACTION_REASON = 'copied providers redaction failed';
 const MODEL_LISTING_TIMEOUT_MS = 120_000;
 const MODEL_LISTING_TERMINATION_GRACE_MS = 2_000;
 const MODEL_LISTING_MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
@@ -121,7 +120,20 @@ export function createOpenCodeAdapter(
       return exportRootSession(settings, dependencies, sessionId, environment);
     },
     normalizeMetrics(input: AgentMetricsInput): TevuResult<AgentMetrics, 'AgentProtocolError'> {
-      const normalized = normalizeOpenCodeMetrics(input);
+      const copiedProviders = redactCopiedProviders(dependencies.secrets, input.copiedProviders);
+      if (copiedProviders === undefined) {
+        return {
+          ok: false,
+          error: toAgentProtocolError(
+            settings.agent,
+            protocolFailureShape(
+              { phase: 'case', caseId: input.caseId },
+              COPIED_PROVIDERS_REDACTION_REASON,
+            ),
+          ),
+        };
+      }
+      const normalized = normalizeOpenCodeMetrics({ ...input, copiedProviders });
       if (normalized.ok) {
         return normalized;
       }
@@ -658,6 +670,21 @@ function replyText(
   }
 }
 
+/**
+ * Redacts the copied providers with the same redactor that redacts the
+ * export, so a secret value inside a provider or model key is masked on both
+ * sides of the cost lookup. Returns `undefined` when redaction fails.
+ */
+function redactCopiedProviders(
+  secrets: SecretRedactor,
+  copiedProviders: readonly CopiedProvider[],
+): readonly CopiedProvider[] | undefined {
+  const redacted = secrets.redactValue(copiedProviders);
+  // `redactValue` rebuilds every string of the list, keys included, so the
+  // result keeps the `CopiedProvider` shape the input had.
+  return redacted.ok ? (redacted.value as readonly CopiedProvider[]) : undefined;
+}
+
 async function runModelCall(
   settings: OpenCodeAdapterSettings,
   dependencies: OpenCodeAdapterDependencies,
@@ -666,6 +693,10 @@ async function runModelCall(
   TevuResult<ModelCallResult, 'ModelCallError' | 'AgentProtocolError' | 'CancellationError'>
 > {
   const context: Extract<ProtocolContext, { phase: 'call' }> = { phase: 'call', role: input.role };
+  const copiedProviders = redactCopiedProviders(dependencies.secrets, input.copiedProviders);
+  if (copiedProviders === undefined) {
+    return agentProtocolError(settings.agent, context, COPIED_PROVIDERS_REDACTION_REASON);
+  }
   let lastError: unknown = null;
 
   const consumer = createRunOutputConsumer(context, dependencies.secrets, (value) => {
@@ -792,7 +823,10 @@ async function runModelCall(
   }
   return {
     ok: true,
-    value: { text: replied.value, metrics: normalizeFromExport(exportOutcome.value) },
+    value: {
+      text: replied.value,
+      metrics: normalizeFromExport(exportOutcome.value, copiedProviders),
+    },
   };
 }
 

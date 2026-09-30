@@ -6,9 +6,9 @@ import {
   decodeExport,
   eventIdentity,
   listMalformedOptionalMetricFields,
-} from './opencode-protocol';
+} from './protocol';
 
-import type { OpenCodeRunEvent, ProtocolContext } from './opencode-protocol';
+import type { OpenCodeRunEvent, ProtocolContext } from './protocol';
 
 const CASE_CONTEXT: ProtocolContext = { phase: 'case', caseId: 'task-1--alpha' };
 const FIXTURE_DIRECTORY = new URL('./fixtures/', import.meta.url);

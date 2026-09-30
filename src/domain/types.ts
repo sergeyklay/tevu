@@ -174,6 +174,14 @@ export type AgentConfigurationFile = {
   text: string;
 };
 
+/** One copied provider and the models its copied definition defines a price for; evidence for cost, never a price. */
+export type CopiedProvider = {
+  /** The provider's key in the copied `provider` map: an `agents.<agent>.providers[].id`. */
+  id: string;
+  /** Keys of the copied definition's `models` map that define a price; ascending UTF-16 code-unit order, no repeats. */
+  pricedModels: string[];
+};
+
 /** The providers one agent block copies, read once and applied to every agent home of one run or call. */
 export type ProviderSnapshot = {
   agent: string;
@@ -181,6 +189,8 @@ export type ProviderSnapshot = {
   configurationFiles: readonly AgentConfigurationFile[];
   /** P-NOKEY warnings, in the order met; empty when none. */
   findings: readonly ValidationFinding[];
+  /** One entry per copied provider, in `providers` order; empty exactly when the block names no provider. */
+  copiedProviders: readonly CopiedProvider[];
 };
 
 /** One file every agent home of one agent received; `sha256` is 64 lowercase hexadecimal characters. */
@@ -470,6 +480,8 @@ export type RunManifest = {
     agentVersions: Record<string, string | null>;
     /** One key per agent whose providers the run read; `[]` when its block names none. */
     agentConfigurationFiles: Record<string, AgentConfigurationFileRecord[]>;
+    /** Same keys as `agentConfigurationFiles`: each read agent's `ProviderSnapshot.copiedProviders`. */
+    copiedProviders: Record<string, CopiedProvider[]>;
   };
   execution: {
     concurrency: number;
@@ -1034,6 +1046,8 @@ export type ModelCallInput = {
   timeoutMs: number;
   terminationGraceMs: number;
   cancellation: AbortSignal;
+  /** Copied providers of the snapshot the call environment was built from. Required, never defaulted. */
+  copiedProviders: readonly CopiedProvider[];
 };
 
 export type ModelCallResult = {
@@ -1069,6 +1083,8 @@ export type AgentMetricsInput = {
   events: readonly AgentEventRecord[];
   sessionExport: AgentSessionExport | null;
   exportUnavailableReason?: string;
+  /** The case agent's copied providers: its run snapshot's, or the run manifest's on regeneration. Required, never defaulted. */
+  copiedProviders: readonly CopiedProvider[];
 };
 
 export interface AgentAdapter {

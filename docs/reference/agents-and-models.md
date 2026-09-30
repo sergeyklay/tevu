@@ -101,7 +101,7 @@ tevu reads the providers once per `tevu validate` invocation, once per run befor
 
 ### What a case receives
 
-The collected definitions become the entire content of `opencode/opencode.json` under the case agent's own `XDG_CONFIG_HOME`: one file holding exactly `{"provider": {...}}`. `run.json` records the SHA-256 of every file tevu writes into an agent's homes, never its text.
+The collected definitions become the entire content of `opencode/opencode.json` under the case agent's own `XDG_CONFIG_HOME`: one file holding exactly `{"provider": {...}}`. `run.json` records the SHA-256 of every file tevu writes into an agent's homes, never its text. `run.json` also records which models each copied definition defines a price for; see [Metrics](results.md#metrics).
 
 ### Copy rules
 

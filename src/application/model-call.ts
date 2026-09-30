@@ -179,6 +179,7 @@ export async function callModelRole(
     timeoutMs: request.timeoutMs,
     terminationGraceMs: durationMs(request.config.run.stop_grace),
     cancellation: request.cancellation,
+    copiedProviders: providers.copiedProviders,
   });
   const removal = await environment.dispose();
 
