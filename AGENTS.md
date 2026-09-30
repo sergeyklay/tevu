@@ -21,6 +21,7 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 ### Always
 
 - Leave the code you touch cleaner than you found it.
+- Keep documentation true to the code in the same change. When writing a spec, a plan, or code that changes a command, flag, configuration field, default, message, artifact, result, or other behaviour, find every document it makes wrong (`README.md`, anything under `docs/`, and the reference docs listed below) and update it. A task that does not mention docs, or names only some of them, does not exempt the rest. The one protected case is a fix that would restructure `docs/` (see Ask first): report that document as stale instead of moving or splitting pages.
 
 ### Ask first
 
