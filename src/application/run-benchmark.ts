@@ -78,7 +78,11 @@ type OrderedChecks = readonly OrderedCheck[];
 /** Result of the single managed agent process one case owns. */
 type AgentRunOutcome = TevuResult<
   AgentRunResult,
-  'AgentProcessError' | 'AgentProtocolError' | 'CaseTimeoutError' | 'CancellationError'
+  | 'AgentProcessError'
+  | 'AgentProtocolError'
+  | 'AgentSessionError'
+  | 'CaseTimeoutError'
+  | 'CancellationError'
 >;
 
 /** Error kinds the benchmark orchestration contract declares. */
@@ -1347,6 +1351,8 @@ function describeError(error: TevuError): string {
       return `agent "${error.agent}" process ended with exit code ${String(error.exitCode)} and signal ${String(error.signal)}`;
     case 'AgentProtocolError':
       return `agent "${error.agent}" protocol failure: ${error.reason}`;
+    case 'AgentSessionError':
+      return `agent "${error.agent}" reported a session error`;
     case 'CaseTimeoutError':
       return `case timed out after ${error.timeoutMs}ms`;
     case 'CancellationError':

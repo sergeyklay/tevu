@@ -76,6 +76,13 @@ export type TevuError =
       reason: string;
     }
   | {
+      kind: 'AgentSessionError';
+      agent: string;
+      caseId: string;
+      /** First line of the agent's own error message, redacted; absent when the agent reported none. */
+      agentMessage?: string;
+    }
+  | {
       kind: 'ModelCallError';
       role: ModelRoleName;
       agent: string;
@@ -1109,7 +1116,11 @@ export interface AgentAdapter {
   ): Promise<
     TevuResult<
       AgentRunResult,
-      'AgentProcessError' | 'AgentProtocolError' | 'CaseTimeoutError' | 'CancellationError'
+      | 'AgentProcessError'
+      | 'AgentProtocolError'
+      | 'AgentSessionError'
+      | 'CaseTimeoutError'
+      | 'CancellationError'
     >
   >;
   exportSession(

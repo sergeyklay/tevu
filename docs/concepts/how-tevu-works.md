@@ -30,7 +30,7 @@ The order carries the design. The patch is captured first so a test run cannot t
 
 ## Process status and task outcome
 
-A case has two independent results. The process result says whether the agent ran cleanly: it can time out, crash, or produce an export tevu cannot read. The task outcome says whether the solution passed its required checks. A model can crash after writing a correct solution, and tevu records both facts instead of collapsing them. The run's exit code reflects both. See [Results](../reference/results.md#outcomes) for the outcome values.
+A case has two independent results. The process result says whether the agent ran cleanly: it can time out, crash, report an error of its own while exiting cleanly, or produce an export tevu cannot read. The task outcome says whether the solution passed its required checks. A model can crash after writing a correct solution, and tevu records both facts instead of collapsing them. The run's exit code reflects both. See [Results](../reference/results.md#outcomes) for the outcome values.
 
 ## Three kinds of checks
 

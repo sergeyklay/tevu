@@ -53,7 +53,7 @@ Reports link to patches, transcripts, and complete evaluator output instead of e
 
 Every saved case identity, in `run.json` and at both levels of `result.json`, carries `model`, `modelId`, `effort`, `attempt` (1 through the effective repeat), and `agent` (the adapter that ran the case). It also carries `timeoutMs`: the agent time limit the case ran under in milliseconds, which is the task's `timeout` when declared and `run.timeout` otherwise. `execution.caseTimeoutMs` holds `run.timeout` in milliseconds.
 
-An environment record's recipient is `agent` or `evaluator`. A process or protocol failure from a case's adapter is recorded with kind `AgentProcessError` or `AgentProtocolError`, each carrying that case's `agent` name.
+An environment record's recipient is `agent` or `evaluator`. A process or protocol failure from a case's adapter is recorded with kind `AgentProcessError`, `AgentProtocolError`, or `AgentSessionError`, each carrying that case's `agent` name. `AgentSessionError` also carries `agentMessage`, the redacted first line of the agent's own message, when the agent reported one.
 
 ## Check state
 

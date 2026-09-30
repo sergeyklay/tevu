@@ -41,6 +41,10 @@ export function renderTevuError(error: TevuError, redact: (text: string) => stri
       return [
         `error: agent "${error.agent}" protocol failure (${describeProtocolPhase(error.context)}): ${error.reason}`,
       ];
+    case 'AgentSessionError':
+      return [
+        `error: agent "${error.agent}" session for case "${error.caseId}" reported an error${error.agentMessage === undefined ? '' : `: ${error.agentMessage}`}`,
+      ];
     case 'ModelCallError':
       return [
         `error: model call for role "${error.role}" through agent "${error.agent}" failed: ${error.reason}`,

@@ -18,6 +18,8 @@ import { composeProgramDependencies, ignoreClosedReader } from './index';
 import type { AgentDraft } from '@/application/model-access';
 import type { TevuConfigInput } from '@/config/schema';
 
+type TevuTaskInput = NonNullable<TevuConfigInput['tasks']>[number];
+
 function writeError(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`write ${code}`), { code, syscall: 'write' });
 }
@@ -178,6 +180,40 @@ const LATE_EXPORT_OPENCODE_SCRIPT = FAKE_OPENCODE_SCRIPT.replace(
     '  process.exit(0);\n',
 );
 
+/** The fake agent with an `export` that returns a session holding one user message. */
+const EXPORTING_OPENCODE_SCRIPT = FAKE_OPENCODE_SCRIPT.replace(
+  'messages: [] }',
+  () => "messages: [{ info: { id: 'msg-u1', sessionID: requested, role: 'user' }, parts: [] }] }",
+);
+
+/** The exporting fake agent whose `run` also emits one root-session `error` event and still exits 0. */
+const SESSION_ERROR_OPENCODE_SCRIPT = EXPORTING_OPENCODE_SCRIPT.replace(
+  "  process.exit(0);\n}\nif (args[0] === 'export') {\n",
+  () =>
+    "  console.log(JSON.stringify({ type: 'error', timestamp: 2, sessionID: 'ses-composition-1', error: { name: 'UnknownError', data: { message: 'synthetic provider failure' } } }));\n" +
+    "  process.exit(0);\n}\nif (args[0] === 'export') {\n",
+);
+
+/** Every required check is a command check that passes on the starting tree, so a case can reach `passed`. */
+const COMMAND_CHECKS = {
+  acceptance: [
+    {
+      id: 'readme-present',
+      description: 'The README is present',
+      run: 'test -f README.md',
+      timeout: '10s',
+    },
+  ],
+  done: [
+    {
+      id: 'readme-kept',
+      description: 'The README is kept',
+      run: 'test -f README.md',
+      timeout: '10s',
+    },
+  ],
+};
+
 describe('composeProgramDependencies wires providers into the real OpenCode adapter (AC-1)', () => {
   let testDirectory: string;
   let savedHome: string | undefined;
@@ -222,6 +258,18 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     return filePath;
   }
 
+  async function writeExportingExecutable(): Promise<string> {
+    const filePath = join(testDirectory, 'fake-opencode-exporting.mjs');
+    await writeFile(filePath, EXPORTING_OPENCODE_SCRIPT, { mode: 0o755 });
+    return filePath;
+  }
+
+  async function writeSessionErrorExecutable(): Promise<string> {
+    const filePath = join(testDirectory, 'fake-opencode-session-error.mjs');
+    await writeFile(filePath, SESSION_ERROR_OPENCODE_SCRIPT, { mode: 0o755 });
+    return filePath;
+  }
+
   /** Points `XDG_CONFIG_HOME` at a fresh operator fixture naming one provider, `acme`. */
   async function writeOperatorFixture(): Promise<void> {
     const operatorDirectory = join(testDirectory, 'operator-config');
@@ -244,6 +292,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     repositoryPath: string;
     baseCommit: string;
     outputDirectory: string;
+    checks?: TevuTaskInput['checks'];
   }): TevuConfigInput {
     return {
       version: 1,
@@ -275,7 +324,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
           description: 'synthetic task description',
           prompt: 'synthetic task prompt',
           readiness: ['synthetic ready item'],
-          checks: {
+          checks: options.checks ?? {
             acceptance: [{ id: 'manual-1', description: 'Manual review', manual: true }],
             done: [{ id: 'manual-done', description: 'Manual review', manual: true }],
           },
@@ -504,5 +553,86 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
       cost: caseResult.metrics.cost,
     }));
     expect(observedCases).toEqual([expectedCase, expectedCase]);
+  });
+
+  describe('a zero-exit run that delivered a root-session error event', () => {
+    async function runTwoCases(executable: string, checks = COMMAND_CHECKS) {
+      await writeOperatorFixture();
+      const repositoryPath = join(testDirectory, 'repo');
+      const baseCommit = await createSourceRepository(repositoryPath);
+      const config = TevuConfigSchema.parse(
+        buildConfigInput({
+          executable,
+          repositoryPath,
+          baseCommit,
+          outputDirectory: join(testDirectory, 'artifacts'),
+          checks,
+        }),
+      );
+      const dependencies = composeProgramDependencies();
+      const plan = dependencies.operations.planBenchmark(config, join(testDirectory, 'tevu.yaml'));
+
+      return dependencies.operations.executeBenchmark(plan, {
+        cancellation: new AbortController().signal,
+      });
+    }
+
+    it('records an AgentSessionError on a passed case and exits with code 2', async () => {
+      const executable = await writeSessionErrorExecutable();
+
+      const result = await runTwoCases(executable);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const observedCases = result.value.cases.map((caseResult) => ({
+        lifecycle: caseResult.lifecycle,
+        outcome: caseResult.outcome,
+        verdicts: caseResult.checks.map((check) => check.verdict),
+        errorKind: caseResult.failure?.error.kind,
+        apiErrors: caseResult.metrics.apiErrors,
+      }));
+      const expectedCase = {
+        lifecycle: 'completed',
+        outcome: 'passed',
+        verdicts: ['passed', 'passed'],
+        errorKind: 'AgentSessionError',
+        apiErrors: {
+          value: 1,
+          unit: 'count',
+          availability: { status: 'available', source: 'root-session export and run events' },
+          scope: 'root-session',
+        },
+      };
+      expect(observedCases).toEqual([expectedCase, expectedCase]);
+      expect(result.value.exitCode).toBe(2);
+    });
+
+    it('keeps an error-free run passed with no failure, zero API errors, and exit code 0', async () => {
+      const executable = await writeExportingExecutable();
+
+      const result = await runTwoCases(executable);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const observedCases = result.value.cases.map((caseResult) => ({
+        lifecycle: caseResult.lifecycle,
+        outcome: caseResult.outcome,
+        failure: caseResult.failure,
+        apiErrors: caseResult.metrics.apiErrors,
+      }));
+      const expectedCase = {
+        lifecycle: 'completed',
+        outcome: 'passed',
+        failure: null,
+        apiErrors: {
+          value: 0,
+          unit: 'count',
+          availability: { status: 'available', source: 'root-session export and run events' },
+          scope: 'root-session',
+        },
+      };
+      expect(observedCases).toEqual([expectedCase, expectedCase]);
+      expect(result.value.exitCode).toBe(0);
+    });
   });
 });

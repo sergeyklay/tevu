@@ -63,7 +63,7 @@ Pending manual checks: man-optional-polish.
 Metrics:
 
 - apiCalls: 2 count (root-session, source: root-session export)
-- apiErrors: 1 count (root-session, source: root-session export)
+- apiErrors: 2 count (root-session, source: root-session export and run events)
 - cacheReadTokens: 30 token (root-session, source: root-session export)
 - cacheWriteTokens: 10 token (root-session, source: root-session export)
 - cost: 0.0125 USD (root-session, source: root-session export)

@@ -123,12 +123,12 @@
         },
         "apiErrors": {
           "availability": {
-            "source": "root-session export",
+            "source": "root-session export and run events",
             "status": "available"
           },
           "scope": "root-session",
           "unit": "count",
-          "value": 1
+          "value": 2
         },
         "cacheReadTokens": {
           "availability": {
