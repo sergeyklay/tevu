@@ -26,7 +26,7 @@ From the directory that holds `tevu.yaml`:
 tevu task add --jira YOUR-123
 ```
 
-Replace `YOUR-123` with an issue key you can access. Review the imported title and description, then choose the repository and starting commit, and add the model instructions, prerequisites, and checks. Confirm the final review to save the task.
+Replace `YOUR-123` with an issue key you can access. The description arrives as plain text and keeps each link's URL: a smart link as its URL, linked text as `text (URL)`; see [Trackers](../reference/trackers.md#jira-cloud) for the full rules. Review the imported title and description, then choose the repository and starting commit, and add the model instructions, prerequisites, and checks. Confirm the final review to save the task.
 
 Cancelling leaves the configuration unchanged. If the import fails, the wizard names the cause and asks for the key again with your answer filled in. Clear the answer to write the task by hand.
 
