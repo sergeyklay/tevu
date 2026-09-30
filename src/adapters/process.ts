@@ -9,11 +9,12 @@
 
 import { Buffer } from 'node:buffer';
 import { constants } from 'node:fs';
-import { access, lstat, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import process from 'node:process';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { execa } from 'execa';
 
 import { describeCause } from '@/domain/describe-cause';
@@ -49,6 +50,7 @@ import type {
   TevuResult,
   WorkingDirectoryChanges,
 } from '@/domain/types';
+import type { FileHandle } from 'node:fs/promises';
 
 /** Chunk-safe redactor holding back partial secret prefixes across chunk boundaries. */
 export type StreamingRedactor = {
@@ -58,6 +60,8 @@ export type StreamingRedactor = {
 
 const REDACTION_MASK = '[REDACTED]';
 const DEFAULT_MAX_CAPTURE_BYTES = 64 * 1024;
+const CAPTURE_FILE_READ_BYTES = 64 * 1024;
+const GROUP_POLL_INTERVAL_MS = 20;
 const FIXED_LOCALE = 'C.UTF-8';
 const PROBE_TIMEOUT_MS = 10_000;
 /** Matches OpenCode's private grace period so a case executable and an agent are torn down alike. */
@@ -170,6 +174,15 @@ export function createSecretRedactor(
  * and `endedAt` stop at the direct child's exit, so the window never counts as
  * elapsed time. The group receives a final SIGKILL before the call returns.
  *
+ * With `request.stdoutTarget` set to "file", stdout goes to a regular file that
+ * has no name while the child runs, so a child that exits right after writing
+ * cannot lose a pending write. The post-exit window then ends as soon as the
+ * process group is empty, or at the SIGKILL that closes the window when members
+ * remain, and the capture is read only after that. `onStdout` therefore
+ * receives its text late, after the child settles, and a capture that could not
+ * be read to its end reports `incomplete`. When the file cannot be prepared the
+ * call reports a launch failure without starting the child.
+ *
  * When `request.stdinText` is set, the child's
  * stdin carries that text and is closed after it; otherwise stdin is
  * `/dev/null`. A child that exits before reading all of the text is reported
@@ -185,6 +198,23 @@ export async function runManagedProcess(
     return { launched: false, reason: 'cancelled before launch' };
   }
 
+  let captureFile: FileHandle | undefined;
+  if (request.stdoutTarget === 'file') {
+    const opened = await openUnnamedCaptureFile();
+    if ('cause' in opened) {
+      return launchFailure(
+        redact(`stdout capture file could not be prepared: ${describeCause(opened.cause)}`),
+        describeErrorCode(opened.cause),
+      );
+    }
+    captureFile = opened.handle;
+  }
+
+  // A numeric descriptor, not a `{ file }` target: execa relays the latter through
+  // a pipe, which keeps the loss. Its types admit only the descriptors 1 and 2
+  // for stdout, although it passes any integer to the child unchanged.
+  const stdoutOption = (captureFile?.fd ?? 'pipe') as 'pipe' | 1;
+
   const [file, ...args] = request.argv;
   const startedAt = new Date();
   const launchedAtMs = performance.now();
@@ -198,7 +228,7 @@ export async function runManagedProcess(
       ...(request.stdinText === undefined
         ? { stdin: 'ignore' }
         : { stdin: 'pipe', input: request.stdinText }),
-      stdout: 'pipe',
+      stdout: stdoutOption,
       stderr: 'pipe',
       buffer: false,
       reject: false,
@@ -206,6 +236,7 @@ export async function runManagedProcess(
       stripFinalNewline: false,
     });
   } catch (cause) {
+    await closeQuietly(captureFile);
     return launchFailure(redact(describeCause(cause)), describeErrorCode(cause));
   }
 
@@ -246,6 +277,7 @@ export async function runManagedProcess(
   let exit: { atMs: number; at: Date } | undefined;
   let graceTimer: NodeJS.Timeout | undefined;
   let survivorTimer: NodeJS.Timeout | undefined;
+  let hasSurvivorKillBeenSent = false;
 
   const beginTermination = (trigger: 'timeout' | 'cancellation'): void => {
     if (exit !== undefined || timedOut || cancelled) {
@@ -276,7 +308,10 @@ export async function runManagedProcess(
   // escalating would add a second grace past the bound.
   subprocess.nodeChildProcess.once('exit', () => {
     exit = { atMs: performance.now(), at: new Date() };
-    survivorTimer = setTimeout(() => signalGroup('SIGKILL'), request.terminationGraceMs);
+    survivorTimer = setTimeout(() => {
+      hasSurvivorKillBeenSent = true;
+      signalGroup('SIGKILL');
+    }, request.terminationGraceMs);
     survivorTimer.unref();
     if (!timedOut && !cancelled) {
       clearTimeout(timeoutTimer);
@@ -285,6 +320,25 @@ export async function runManagedProcess(
   });
 
   const result = await subprocess;
+
+  if (captureFile !== undefined && exit !== undefined && subprocess.pid !== undefined) {
+    const groupId = subprocess.pid;
+    // Only the survivor SIGKILL may end this wait early: sent while `settled` is
+    // still false, it marks a capture the group never finished as incomplete.
+    while (true) {
+      if (groupIsEmpty(groupId)) {
+        stdoutCapture.markEnded();
+        break;
+      }
+      if (hasSurvivorKillBeenSent) {
+        break;
+      }
+      // In file mode no pipe or child handle of this call is open here, so this
+      // ref'd timer alone keeps the event loop alive; unref'ing it would let
+      // tevu exit mid-wait.
+      await sleep(GROUP_POLL_INTERVAL_MS);
+    }
+  }
 
   clearTimeout(timeoutTimer);
   if (graceTimer !== undefined) {
@@ -296,6 +350,9 @@ export async function runManagedProcess(
   request.cancellation?.removeEventListener('abort', onAbort);
   settled = true;
   signalGroup('SIGKILL');
+  if (captureFile !== undefined) {
+    await drainCaptureFile(captureFile, stdoutCapture);
+  }
 
   const exitCode = typeof result.exitCode === 'number' ? result.exitCode : null;
   const signal = typeof result.signal === 'string' ? result.signal : null;
@@ -1048,6 +1105,64 @@ function createDirectorySnapshotWatcher(work: string): DirectorySnapshotWatcher 
     },
     changes,
   };
+}
+
+/**
+ * Creates the capture file a child receives as stdout and removes every name it
+ * has, so only descriptors reach it; resolves to the failure instead of
+ * throwing.
+ */
+async function openUnnamedCaptureFile(): Promise<{ handle: FileHandle } | { cause: unknown }> {
+  let directory: string | undefined;
+  let handle: FileHandle | undefined;
+  try {
+    directory = await mkdtemp(join(tmpdir(), 'tevu-stdout-'));
+    handle = await open(join(directory, 'stdout'), 'wx+', 0o600);
+    await rm(directory, { recursive: true, force: true });
+    return { handle };
+  } catch (cause) {
+    await closeQuietly(handle);
+    if (directory !== undefined) {
+      await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    }
+    return { cause };
+  }
+}
+
+/**
+ * Feeds the capture file to `capture` in file order and closes it; a read
+ * error marks the capture incomplete and never rejects.
+ */
+async function drainCaptureFile(handle: FileHandle, capture: StreamCapture): Promise<void> {
+  const buffer = Buffer.alloc(CAPTURE_FILE_READ_BYTES);
+  let position = 0;
+  try {
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+      if (bytesRead === 0) {
+        break;
+      }
+      capture.onData(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+  } catch {
+    capture.markIncomplete();
+  }
+  await closeQuietly(handle);
+}
+
+async function closeQuietly(handle: FileHandle | undefined): Promise<void> {
+  await handle?.close().catch(() => undefined);
+}
+
+/** Reports whether no member of the process group `pid` leads remains; other errors mean members exist. */
+function groupIsEmpty(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return false;
+  } catch (cause) {
+    return describeErrorCode(cause) === 'ESRCH';
+  }
 }
 
 type StreamCapture = {

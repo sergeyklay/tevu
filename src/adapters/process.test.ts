@@ -29,6 +29,7 @@ import {
 import type {
   CaseExecutableProbeRequest,
   ManagedProcessCompletion,
+  ManagedProcessLaunchFailure,
   ManagedProcessRequest,
   ManagedProcessResult,
 } from '@/domain/types';
@@ -798,12 +799,20 @@ describe('createEnvironmentAdapter unsetVariables', () => {
 
 const POST_EXIT_GRACE_MS = 1_500;
 
-/** The direct child starts the descendant in its own process group, shares its output pipes, and exits at once. */
-function scriptWithDescendant(descendantBody: string): string {
+/**
+ * The direct child starts the descendant in its own process group, shares its
+ * stdout, and exits at once. The descendant shares stderr too, unless
+ * `stderrStdio` is `'ignore'`, which leaves the file-backed stdout as the only
+ * channel that still reaches it.
+ */
+function scriptWithDescendant(
+  descendantBody: string,
+  stderrStdio: 'inherit' | 'ignore' = 'inherit',
+): string {
   return (
     "const { spawn } = require('node:child_process');" +
     `spawn(process.execPath, ['-e', ${JSON.stringify(descendantBody)}], ` +
-    "{ stdio: ['ignore', 'inherit', 'inherit'] }).unref();"
+    `{ stdio: ${JSON.stringify(['ignore', 'inherit', stderrStdio])} }).unref();`
   );
 }
 
@@ -819,6 +828,13 @@ function lingeringDescendant(pidFile: string): string {
 function expectLaunched(result: ManagedProcessResult): ManagedProcessCompletion {
   if (!result.launched) {
     throw new Error(`expected a launched process, got: ${result.reason}`);
+  }
+  return result;
+}
+
+function expectLaunchFailure(result: ManagedProcessResult): ManagedProcessLaunchFailure {
+  if (result.launched) {
+    throw new Error('expected a launch failure, got a launched process');
   }
   return result;
 }
@@ -930,6 +946,71 @@ describe('runManagedProcess post-exit window', () => {
     });
   });
 
+  describe('a file-backed stdout that only a descendant holds', () => {
+    it('keeps every byte a descendant writes after the direct child exits and stops at the empty group', async () => {
+      const payloadBytes = 1_000_000;
+      const terminationGraceMs = 5_000;
+      const script = scriptWithDescendant(
+        `setTimeout(() => process.stdout.write('x'.repeat(${String(payloadBytes)})), 200);`,
+        'ignore',
+      );
+      const streamed: string[] = [];
+      const startedAtMs = performance.now();
+
+      const outcome = expectLaunched(
+        await runManagedProcess(
+          windowRequest(script, {
+            stdoutTarget: 'file',
+            maxCaptureBytes: 2_000_000,
+            terminationGraceMs,
+            onStdout: (text) => streamed.push(text),
+          }),
+        ),
+      );
+      const elapsedMs = performance.now() - startedAtMs;
+
+      expect(outcome.exitCode).toBe(0);
+      expect(outcome.stdout).toMatchObject({
+        totalBytes: payloadBytes,
+        truncated: false,
+        incomplete: false,
+      });
+      expect(outcome.stdout.text).toHaveLength(payloadBytes);
+      expect(streamed.join('')).toHaveLength(payloadBytes);
+      expect(elapsedMs).toBeLessThan(terminationGraceMs);
+    });
+
+    it('force-kills a descendant still holding the file after the grace and marks stdout incomplete', async () => {
+      const script = scriptWithDescendant(
+        lingeringDescendant(join(directory, 'descendant.pid')),
+        'ignore',
+      );
+      const startedAtMs = performance.now();
+
+      const outcome = expectLaunched(
+        await runManagedProcess(windowRequest(script, { stdoutTarget: 'file' })),
+      );
+      const elapsedMs = performance.now() - startedAtMs;
+
+      expect(elapsedMs).toBeGreaterThanOrEqual(POST_EXIT_GRACE_MS);
+      expect(outcome).toMatchObject({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        cancelled: false,
+        terminationStage: 'none',
+      });
+      expect(outcome.durationMs).toBeLessThan(POST_EXIT_GRACE_MS);
+      expect(outcome.stdout).toMatchObject({
+        text: 'early',
+        totalBytes: 5,
+        truncated: false,
+        incomplete: true,
+      });
+      await expectDescendantKilled();
+    });
+  });
+
   describe('a descendant that outlives the window', () => {
     it('force-kills a descendant still holding stdout after the grace and marks stdout incomplete', async () => {
       const script = scriptWithDescendant(lingeringDescendant(join(directory, 'descendant.pid')));
@@ -1024,6 +1105,183 @@ describe('runManagedProcess post-exit window', () => {
       });
       expect(elapsedMs).toBeGreaterThanOrEqual(POST_EXIT_GRACE_MS);
       await expectDescendantKilled();
+    });
+  });
+});
+
+const CAPTURE_SECRET = 'tevu-test-secret-value';
+
+describe('runManagedProcess stdout file mode', () => {
+  let workspace = '';
+  let originalTmpdir: string | undefined;
+
+  beforeEach(async () => {
+    originalTmpdir = process.env.TMPDIR;
+    workspace = await mkdtemp(join(tmpdir(), 'tevu-file-mode-'));
+  });
+
+  afterEach(async () => {
+    if (originalTmpdir === undefined) {
+      delete process.env.TMPDIR;
+    } else {
+      process.env.TMPDIR = originalTmpdir;
+    }
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  function captureRequest(
+    script: string,
+    overrides: Partial<ManagedProcessRequest> = {},
+  ): ManagedProcessRequest {
+    return {
+      argv: [process.execPath, '-e', script],
+      cwd: workspace,
+      environment: {},
+      timeoutMs: 30_000,
+      terminationGraceMs: 1_000,
+      ...overrides,
+    };
+  }
+
+  /** Runs a child that loses nothing: it exits only after its write drained, so any difference between modes comes from tevu. */
+  async function captureInBothModes(
+    outputExpression: string,
+    overrides: Partial<ManagedProcessRequest>,
+  ) {
+    const script = `process.stdout.write(${outputExpression}, () => process.exit(0));`;
+    const run = async (stdoutTarget: 'pipe' | 'file') => {
+      const streamed: string[] = [];
+      const outcome = expectLaunched(
+        await runManagedProcess(
+          captureRequest(script, {
+            ...overrides,
+            stdoutTarget,
+            onStdout: (text) => streamed.push(text),
+          }),
+        ),
+      );
+      return { capture: outcome.stdout, streamed: streamed.join('') };
+    };
+    return { piped: await run('pipe'), filed: await run('file') };
+  }
+
+  it('hands the child a regular file without a name as stdout', async () => {
+    const script =
+      "const info = require('node:fs').fstatSync(1);" +
+      'process.stdout.write(JSON.stringify({ isFile: info.isFile(), links: info.nlink }));';
+
+    const outcome = expectLaunched(
+      await runManagedProcess(captureRequest(script, { stdoutTarget: 'file' })),
+    );
+
+    expect(JSON.parse(outcome.stdout.text)).toEqual({ isFile: true, links: 0 });
+  });
+
+  describe('capture equivalence with pipe mode', () => {
+    it.each([
+      {
+        label: 'a multibyte payload that a read boundary splits mid-character',
+        outputExpression: "'a' + 'я'.repeat(100_000)",
+        overrides: { maxCaptureBytes: 1_000_000 },
+        expected: { totalBytes: 200_001, truncated: false, incomplete: false },
+      },
+      {
+        label: 'output past maxCaptureBytes',
+        outputExpression: "'z'.repeat(100_000)",
+        overrides: { maxCaptureBytes: 1_000 },
+        expected: { totalBytes: 100_000, truncated: true, incomplete: false },
+      },
+    ])('captures $label as pipe mode does', async ({ outputExpression, overrides, expected }) => {
+      const { piped, filed } = await captureInBothModes(outputExpression, overrides);
+
+      expect(filed.capture).toEqual(piped.capture);
+      expect(filed.streamed).toBe(piped.streamed);
+      expect(filed.capture).toMatchObject(expected);
+    });
+
+    it('redacts a secret value that straddles a read boundary as pipe mode does', async () => {
+      const outputExpression = `'x'.repeat(65_530) + ${JSON.stringify(CAPTURE_SECRET)} + 'y'.repeat(1_000)`;
+
+      const { piped, filed } = await captureInBothModes(outputExpression, {
+        maxCaptureBytes: 1_000_000,
+        secretValues: [CAPTURE_SECRET],
+        stdoutRedaction: 'text',
+      });
+
+      expect(filed.capture).toEqual(piped.capture);
+      expect(filed.streamed).toBe(piped.streamed);
+      expect(filed.capture.text).toContain('[REDACTED]');
+      expect(filed.capture.text).not.toContain(CAPTURE_SECRET);
+      expect(filed.streamed).not.toContain(CAPTURE_SECRET);
+    });
+  });
+
+  describe('temporary directory', () => {
+    it('stays empty while the child runs and after the call resolves', async () => {
+      const privateTmp = join(workspace, 'private-tmp');
+      await mkdir(privateTmp);
+      process.env.TMPDIR = privateTmp;
+      const script = `process.stdout.write(JSON.stringify(require('node:fs').readdirSync(${JSON.stringify(privateTmp)})));`;
+
+      const outcome = expectLaunched(
+        await runManagedProcess(captureRequest(script, { stdoutTarget: 'file' })),
+      );
+
+      expect(outcome.stdout.text).toBe('[]');
+      expect(await readdir(privateTmp)).toEqual([]);
+    });
+
+    it('stays empty when the executable does not exist', async () => {
+      const privateTmp = join(workspace, 'private-tmp');
+      await mkdir(privateTmp);
+      process.env.TMPDIR = privateTmp;
+
+      const failure = expectLaunchFailure(
+        await runManagedProcess(
+          captureRequest('', {
+            argv: [join(workspace, 'tevu-test-no-such-executable')],
+            stdoutTarget: 'file',
+          }),
+        ),
+      );
+
+      expect(failure.code).toBe('ENOENT');
+      expect(failure.reason).not.toContain('stdout capture file');
+      expect(await readdir(privateTmp)).toEqual([]);
+    });
+
+    it('reports a launch failure and never starts the command when the directory does not exist', async () => {
+      process.env.TMPDIR = join(workspace, 'missing-tmp');
+      const marker = join(workspace, 'ran.marker');
+      const script = `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran');`;
+
+      const failure = expectLaunchFailure(
+        await runManagedProcess(captureRequest(script, { stdoutTarget: 'file' })),
+      );
+
+      expect(failure.code).toBe('ENOENT');
+      expect(failure.reason).toMatch(/^stdout capture file could not be prepared: /);
+      expect(existsSync(marker)).toBe(false);
+    });
+
+    it.each([
+      { label: 'file mode with an existing directory', stdoutTarget: 'file', isPresent: true },
+      { label: 'pipe mode with a missing directory', stdoutTarget: 'pipe', isPresent: false },
+    ] as const)('starts the command in $label', async ({ stdoutTarget, isPresent }) => {
+      const privateTmp = join(workspace, 'private-tmp');
+      if (isPresent) {
+        await mkdir(privateTmp);
+      }
+      process.env.TMPDIR = privateTmp;
+      const marker = join(workspace, 'ran.marker');
+      const script = `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran');`;
+
+      const outcome = expectLaunched(
+        await runManagedProcess(captureRequest(script, { stdoutTarget })),
+      );
+
+      expect(outcome.exitCode).toBe(0);
+      expect(existsSync(marker)).toBe(true);
     });
   });
 });
