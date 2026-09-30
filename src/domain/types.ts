@@ -931,9 +931,10 @@ export type RedactedCapture = {
   totalBytes: number;
   truncated: boolean;
   /**
-   * Whether a tevu signal reached the process group while this stream was
-   * still open, so a writer may have been stopped mid-output; `totalBytes`
-   * then counts only what arrived.
+   * Whether the capture may lack bytes the process wrote: a tevu signal
+   * reached the process group while this stream was still open, so a writer
+   * may have been stopped mid-output, or a file-backed capture could not be
+   * read to its end; `totalBytes` then counts only what was captured.
    */
   incomplete: boolean;
 };
@@ -1165,6 +1166,15 @@ export type ManagedProcessRequest = {
    * absent, stdin is `/dev/null`.
    */
   stdinText?: string;
+  /**
+   * Where the child's stdout goes. "pipe" (the default) streams it to tevu
+   * while the child runs. "file" gives the child a regular file without a
+   * name, because a child that exits right after writing can lose a pending
+   * pipe write; tevu reads the file once the process group is empty or the
+   * post-exit window has ended, so `onStdout` receives the text after the
+   * child settles. Bound, byte totals, and redaction behave as for "pipe".
+   */
+  stdoutTarget?: 'pipe' | 'file';
 };
 
 /**

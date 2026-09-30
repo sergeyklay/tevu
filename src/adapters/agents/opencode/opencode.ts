@@ -410,6 +410,11 @@ type ExportProcessOutcome =
  * of an `IsolatedEnvironment`. A launch failure, non-zero exit, truncated
  * capture, or incomplete capture that does not parse is returned as the raw
  * process outcome so each caller maps it to its own error kind.
+ *
+ * The process writes to a regular file rather than a pipe: OpenCode calls
+ * `process.exit()` right after writing the export, a pending write to a
+ * socket-backed stdout is lost at exit, and a regular file receives every byte
+ * before the write returns.
  */
 async function runExportProcess(
   settings: OpenCodeAdapterSettings,
@@ -432,6 +437,7 @@ async function runExportProcess(
     // this boundary, decoded, and redacted as a value so numeric metrics
     // survive; the raw capture never reaches a sink.
     stdoutRedaction: 'structured',
+    stdoutTarget: 'file',
     maxCaptureBytes: EXPORT_MAX_CAPTURE_BYTES,
   });
   if (!outcome.launched || outcome.exitCode !== 0 || outcome.stdout.truncated) {

@@ -10,7 +10,7 @@ Node.js 24, Bun, and Git from the repository checkout. The synthetic-repository 
 bun install --frozen-lockfile
 ```
 
-Bun installs dependencies and launches scripts. Node.js runs the CLI and Vitest.
+Bun installs dependencies, launches scripts, and also runs the fake OpenCode of one end-to-end test, because the loss that test reproduces comes from how Bun handles a pending stdout write at exit. Node.js runs the CLI and Vitest.
 
 ## Run every gate
 

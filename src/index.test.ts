@@ -144,9 +144,11 @@ process.exit(3);
 
 const LATE_EXPORT_SESSION_BYTES = 1_000_000;
 
-/** One user message padded past a pipe buffer and one assistant message carrying the metrics the test asserts. */
-const LATE_EXPORT_WRITER_SCRIPT = `
-const sessionID = process.argv[1];
+/**
+ * One user message padded past a pipe buffer and one assistant message carrying
+ * the metrics the tests assert. Reads `sessionID` from the enclosing script.
+ */
+const EXPORT_DOCUMENT_SOURCE = `
 const doc = {
   info: { id: sessionID },
   messages: [
@@ -163,6 +165,11 @@ const doc = {
     },
   ],
 };
+`;
+
+const LATE_EXPORT_WRITER_SCRIPT = `
+const sessionID = process.argv[1];
+${EXPORT_DOCUMENT_SOURCE}
 setTimeout(() => process.stdout.write(JSON.stringify(doc)), 200);
 `;
 
@@ -179,6 +186,35 @@ const LATE_EXPORT_OPENCODE_SCRIPT = FAKE_OPENCODE_SCRIPT.replace(
     `  spawn(process.execPath, ['-e', ${JSON.stringify(LATE_EXPORT_WRITER_SCRIPT)}, args[1] ?? ''], { stdio: ['ignore', 'inherit', 'inherit'] }).unref();\n` +
     '  process.exit(0);\n',
 );
+
+/**
+ * The fake agent running under Bun, whose `export` writes the whole document in
+ * one call and exits in the next statement, as OpenCode does. The interpreter
+ * is named by absolute path because a case has its own `HOME`, where a
+ * version-manager shim may not resolve.
+ */
+function buildBunExportOpencodeScript(bunExecutable: string): string {
+  return FAKE_OPENCODE_SCRIPT.replace(
+    '#!/usr/bin/env node\n',
+    () => `#!${bunExecutable}\n`,
+  ).replace(
+    "if (args[0] === 'export') {\n",
+    () =>
+      "if (args[0] === 'export') {\n" +
+      "  const sessionID = args[1] ?? '';\n" +
+      `${EXPORT_DOCUMENT_SOURCE}\n` +
+      '  process.stdout.write(JSON.stringify(doc));\n' +
+      '  process.exit(0);\n',
+  );
+}
+
+/** Starts `bun` from the test's own environment and reports the real executable it runs as. */
+async function resolveBunExecutable(): Promise<string> {
+  const result = await execa('bun', ['--eval', 'console.log(process.execPath)'], {
+    stdin: 'ignore',
+  });
+  return result.stdout.trim();
+}
 
 /** The fake agent with an `export` that returns a session holding one user message. */
 const EXPORTING_OPENCODE_SCRIPT = FAKE_OPENCODE_SCRIPT.replace(
@@ -255,6 +291,14 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
   async function writeLateExportExecutable(): Promise<string> {
     const filePath = join(testDirectory, 'fake-opencode-late-export.mjs');
     await writeFile(filePath, LATE_EXPORT_OPENCODE_SCRIPT, { mode: 0o755 });
+    return filePath;
+  }
+
+  async function writeBunExportExecutable(): Promise<string> {
+    const filePath = join(testDirectory, 'fake-opencode-bun-export.mjs');
+    await writeFile(filePath, buildBunExportOpencodeScript(await resolveBunExecutable()), {
+      mode: 0o755,
+    });
     return filePath;
   }
 
@@ -551,6 +595,61 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
       inputTokens: caseResult.metrics.inputTokens,
       outputTokens: caseResult.metrics.outputTokens,
       cost: caseResult.metrics.cost,
+    }));
+    expect(observedCases).toEqual([expectedCase, expectedCase]);
+  });
+
+  it('records export-derived metrics from an export a Bun process writes right before exiting', async () => {
+    const executable = await writeBunExportExecutable();
+    await writeOperatorFixture();
+    const repositoryPath = join(testDirectory, 'repo');
+    const baseCommit = await createSourceRepository(repositoryPath);
+    const config = TevuConfigSchema.parse(
+      buildConfigInput({
+        executable,
+        repositoryPath,
+        baseCommit,
+        outputDirectory: join(testDirectory, 'artifacts'),
+      }),
+    );
+    const dependencies = composeProgramDependencies();
+    const plan = dependencies.operations.planBenchmark(config, join(testDirectory, 'tevu.yaml'));
+
+    const result = await dependencies.operations.executeBenchmark(plan, {
+      cancellation: new AbortController().signal,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const fromExport = (value: number, unit: 'token' | 'USD' | 'count') => ({
+      value,
+      unit,
+      availability: { status: 'available', source: 'root-session export' },
+      scope: 'root-session',
+    });
+    const expectedCase = {
+      failure: null,
+      hasSessionExport: true,
+      inputTokens: fromExport(1200, 'token'),
+      outputTokens: fromExport(450, 'token'),
+      reasoningTokens: fromExport(16, 'token'),
+      cacheReadTokens: fromExport(30, 'token'),
+      cacheWriteTokens: fromExport(10, 'token'),
+      cost: fromExport(0.0125, 'USD'),
+      apiCalls: fromExport(1, 'count'),
+      turns: fromExport(1, 'count'),
+    };
+    const observedCases = result.value.cases.map((caseResult) => ({
+      failure: caseResult.failure,
+      hasSessionExport: caseResult.artifacts.sessionExport !== null,
+      inputTokens: caseResult.metrics.inputTokens,
+      outputTokens: caseResult.metrics.outputTokens,
+      reasoningTokens: caseResult.metrics.reasoningTokens,
+      cacheReadTokens: caseResult.metrics.cacheReadTokens,
+      cacheWriteTokens: caseResult.metrics.cacheWriteTokens,
+      cost: caseResult.metrics.cost,
+      apiCalls: caseResult.metrics.apiCalls,
+      turns: caseResult.metrics.turns,
     }));
     expect(observedCases).toEqual([expectedCase, expectedCase]);
   });
