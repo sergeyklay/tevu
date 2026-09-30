@@ -22,12 +22,14 @@ import {
   unlink,
   writeFile,
 } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import process from 'node:process';
 import { execa } from 'execa';
 
 import { describeCause } from '@/domain/describe-cause';
 import { GIT_COMMAND_TIMEOUT_MS, ISOLATED_GIT_SETTINGS } from '@/domain/git-environment';
+import { formatGitHubRepository, parseGitHubRepository } from '@/domain/github-reference';
 
 import type {
   CaseIdentity,
@@ -36,6 +38,7 @@ import type {
   CheckStateRequest,
   CommitLookup,
   GitWorkspaceAdapter,
+  LfsObjectInventory,
   OverlayEntry,
   OverlayFileRecord,
   OverlayRecord,
@@ -59,7 +62,6 @@ const SUBMODULE_MODE = '160000';
 const REGULAR_FILE_MODES: ReadonlySet<string> = new Set(['100644', '100755']);
 const LFS_POINTER_VERSION_LINE = 'version https://git-lfs.github.com/spec/v1';
 const LFS_POINTER_SIZE_LIMIT = 1024;
-const LFS_ATTRIBUTE = 'filter=lfs';
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{40,64}$/;
 
 /** Deterministic identity for the synthetic root commit of every sealed case. */
@@ -79,9 +81,9 @@ const SYNTHETIC_COMMIT_IDENTITY: Record<string, string> = {
  */
 export function createSourceValidator(): Pick<
   GitWorkspaceAdapter,
-  'validateSource' | 'resolveCommit'
+  'validateSource' | 'resolveCommit' | 'inspectLfsObjects'
 > {
-  return { validateSource, resolveCommit: resolveCommitInRepository };
+  return { validateSource, resolveCommit: resolveCommitInRepository, inspectLfsObjects };
 }
 
 /** Reports whether `directory` lies in a Git repository; a missing directory does not. */
@@ -119,31 +121,90 @@ async function isAncestor(
   return null;
 }
 
+type ResolvedSourceTree =
+  | { ok: true; resolvedCommit: string; pointerEntries: LfsPointerEntry[] }
+  | { ok: false; reason: string };
+
+/**
+ * Resolves `revision` to one commit and inspects its tree. The failure reason
+ * carries the `repository "<id>": ` prefix every source-validation text has.
+ */
+async function resolveSourceTree(
+  repository: RepositoryDefinition,
+  revision: string,
+): Promise<ResolvedSourceTree> {
+  const lookup = await resolveCommit(repository.path, revision);
+  if (lookup.kind === 'no-repository') {
+    return {
+      ok: false,
+      reason: `repository "${repository.id}": "${repository.path}" is not a Git repository`,
+    };
+  }
+  if (lookup.kind === 'not-found') {
+    return {
+      ok: false,
+      reason: `repository "${repository.id}": "${revision}" is not readable as exactly one commit in "${repository.path}"`,
+    };
+  }
+  const inspection = await inspectSourceTree(repository.path, lookup.commit);
+  if (!inspection.ok) {
+    return { ok: false, reason: `repository "${repository.id}": ${inspection.reason}` };
+  }
+  return {
+    ok: true,
+    resolvedCommit: lookup.commit,
+    pointerEntries: inspection.pointerEntries,
+  };
+}
+
 async function validateSource(
   repository: RepositoryDefinition,
   commit: string,
 ): Promise<TevuResult<SourceValidation, 'SourceMaterializationError'>> {
-  const lookup = await resolveCommit(repository.path, commit);
-  if (lookup.kind === 'no-repository') {
+  const resolved = await resolveSourceTree(repository, commit);
+  if (!resolved.ok) {
+    return sourceError(repository.id, resolved.reason);
+  }
+  const { resolvedCommit, pointerEntries } = resolved;
+  const extensionFailure = extensionReason(repository, pointerEntries);
+  if (extensionFailure !== undefined) {
+    return sourceError(repository.id, extensionFailure);
+  }
+  const report = await lfsStorageReport(repository.path, pointerEntries);
+  if (!report.ok) {
+    return sourceError(repository.id, `repository "${repository.id}": ${report.reason}`);
+  }
+  if (report.report.missing > 0) {
     return sourceError(
       repository.id,
-      `repository "${repository.id}": "${repository.path}" is not a Git repository`,
+      missingReason(repository, report.report, resolvedCommit, await probeGitLfs()),
     );
-  }
-  if (lookup.kind === 'not-found') {
-    return sourceError(
-      repository.id,
-      `repository "${repository.id}": "${commit}" is not readable as exactly one commit in "${repository.path}"`,
-    );
-  }
-  const resolvedCommit = lookup.commit;
-  const inspection = await inspectSourceTree(repository.path, resolvedCommit);
-  if (!inspection.ok) {
-    return sourceError(repository.id, `repository "${repository.id}": ${inspection.reason}`);
   }
   return {
     ok: true,
     value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
+  };
+}
+
+async function inspectLfsObjects(
+  repository: RepositoryDefinition,
+  revision: string,
+): Promise<TevuResult<LfsObjectInventory, 'SourceMaterializationError'>> {
+  const resolved = await resolveSourceTree(repository, revision);
+  if (!resolved.ok) {
+    return sourceError(repository.id, resolved.reason);
+  }
+  const report = await lfsStorageReport(repository.path, resolved.pointerEntries);
+  if (!report.ok) {
+    return sourceError(repository.id, `repository "${repository.id}": ${report.reason}`);
+  }
+  return {
+    ok: true,
+    value: {
+      commit: resolved.resolvedCommit,
+      objectCount: report.report.needed.length,
+      missingCount: report.report.missing,
+    },
   };
 }
 
@@ -162,6 +223,7 @@ export function createGitWorkspaceAdapter(
   return {
     validateSource,
     resolveCommit: resolveCommitInRepository,
+    inspectLfsObjects,
     isAncestor,
     readOverlay,
     applyCheckState,
@@ -389,7 +451,9 @@ type SealCaseInput = {
  * alternates, extra refs, reflogs, or untracked source files. Objects are
  * borrowed through a temporary alternates link, copied local by `repack`, and
  * the link is removed before the worktree is populated so a missing local
- * object fails loudly instead of leaking source history.
+ * object fails loudly instead of leaking source history. Each Git LFS pointer
+ * entry of the pinned tree is replaced, in the synthetic tree, by the blob of
+ * its object read from the source's own Git LFS storage.
  */
 async function sealCase(
   input: SealCaseInput,
@@ -416,6 +480,15 @@ async function sealCase(
   ): Promise<{ ok: false; error: { kind: 'IsolationError'; caseId: string; reason: string } }> => {
     await rm(caseDirectory, { recursive: true, force: true }).catch(() => undefined);
     return isolationError(identity.caseId, reason);
+  };
+  const failSource = async (
+    reason: string,
+  ): Promise<{
+    ok: false;
+    error: { kind: 'SourceMaterializationError'; taskId: string; reason: string };
+  }> => {
+    await rm(caseDirectory, { recursive: true, force: true }).catch(() => undefined);
+    return sourceError(identity.taskId, reason);
   };
 
   try {
@@ -455,9 +528,56 @@ async function sealCase(
   if (tree.exitCode !== 0 || tree.stdout.length === 0) {
     return fail(describeGitFailure('rev-parse tree', tree));
   }
+
+  const inspection = await inspectSourceTree(repository.path, resolvedCommit);
+  if (!inspection.ok) {
+    return failSource(`repository "${repository.id}": ${inspection.reason}`);
+  }
+  const { pointerEntries } = inspection;
+  const extensionFailure = extensionReason(repository, pointerEntries);
+  if (extensionFailure !== undefined) {
+    return failSource(extensionFailure);
+  }
+  let sealedTree = tree.stdout;
+  let materialized = false;
+  if (pointerEntries.length > 0) {
+    const storage = await lfsStorageReport(repository.path, pointerEntries);
+    if (!storage.ok) {
+      return failSource(`repository "${repository.id}": ${storage.reason}`);
+    }
+    if (storage.report.missing > 0) {
+      return failSource(
+        missingReason(repository, storage.report, resolvedCommit, await probeGitLfs()),
+      );
+    }
+    const materialization = await materializeLfsEntries({
+      repository,
+      resolvedCommit,
+      pointerEntries,
+      report: storage.report,
+      worktreeDirectory,
+    });
+    if (!materialization.ok) {
+      return materialization.isSourceFailure
+        ? failSource(materialization.reason)
+        : fail(materialization.reason);
+    }
+    materialized = materialization.materialized;
+    const written = await writeTreeWithEntries(
+      worktreeDirectory,
+      join(runtimeDirectory, 'materialize-index'),
+      tree.stdout,
+      materialization.records,
+    );
+    if (!written.ok) {
+      return fail(written.reason);
+    }
+    sealedTree = written.tree;
+  }
+
   const committed = await runGit(
     worktreeDirectory,
-    ['commit-tree', tree.stdout, '-m', `tevu sealed case ${identity.caseId}`],
+    ['commit-tree', sealedTree, '-m', `tevu sealed case ${identity.caseId}`],
     { environment: SYNTHETIC_COMMIT_IDENTITY },
   );
   if (committed.exitCode !== 0 || committed.stdout.length === 0) {
@@ -473,7 +593,16 @@ async function sealCase(
   if (branchRef.exitCode !== 0) {
     return fail(describeGitFailure('update-ref', branchRef));
   }
-  const repacked = await runGit(worktreeDirectory, ['repack', '-a', '-d', '--quiet']);
+  // Streams every blob above 1 MiB and skips the delta search, bounding the
+  // memory of the two commands that would otherwise hold whole LFS objects.
+  const boundedMemory = materialized ? ['-c', 'core.bigFileThreshold=1m'] : [];
+  const repacked = await runGit(worktreeDirectory, [
+    ...boundedMemory,
+    'repack',
+    '-a',
+    '-d',
+    '--quiet',
+  ]);
   if (repacked.exitCode !== 0) {
     return fail(describeGitFailure('repack', repacked));
   }
@@ -484,12 +613,17 @@ async function sealCase(
     return fail(`sealing cleanup failed: ${describeCause(cause)}`);
   }
 
-  const populated = await runGit(worktreeDirectory, ['reset', '--hard', '--quiet']);
+  const populated = await runGit(worktreeDirectory, [
+    ...boundedMemory,
+    'reset',
+    '--hard',
+    '--quiet',
+  ]);
   if (populated.exitCode !== 0) {
     return fail(describeGitFailure('reset --hard', populated));
   }
-  const sealedTree = await runGit(worktreeDirectory, ['rev-parse', 'HEAD^{tree}']);
-  if (sealedTree.exitCode !== 0 || sealedTree.stdout !== tree.stdout) {
+  const checkedTree = await runGit(worktreeDirectory, ['rev-parse', 'HEAD^{tree}']);
+  if (checkedTree.exitCode !== 0 || checkedTree.stdout !== sealedTree) {
     return fail('sealed tree does not match the pinned source tree');
   }
 
@@ -508,7 +642,187 @@ async function sealCase(
   };
 }
 
-type TreeInspection = { ok: true } | { ok: false; reason: string };
+type LfsMaterialization =
+  | { ok: true; records: string; materialized: boolean }
+  | { ok: false; isSourceFailure: boolean; reason: string };
+
+type LfsDigest =
+  | { ok: true; sha256: string; byteCount: number; gitBlobId: string }
+  | { ok: false; isAbsent: boolean; cause: unknown };
+
+const LFS_READ_CHUNK_BYTES = 1024 * 1024;
+
+/**
+ * Reads one object file in fixed-size chunks, keeping none after hashing it,
+ * and computes the SHA-256 Git LFS names it by and the blob id Git would give
+ * `size` bytes of it.
+ */
+async function digestLfsObjectFile(file: string, size: number): Promise<LfsDigest> {
+  const sha256 = createHash('sha256');
+  const gitBlob = createHash('sha1').update(`blob ${size}\0`);
+  let byteCount = 0;
+  try {
+    const handle = await open(file, 'r');
+    try {
+      const chunk = Buffer.allocUnsafe(LFS_READ_CHUNK_BYTES);
+      for (;;) {
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+        if (bytesRead === 0) {
+          break;
+        }
+        const filled = chunk.subarray(0, bytesRead);
+        sha256.update(filled);
+        gitBlob.update(filled);
+        byteCount += bytesRead;
+      }
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+  } catch (cause) {
+    const code = systemErrorCode(cause);
+    return { ok: false, isAbsent: code === 'ENOENT' || code === 'ENOTDIR', cause };
+  }
+  return { ok: true, sha256: sha256.digest('hex'), byteCount, gitBlobId: gitBlob.digest('hex') };
+}
+
+/**
+ * Verifies each needed object file against its pointer and writes it into the
+ * case repository as a blob, then returns the `update-index --index-info`
+ * records that put every pointer entry's blob at its path with its mode.
+ * Source-reading failures are flagged so the caller reports them as such.
+ */
+async function materializeLfsEntries(input: {
+  repository: RepositoryDefinition;
+  resolvedCommit: string;
+  pointerEntries: readonly LfsPointerEntry[];
+  report: LfsStorageReport;
+  worktreeDirectory: string;
+}): Promise<LfsMaterialization> {
+  const { repository, resolvedCommit, pointerEntries, report, worktreeDirectory } = input;
+  const sourceFailure = (reason: string): LfsMaterialization => ({
+    ok: false,
+    isSourceFailure: true,
+    reason,
+  });
+  const blobIds = new Map<string, string>();
+  let emptyBlobId: string | undefined;
+  let materialized = false;
+
+  for (const { oid, size } of report.needed) {
+    const file = lfsObjectFile(report.objectsDirectory, oid);
+    const digest = await digestLfsObjectFile(file, size);
+    if (!digest.ok) {
+      if (digest.isAbsent) {
+        return sourceFailure(
+          missingReason(repository, { ...report, missing: 1 }, resolvedCommit, await probeGitLfs()),
+        );
+      }
+      return sourceFailure(`repository "${repository.id}": ${readReason(file, digest.cause)}`);
+    }
+    if (digest.sha256 !== oid || digest.byteCount !== size) {
+      return sourceFailure(mismatchReason(repository, file, resolvedCommit));
+    }
+    const written = await runGit(worktreeDirectory, [
+      '-c',
+      'core.bigFileThreshold=1m',
+      'hash-object',
+      '-w',
+      '--no-filters',
+      '--',
+      file,
+    ]);
+    if (written.exitCode !== 0 || written.stdout.length === 0) {
+      return {
+        ok: false,
+        isSourceFailure: false,
+        reason: describeGitFailure('hash-object', written),
+      };
+    }
+    if (written.stdout !== digest.gitBlobId) {
+      return sourceFailure(mismatchReason(repository, file, resolvedCommit));
+    }
+    blobIds.set(lfsObjectKey(oid, size), written.stdout);
+    materialized = true;
+  }
+
+  if (pointerEntries.some((entry) => entry.size === 0)) {
+    const empty = await runGit(
+      worktreeDirectory,
+      ['hash-object', '-w', '--no-filters', '--stdin'],
+      {
+        stdin: '',
+      },
+    );
+    if (empty.exitCode !== 0 || empty.stdout.length === 0) {
+      return {
+        ok: false,
+        isSourceFailure: false,
+        reason: describeGitFailure('hash-object', empty),
+      };
+    }
+    emptyBlobId = empty.stdout;
+  }
+
+  let records = '';
+  for (const entry of pointerEntries) {
+    const blobId =
+      entry.size === 0 ? emptyBlobId : blobIds.get(lfsObjectKey(entry.oid, entry.size));
+    if (blobId === undefined) {
+      return { ok: false, isSourceFailure: false, reason: 'materialized blob is missing' };
+    }
+    records += `${entry.mode} ${blobId}\t${entry.path}\0`;
+  }
+  return { ok: true, records, materialized };
+}
+
+/**
+ * Writes the tree `tree` with the given `--index-info` records applied,
+ * through a private index file removed on every exit path.
+ */
+async function writeTreeWithEntries(
+  worktreeDirectory: string,
+  indexFile: string,
+  tree: string,
+  records: string,
+): Promise<{ ok: true; tree: string } | { ok: false; reason: string }> {
+  const environment = { GIT_INDEX_FILE: indexFile };
+  try {
+    const read = await runGit(worktreeDirectory, ['read-tree', tree], { environment });
+    if (read.exitCode !== 0) {
+      return { ok: false, reason: describeGitFailure('read-tree', read) };
+    }
+    const updated = await runGit(worktreeDirectory, ['update-index', '-z', '--index-info'], {
+      environment,
+      stdin: records,
+    });
+    if (updated.exitCode !== 0) {
+      return { ok: false, reason: describeGitFailure('update-index --index-info', updated) };
+    }
+    const written = await runGit(worktreeDirectory, ['write-tree'], { environment });
+    if (written.exitCode !== 0 || written.stdout.length === 0) {
+      return { ok: false, reason: describeGitFailure('write-tree', written) };
+    }
+    return { ok: true, tree: written.stdout };
+  } finally {
+    await rm(indexFile, { force: true }).catch(() => undefined);
+  }
+}
+
+/** One tree entry whose whole blob is a Git LFS pointer. */
+type LfsPointerEntry = {
+  path: string;
+  mode: '100644' | '100755';
+  /** 64 lowercase hexadecimal characters from the `oid sha256:` line. */
+  oid: string;
+  size: number;
+  /** The pointer holds at least one `ext-` line. */
+  usesExtensions: boolean;
+};
+
+type TreeInspection =
+  { ok: true; pointerEntries: LfsPointerEntry[] } | { ok: false; reason: string };
+
+type RegularFileBlob = { mode: LfsPointerEntry['mode']; blobId: string };
 
 // `$` without the multiline flag matches only at the end of the input, so a
 // second trailing LF fails the match.
@@ -518,40 +832,42 @@ const LFS_POINTER_PATTERN = new RegExp(
     String.raw`oid sha256:[0-9a-f]{64}\n` +
     String.raw`size \d+\n$`,
 );
+const LFS_POINTER_FIELDS_PATTERN = /^oid sha256:([0-9a-f]{64})\nsize (\d+)\n/m;
 
 /** Reports whether the whole blob text is a Git LFS pointer in the one encoding git-lfs writes. */
 function isLfsPointerText(content: string): boolean {
   return LFS_POINTER_PATTERN.test(content);
 }
 
-/**
- * Reports whether a `.gitattributes` text assigns `filter=lfs` on a non-comment
- * line. A line Git would discard as invalid still counts when it carries the
- * token: rejecting a broken line is the safe error.
- */
-function configuresLfsFilter(attributes: string): boolean {
-  return attributes.split('\n').some((line) => {
-    const [pattern, ...attributeTokens] = line
-      .split(/[ \t\r]+/)
-      .filter((token) => token.length > 0);
-    if (pattern === undefined || pattern.startsWith('#')) {
-      return false;
-    }
-    return attributeTokens.some((token) => token === LFS_ATTRIBUTE);
-  });
+function isRegularFileMode(mode: string): mode is LfsPointerEntry['mode'] {
+  return REGULAR_FILE_MODES.has(mode);
 }
 
-type LfsPointerScan = { ok: true; pointerEntryCount: number } | { ok: false; reason: string };
+/** Reads the object id, size, and extension use out of text {@link isLfsPointerText} accepted. */
+function parseLfsPointer(
+  content: string,
+): Pick<LfsPointerEntry, 'oid' | 'size' | 'usesExtensions'> | undefined {
+  const fields = LFS_POINTER_FIELDS_PATTERN.exec(content);
+  const oid = fields?.[1];
+  const sizeText = fields?.[2];
+  if (oid === undefined || sizeText === undefined) {
+    return undefined;
+  }
+  return { oid, size: Number(sizeText), usesExtensions: content.includes('\next-') };
+}
+
+type LfsPointerScan =
+  { ok: true; pointerEntries: LfsPointerEntry[] } | { ok: false; reason: string };
 
 /**
- * Counts the regular-file entries of `commit` whose whole blob is a Git LFS
- * pointer. `git grep` only nominates candidates; the blob bytes decide, and
- * only blobs under the pointer size limit are ever read.
+ * Lists the regular-file entries of `commit` whose whole blob is a Git LFS
+ * pointer, sorted by path. `git grep` only nominates candidates; the blob
+ * bytes decide, and only blobs under the pointer size limit are ever read.
  */
-async function countLfsPointerEntries(
+async function listLfsPointerEntries(
   repositoryPath: string,
   commit: string,
-  regularFileBlobs: ReadonlyMap<string, string>,
+  regularFileBlobs: ReadonlyMap<string, RegularFileBlob>,
 ): Promise<LfsPointerScan> {
   // No `-I`: attributes Git reads outside the pinned tree would otherwise
   // decide which blobs are searched.
@@ -567,7 +883,7 @@ async function countLfsPointerEntries(
     commit,
   ]);
   if (grep.exitCode === 1) {
-    return { ok: true, pointerEntryCount: 0 };
+    return { ok: true, pointerEntries: [] };
   }
   const grepFailure = { ok: false, reason: describeGitFailure('grep', grep) } as const;
   if (grep.exitCode !== 0) {
@@ -579,18 +895,19 @@ async function countLfsPointerEntries(
   }
 
   const prefix = `${commit}:`;
-  const candidateBlobIds: string[] = [];
+  const candidates: Array<{ path: string } & RegularFileBlob> = [];
   for (const entry of entries) {
     if (!entry.startsWith(prefix)) {
       return grepFailure;
     }
-    const blobId = regularFileBlobs.get(entry.slice(prefix.length));
-    if (blobId === undefined) {
+    const path = entry.slice(prefix.length);
+    const blob = regularFileBlobs.get(path);
+    if (blob === undefined) {
       return grepFailure;
     }
-    candidateBlobIds.push(blobId);
+    candidates.push({ path, ...blob });
   }
-  const distinctBlobIds = [...new Set(candidateBlobIds)];
+  const distinctBlobIds = [...new Set(candidates.map((candidate) => candidate.blobId))];
 
   const sizes = await runGit(repositoryPath, ['cat-file', '--batch-check'], {
     stdin: `${distinctBlobIds.join('\n')}\n`,
@@ -607,7 +924,7 @@ async function countLfsPointerEntries(
     return sizesFailure;
   }
 
-  const pointerBlobIds = new Set<string>();
+  const pointerBlobs = new Map<string, NonNullable<ReturnType<typeof parseLfsPointer>>>();
   for (const [index, blobId] of distinctBlobIds.entries()) {
     const line = lines[index];
     const linePrefix = `${blobId} blob `;
@@ -627,20 +944,33 @@ async function countLfsPointerEntries(
     if (blob.exitCode !== 0) {
       return { ok: false, reason: describeGitFailure('cat-file blob', blob) };
     }
-    if (isLfsPointerText(blob.stdout)) {
-      pointerBlobIds.add(blobId);
+    if (!isLfsPointerText(blob.stdout)) {
+      continue;
+    }
+    const pointer = parseLfsPointer(blob.stdout);
+    if (pointer === undefined) {
+      return { ok: false, reason: describeGitFailure('cat-file blob', blob) };
+    }
+    pointerBlobs.set(blobId, pointer);
+  }
+
+  const pointerEntries: LfsPointerEntry[] = [];
+  for (const candidate of candidates) {
+    const pointer = pointerBlobs.get(candidate.blobId);
+    if (pointer !== undefined) {
+      pointerEntries.push({ path: candidate.path, mode: candidate.mode, ...pointer });
     }
   }
   return {
     ok: true,
-    pointerEntryCount: candidateBlobIds.filter((blobId) => pointerBlobIds.has(blobId)).length,
+    pointerEntries: pointerEntries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
   };
 }
 
 /**
- * Inspects the pinned tree for unsupported submodule (gitlink) entries, Git
- * LFS attribute configuration, and Git LFS pointer blobs. Reasons carry counts
- * only; source filenames never enter error messages.
+ * Inspects the pinned tree for unsupported submodule (gitlink) entries and
+ * lists its Git LFS pointer entries. Reasons carry counts only; source
+ * filenames never enter error messages.
  */
 async function inspectSourceTree(repositoryPath: string, commit: string): Promise<TreeInspection> {
   const listed = await runGit(repositoryPath, ['ls-tree', '-r', '-z', commit]);
@@ -648,8 +978,7 @@ async function inspectSourceTree(repositoryPath: string, commit: string): Promis
     return { ok: false, reason: describeGitFailure('ls-tree', listed) };
   }
   let submoduleCount = 0;
-  const attributeFilePaths: string[] = [];
-  const regularFileBlobs = new Map<string, string>();
+  const regularFileBlobs = new Map<string, RegularFileBlob>();
   for (const entry of listed.stdout.split('\0')) {
     if (entry.length === 0) {
       continue;
@@ -660,11 +989,8 @@ async function inspectSourceTree(repositoryPath: string, commit: string): Promis
     if (mode === SUBMODULE_MODE) {
       submoduleCount += 1;
     }
-    if (mode !== undefined && objectId !== undefined && REGULAR_FILE_MODES.has(mode)) {
-      regularFileBlobs.set(path, objectId);
-    }
-    if (basename(path) === '.gitattributes') {
-      attributeFilePaths.push(path);
+    if (mode !== undefined && objectId !== undefined && isRegularFileMode(mode)) {
+      regularFileBlobs.set(path, { mode, blobId: objectId });
     }
   }
   if (submoduleCount > 0) {
@@ -674,28 +1000,158 @@ async function inspectSourceTree(repositoryPath: string, commit: string): Promis
     };
   }
 
-  for (const path of attributeFilePaths) {
-    const attributes = await runGit(repositoryPath, ['cat-file', 'blob', `${commit}:${path}`]);
-    if (attributes.exitCode !== 0) {
-      return { ok: false, reason: describeGitFailure('cat-file .gitattributes', attributes) };
-    }
-    if (configuresLfsFilter(attributes.stdout)) {
-      return { ok: false, reason: 'source tree configures unsupported Git LFS attributes' };
-    }
-  }
-
-  const scan = await countLfsPointerEntries(repositoryPath, commit, regularFileBlobs);
+  const scan = await listLfsPointerEntries(repositoryPath, commit, regularFileBlobs);
   if (!scan.ok) {
     return { ok: false, reason: scan.reason };
   }
-  if (scan.pointerEntryCount > 0) {
-    const { pointerEntryCount } = scan;
-    return {
-      ok: false,
-      reason: `source tree contains ${pointerEntryCount} unsupported Git LFS pointer blob${pointerEntryCount === 1 ? '' : 's'}`,
-    };
+  return { ok: true, pointerEntries: scan.pointerEntries };
+}
+
+/** Where a repository's Git LFS objects are, and how many of the ones a tree needs are absent. */
+type LfsStorageReport = {
+  /** Absolute. */
+  objectsDirectory: string;
+  /** Distinct (oid, size) pairs, sorted by oid, then size. */
+  needed: ReadonlyArray<{ oid: string; size: number }>;
+  missing: number;
+};
+
+type LfsStorageOutcome = { ok: true; report: LfsStorageReport } | { ok: false; reason: string };
+
+/**
+ * Reads the Git LFS storage of `repositoryPath` without writing to it and
+ * counts how many objects the pointer entries need that it lacks. The failure
+ * reason carries no repository prefix.
+ */
+async function lfsStorageReport(
+  repositoryPath: string,
+  pointerEntries: readonly LfsPointerEntry[],
+): Promise<LfsStorageOutcome> {
+  const needed = neededLfsObjects(pointerEntries);
+  const configured = await runGit(repositoryPath, [
+    'config',
+    '--type=path',
+    '--get',
+    'lfs.storage',
+  ]);
+  if (configured.exitCode !== 0 && configured.exitCode !== 1) {
+    return { ok: false, reason: describeGitFailure('config lfs.storage', configured) };
   }
-  return { ok: true };
+  const common = await runGit(repositoryPath, [
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-common-dir',
+  ]);
+  if (common.exitCode !== 0 || common.stdout.length === 0) {
+    return { ok: false, reason: describeGitFailure('rev-parse --git-common-dir', common) };
+  }
+  const configuredStorage = configured.exitCode === 0 ? configured.stdout : '';
+  const storage = isAbsolute(configuredStorage)
+    ? configuredStorage
+    : join(common.stdout, configuredStorage.length > 0 ? configuredStorage : 'lfs');
+  const objectsDirectory = join(storage, 'objects');
+
+  let missing = 0;
+  for (const { oid, size } of needed) {
+    const file = lfsObjectFile(objectsDirectory, oid);
+    try {
+      const entryStat = await stat(file);
+      if (!entryStat.isFile() || !Number.isSafeInteger(size) || entryStat.size !== size) {
+        missing += 1;
+      }
+    } catch (cause) {
+      const code = systemErrorCode(cause);
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        missing += 1;
+        continue;
+      }
+      return { ok: false, reason: readReason(file, cause) };
+    }
+  }
+  return { ok: true, report: { objectsDirectory, needed, missing } };
+}
+
+/** Distinct (oid, size) pairs of pointer entries that use no extension and have a nonzero size. */
+function neededLfsObjects(
+  pointerEntries: readonly LfsPointerEntry[],
+): Array<{ oid: string; size: number }> {
+  const distinct = new Map<string, { oid: string; size: number }>();
+  for (const { oid, size, usesExtensions } of pointerEntries) {
+    if (!usesExtensions && size > 0) {
+      distinct.set(lfsObjectKey(oid, size), { oid, size });
+    }
+  }
+  return [...distinct.values()].sort((a, b) =>
+    a.oid === b.oid ? a.size - b.size : a.oid < b.oid ? -1 : 1,
+  );
+}
+
+function lfsObjectKey(oid: string, size: number): string {
+  return `${oid}:${size}`;
+}
+
+function lfsObjectFile(objectsDirectory: string, oid: string): string {
+  return join(objectsDirectory, oid.slice(0, 2), oid.slice(2, 4), oid);
+}
+
+/** Reports whether `git lfs version` succeeds; runs outside every repository so it cannot write to one. */
+async function probeGitLfs(): Promise<boolean> {
+  const outcome = await runGit(tmpdir(), ['lfs', 'version']);
+  return outcome.exitCode === 0 && outcome.stdout.startsWith('git-lfs/');
+}
+
+/** The extension failure text, or `undefined` when no pointer entry uses Git LFS extensions. */
+function extensionReason(
+  repository: RepositoryDefinition,
+  pointerEntries: readonly LfsPointerEntry[],
+): string | undefined {
+  const count = pointerEntries.filter((entry) => entry.usesExtensions).length;
+  if (count === 0) {
+    return undefined;
+  }
+  const subject =
+    count === 1
+      ? '1 Git LFS pointer entry that uses Git LFS extensions; tevu cannot rebuild its content'
+      : `${count} Git LFS pointer entries that use Git LFS extensions; tevu cannot rebuild their content`;
+  return `repository "${repository.id}": source tree contains ${subject}`;
+}
+
+function missingReason(
+  repository: RepositoryDefinition,
+  report: LfsStorageReport,
+  resolvedCommit: string,
+  isInstalled: boolean,
+): string {
+  const counts = `${report.missing} of ${report.needed.length}`;
+  const installHint = isInstalled
+    ? ''
+    : 'Git LFS is not installed or not on PATH: install it from https://git-lfs.com, then ';
+  const nextStep =
+    repository.github === undefined
+      ? `fetch them in "${repository.path}"${isInstalled ? ' first' : ''}, for example: git lfs fetch -I "" -X "" origin ${resolvedCommit}`
+      : `tevu run --dry-run fetches them from ${githubDisplay(repository.github)}`;
+  return `repository "${repository.id}": Git LFS objects not in "${report.objectsDirectory}": ${counts}; ${installHint}${nextStep}`;
+}
+
+function mismatchReason(
+  repository: RepositoryDefinition,
+  file: string,
+  resolvedCommit: string,
+): string {
+  const nextStep =
+    repository.github === undefined
+      ? `fetch it again in "${repository.path}", for example: git lfs fetch -I "" -X "" origin ${resolvedCommit}`
+      : `tevu run --dry-run fetches it again from ${githubDisplay(repository.github)}`;
+  return `repository "${repository.id}": Git LFS object file "${file}" does not match its pointer; delete the file, then ${nextStep}`;
+}
+
+function readReason(file: string, cause: unknown): string {
+  return `Git LFS object file "${file}" cannot be read: ${describeCause(cause)}`;
+}
+
+function githubDisplay(github: string): string {
+  const parsed = parseGitHubRepository(github);
+  return parsed === null ? github : formatGitHubRepository(parsed);
 }
 
 /**

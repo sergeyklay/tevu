@@ -668,6 +668,7 @@ function failingManagedCloneAdapter(): ManagedCloneAdapter {
     fetchCommits: fail,
     fetchBranchesAndTags: fail,
     checkRemote: fail,
+    fetchLfsObjects: fail,
   };
 }
 
@@ -691,6 +692,7 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
     ensureManagedCommits: vi.fn(async () => {
       throw new Error('ensureManagedCommits should not be called without a scripted GitHub entry');
     }),
+    ensureManagedLfsObjects: vi.fn(async () => ({ ok: true as const, value: undefined })),
     checkGitHubRepository: vi.fn(async () => ({ ok: true as const, value: undefined })),
     inspectBaseCommit: vi.fn(async () => ({ ok: true as const, value: undefined })),
     checkRepositoryPlacement: vi.fn(async () => []),
@@ -2259,6 +2261,28 @@ describe('tevu CLI', () => {
       ]);
       expect(operations.validateConfig).not.toHaveBeenCalled();
       expect(operations.planBenchmark).not.toHaveBeenCalled();
+    });
+
+    it('renders a Git LFS fetch failure from prepareRepositories as the failure it is, exits 1, and never validates', async () => {
+      const operations = createOperations({
+        prepareRepositories: vi.fn(async () => ({
+          ok: false as const,
+          error: {
+            kind: 'ManagedCloneError' as const,
+            operation: 'lfs-fetch' as const,
+            repository: 'github.com/octo/app',
+            reason: 'Git LFS is not installed or not on PATH; install it from https://git-lfs.com',
+          },
+        })),
+      });
+
+      const { code, err } = await runCli(['run', '--dry-run'], { operations });
+
+      expect(code).toBe(1);
+      expect(err).toEqual([
+        'error: fetching Git LFS objects from github.com/octo/app failed: Git LFS is not installed or not on PATH; install it from https://git-lfs.com',
+      ]);
+      expect(operations.validateConfig).not.toHaveBeenCalled();
     });
 
     it('maps a CancellationError from prepareRepositories to exit 130', async () => {
@@ -4497,7 +4521,7 @@ describe('tevu CLI', () => {
     describe('the early base-commit check', () => {
       const REPOSITORY = { id: 'repo-1', path: '../repos/fixture' };
       const WARNING_LAST_LINE =
-        'Fix the base commit below. Press Enter to retry, or Ctrl-C to cancel.';
+        'Fix the cause or change the base commit below. Press Enter to retry, or Ctrl-C to cancel.';
 
       function refusedOnce(
         error: Extract<
@@ -4651,6 +4675,7 @@ describe('tevu CLI', () => {
         expect(clack.state.spinners.map((spinner) => spinner.label)).toEqual([
           'Preparing repository',
           'Fetching base commit',
+          'Fetching Git LFS objects',
           'Checking base commit',
           'Saving task',
         ]);
@@ -4734,6 +4759,199 @@ describe('tevu CLI', () => {
           clack.state.prompts.filter((prompt) => prompt.message === 'Base commit'),
         ).toHaveLength(1);
         expect(requireCreateTaskCall(operations).task.base_commit).toBe(fullHash);
+      });
+
+      describe('the Git LFS objects of a GitHub entry', () => {
+        const GITHUB_ENTRY = { id: 'repo-1', github: 'octo/app' };
+        const LFS_FAILURE: Extract<TevuError, { kind: 'ManagedCloneError' }> = {
+          kind: 'ManagedCloneError',
+          operation: 'lfs-fetch',
+          repository: 'github.com/octo/app',
+          reason:
+            'git lfs fetch exited with code 2: error transferring "abc": [0] remote missing object abc; github.com/octo/app does not have every Git LFS object of this commit; choose another base commit',
+        };
+
+        function githubOperations(
+          ensureManagedLfsObjects: ProgramOperations['ensureManagedLfsObjects'],
+        ): ProgramOperations {
+          return createOperations({
+            loadConfig: vi.fn(async () => ({
+              ok: true as const,
+              value: buildGitHubRepositoryConfig(),
+            })),
+            ensureManagedCommits: vi.fn(async () => ({
+              ok: true as const,
+              value: { missing: [] },
+            })),
+            ensureManagedLfsObjects,
+          });
+        }
+
+        function failingOnce(
+          error: Extract<
+            Awaited<ReturnType<ProgramOperations['ensureManagedLfsObjects']>>,
+            { ok: false }
+          >['error'],
+        ): ReturnType<typeof vi.fn<ProgramOperations['ensureManagedLfsObjects']>> {
+          return vi
+            .fn<ProgramOperations['ensureManagedLfsObjects']>()
+            .mockResolvedValueOnce({ ok: false, error })
+            .mockResolvedValue({ ok: true, value: undefined });
+        }
+
+        it('fetches them for the answer once the clone holds it and prints the progress lines the fetch reports', async () => {
+          const line =
+            'Fetching 2 Git LFS objects from github.com/octo/app into the clone of repository "repo-1"';
+          const ensureManagedLfsObjects = vi.fn<ProgramOperations['ensureManagedLfsObjects']>(
+            async (_request, onProgress) => {
+              onProgress(line);
+              return { ok: true, value: undefined };
+            },
+          );
+          const operations = githubOperations(ensureManagedLfsObjects);
+          scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+          const { code } = await runCli(['task', 'add'], { operations });
+
+          expect(code).toBe(0);
+          expect(ensureManagedLfsObjects).toHaveBeenCalledExactlyOnceWith(
+            { repository: GITHUB_ENTRY, revision: 'abc123' },
+            expect.any(Function),
+          );
+          expect(clack.state.logs).toContainEqual({ kind: 'step', message: line });
+        });
+
+        it('prints the headline, the rendered failure, and the next step, then asks Base commit again with the answer filled in', async () => {
+          const ensureManagedLfsObjects = failingOnce(LFS_FAILURE);
+          const operations = githubOperations(ensureManagedLfsObjects);
+          const answers = taskInterviewAnswers('repo-1');
+          scriptAnswers(...answers.slice(0, 4), 'abc123', ...answers.slice(4), true);
+
+          const { code } = await runCli(['task', 'add'], { operations });
+
+          const asked = clack.state.prompts.filter((prompt) => prompt.message === 'Base commit');
+          expect(code).toBe(0);
+          expect(clack.state.logs).toContainEqual({
+            kind: 'warn',
+            message: `Can't fetch the Git LFS objects of base commit abc123.\nfetching Git LFS objects from github.com/octo/app failed: ${LFS_FAILURE.reason}\n${WARNING_LAST_LINE}`,
+          });
+          expect(asked.map((prompt) => prompt.initialValue)).toEqual([undefined, 'abc123']);
+          expect(asked[1]?.defaultValue).toBeUndefined();
+          expect(ensureManagedLfsObjects).toHaveBeenCalledTimes(2);
+        });
+
+        it('keeps every earlier answer when Enter retries the fetch', async () => {
+          const answers = taskInterviewAnswers('repo-1');
+          const baselineOperations = githubOperations(
+            vi.fn(async () => ({ ok: true as const, value: undefined })),
+          );
+          scriptAnswers(...answers, true);
+          await runCli(['task', 'add'], { operations: baselineOperations });
+          const baseline = requireCreateTaskCall(baselineOperations);
+          resetClackState();
+          const operations = githubOperations(failingOnce(LFS_FAILURE));
+          scriptAnswers(...answers.slice(0, 4), 'abc123', ...answers.slice(4), true);
+
+          await runCli(['task', 'add'], { operations });
+
+          expect(requireCreateTaskCall(operations)).toEqual(baseline);
+        });
+
+        it('renders a missing managed-clone directory as the prerequisite it is', async () => {
+          const operations = githubOperations(
+            failingOnce({
+              kind: 'PrerequisiteError',
+              tool: 'managed-clone-directory',
+              expected: 'XDG_CACHE_HOME or HOME set to an absolute path',
+              actual: 'unset',
+            }),
+          );
+          const answers = taskInterviewAnswers('repo-1');
+          scriptAnswers(...answers.slice(0, 4), clack.CANCEL, true);
+
+          await runCli(['task', 'add'], { operations });
+
+          expect(clack.state.logs).toContainEqual({
+            kind: 'warn',
+            message: expect.stringMatching(
+              /^Can't fetch the Git LFS objects of base commit abc123\.\n.*managed-clone-directory.*\n/,
+            ),
+          });
+        });
+
+        it('cancels like every other wait when the fetch reports a cancellation', async () => {
+          const operations = githubOperations(
+            vi.fn(async () => ({
+              ok: false as const,
+              error: { kind: 'CancellationError' as const, activeCaseIds: [] },
+            })),
+          );
+          scriptAnswers('manual', 'repo-1', '', 'abc123');
+
+          const { code, err } = await runCli(['task', 'add'], { operations });
+
+          expect(code).toBe(130);
+          expect(err).toEqual([]);
+          expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+          expect(operations.createTask).not.toHaveBeenCalled();
+        });
+
+        it('never fetches them for the full hash of a pull-request task that the clone does not hold', async () => {
+          const fullHash = 'd'.repeat(40);
+          const ensureManagedLfsObjects = vi.fn<ProgramOperations['ensureManagedLfsObjects']>();
+          const operations = createOperations({
+            loadConfig: vi.fn(async () => ({
+              ok: true as const,
+              value: buildGitHubRepositoryConfig(),
+            })),
+            ensureManagedCommits: vi
+              .fn<ProgramOperations['ensureManagedCommits']>()
+              .mockResolvedValueOnce({ ok: true, value: { missing: [] } })
+              .mockResolvedValueOnce({ ok: true, value: { missing: [fullHash] } }),
+            ensureManagedLfsObjects,
+            resolveReference: vi.fn<ProgramOperations['resolveReference']>().mockResolvedValue({
+              ok: true,
+              value: {
+                reference: {
+                  kind: 'pull-request' as const,
+                  identifier: 'octo/app#128',
+                  commits: ['a'.repeat(40)],
+                },
+                pullRequest: {
+                  key: 'octo/app#128',
+                  state: 'merged',
+                  targetBranch: 'main',
+                  noProposedBase: 'first commit aaaaaaa has no parent',
+                },
+              },
+            }),
+          });
+          const answers = taskInterviewAnswers('repo-1');
+          scriptAnswers(
+            ...answers.slice(0, 2),
+            'octo/app#128',
+            fullHash,
+            ...answers.slice(4),
+            true,
+          );
+
+          const { code } = await runCli(['task', 'add'], { operations });
+
+          expect(code).toBe(0);
+          expect(ensureManagedLfsObjects).not.toHaveBeenCalled();
+        });
+
+        it('never fetches them for a path entry', async () => {
+          const operations = createOperations();
+          scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+          await runCli(['task', 'add'], { operations });
+
+          expect(operations.ensureManagedLfsObjects).not.toHaveBeenCalled();
+          expect(clack.state.spinners.map((spinner) => spinner.label)).not.toContain(
+            'Fetching Git LFS objects',
+          );
+        });
       });
     });
 
@@ -5891,6 +6109,27 @@ describe('tevu CLI', () => {
           },
         },
         {
+          label: 'Fetching Git LFS objects',
+          operation: 'ensureManagedLfsObjects',
+          argv: ['task', 'add'],
+          build: (outcome, controller) => ({
+            operations: createOperations({
+              loadConfig: vi.fn(async () => ({
+                ok: true as const,
+                value: buildGitHubRepositoryConfig(),
+              })),
+              ensureManagedCommits: async () => ({ ok: true as const, value: { missing: [] } }),
+              ensureManagedLfsObjects: recordOperation('ensureManagedLfsObjects', async () => {
+                applyOutcome(outcome, controller);
+                return outcome === 'returns an error'
+                  ? { ok: false as const, error: managedCloneFailure() }
+                  : { ok: true as const, value: undefined };
+              }),
+            }),
+            answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL, true],
+          }),
+        },
+        {
           label: 'Drafting criteria',
           operation: 'draftCriteria',
           argv: ['task', 'add'],
@@ -6243,7 +6482,7 @@ describe('tevu CLI', () => {
             }),
             answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL, true],
           }),
-          expected: `Can't fetch the base commit.\n${CLONE_FAILURE_DETAIL}\nFix the base commit below. Press Enter to retry, or Ctrl-C to cancel.`,
+          expected: `Can't fetch the base commit.\n${CLONE_FAILURE_DETAIL}\nFix the cause or change the base commit below. Press Enter to retry, or Ctrl-C to cancel.`,
           composedLines: [0, 2],
         },
         {
@@ -6262,7 +6501,7 @@ describe('tevu CLI', () => {
             answers: ['manual', 'repo-1', '', 'abc123', clack.CANCEL, true],
           }),
           expected:
-            "Base commit abc123 isn't in repository repo-1.\nIt can't be fetched from github.com/octo/app.\nFix the base commit below. Press Enter to retry, or Ctrl-C to cancel.",
+            "Base commit abc123 isn't in repository repo-1.\nIt can't be fetched from github.com/octo/app.\nFix the cause or change the base commit below. Press Enter to retry, or Ctrl-C to cancel.",
           composedLines: [0, 2],
         },
         ...DRAFT_FAILURE_CASES.map(({ name, failure, lines, retryable }) => ({

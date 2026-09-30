@@ -107,7 +107,17 @@ export type TevuError =
     };
 
 /** The git operation a `ManagedCloneError` reports on. */
-export type ManagedCloneOperation = 'clone' | 'fetch' | 'ls-remote';
+export type ManagedCloneOperation = 'clone' | 'fetch' | 'ls-remote' | 'lfs-fetch';
+
+/** Git LFS objects the tree of one commit needs, counted against its repository's own Git LFS storage. */
+export type LfsObjectInventory = {
+  /** Full hash the requested revision resolved to. */
+  commit: string;
+  /** Distinct (oid, size) pairs of pointer entries that use no extension and have a nonzero size. */
+  objectCount: number;
+  /** Pairs whose object file is absent, not a regular file, or of a size other than the pointer's. */
+  missingCount: number;
+};
 
 /** Where a run's effective repeat came from: the configuration (set or defaulted) or `tevu run --repeat`. */
 type RepeatSource = 'config' | 'cli';
@@ -253,6 +263,12 @@ export interface ManagedCloneAdapter {
   /** Reads `repository`'s HEAD from the remote without writing anything, proving it exists and is readable. */
   checkRemote(
     repository: ParsedGitHubRepository,
+  ): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>>;
+  /** Fetches every Git LFS object of `commit` that the clone in `directory` lacks, from the endpoint that `repository`'s clone URL implies. */
+  fetchLfsObjects(
+    directory: string,
+    repository: ParsedGitHubRepository,
+    commit: string,
   ): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>>;
 }
 
@@ -776,6 +792,11 @@ export interface GitWorkspaceAdapter {
   ): Promise<TevuResult<SourceValidation, 'SourceMaterializationError'>>;
   /** Looks up a revision without failing: distinguishes a repository the path does not hold from a revision it does not resolve. */
   resolveCommit(repository: RepositoryDefinition, reference: string): Promise<CommitLookup>;
+  /** Counts the Git LFS objects a revision's tree needs against the repository's own storage; reads only and never starts Git LFS. */
+  inspectLfsObjects(
+    repository: RepositoryDefinition,
+    revision: string,
+  ): Promise<TevuResult<LfsObjectInventory, 'SourceMaterializationError'>>;
   /** Reports whether `ancestor` precedes or equals `descendant`; `null` when Git cannot decide. */
   isAncestor(
     repository: RepositoryDefinition,

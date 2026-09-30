@@ -3,7 +3,8 @@
  * command needs, cloning or fetching through the injected
  * {@link ManagedCloneAdapter} only when a resolution actually requires it.
  *
- * Entry points: {@link ensureManagedCommits}, {@link prepareManagedRepositories}.
+ * Entry points: {@link ensureManagedCommits}, {@link ensureManagedLfsObjects},
+ * {@link prepareManagedRepositories}.
  */
 
 import * as path from 'node:path';
@@ -37,6 +38,17 @@ export type ManagedCloneDependencies = {
   onProgress: (line: string) => void;
 };
 
+/** Managed-clone effects plus the offline Git LFS inventory; {@link ManagedCloneDependencies} itself is unchanged. */
+export type ManagedLfsDependencies = ManagedCloneDependencies & {
+  git: Pick<GitWorkspaceAdapter, 'resolveCommit' | 'inspectLfsObjects'>;
+};
+
+/** One request to ensure a GitHub entry's managed clone holds the Git LFS objects of one base commit. */
+export type ManagedLfsObjectsRequest = {
+  repository: { id: string; github: string };
+  revision: string;
+};
+
 /** One request to ensure `revisions` resolve in a GitHub entry's managed clone. */
 export type ManagedCommitsRequest = {
   repository: { id: string; github: string };
@@ -66,15 +78,7 @@ export async function ensureManagedCommits(
 > {
   const { managedCloneRoot } = dependencies;
   if (managedCloneRoot === undefined) {
-    return {
-      ok: false,
-      error: {
-        kind: 'PrerequisiteError',
-        tool: 'managed-clone-directory',
-        expected: 'XDG_CACHE_HOME or HOME set to an absolute path',
-        actual: 'unset',
-      },
-    };
+    return missingManagedCloneRoot();
   }
   const parsed = parseGitHubRepository(request.repository.github);
   if (parsed === null) {
@@ -139,14 +143,67 @@ export async function ensureManagedCommits(
 }
 
 /**
+ * Ensures the managed clone of a GitHub entry holds every Git LFS object the
+ * tree of one base commit needs, fetching them once when some are missing.
+ *
+ * Reports no progress and fetches nothing when no object is missing or the
+ * inventory fails; the source validation that follows reports that failure.
+ * Fails with `PrerequisiteError` when `dependencies.managedCloneRoot` is
+ * `undefined`, and with `ManagedCloneError` when the fetch fails or finishes
+ * without every object.
+ */
+export async function ensureManagedLfsObjects(
+  request: ManagedLfsObjectsRequest,
+  dependencies: ManagedLfsDependencies,
+): Promise<TevuResult<void, 'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'>> {
+  const { managedCloneRoot } = dependencies;
+  if (managedCloneRoot === undefined) {
+    return missingManagedCloneRoot();
+  }
+  const parsed = parseGitHubRepository(request.repository.github);
+  if (parsed === null) {
+    throw new Error(
+      'unreachable: a managed-LFS-objects request names a repository the schema already validated',
+    );
+  }
+  const directory = path.join(managedCloneRoot, managedCloneLocation(parsed));
+  const display = formatGitHubRepository(parsed);
+  const clone = { id: request.repository.id, path: directory, github: request.repository.github };
+
+  const inventory = await dependencies.git.inspectLfsObjects(clone, request.revision);
+  if (!inventory.ok || inventory.value.missingCount === 0) {
+    return { ok: true, value: undefined };
+  }
+  const { commit, missingCount } = inventory.value;
+  dependencies.onProgress(
+    `Fetching ${missingCount === 1 ? '1 Git LFS object' : `${missingCount} Git LFS objects`} from ${display} into the clone of repository "${request.repository.id}"`,
+  );
+  const fetched = await dependencies.clones.fetchLfsObjects(directory, parsed, commit);
+  if (!fetched.ok) {
+    return fetched;
+  }
+
+  const remaining = await dependencies.git.inspectLfsObjects(clone, commit);
+  if (!remaining.ok || remaining.value.missingCount === 0) {
+    return { ok: true, value: undefined };
+  }
+  return managedCloneError(
+    'lfs-fetch',
+    display,
+    `git lfs fetch finished without fetching ${remaining.value.missingCount} of ${remaining.value.objectCount} Git LFS objects; choose another base commit`,
+  );
+}
+
+/**
  * Clones and fetches every GitHub entry a task names, in configuration
- * order, before validation: each entry's tasks' base commits first, failing
- * the whole call on error, then each task's reference commits, only warning
- * when a reference fetch falls short.
+ * order, before validation: each entry's tasks' base commits first, then
+ * their Git LFS objects once per distinct base commit, failing the whole call
+ * on error, then each task's reference commits, only warning when a
+ * reference fetch falls short.
  */
 export async function prepareManagedRepositories(
   config: TevuConfig,
-  dependencies: ManagedCloneDependencies,
+  dependencies: ManagedLfsDependencies,
 ): Promise<
   TevuResult<ValidationFinding[], 'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'>
 > {
@@ -166,6 +223,16 @@ export async function prepareManagedRepositories(
     );
     if (!baseResult.ok) {
       return baseResult;
+    }
+
+    for (const revision of new Set(tasks.map((task) => task.base_commit))) {
+      const lfsResult = await ensureManagedLfsObjects(
+        { repository: entry, revision },
+        dependencies,
+      );
+      if (!lfsResult.ok) {
+        return lfsResult;
+      }
     }
 
     for (const task of tasks) {
@@ -216,7 +283,9 @@ function referenceSource(
 /**
  * Renders a `ManagedCloneError` for a log line or a rendered CLI error:
  * `cloning <repository> failed: <reason>` for a clone, `fetching from
- * <repository> failed: <reason>` for a fetch.
+ * <repository> failed: <reason>` for a fetch, `reading <repository> failed:
+ * <reason>` for a remote check, `fetching Git LFS objects from <repository>
+ * failed: <reason>` for a Git LFS fetch.
  */
 export function describeManagedCloneError(
   error: Extract<TevuError, { kind: 'ManagedCloneError' }>,
@@ -228,6 +297,8 @@ export function describeManagedCloneError(
       return `fetching from ${error.repository} failed: ${error.reason}`;
     case 'ls-remote':
       return `reading ${error.repository} failed: ${error.reason}`;
+    case 'lfs-fetch':
+      return `fetching Git LFS objects from ${error.repository} failed: ${error.reason}`;
   }
 }
 
@@ -256,8 +327,20 @@ async function unresolvedRevisions(
   return result;
 }
 
+function missingManagedCloneRoot(): TevuResult<never, 'PrerequisiteError'> {
+  return {
+    ok: false,
+    error: {
+      kind: 'PrerequisiteError',
+      tool: 'managed-clone-directory',
+      expected: 'XDG_CACHE_HOME or HOME set to an absolute path',
+      actual: 'unset',
+    },
+  };
+}
+
 function managedCloneError(
-  operation: 'clone' | 'fetch',
+  operation: 'clone' | 'fetch' | 'lfs-fetch',
   repository: string,
   reason: string,
 ): TevuResult<never, 'ManagedCloneError'> {

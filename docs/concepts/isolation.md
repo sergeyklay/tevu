@@ -22,6 +22,16 @@ The agent needs enough context and credentials to produce a solution. An accepta
 
 tevu gives evaluators separate state directories and a fixed environment with explicitly allowed additions. It also captures the solution patch before checks run, so files created by a test command do not become part of the model's submitted solution. After capturing the patch, tevu can reset configured paths to the starting commit and add hidden check files, so the agent's edits to those paths do not decide the verdict, within the limits the [configuration reference](../reference/configuration.md#restore-and-overlay) lists. The [environment reference](../reference/configuration.md#fixed-evaluator-environment) lists the exact variables.
 
+## A case holds Git LFS content, not pointers
+
+A repository that stores files in Git LFS keeps a small pointer in each tracked commit and the file's real bytes in separate storage. A developer with Git LFS configured never sees the pointer in a checkout, so a pointer is not the starting point a case should give a model. The synthetic root commit therefore holds each pointer entry's object content, as an ordinary file with the pointer's path and mode. See [Source trees](../reference/configuration.md#source-trees) for the recognition rule and the failures.
+
+What crosses into a case is the content of every pointer entry, a tracked `.gitattributes` byte for byte, and a tracked root `.lfsconfig` byte for byte, like other tracked project files. The endpoint that file names is therefore visible inside the case, and an agent's own git-lfs resolves it, for example in the output of `git lfs env`. What does not cross is everything else about Git LFS: the Git LFS storage of the source, the source's Git and Git LFS configuration, remotes, credentials, Git LFS hooks, and the pointer blobs themselves. The case repository has no `lfs` directory and no `lfs.*`, `filter.*`, `remote.*`, or `credential.*` key, so nothing in it fetches or pushes.
+
+The solution patch and `checks.restore` treat these paths as ordinary tracked files. An untouched path yields no patch, an edit yields a content change (a `GIT binary patch` for binary content), and a restore writes the object's content back. tevu's own patch capture and restore never run Git LFS.
+
+The isolation stops at what a case process reads from the host. An agent's or check's own git reads the host's system Git configuration, and when that defines the `lfs` filter, that git reports these paths as modified and prints git-lfs's `Encountered 1 file that should have been a pointer, but wasn't` warning. The paths are unchanged in the case; only that git's view of them differs. This is the same limitation [Context isolation is not a sandbox](#context-isolation-is-not-a-sandbox) describes for the rest of the host.
+
 ## Context isolation is not a sandbox
 
 Separate directories keep sibling outputs and benchmark artifacts out of the context tevu supplies. They do not create an operating-system security boundary: an agent with shell access can still probe other host paths. The current adapter reports its optional outside-worktree restriction as `unavailable`.

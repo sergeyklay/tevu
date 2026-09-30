@@ -1,8 +1,9 @@
 // @vitest-environment node
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { constants, existsSync, readFileSync } from 'node:fs';
 import {
+  access,
   chmod,
   lstat,
   mkdir,
@@ -10,6 +11,7 @@ import {
   readdir,
   readFile,
   readlink,
+  realpath,
   rm,
   stat,
   symlink,
@@ -26,6 +28,13 @@ import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
 import { TevuConfigSchema } from '@/config/schema';
 import { buildCheckEnvironment } from '@/evaluation/checks';
 
+import {
+  buildLfsExtensionLine,
+  buildLfsObject,
+  buildLfsPointer,
+  lfsObjectFile,
+  storeLfsObject,
+} from './__fixtures__/lfs.fixtures';
 import { createOpenCodeAdapter } from './agents/opencode/opencode';
 import { createArtifactStore } from './artifact-store';
 import { createGitWorkspaceAdapter } from './git';
@@ -38,6 +47,7 @@ import {
   runManagedProcess,
 } from './process';
 
+import type { LfsObject } from './__fixtures__/lfs.fixtures';
 import type { TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentAdapter,
@@ -715,6 +725,9 @@ const LFS_FIXTURE_POINTER_LINES = [
 const LFS_FIXTURE_POINTER = `${LFS_FIXTURE_POINTER_LINES.join('\n')}\n`;
 const COMMENTED_ATTRIBUTES =
   '# Assets moved off filter=lfs.\n   # filter=lfs diff=lfs merge=lfs -text\n\t# filter=lfs\n';
+const SPACED_PATH = 'assets/na\u00efve file "quoted".bin';
+const EMPTY_BLOB_ID = 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391';
+const LFS_POINTER_SIZE_LIMIT = 1024;
 
 async function commitAll(repositoryPath: string, message: string): Promise<string> {
   await runGit(repositoryPath, ['add', '-A']);
@@ -755,6 +768,83 @@ async function writeMentionFiles(repositoryPath: string): Promise<void> {
   });
 }
 
+/** Path of the Git LFS storage a plain (non-bare) repository uses by default. */
+function lfsObjectsDirectory(repositoryPath: string): string {
+  return join(repositoryPath, '.git', 'lfs', 'objects');
+}
+
+async function storeObjects(
+  objectsDirectory: string,
+  objects: readonly LfsObject[],
+): Promise<void> {
+  for (const object of objects) {
+    await storeLfsObject(objectsDirectory, object);
+  }
+}
+
+/** Commits `files` on top of a base repository; paths in `executable` get mode 100755. */
+async function commitPointerFiles(
+  name: string,
+  files: Readonly<Record<string, string>>,
+  executable: readonly string[] = [],
+): Promise<{ path: string; commit: string }> {
+  const path = await createBaseRepository(name);
+  await writeTextFiles(path, files);
+  for (const executablePath of executable) {
+    await chmod(join(path, executablePath), 0o755);
+  }
+  return { path, commit: await commitAll(path, 'synthetic lfs pointer commit') };
+}
+
+async function sealFrom(
+  source: { path: string; commit: string },
+  caseId = 'task-1--c1',
+): Promise<ReturnType<GitWorkspaceAdapter['createIsolatedCase']>> {
+  return createGitAdapter().createIsolatedCase(buildIdentity(caseId, source.commit), {
+    id: 'repo-1',
+    path: source.path,
+  });
+}
+
+/** Maps each tracked path of `revision` to its mode. */
+async function trackedModes(cwd: string, revision: string): Promise<Record<string, string>> {
+  const listing = await runGit(cwd, ['ls-tree', '-r', '-z', revision]);
+  return Object.fromEntries(
+    listing.stdout
+      .split('\0')
+      .filter((entry) => entry.length > 0)
+      .map((entry) => {
+        const [meta = '', path = ''] = entry.split('\t');
+        return [path, meta.split(' ')[0] ?? ''];
+      }),
+  );
+}
+
+async function hexOfFile(path: string): Promise<string> {
+  return (await readFile(path)).toString('hex');
+}
+
+async function findExecutable(name: string): Promise<string> {
+  for (const directory of (process.env.PATH ?? '').split(':')) {
+    const candidate = join(directory, name);
+    try {
+      await access(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  throw new Error(`${name} is not on PATH`);
+}
+
+/** Builds pointer-shaped text of exactly `totalBytes` bytes by lengthening its one extension name. */
+function buildSizedExtensionPointer(totalBytes: number): string {
+  const oid = '0'.repeat(64);
+  const unpadded = buildLfsPointer(oid, 12, [buildLfsExtensionLine('x')]);
+  const name = 'x'.repeat(1 + totalBytes - Buffer.byteLength(unpadded));
+  return buildLfsPointer(oid, 12, [buildLfsExtensionLine(name)]);
+}
+
 describe('unsupported source rejection', () => {
   it('rejects a synthetic gitlink without disclosing the submodule path', async () => {
     const repositoryPath = await createBaseRepository('gitlink-source');
@@ -792,73 +882,103 @@ describe('unsupported source rejection', () => {
     expect(after).toEqual(before);
   });
 
-  it('rejects a tracked Git LFS pointer without disclosing the blob filename', async () => {
-    const repositoryPath = await createBaseRepository('lfs-pointer-source');
-    await mkdir(join(repositoryPath, 'assets'), { recursive: true });
-    await writeFile(
-      join(repositoryPath, 'assets/model.bin'),
-      'version https://git-lfs.github.com/spec/v1\noid sha256:0000000000000000000000000000000000000000000000000000000000000000\nsize 12\n',
-    );
-    await runGit(repositoryPath, ['add', 'assets/model.bin']);
-    await runGit(repositoryPath, [
-      ...GIT_IDENTITY_FLAGS,
-      'commit',
-      '--quiet',
-      '-m',
-      'synthetic lfs pointer commit',
-    ]);
-    const commit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
-    const before = await sourceFingerprint(repositoryPath);
+  it.each([
+    {
+      name: 'one extension pointer entry',
+      count: 1,
+      reason:
+        'repository "repo-1": source tree contains 1 Git LFS pointer entry that uses Git LFS extensions; tevu cannot rebuild its content',
+    },
+    {
+      name: 'two extension pointer entries',
+      count: 2,
+      reason:
+        'repository "repo-1": source tree contains 2 Git LFS pointer entries that use Git LFS extensions; tevu cannot rebuild their content',
+    },
+  ])(
+    'rejects a tree with $name using the extension reason from validation and sealing',
+    async ({ count, reason }) => {
+      const object = buildLfsObject();
+      const files = Object.fromEntries(
+        Array.from({ length: count }, (_, index) => [
+          `assets/extension-${index}.bin`,
+          buildLfsPointer(object.oid, object.size, [buildLfsExtensionLine()]),
+        ]),
+      );
+      const source = await commitPointerFiles('lfs-extension-source', files);
+      const before = await sourceFingerprint(source.path);
 
-    const rejected = await createGitAdapter().validateSource(
-      { id: 'repo-1', path: repositoryPath },
-      commit,
-    );
-    const after = await sourceFingerprint(repositoryPath);
+      const validated = await createGitAdapter().validateSource(
+        { id: 'repo-1', path: source.path },
+        source.commit,
+      );
+      const sealed = await sealFrom(source);
+      const after = await sourceFingerprint(source.path);
 
-    expect(rejected.ok).toBe(false);
-    if (!rejected.ok) {
-      expect(rejected.error).toEqual({
-        kind: 'SourceMaterializationError',
-        taskId: 'repo-1',
-        reason: 'repository "repo-1": source tree contains 1 unsupported Git LFS pointer blob',
+      expect(validated).toEqual({
+        ok: false,
+        error: { kind: 'SourceMaterializationError', taskId: 'repo-1', reason },
       });
-    }
-    expect(after).toEqual(before);
+      expect(sealed).toEqual({
+        ok: false,
+        error: { kind: 'SourceMaterializationError', taskId: 'task-1', reason },
+      });
+      expect(existsSync(join(testDirectory, 'workspaces', 'task-1--c1'))).toBe(false);
+      expect(after).toEqual(before);
+    },
+  );
+
+  it('reports extension pointer entries before objects that are missing', async () => {
+    const missing = buildLfsObject('never stored\n');
+    const source = await commitPointerFiles('lfs-extension-first-source', {
+      'assets/extension.bin': buildLfsPointer(missing.oid, missing.size, [buildLfsExtensionLine()]),
+      'assets/plain.bin': missing.pointer,
+    });
+
+    const validated = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: source.path },
+      source.commit,
+    );
+
+    expect(validated).toMatchObject({
+      ok: false,
+      error: {
+        reason:
+          'repository "repo-1": source tree contains 1 Git LFS pointer entry that uses Git LFS extensions; tevu cannot rebuild its content',
+      },
+    });
   });
 
-  it('rejects Git LFS attributes without disclosing the attributes path', async () => {
-    const repositoryPath = await createBaseRepository('lfs-attributes-source');
-    await writeFile(
-      join(repositoryPath, '.gitattributes'),
-      '*.bin filter=lfs diff=lfs merge=lfs -text\n',
-    );
-    await runGit(repositoryPath, ['add', '.gitattributes']);
-    await runGit(repositoryPath, [
-      ...GIT_IDENTITY_FLAGS,
-      'commit',
-      '--quiet',
-      '-m',
-      'synthetic lfs attributes commit',
-    ]);
-    const commit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
-    const before = await sourceFingerprint(repositoryPath);
+  it('rejects a pointer-shaped file just under the pointer size limit as an extension pointer', async () => {
+    const pointer = buildSizedExtensionPointer(LFS_POINTER_SIZE_LIMIT - 1);
+    const source = await commitPointerFiles('lfs-limit-under-source', {
+      'assets/large-extension.bin': pointer,
+    });
 
-    const rejected = await createGitAdapter().validateSource(
-      { id: 'repo-1', path: repositoryPath },
-      commit,
+    const validated = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: source.path },
+      source.commit,
     );
-    const after = await sourceFingerprint(repositoryPath);
 
-    expect(rejected.ok).toBe(false);
-    if (!rejected.ok) {
-      expect(rejected.error).toEqual({
-        kind: 'SourceMaterializationError',
-        taskId: 'repo-1',
-        reason: 'repository "repo-1": source tree configures unsupported Git LFS attributes',
-      });
-    }
-    expect(after).toEqual(before);
+    expect(Buffer.byteLength(pointer)).toBe(LFS_POINTER_SIZE_LIMIT - 1);
+    expect(validated).toMatchObject({
+      ok: false,
+      error: { reason: expect.stringContaining('1 Git LFS pointer entry that uses') },
+    });
+  });
+
+  it('seals a pointer-shaped file at the pointer size limit byte-identical', async () => {
+    const pointer = buildSizedExtensionPointer(LFS_POINTER_SIZE_LIMIT);
+    const source = await commitPointerFiles('lfs-limit-at-source', {
+      'assets/large-extension.bin': pointer,
+    });
+
+    const sealed = unwrapOk(await sealFrom(source));
+
+    const sourceTree = await runGit(source.path, ['rev-parse', `${source.commit}^{tree}`]);
+    const sealedTree = await runGit(sealed.worktreeDirectory, ['rev-parse', 'HEAD^{tree}']);
+    expect(Buffer.byteLength(pointer)).toBe(LFS_POINTER_SIZE_LIMIT);
+    expect(sealedTree.stdout).toBe(sourceTree.stdout);
   });
 
   it('accepts a tree that only mentions the Git LFS specification URL', async () => {
@@ -878,76 +998,6 @@ describe('unsupported source rejection', () => {
       value: { repositoryId: 'repo-1', requestedCommit: commit, resolvedCommit: commit },
     });
     expect(after).toEqual(before);
-  });
-
-  it('counts only whole-content pointers in a tree that also holds mention files', async () => {
-    const repositoryPath = await createBaseRepository('lfs-mixed-source');
-    await runGit(repositoryPath, ['config', 'color.grep', 'always']);
-    await writeMentionFiles(repositoryPath);
-    await writeTextFiles(repositoryPath, {
-      'assets/model.bin': LFS_FIXTURE_POINTER,
-      'bin/tool': LFS_FIXTURE_POINTER,
-      'assets/texture.bin': LFS_FIXTURE_POINTER.replace(
-        '\noid',
-        `\next-0-foo sha256:${'a1b2c3d4'.repeat(8)}\noid`,
-      ),
-      'assets/crlf.bin': LFS_FIXTURE_POINTER.replaceAll('\n', '\r\n'),
-      'assets/unterminated.bin': LFS_FIXTURE_POINTER.slice(0, -1),
-      '.gitattributes': '*.bin binary\n',
-    });
-    await runGit(repositoryPath, ['add', '-A']);
-    await runGit(repositoryPath, ['add', '--chmod=+x', 'bin/tool']);
-    await runGit(repositoryPath, [
-      ...GIT_IDENTITY_FLAGS,
-      'commit',
-      '--quiet',
-      '-m',
-      'synthetic lfs mixed commit',
-    ]);
-    const commit = (await runGit(repositoryPath, ['rev-parse', 'HEAD'])).stdout.trim();
-    const executableEntry = await runGit(repositoryPath, ['ls-tree', commit, 'bin/tool']);
-    const before = await sourceFingerprint(repositoryPath);
-
-    const result = await createGitAdapter().validateSource(
-      { id: 'repo-1', path: repositoryPath },
-      commit,
-    );
-    const after = await sourceFingerprint(repositoryPath);
-
-    expect(executableEntry.stdout).toMatch(/^100755 blob /);
-    expect(result).toEqual({
-      ok: false,
-      error: {
-        kind: 'SourceMaterializationError',
-        taskId: 'repo-1',
-        reason: 'repository "repo-1": source tree contains 3 unsupported Git LFS pointer blobs',
-      },
-    });
-    expect(after).toEqual(before);
-  });
-
-  it('counts every path that holds a pointer blob, including a path containing a colon', async () => {
-    const repositoryPath = await createBaseRepository('lfs-shared-blob-source');
-    await writeTextFiles(repositoryPath, {
-      'shared/first.dat': LFS_FIXTURE_POINTER,
-      'shared/second.dat': LFS_FIXTURE_POINTER,
-      'we:ird.txt': LFS_FIXTURE_POINTER.replace('size 12', 'size 13'),
-    });
-    const commit = await commitAll(repositoryPath, 'synthetic lfs shared blob commit');
-
-    const result = await createGitAdapter().validateSource(
-      { id: 'repo-1', path: repositoryPath },
-      commit,
-    );
-
-    expect(result).toEqual({
-      ok: false,
-      error: {
-        kind: 'SourceMaterializationError',
-        taskId: 'repo-1',
-        reason: 'repository "repo-1": source tree contains 3 unsupported Git LFS pointer blobs',
-      },
-    });
   });
 
   it('accepts Git LFS attributes that appear only in comment lines', async () => {
@@ -970,31 +1020,452 @@ describe('unsupported source rejection', () => {
     });
     expect(after).toEqual(before);
   });
+});
 
-  it('rejects a Git LFS attribute rule that follows comment lines', async () => {
-    const repositoryPath = await createBaseRepository('lfs-rule-after-comments-source');
-    await writeTextFiles(repositoryPath, {
-      '.gitattributes': `${COMMENTED_ATTRIBUTES}\n*.txt text\n*.psd filter=lfs diff=lfs merge=lfs -text\n`,
-    });
-    const commit = await commitAll(repositoryPath, 'synthetic rule after comments commit');
-    const before = await sourceFingerprint(repositoryPath);
-
-    const result = await createGitAdapter().validateSource(
-      { id: 'repo-1', path: repositoryPath },
-      commit,
+describe('Git LFS pointer entries in a source tree', () => {
+  it('seals canonical pointer entries as their object content, keeping each mode', async () => {
+    const model = buildLfsObject(Buffer.from([0x00, 0x10, 0xff, 0x42, 0x0a, 0x00]));
+    const tool = buildLfsObject('#!/bin/sh\necho tool\n');
+    const shared = buildLfsObject('shared bytes\n');
+    const colon = buildLfsObject('colon path bytes\n');
+    const spaced = buildLfsObject('spaced path bytes\n');
+    const source = await commitPointerFiles(
+      'lfs-canonical-source',
+      {
+        'assets/model.bin': model.pointer,
+        'bin/tool': tool.pointer,
+        'shared/first.dat': shared.pointer,
+        'shared/second.dat': shared.pointer,
+        'we:ird.txt': colon.pointer,
+        [SPACED_PATH]: spaced.pointer,
+        'src/plain.txt': 'plain text\n',
+      },
+      ['bin/tool'],
     );
-    const after = await sourceFingerprint(repositoryPath);
+    await storeObjects(lfsObjectsDirectory(source.path), [model, tool, shared, colon, spaced]);
+    const before = await sourceFingerprint(source.path);
 
-    expect(result).toEqual({
+    const validated = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: source.path },
+      source.commit,
+    );
+    const workspace = unwrapOk(await sealFrom(source));
+    const after = await sourceFingerprint(source.path);
+
+    const worktree = workspace.worktreeDirectory;
+    expect(validated).toEqual({
+      ok: true,
+      value: {
+        repositoryId: 'repo-1',
+        requestedCommit: source.commit,
+        resolvedCommit: source.commit,
+      },
+    });
+    expect({
+      'assets/model.bin': await hexOfFile(join(worktree, 'assets/model.bin')),
+      'bin/tool': await hexOfFile(join(worktree, 'bin/tool')),
+      'shared/first.dat': await hexOfFile(join(worktree, 'shared/first.dat')),
+      'shared/second.dat': await hexOfFile(join(worktree, 'shared/second.dat')),
+      'we:ird.txt': await hexOfFile(join(worktree, 'we:ird.txt')),
+      [SPACED_PATH]: await hexOfFile(join(worktree, SPACED_PATH)),
+    }).toEqual({
+      'assets/model.bin': model.content.toString('hex'),
+      'bin/tool': tool.content.toString('hex'),
+      'shared/first.dat': shared.content.toString('hex'),
+      'shared/second.dat': shared.content.toString('hex'),
+      'we:ird.txt': colon.content.toString('hex'),
+      [SPACED_PATH]: spaced.content.toString('hex'),
+    });
+    expect((await stat(join(worktree, 'bin/tool'))).mode & 0o111).not.toBe(0);
+    expect(existsSync(join(workspace.runtimeDirectory, 'materialize-index'))).toBe(false);
+    expect(await trackedModes(worktree, 'HEAD')).toEqual({
+      'README.md': '100644',
+      'assets/model.bin': '100644',
+      'bin/tool': '100755',
+      'shared/first.dat': '100644',
+      'shared/second.dat': '100644',
+      'src/plain.txt': '100644',
+      'we:ird.txt': '100644',
+      [SPACED_PATH]: '100644',
+    });
+    expect((await runGit(worktree, ['rev-parse', 'HEAD:src/plain.txt'])).stdout).toBe(
+      (await runGit(source.path, ['rev-parse', `${source.commit}:src/plain.txt`])).stdout,
+    );
+    expect((await runGit(worktree, ['grep', '-l', LFS_VERSION_LINE, 'HEAD'])).exitCode).toBe(1);
+    expect(after).toEqual(before);
+  }, 30_000);
+
+  it('seals pointer-shaped files that are not whole-content pointers byte-identical, needing no object', async () => {
+    const repositoryPath = await createBaseRepository('lfs-shaped-source');
+    await writeMentionFiles(repositoryPath);
+    await writeTextFiles(repositoryPath, {
+      'assets/crlf.bin': LFS_FIXTURE_POINTER.replaceAll('\n', '\r\n'),
+      'assets/unterminated.bin': LFS_FIXTURE_POINTER.slice(0, -1),
+      '.gitattributes': '*.bin binary\n',
+    });
+    const commit = await commitAll(repositoryPath, 'synthetic lfs shaped commit');
+    const adapter = createGitAdapter();
+    const repository = { id: 'repo-1', path: repositoryPath };
+
+    const validated = await adapter.validateSource(repository, commit);
+    const inventory = await adapter.inspectLfsObjects(repository, commit);
+    const sealed = unwrapOk(await sealFrom({ path: repositoryPath, commit }));
+
+    const sourceTree = await runGit(repositoryPath, ['rev-parse', `${commit}^{tree}`]);
+    const sealedTree = await runGit(sealed.worktreeDirectory, ['rev-parse', 'HEAD^{tree}']);
+    expect(validated.ok).toBe(true);
+    expect(inventory).toEqual({ ok: true, value: { commit, objectCount: 0, missingCount: 0 } });
+    expect(sealedTree.stdout).toBe(sourceTree.stdout);
+  });
+
+  it.each([
+    { name: 'a lone filter=lfs rule', attributes: '*.bin filter=lfs diff=lfs merge=lfs -text\n' },
+    {
+      name: 'a filter=lfs rule after comment lines',
+      attributes: `${COMMENTED_ATTRIBUTES}\n*.txt text\n*.bin filter=lfs diff=lfs merge=lfs -text\n`,
+    },
+  ])(
+    'seals a tree with $name and ordinary content at a matching path as the pinned tree',
+    async ({ attributes }) => {
+      const source = await commitPointerFiles('lfs-attributes-source', {
+        '.gitattributes': attributes,
+        'assets/ordinary.bin': 'ordinary content, not a pointer\n',
+      });
+      const before = await sourceFingerprint(source.path);
+
+      const validated = await createGitAdapter().validateSource(
+        { id: 'repo-1', path: source.path },
+        source.commit,
+      );
+      const sealed = unwrapOk(await sealFrom(source));
+      const after = await sourceFingerprint(source.path);
+
+      const sourceTree = await runGit(source.path, ['rev-parse', `${source.commit}^{tree}`]);
+      const sealedTree = await runGit(sealed.worktreeDirectory, ['rev-parse', 'HEAD^{tree}']);
+      expect(validated.ok).toBe(true);
+      expect(sealedTree.stdout).toBe(sourceTree.stdout);
+      expect(after).toEqual(before);
+    },
+  );
+
+  it('seals a size 0 pointer as an empty file with its mode, reading no storage', async () => {
+    const empty = buildLfsObject('');
+    const source = await commitPointerFiles(
+      'lfs-zero-size-source',
+      { 'assets/empty.bin': empty.pointer, 'bin/empty-tool': empty.pointer },
+      ['bin/empty-tool'],
+    );
+    const adapter = createGitAdapter();
+    const repository = { id: 'repo-1', path: source.path };
+
+    const validated = await adapter.validateSource(repository, source.commit);
+    const inventory = await adapter.inspectLfsObjects(repository, source.commit);
+    const workspace = unwrapOk(await sealFrom(source));
+
+    const blobId = await runGit(workspace.worktreeDirectory, [
+      'rev-parse',
+      'HEAD:assets/empty.bin',
+    ]);
+    expect(validated.ok).toBe(true);
+    expect(inventory).toEqual({
+      ok: true,
+      value: { commit: source.commit, objectCount: 0, missingCount: 0 },
+    });
+    expect((await stat(join(workspace.worktreeDirectory, 'assets/empty.bin'))).size).toBe(0);
+    expect(blobId.stdout).toBe(EMPTY_BLOB_ID);
+    expect(await trackedModes(workspace.worktreeDirectory, 'HEAD')).toMatchObject({
+      'assets/empty.bin': '100644',
+      'bin/empty-tool': '100755',
+    });
+  });
+
+  describe('the git commands that handle object files', () => {
+    async function sealRecordingGitCommands(source: {
+      path: string;
+      commit: string;
+    }): Promise<string[]> {
+      const realGit = await findExecutable('git');
+      const scratchBin = join(testDirectory, 'recording-bin');
+      const log = join(testDirectory, 'git-commands.log');
+      await mkdir(scratchBin);
+      await writeFile(
+        join(scratchBin, 'git'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexec '${realGit}' "$@"\n`,
+      );
+      await chmod(join(scratchBin, 'git'), 0o755);
+      const savedPath = process.env.PATH;
+
+      process.env.PATH = `${scratchBin}:${savedPath ?? ''}`;
+      try {
+        unwrapOk(await sealFrom(source));
+      } finally {
+        process.env.PATH = savedPath;
+      }
+
+      return (await readFile(log, 'utf8')).split('\n').filter((line) => line.length > 0);
+    }
+
+    it('reads each object file by path and bounds hash-object, repack, and reset --hard when it wrote object files', async () => {
+      const first = buildLfsObject('first object\n');
+      const second = buildLfsObject('second object\n');
+      const source = await commitPointerFiles('lfs-bounded-source', {
+        'assets/first.bin': first.pointer,
+        'assets/second.bin': second.pointer,
+      });
+      const objectsDirectory = lfsObjectsDirectory(await realpath(source.path));
+      await storeObjects(lfsObjectsDirectory(source.path), [first, second]);
+
+      const commands = await sealRecordingGitCommands(source);
+
+      const bounded = commands
+        .filter((line) => line.includes('core.bigFileThreshold=1m'))
+        .map((line) => line.replace('-c core.bigFileThreshold=1m ', '').split(' ')[0]);
+      expect(bounded).toEqual(['hash-object', 'hash-object', 'repack', 'reset']);
+      expect(commands.filter((line) => line.includes(' hash-object ')).sort()).toEqual(
+        [
+          `-c core.bigFileThreshold=1m hash-object -w --no-filters -- ${lfsObjectFile(objectsDirectory, first.oid)}`,
+          `-c core.bigFileThreshold=1m hash-object -w --no-filters -- ${lfsObjectFile(objectsDirectory, second.oid)}`,
+        ].sort(),
+      );
+    });
+
+    it('leaves repack and reset --hard as they were when it wrote no object file', async () => {
+      const source = await commitPointerFiles('lfs-unbounded-source', {
+        'src/plain.txt': 'plain text\n',
+        'assets/empty.bin': buildLfsObject('').pointer,
+      });
+
+      const commands = await sealRecordingGitCommands(source);
+
+      expect(commands.filter((line) => line.includes('core.bigFileThreshold'))).toEqual([]);
+    });
+  });
+
+  it('reports the not-installed missing text from validation and sealing when git lfs is not on PATH', async () => {
+    const missing = buildLfsObject('stored nowhere\n');
+    const source = await commitPointerFiles('lfs-not-installed-source', {
+      'assets/model.bin': missing.pointer,
+    });
+    const scratchBin = join(testDirectory, 'git-only-bin');
+    await mkdir(scratchBin);
+    await symlink(await findExecutable('git'), join(scratchBin, 'git'));
+    const savedPath = process.env.PATH;
+    const reason = `repository "repo-1": Git LFS objects not in "${lfsObjectsDirectory(await realpath(source.path))}": 1 of 1; Git LFS is not installed or not on PATH: install it from https://git-lfs.com, then fetch them in "${source.path}", for example: git lfs fetch -I "" -X "" origin ${source.commit}`;
+
+    process.env.PATH = scratchBin;
+    let validated;
+    let sealed;
+    try {
+      validated = await createGitAdapter().validateSource(
+        { id: 'repo-1', path: source.path },
+        source.commit,
+      );
+      sealed = await sealFrom(source);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+
+    expect(validated).toEqual({
+      ok: false,
+      error: { kind: 'SourceMaterializationError', taskId: 'repo-1', reason },
+    });
+    expect(sealed).toEqual({
+      ok: false,
+      error: { kind: 'SourceMaterializationError', taskId: 'task-1', reason },
+    });
+    expect(existsSync(join(testDirectory, 'workspaces', 'task-1--c1'))).toBe(false);
+  });
+});
+
+describe('Git LFS storage of a source repository', () => {
+  it('counts each distinct object once and skips size 0 and extension entries', async () => {
+    const present = buildLfsObject('present\n');
+    const wrongSize = buildLfsObject('wrong size\n');
+    const absent = buildLfsObject('absent\n');
+    const blocked = buildLfsObject('blocked by a directory\n');
+    const empty = buildLfsObject('');
+    const source = await commitPointerFiles('lfs-inventory-source', {
+      'a/present.bin': present.pointer,
+      'a/present-again.bin': present.pointer,
+      'b/wrong-size.bin': wrongSize.pointer,
+      'c/absent.bin': absent.pointer,
+      'd/blocked.bin': blocked.pointer,
+      'e/empty.bin': empty.pointer,
+      'f/extension.bin': buildLfsPointer(absent.oid, absent.size, [buildLfsExtensionLine()]),
+    });
+    const objectsDirectory = lfsObjectsDirectory(source.path);
+    await storeLfsObject(objectsDirectory, present);
+    await storeLfsObject(objectsDirectory, {
+      ...wrongSize,
+      content: Buffer.concat([wrongSize.content, Buffer.from('x')]),
+    });
+    await mkdir(lfsObjectFile(objectsDirectory, blocked.oid), { recursive: true });
+    const before = await sourceFingerprint(source.path);
+
+    const inventory = await createGitAdapter().inspectLfsObjects(
+      { id: 'repo-1', path: source.path },
+      source.commit.slice(0, 10),
+    );
+    const after = await sourceFingerprint(source.path);
+
+    expect(inventory).toEqual({
+      ok: true,
+      value: { commit: source.commit, objectCount: 4, missingCount: 3 },
+    });
+    expect(after).toEqual(before);
+  });
+
+  it('reports the missing count with the objects directory and the fetch command for a path entry', async () => {
+    const kept = buildLfsObject('kept\n');
+    const lost = buildLfsObject('lost\n');
+    const source = await commitPointerFiles('lfs-missing-source', {
+      'assets/kept.bin': kept.pointer,
+      'assets/lost.bin': lost.pointer,
+    });
+    await storeObjects(lfsObjectsDirectory(source.path), [kept]);
+
+    const validated = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: source.path },
+      source.commit,
+    );
+
+    expect(validated).toMatchObject({
       ok: false,
       error: {
         kind: 'SourceMaterializationError',
         taskId: 'repo-1',
-        reason: 'repository "repo-1": source tree configures unsupported Git LFS attributes',
+        reason: expect.stringMatching(
+          new RegExp(
+            String.raw`^repository "repo-1": Git LFS objects not in "[^"]+/\.git/lfs/objects": 1 of 2; .*fetch them in "${source.path}"`,
+          ),
+        ),
       },
     });
-    expect(after).toEqual(before);
   });
+
+  it('reads the objects of a repository whose lfs.storage is relative to its git directory', async () => {
+    const object = buildLfsObject('relative storage\n');
+    const source = await commitPointerFiles('lfs-relative-storage-source', {
+      'assets/model.bin': object.pointer,
+    });
+    await runGit(source.path, ['config', 'lfs.storage', 'custom-lfs']);
+    await storeObjects(join(source.path, '.git', 'custom-lfs', 'objects'), [object]);
+
+    const validated = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: source.path },
+      source.commit,
+    );
+
+    expect(validated.ok).toBe(true);
+  });
+
+  it('reads the objects of a repository whose lfs.storage is an absolute path', async () => {
+    const object = buildLfsObject('absolute storage\n');
+    const source = await commitPointerFiles('lfs-absolute-storage-source', {
+      'assets/model.bin': object.pointer,
+    });
+    const storage = join(testDirectory, 'external-lfs-storage');
+    await runGit(source.path, ['config', 'lfs.storage', storage]);
+    await storeObjects(join(storage, 'objects'), [object]);
+
+    const validated = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: source.path },
+      source.commit,
+    );
+
+    expect(validated.ok).toBe(true);
+  });
+
+  it('reads the objects of a bare repository from its own lfs directory', async () => {
+    const object = buildLfsObject('bare storage\n');
+    const source = await commitPointerFiles('lfs-bare-source', {
+      'assets/model.bin': object.pointer,
+    });
+    const barePath = join(testDirectory, 'lfs-bare.git');
+    await runGit(testDirectory, ['clone', '--quiet', '--bare', source.path, barePath]);
+    await storeObjects(join(barePath, 'lfs', 'objects'), [object]);
+
+    const validated = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: barePath },
+      source.commit,
+    );
+
+    expect(validated.ok).toBe(true);
+  });
+
+  it('reads the objects of a linked worktree from the storage of its main repository', async () => {
+    const object = buildLfsObject('linked worktree storage\n');
+    const source = await commitPointerFiles('lfs-linked-source', {
+      'assets/model.bin': object.pointer,
+    });
+    await storeObjects(lfsObjectsDirectory(source.path), [object]);
+    const linkedPath = join(testDirectory, 'lfs-linked-worktree');
+    await runGit(source.path, ['worktree', 'add', '--quiet', '--detach', linkedPath]);
+
+    const validated = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: linkedPath },
+      source.commit,
+    );
+
+    expect(validated.ok).toBe(true);
+  });
+
+  it('fails with the git config failure when lfs.storage cannot be expanded', async () => {
+    const source = await commitPointerFiles('lfs-bad-storage-source', {
+      'assets/model.bin': buildLfsObject().pointer,
+    });
+    await runGit(source.path, ['config', 'lfs.storage', '~tevu-no-such-user/lfs']);
+    const adapter = createGitAdapter();
+    const repository = { id: 'repo-1', path: source.path };
+
+    const validated = await adapter.validateSource(repository, source.commit);
+    const inventory = await adapter.inspectLfsObjects(repository, source.commit);
+
+    const failure = {
+      ok: false,
+      error: {
+        kind: 'SourceMaterializationError',
+        taskId: 'repo-1',
+        reason: 'repository "repo-1": git config lfs.storage exited with code 128',
+      },
+    };
+    expect(validated).toEqual(failure);
+    expect(inventory).toEqual(failure);
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'fails with the read failure when an object cannot be inspected for a reason other than absence',
+    async () => {
+      const object = buildLfsObject('unreadable directory\n');
+      const source = await commitPointerFiles('lfs-unreadable-source', {
+        'assets/model.bin': object.pointer,
+      });
+      const objectsDirectory = lfsObjectsDirectory(source.path);
+      await storeObjects(objectsDirectory, [object]);
+      const guarded = join(objectsDirectory, object.oid.slice(0, 2));
+      await chmod(guarded, 0o000);
+
+      let validated;
+      try {
+        validated = await createGitAdapter().validateSource(
+          { id: 'repo-1', path: source.path },
+          source.commit,
+        );
+      } finally {
+        await chmod(guarded, 0o755);
+      }
+
+      expect(validated).toMatchObject({
+        ok: false,
+        error: {
+          kind: 'SourceMaterializationError',
+          reason: expect.stringMatching(
+            /^repository "repo-1": Git LFS object file ".+" cannot be read: .+/,
+          ),
+        },
+      });
+    },
+  );
 });
 
 describe('pre-evaluation patch capture', () => {

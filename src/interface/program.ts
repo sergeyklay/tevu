@@ -21,7 +21,11 @@ import type { WaitInterrupt } from './wait-interrupt';
 import type { AssessmentCaseContext } from '@/application/assess';
 import type { CreateTaskErrorKind, TaskWizardInput } from '@/application/create-task';
 import type { CriteriaDraftOutcome, CriteriaDraftRequest } from '@/application/draft-criteria';
-import type { ManagedCommitsOutcome, ManagedCommitsRequest } from '@/application/managed-clone';
+import type {
+  ManagedCommitsOutcome,
+  ManagedCommitsRequest,
+  ManagedLfsObjectsRequest,
+} from '@/application/managed-clone';
 import type {
   AgentDraft,
   ModelAccessOutcome,
@@ -107,6 +111,11 @@ export type ProgramOperations = {
       'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'
     >
   >;
+  /** Ensures a GitHub entry's managed clone holds the Git LFS objects of one base commit, fetching the missing ones. */
+  ensureManagedLfsObjects(
+    request: ManagedLfsObjectsRequest,
+    onProgress: (line: string) => void,
+  ): Promise<TevuResult<void, 'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'>>;
   /** Reads a GitHub repository's HEAD from its remote, proving it exists and is readable. */
   checkGitHubRepository(
     repository: ParsedGitHubRepository,
@@ -590,6 +599,8 @@ async function runTaskAdd(
         operations.resolveReference({ configPath: loaderPath, repository, identifier }, onProgress),
       ensureManagedCommits: (repository, revisions, onProgress) =>
         operations.ensureManagedCommits({ repository, revisions }, onProgress),
+      ensureManagedLfsObjects: (repository, revision, onProgress) =>
+        operations.ensureManagedLfsObjects({ repository, revision }, onProgress),
       checkGitHubRepository: operations.checkGitHubRepository,
       isGitRepository: (repositoryPath) => operations.isGitRepository(loaderPath, repositoryPath),
       isVariableSet: (name) => operations.unsetVariables([name]).length === 0,
