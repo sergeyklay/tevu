@@ -140,6 +140,44 @@ if (args[0] === 'export') {
 process.exit(3);
 `;
 
+const LATE_EXPORT_SESSION_BYTES = 1_000_000;
+
+/** One user message padded past a pipe buffer and one assistant message carrying the metrics the test asserts. */
+const LATE_EXPORT_WRITER_SCRIPT = `
+const sessionID = process.argv[1];
+const doc = {
+  info: { id: sessionID },
+  messages: [
+    {
+      info: { id: 'msg-u1', sessionID, role: 'user' },
+      parts: [{ id: 'prt-u1', sessionID, messageID: 'msg-u1', type: 'text', text: 'x'.repeat(${String(LATE_EXPORT_SESSION_BYTES)}) }],
+    },
+    {
+      info: {
+        id: 'msg-a1', sessionID, role: 'assistant', parentID: 'msg-u1', finish: 'stop', cost: 0.0125,
+        tokens: { input: 1200, output: 450, reasoning: 16, cache: { read: 30, write: 10 } },
+      },
+      parts: [],
+    },
+  ],
+};
+setTimeout(() => process.stdout.write(JSON.stringify(doc)), 200);
+`;
+
+/**
+ * The fake agent with an `export` that hands the document to a descendant
+ * sharing its stdout and exits at once, so the document arrives after the
+ * direct child is gone.
+ */
+const LATE_EXPORT_OPENCODE_SCRIPT = FAKE_OPENCODE_SCRIPT.replace(
+  "if (args[0] === 'export') {\n",
+  () =>
+    "if (args[0] === 'export') {\n" +
+    "  const { spawn } = await import('node:child_process');\n" +
+    `  spawn(process.execPath, ['-e', ${JSON.stringify(LATE_EXPORT_WRITER_SCRIPT)}, args[1] ?? ''], { stdio: ['ignore', 'inherit', 'inherit'] }).unref();\n` +
+    '  process.exit(0);\n',
+);
+
 describe('composeProgramDependencies wires providers into the real OpenCode adapter (AC-1)', () => {
   let testDirectory: string;
   let savedHome: string | undefined;
@@ -175,6 +213,12 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
   async function writeFakeExecutable(): Promise<string> {
     const filePath = join(testDirectory, 'fake-opencode.mjs');
     await writeFile(filePath, FAKE_OPENCODE_SCRIPT, { mode: 0o755 });
+    return filePath;
+  }
+
+  async function writeLateExportExecutable(): Promise<string> {
+    const filePath = join(testDirectory, 'fake-opencode-late-export.mjs');
+    await writeFile(filePath, LATE_EXPORT_OPENCODE_SCRIPT, { mode: 0o755 });
     return filePath;
   }
 
@@ -415,5 +459,50 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     const expectedText = `${JSON.stringify(expectedDocument, null, 2)}\n`;
     const expectedDigest = createHash('sha256').update(expectedText, 'utf8').digest('hex');
     expect(written?.[0]).toEqual({ path: 'opencode/opencode.json', sha256: expectedDigest });
+  });
+
+  it('records export-derived metrics from a document a descendant writes after the fake exits', async () => {
+    const executable = await writeLateExportExecutable();
+    await writeOperatorFixture();
+    const repositoryPath = join(testDirectory, 'repo');
+    const baseCommit = await createSourceRepository(repositoryPath);
+    const config = TevuConfigSchema.parse(
+      buildConfigInput({
+        executable,
+        repositoryPath,
+        baseCommit,
+        outputDirectory: join(testDirectory, 'artifacts'),
+      }),
+    );
+    const dependencies = composeProgramDependencies();
+    const plan = dependencies.operations.planBenchmark(config, join(testDirectory, 'tevu.yaml'));
+
+    const result = await dependencies.operations.executeBenchmark(plan, {
+      cancellation: new AbortController().signal,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const fromExport = (value: number, unit: 'token' | 'USD') => ({
+      value,
+      unit,
+      availability: { status: 'available', source: 'root-session export' },
+      scope: 'root-session',
+    });
+    const expectedCase = {
+      failure: null,
+      hasSessionExport: true,
+      inputTokens: fromExport(1200, 'token'),
+      outputTokens: fromExport(450, 'token'),
+      cost: fromExport(0.0125, 'USD'),
+    };
+    const observedCases = result.value.cases.map((caseResult) => ({
+      failure: caseResult.failure,
+      hasSessionExport: caseResult.artifacts.sessionExport !== null,
+      inputTokens: caseResult.metrics.inputTokens,
+      outputTokens: caseResult.metrics.outputTokens,
+      cost: caseResult.metrics.cost,
+    }));
+    expect(observedCases).toEqual([expectedCase, expectedCase]);
   });
 });

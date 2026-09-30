@@ -56,7 +56,12 @@ const CLOCK_BASE = '2026-01-01T00:00:00.000Z';
 const AGENT_NAME = 'fake-agent';
 const CONFIG_PATH = '/synthetic/tevu.yaml';
 
-const EMPTY_CAPTURE: RedactedCapture = { text: '', totalBytes: 0, truncated: false };
+const EMPTY_CAPTURE: RedactedCapture = {
+  text: '',
+  totalBytes: 0,
+  truncated: false,
+  incomplete: false,
+};
 
 /** Neutral event record the fake agent emits and counts; carries no protocol shape. */
 type FakeEventRecord = { kind: 'tool' } | { kind: 'error' };

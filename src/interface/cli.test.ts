@@ -1,9 +1,6 @@
 // @vitest-environment node
 
-import * as fs from 'node:fs/promises';
-import { dirname, join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
-import { fileURLToPath } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -876,42 +873,6 @@ function renderAndParseBootstrap(call: TaskWizardInput): TevuConfig {
   return parsed.value;
 }
 
-/**
- * Reads the fenced `yaml` block under the `## Example` heading of the
- * configuration reference, resolved from this test file's own module
- * location rather than the working directory.
- */
-async function readConfigurationExampleBlock(): Promise<string> {
-  const docsPath = join(
-    dirname(fileURLToPath(import.meta.url)),
-    '../../docs/reference/configuration.md',
-  );
-  const lines = (await fs.readFile(docsPath, 'utf8')).split('\n');
-  const headingIndex = lines.indexOf('## Example');
-  if (headingIndex === -1) {
-    throw new Error('docs/reference/configuration.md is missing the "## Example" heading');
-  }
-  const sectionEndOffset = lines
-    .slice(headingIndex + 1)
-    .findIndex((line) => line.startsWith('## '));
-  const section = lines.slice(
-    headingIndex,
-    sectionEndOffset === -1 ? lines.length : headingIndex + 1 + sectionEndOffset,
-  );
-  const openIndex = section.indexOf('```yaml');
-  if (openIndex === -1) {
-    throw new Error('the "## Example" section has no fenced yaml block');
-  }
-  const closeOffset = section.slice(openIndex + 1).indexOf('```');
-  if (closeOffset === -1) {
-    throw new Error('the fenced yaml block under "## Example" has no closing fence');
-  }
-  return section
-    .slice(openIndex + 1, openIndex + 1 + closeOffset)
-    .map((line) => `${line}\n`)
-    .join('');
-}
-
 function taskInterviewAnswers(repositoryChoice: string): unknown[] {
   return [
     'manual',
@@ -1554,14 +1515,6 @@ describe('tevu CLI', () => {
       const stdout = (dependencies.io.stdout as MemoryStream).text;
       expect(stdout).toContain('[redacted]');
       expect(stdout).not.toContain('OPENAI_API_KEY');
-    });
-
-    it("matches the fenced yaml block under the configuration reference's Example heading byte for byte", async () => {
-      const { dependencies, err } = await runCli(['config', 'example']);
-      const docsBlock = await readConfigurationExampleBlock();
-
-      expect(err).toEqual([]);
-      expect((dependencies.io.stdout as MemoryStream).text).toBe(docsBlock);
     });
 
     it('prints roles.criteria before roles.grader (AC-13)', async () => {

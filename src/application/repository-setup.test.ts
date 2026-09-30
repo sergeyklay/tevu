@@ -12,7 +12,12 @@ import type {
   SetupCommand,
 } from '@/domain/types';
 
-const EMPTY_CAPTURE: RedactedCapture = { text: '', totalBytes: 0, truncated: false };
+const EMPTY_CAPTURE: RedactedCapture = {
+  text: '',
+  totalBytes: 0,
+  truncated: false,
+  incomplete: false,
+};
 
 function buildCapture(overrides: Partial<RedactedCapture> = {}): RedactedCapture {
   return { ...EMPTY_CAPTURE, ...overrides };

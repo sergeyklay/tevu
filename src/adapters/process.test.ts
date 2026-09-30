@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import {
   chmod,
   lstat,
@@ -14,6 +14,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import process from 'node:process';
 import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -25,7 +26,12 @@ import {
   runManagedProcess,
 } from './process';
 
-import type { CaseExecutableProbeRequest } from '@/domain/types';
+import type {
+  CaseExecutableProbeRequest,
+  ManagedProcessCompletion,
+  ManagedProcessRequest,
+  ManagedProcessResult,
+} from '@/domain/types';
 
 const SYNTHETIC_GIT_SCRIPT = '#!/bin/sh\necho "git version 2.45.0-synthetic"\nexit 0\n';
 
@@ -787,5 +793,237 @@ describe('createEnvironmentAdapter unsetVariables', () => {
 
   it('returns nothing for no names', () => {
     expect(createEnvironmentAdapter().unsetVariables([])).toEqual([]);
+  });
+});
+
+const POST_EXIT_GRACE_MS = 1_500;
+
+/** The direct child starts the descendant in its own process group, shares its output pipes, and exits at once. */
+function scriptWithDescendant(descendantBody: string): string {
+  return (
+    "const { spawn } = require('node:child_process');" +
+    `spawn(process.execPath, ['-e', ${JSON.stringify(descendantBody)}], ` +
+    "{ stdio: ['ignore', 'inherit', 'inherit'] }).unref();"
+  );
+}
+
+/** Records its pid, writes `early` and then holds the inherited pipes open without writing again. */
+function lingeringDescendant(pidFile: string): string {
+  return (
+    `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));` +
+    "process.stdout.write('early');" +
+    'setInterval(() => {}, 1000);'
+  );
+}
+
+function expectLaunched(result: ManagedProcessResult): ManagedProcessCompletion {
+  if (!result.launched) {
+    throw new Error(`expected a launched process, got: ${result.reason}`);
+  }
+  return result;
+}
+
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  try {
+    const statText = readFileSync(`/proc/${String(pid)}/stat`, 'utf8');
+    const state = statText.slice(statText.lastIndexOf(')') + 2)[0];
+    return state !== 'Z';
+  } catch {
+    return false;
+  }
+}
+
+describe('runManagedProcess post-exit window', () => {
+  let directory = '';
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), 'tevu-post-exit-'));
+  });
+
+  afterEach(async () => {
+    const pidFile = join(directory, 'descendant.pid');
+    if (existsSync(pidFile)) {
+      try {
+        process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL');
+      } catch {
+        // The descendant is already gone, which is the expected outcome.
+      }
+    }
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  function windowRequest(
+    script: string,
+    overrides: Partial<ManagedProcessRequest> = {},
+  ): ManagedProcessRequest {
+    return {
+      argv: [process.execPath, '-e', script],
+      cwd: directory,
+      environment: {},
+      timeoutMs: 30_000,
+      terminationGraceMs: POST_EXIT_GRACE_MS,
+      ...overrides,
+    };
+  }
+
+  async function expectDescendantKilled(): Promise<void> {
+    const descendantPid = Number(readFileSync(join(directory, 'descendant.pid'), 'utf8'));
+    const deadline = performance.now() + 5_000;
+    while (isRunning(descendantPid)) {
+      if (performance.now() > deadline) {
+        throw new Error(`descendant ${String(descendantPid)} was still running after 5s`);
+      }
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    }
+  }
+
+  describe('a descendant that finishes inside the window', () => {
+    it('captures every byte a descendant writes after the direct child exits', async () => {
+      const payloadBytes = 1_000_000;
+      const script = scriptWithDescendant(
+        `setTimeout(() => process.stdout.write('x'.repeat(${String(payloadBytes)})), 200);`,
+      );
+      const streamed: string[] = [];
+
+      const outcome = expectLaunched(
+        await runManagedProcess(
+          windowRequest(script, {
+            maxCaptureBytes: 2_000_000,
+            terminationGraceMs: 5_000,
+            onStdout: (text) => streamed.push(text),
+          }),
+        ),
+      );
+
+      expect(outcome.exitCode).toBe(0);
+      expect(outcome.stdout).toMatchObject({
+        totalBytes: payloadBytes,
+        truncated: false,
+        incomplete: false,
+      });
+      expect(outcome.stdout.text).toHaveLength(payloadBytes);
+      expect(streamed.join('')).toHaveLength(payloadBytes);
+    });
+
+    it('reports incomplete false on both captures for a process with no descendants', async () => {
+      const script = "process.stdout.write('out'); process.stderr.write('err');";
+
+      const outcome = expectLaunched(await runManagedProcess(windowRequest(script)));
+
+      expect(outcome.stdout).toEqual({
+        text: 'out',
+        totalBytes: 3,
+        truncated: false,
+        incomplete: false,
+      });
+      expect(outcome.stderr).toEqual({
+        text: 'err',
+        totalBytes: 3,
+        truncated: false,
+        incomplete: false,
+      });
+    });
+  });
+
+  describe('a descendant that outlives the window', () => {
+    it('force-kills a descendant still holding stdout after the grace and marks stdout incomplete', async () => {
+      const script = scriptWithDescendant(lingeringDescendant(join(directory, 'descendant.pid')));
+      const startedAtMs = performance.now();
+
+      const outcome = expectLaunched(await runManagedProcess(windowRequest(script)));
+      const elapsedMs = performance.now() - startedAtMs;
+
+      expect(elapsedMs).toBeGreaterThanOrEqual(POST_EXIT_GRACE_MS);
+      expect(outcome).toMatchObject({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        cancelled: false,
+        terminationStage: 'none',
+      });
+      expect(outcome.stdout).toMatchObject({
+        text: 'early',
+        totalBytes: 5,
+        truncated: false,
+        incomplete: true,
+      });
+      expect(outcome.stderr.incomplete).toBe(true);
+      await expectDescendantKilled();
+    });
+
+    it("stops durationMs and endedAt at the direct child's exit", async () => {
+      const terminationGraceMs = 2_000;
+      const script = scriptWithDescendant(lingeringDescendant(join(directory, 'descendant.pid')));
+      const startedAtMs = performance.now();
+
+      const outcome = expectLaunched(
+        await runManagedProcess(windowRequest(script, { terminationGraceMs })),
+      );
+      const elapsedMs = performance.now() - startedAtMs;
+
+      expect(elapsedMs).toBeGreaterThanOrEqual(terminationGraceMs);
+      expect(outcome.durationMs).toBeLessThan(terminationGraceMs);
+      expect(Date.parse(outcome.endedAt) - Date.parse(outcome.startedAt)).toBeLessThan(
+        terminationGraceMs,
+      );
+    });
+  });
+
+  describe('a timeout or cancellation that arrives after the direct child exited', () => {
+    it('does not relabel a finished process when timeoutMs elapses inside the window', async () => {
+      const terminationGraceMs = 2_500;
+      const script = scriptWithDescendant(lingeringDescendant(join(directory, 'descendant.pid')));
+      const startedAtMs = performance.now();
+
+      const outcome = expectLaunched(
+        await runManagedProcess(windowRequest(script, { timeoutMs: 1_200, terminationGraceMs })),
+      );
+      const elapsedMs = performance.now() - startedAtMs;
+
+      expect(outcome).toMatchObject({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        cancelled: false,
+        terminationStage: 'none',
+      });
+      expect(elapsedMs).toBeGreaterThanOrEqual(terminationGraceMs);
+      await expectDescendantKilled();
+    });
+
+    it('does not relabel a finished process when cancellation aborts inside the window', async () => {
+      const controller = new AbortController();
+      const abortShortlyAfterOutput = (): void => {
+        setTimeout(() => controller.abort(), 300);
+      };
+      const script = scriptWithDescendant(lingeringDescendant(join(directory, 'descendant.pid')));
+      const startedAtMs = performance.now();
+
+      const outcome = expectLaunched(
+        await runManagedProcess(
+          windowRequest(script, {
+            cancellation: controller.signal,
+            onStdout: abortShortlyAfterOutput,
+          }),
+        ),
+      );
+      const elapsedMs = performance.now() - startedAtMs;
+
+      expect(controller.signal.aborted).toBe(true);
+      expect(outcome).toMatchObject({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        cancelled: false,
+        terminationStage: 'none',
+      });
+      expect(elapsedMs).toBeGreaterThanOrEqual(POST_EXIT_GRACE_MS);
+      await expectDescendantKilled();
+    });
   });
 });

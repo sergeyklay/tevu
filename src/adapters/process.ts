@@ -12,6 +12,7 @@ import { constants } from 'node:fs';
 import { access, lstat, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import process from 'node:process';
 import { execa } from 'execa';
 
@@ -157,8 +158,19 @@ export function createSecretRedactor(
  * given replacement environment. Output streams pass through chunk-safe
  * redaction before the optional callbacks and the bounded captures. On timeout
  * or cancellation the whole group receives SIGTERM, then SIGKILL after
- * `terminationGraceMs`; surviving grandchildren are force-terminated after the
- * supervised process settles. When `request.stdinText` is set, the child's
+ * `terminationGraceMs`.
+ *
+ * When the direct child exits, the group is not signaled: descendants still
+ * writing get `terminationGraceMs` to finish, and any still running then
+ * receive SIGKILL without a preceding SIGTERM, which would add a second grace.
+ * The exit also disarms `timeoutMs` and `request.cancellation`, because a child
+ * that finished inside its limit did not time out. A capture reports
+ * `incomplete` when a signal reached the group while that stream was still
+ * open, so callers can tell a cut-short stream from a complete one. `durationMs`
+ * and `endedAt` stop at the direct child's exit, so the window never counts as
+ * elapsed time. The group receives a final SIGKILL before the call returns.
+ *
+ * When `request.stdinText` is set, the child's
  * stdin carries that text and is closed after it; otherwise stdin is
  * `/dev/null`. A child that exits before reading all of the text is reported
  * by its exit status, not as a write failure, and a pending write delays
@@ -175,6 +187,7 @@ export async function runManagedProcess(
 
   const [file, ...args] = request.argv;
   const startedAt = new Date();
+  const launchedAtMs = performance.now();
   let subprocess: ReturnType<typeof execa>;
   try {
     subprocess = execa(file, args, {
@@ -202,7 +215,10 @@ export async function runManagedProcess(
   const stderrCapture = createStreamCapture(secretValues, maxCaptureBytes, request.onStderr);
   subprocess.stdout?.on('data', stdoutCapture.onData);
   subprocess.stderr?.on('data', stderrCapture.onData);
+  subprocess.stdout?.once('end', stdoutCapture.markEnded);
+  subprocess.stderr?.once('end', stderrCapture.markEnded);
 
+  let settled = false;
   const signalGroup = (signal: NodeJS.Signals): void => {
     const pid = subprocess.pid;
     if (pid === undefined) {
@@ -211,18 +227,28 @@ export async function runManagedProcess(
     try {
       process.kill(-pid, signal);
     } catch {
-      // The process group is already gone.
+      // The process group is already gone, so no writer was cut short.
+      return;
+    }
+    if (settled) {
+      return;
+    }
+    for (const capture of [stdoutCapture, stderrCapture]) {
+      if (!capture.hasEnded()) {
+        capture.markIncomplete();
+      }
     }
   };
 
   let terminationStage: TerminationStage = 'none';
   let timedOut = false;
   let cancelled = false;
+  let exit: { atMs: number; at: Date } | undefined;
   let graceTimer: NodeJS.Timeout | undefined;
   let survivorTimer: NodeJS.Timeout | undefined;
 
   const beginTermination = (trigger: 'timeout' | 'cancellation'): void => {
-    if (timedOut || cancelled) {
+    if (exit !== undefined || timedOut || cancelled) {
       return;
     }
     if (trigger === 'timeout') {
@@ -245,11 +271,17 @@ export async function runManagedProcess(
   request.cancellation?.addEventListener('abort', onAbort, { once: true });
 
   // A grandchild holding the inherited stdio pipes would otherwise keep the
-  // await pending forever after the supervised process itself has exited.
+  // await pending forever after the supervised process itself has exited. It
+  // gets the grace to finish writing; SIGKILL follows without SIGTERM because
+  // escalating would add a second grace past the bound.
   subprocess.nodeChildProcess.once('exit', () => {
-    signalGroup('SIGTERM');
+    exit = { atMs: performance.now(), at: new Date() };
     survivorTimer = setTimeout(() => signalGroup('SIGKILL'), request.terminationGraceMs);
     survivorTimer.unref();
+    if (!timedOut && !cancelled) {
+      clearTimeout(timeoutTimer);
+      request.cancellation?.removeEventListener('abort', onAbort);
+    }
   });
 
   const result = await subprocess;
@@ -262,22 +294,22 @@ export async function runManagedProcess(
     clearTimeout(survivorTimer);
   }
   request.cancellation?.removeEventListener('abort', onAbort);
+  settled = true;
   signalGroup('SIGKILL');
 
   const exitCode = typeof result.exitCode === 'number' ? result.exitCode : null;
   const signal = typeof result.signal === 'string' ? result.signal : null;
-  if (exitCode === null && signal === null) {
+  if (exit === undefined || (exitCode === null && signal === null)) {
     return launchFailure(redact(describeSpawnFailure(result)), result.code);
   }
 
-  const endedAt = new Date();
   return {
     launched: true,
     exitCode,
     signal,
     startedAt: startedAt.toISOString(),
-    endedAt: endedAt.toISOString(),
-    durationMs: result.durationMs,
+    endedAt: exit.at.toISOString(),
+    durationMs: exit.atMs - launchedAtMs,
     timedOut,
     cancelled,
     terminationStage,
@@ -1020,6 +1052,9 @@ function createDirectorySnapshotWatcher(work: string): DirectorySnapshotWatcher 
 
 type StreamCapture = {
   onData: (chunk: Buffer) => void;
+  markEnded: () => void;
+  hasEnded: () => boolean;
+  markIncomplete: () => void;
   finish: () => RedactedCapture;
 };
 
@@ -1034,6 +1069,8 @@ function createStreamCapture(
   let capturedBytes = 0;
   let totalBytes = 0;
   let truncated = false;
+  let incomplete = false;
+  let ended = false;
 
   const accept = (emitted: string): void => {
     if (emitted.length === 0) {
@@ -1055,10 +1092,19 @@ function createStreamCapture(
     onData(chunk) {
       accept(redactor.push(decoder.decode(chunk, { stream: true })));
     },
+    markEnded() {
+      ended = true;
+    },
+    hasEnded() {
+      return ended;
+    },
+    markIncomplete() {
+      incomplete = true;
+    },
     finish() {
       accept(redactor.push(decoder.decode()));
       accept(redactor.flush());
-      return { text, totalBytes, truncated };
+      return { text, totalBytes, truncated, incomplete };
     },
   };
 }

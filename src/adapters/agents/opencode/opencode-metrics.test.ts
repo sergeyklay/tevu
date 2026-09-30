@@ -19,6 +19,7 @@ import type {
   ManagedProcessResult,
   ManagedProcessRunner,
   ModelCallEnvironment,
+  RedactedCapture,
   SecretRedactor,
 } from '@/domain/types';
 
@@ -1496,8 +1497,8 @@ function buildFakeRunner(
       timedOut: false,
       cancelled: false,
       terminationStage: 'none',
-      stdout: { text: stdout, totalBytes: stdout.length, truncated: false },
-      stderr: { text: '', totalBytes: 0, truncated: false },
+      stdout: { text: stdout, totalBytes: stdout.length, truncated: false, incomplete: false },
+      stderr: { text: '', totalBytes: 0, truncated: false, incomplete: false },
     };
     return completion;
   };
@@ -1867,8 +1868,8 @@ describe('OpenCode adapter listModels over an injected fake process', () => {
           timedOut: false,
           cancelled: false,
           terminationStage: 'none',
-          stdout: { text: '', totalBytes: 0, truncated: false },
-          stderr: { text: '', totalBytes: 0, truncated: false },
+          stdout: { text: '', totalBytes: 0, truncated: false, incomplete: false },
+          stderr: { text: '', totalBytes: 0, truncated: false, incomplete: false },
         }),
       }),
     );
@@ -1897,8 +1898,8 @@ describe('OpenCode adapter listModels over an injected fake process', () => {
           timedOut: false,
           cancelled: false,
           terminationStage: 'forced',
-          stdout: { text: '', totalBytes: 0, truncated: false },
-          stderr: { text: '', totalBytes: 0, truncated: false },
+          stdout: { text: '', totalBytes: 0, truncated: false, incomplete: false },
+          stderr: { text: '', totalBytes: 0, truncated: false, incomplete: false },
         }),
       }),
     );
@@ -1927,8 +1928,13 @@ describe('OpenCode adapter listModels over an injected fake process', () => {
           timedOut: false,
           cancelled: false,
           terminationStage: 'none',
-          stdout: { text: 'acme/model-a', totalBytes: 99_999_999, truncated: true },
-          stderr: { text: '', totalBytes: 0, truncated: false },
+          stdout: {
+            text: 'acme/model-a',
+            totalBytes: 99_999_999,
+            truncated: true,
+            incomplete: false,
+          },
+          stderr: { text: '', totalBytes: 0, truncated: false, incomplete: false },
         }),
       }),
     );
@@ -1957,8 +1963,8 @@ describe('OpenCode adapter listModels over an injected fake process', () => {
           timedOut: true,
           cancelled: false,
           terminationStage: 'forced',
-          stdout: { text: '', totalBytes: 0, truncated: false },
-          stderr: { text: '', totalBytes: 0, truncated: false },
+          stdout: { text: '', totalBytes: 0, truncated: false, incomplete: false },
+          stderr: { text: '', totalBytes: 0, truncated: false, incomplete: false },
         }),
       }),
     );
@@ -1991,8 +1997,9 @@ describe('OpenCode adapter listModels over an injected fake process', () => {
             text: 'acme/model-a\r\n\nacme/model-b\r\n   \nacme/model-c',
             totalBytes: 50,
             truncated: false,
+            incomplete: false,
           },
-          stderr: { text: '', totalBytes: 0, truncated: false },
+          stderr: { text: '', totalBytes: 0, truncated: false, incomplete: false },
         }),
       }),
     );
@@ -2019,8 +2026,8 @@ function buildCompletion(
     timedOut: false,
     cancelled: false,
     terminationStage: 'none',
-    stdout: { text: '', totalBytes: 0, truncated: false },
-    stderr: { text: '', totalBytes: 0, truncated: false },
+    stdout: { text: '', totalBytes: 0, truncated: false, incomplete: false },
+    stderr: { text: '', totalBytes: 0, truncated: false, incomplete: false },
     ...overrides,
   };
 }
@@ -2109,7 +2116,7 @@ describe('OpenCode adapter callModel failures over an injected fake process', ()
       request.onStdout?.(stdout);
       return buildCompletion({
         exitCode,
-        stdout: { text: stdout, totalBytes: stdout.length, truncated: false },
+        stdout: { text: stdout, totalBytes: stdout.length, truncated: false, incomplete: false },
       });
     };
   }
@@ -2238,5 +2245,169 @@ describe('OpenCode adapter models command capability probe', () => {
       throw new Error(`expected a probe-phase protocol error, got ${JSON.stringify(probe)}`);
     }
     expect(probe.error.reason).toContain('models command');
+  });
+});
+
+describe('OpenCode adapter export refusal over an injected fake process', () => {
+  const EXPORT_SESSION_ID = 'ses-export-0001';
+  const REPLY_TEXT = 'final reply';
+
+  type CallerOutcome = { ok: true; value: unknown } | { ok: false; error: unknown };
+
+  type ExportCaller = {
+    name: string;
+    context: { phase: 'case'; caseId: string } | { phase: 'call'; role: 'criteria' };
+    invoke: (runProcess: ManagedProcessRunner) => Promise<CallerOutcome>;
+  };
+
+  const EXPORT_CALLERS: readonly ExportCaller[] = [
+    {
+      name: 'exportSession',
+      context: { phase: 'case', caseId: CASE_ID },
+      invoke: (runProcess) =>
+        buildOpenCodeAdapter({ runProcess }).exportSession(
+          EXPORT_SESSION_ID,
+          buildBareEnvironment(),
+        ),
+    },
+    {
+      name: 'callModel',
+      context: { phase: 'call', role: 'criteria' },
+      invoke: (runProcess) =>
+        buildOpenCodeAdapter({ runProcess }).callModel({
+          role: 'criteria',
+          model: 'acme/model-a',
+          effort: 'high',
+          prompt: 'synthetic prompt',
+          environment: buildModelCallEnvironment(),
+          timeoutMs: 10_000,
+          terminationGraceMs: 250,
+          cancellation: new AbortController().signal,
+        }),
+    },
+  ];
+
+  function buildCapture(overrides: Partial<RedactedCapture> = {}): RedactedCapture {
+    const text = overrides.text ?? '';
+    return { text, totalBytes: text.length, truncated: false, incomplete: false, ...overrides };
+  }
+
+  function buildExportText(): string {
+    const sessionID = EXPORT_SESSION_ID;
+    return JSON.stringify({
+      info: { id: sessionID },
+      messages: [
+        { info: { id: 'msg-u1', sessionID, role: 'user' }, parts: [] },
+        {
+          info: {
+            id: 'msg-a1',
+            sessionID,
+            role: 'assistant',
+            parentID: 'msg-u1',
+            finish: 'stop',
+            cost: 0.5,
+            tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } },
+          },
+          parts: [{ id: 'prt-a1', sessionID, messageID: 'msg-a1', type: 'text', text: REPLY_TEXT }],
+        },
+      ],
+    });
+  }
+
+  /** Answers `run` with one event naming the root session and `export` with the given capture. */
+  function buildExportRunner(exportCapture: RedactedCapture): ManagedProcessRunner {
+    return async (request) => {
+      if (request.argv[1] === 'export') {
+        return buildCompletion({ stdout: exportCapture });
+      }
+      const line = `${JSON.stringify({
+        type: 'step_start',
+        timestamp: 1,
+        sessionID: EXPORT_SESSION_ID,
+        part: {
+          id: 'prt-1',
+          sessionID: EXPORT_SESSION_ID,
+          messageID: 'msg-a1',
+          type: 'step-start',
+        },
+      })}\n`;
+      request.onStdout?.(line);
+      return buildCompletion({ stdout: buildCapture({ text: line }) });
+    };
+  }
+
+  describe.each(EXPORT_CALLERS)('$name', ({ context, invoke }) => {
+    it('returns the capture-bound reason for a truncated incomplete export', async () => {
+      const capture = buildCapture({
+        text: buildExportText().slice(0, 40),
+        totalBytes: 99_999_999,
+        truncated: true,
+        incomplete: true,
+      });
+
+      const outcome = await invoke(buildExportRunner(capture));
+
+      expect(outcome).toEqual({
+        ok: false,
+        error: {
+          kind: 'AgentProtocolError',
+          agent: 'opencode',
+          context,
+          reason: 'export output exceeded the capture bound and cannot be decoded',
+        },
+      });
+    });
+
+    it('returns the incomplete reason for an incomplete export whose text does not parse', async () => {
+      const exportText = buildExportText();
+      const capture = buildCapture({
+        text: exportText.slice(0, Math.floor(exportText.length / 2)),
+        incomplete: true,
+      });
+
+      const outcome = await invoke(buildExportRunner(capture));
+
+      expect(outcome).toEqual({
+        ok: false,
+        error: {
+          kind: 'AgentProtocolError',
+          agent: 'opencode',
+          context,
+          reason:
+            'export output is incomplete: tevu stopped its process group before the output ended',
+        },
+      });
+    });
+
+    it('keeps the invalid JSON reason for a complete capture whose text does not parse', async () => {
+      const exportText = buildExportText();
+      const capture = buildCapture({
+        text: exportText.slice(0, Math.floor(exportText.length / 2)),
+      });
+
+      const outcome = await invoke(buildExportRunner(capture));
+
+      expect(outcome).toEqual({
+        ok: false,
+        error: {
+          kind: 'AgentProtocolError',
+          agent: 'opencode',
+          context,
+          reason: 'export output is not valid JSON',
+        },
+      });
+    });
+
+    it('returns the same result as a complete capture for an incomplete export whose text parses', async () => {
+      const exportText = buildExportText();
+
+      const fromIncomplete = await invoke(
+        buildExportRunner(buildCapture({ text: exportText, incomplete: true })),
+      );
+      const fromComplete = await invoke(buildExportRunner(buildCapture({ text: exportText })));
+
+      expect(fromIncomplete.ok).toBe(true);
+      expect(fromIncomplete).toEqual(fromComplete);
+    });
   });
 });

@@ -37,6 +37,7 @@ import type {
   OperatorProvider,
   ProcessResult,
   ProviderSnapshot,
+  RedactedCapture,
   SecretRedactor,
   TevuError,
   TevuResult,
@@ -358,13 +359,15 @@ type ExportProcessOutcome =
 
 /**
  * Runs one `export <sessionID>` process and, on a clean zero-exit and
- * untruncated capture, decodes, checks its identity, and redacts it. Shared
+ * untruncated capture, decodes, checks its identity, and redacts it. An
+ * incomplete capture is parsed like a complete one: a strict prefix of one JSON
+ * object never parses, so text that parses is the whole document. Shared
  * by the case path (`exportRootSession`) and the model-call path
  * (`runModelCall`), parameterized by working directory, replacement
  * variables, protocol context, and an optional cancellation signal in place
- * of an `IsolatedEnvironment`. A launch failure, non-zero exit, or truncated
- * capture is returned as the raw process outcome so each caller maps it to
- * its own error kind.
+ * of an `IsolatedEnvironment`. A launch failure, non-zero exit, truncated
+ * capture, or incomplete capture that does not parse is returned as the raw
+ * process outcome so each caller maps it to its own error kind.
  */
 async function runExportProcess(
   settings: OpenCodeAdapterSettings,
@@ -396,6 +399,9 @@ async function runExportProcess(
   try {
     parsed = JSON.parse(outcome.stdout.text);
   } catch {
+    if (outcome.stdout.incomplete) {
+      return { settled: 'process', outcome };
+    }
     return {
       settled: 'protocol-error',
       error: protocolFailureShape(context, 'export output is not valid JSON'),
@@ -424,6 +430,12 @@ async function runExportProcess(
   // `redactValue` redacts every string of the decoded export in place, so the
   // result still satisfies the decoded export's shape.
   return { settled: 'ok', value: redacted.value as OpenCodeExport };
+}
+
+function undecodableExportReason(stdout: RedactedCapture): string {
+  return stdout.truncated
+    ? 'export output exceeded the capture bound and cannot be decoded'
+    : 'export output is incomplete: tevu stopped its process group before the output ended';
 }
 
 async function exportRootSession(
@@ -464,7 +476,7 @@ async function exportRootSession(
   return agentProtocolError(
     settings.agent,
     context,
-    'export output exceeded the capture bound and cannot be decoded',
+    undecodableExportReason(processOutcome.stdout),
   );
 }
 
@@ -770,7 +782,7 @@ async function runModelCall(
     return agentProtocolError(
       settings.agent,
       context,
-      'export output exceeded the capture bound and cannot be decoded',
+      undecodableExportReason(exportProcess.stdout),
     );
   }
 

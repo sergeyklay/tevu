@@ -911,6 +911,12 @@ export type RedactedCapture = {
   text: string;
   totalBytes: number;
   truncated: boolean;
+  /**
+   * Whether a tevu signal reached the process group while this stream was
+   * still open, so a writer may have been stopped mid-output; `totalBytes`
+   * then counts only what arrived.
+   */
+  incomplete: boolean;
 };
 
 /** Evaluator process request: argv started as given, with an explicit replacement environment. */
@@ -1147,7 +1153,9 @@ export type ManagedProcessCompletion = {
   exitCode: number | null;
   signal: string | null;
   startedAt: string;
+  /** Wall-clock instant the direct child exited, ISO 8601; excludes the post-exit window. */
   endedAt: string;
+  /** Milliseconds from launch to the direct child's exit on a monotonic clock; excludes the post-exit window. */
   durationMs: number;
   timedOut: boolean;
   cancelled: boolean;

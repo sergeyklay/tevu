@@ -36,8 +36,8 @@ function launched(
     timedOut: false,
     cancelled: false,
     terminationStage: 'none',
-    stdout: { text: '', totalBytes: 0, truncated: false },
-    stderr: { text: '', totalBytes: 0, truncated: false },
+    stdout: { text: '', totalBytes: 0, truncated: false, incomplete: false },
+    stderr: { text: '', totalBytes: 0, truncated: false, incomplete: false },
     ...overrides,
   };
 }
@@ -169,7 +169,12 @@ describe('createManagedCloneAdapter', () => {
       const runProcess = buildRunProcess({
         absoluteGitDir: launched({
           exitCode: 0,
-          stdout: { text: `${realDirectory}\n`, totalBytes: 0, truncated: false },
+          stdout: {
+            text: `${realDirectory}\n`,
+            totalBytes: 0,
+            truncated: false,
+            incomplete: false,
+          },
         }),
       });
       const adapter = createManagedCloneAdapter(buildOptions({ runProcess }));
@@ -196,7 +201,12 @@ describe('createManagedCloneAdapter', () => {
       const runProcess = buildRunProcess({
         absoluteGitDir: launched({
           exitCode: 0,
-          stdout: { text: `${join(root, 'outer.git')}\n`, totalBytes: 0, truncated: false },
+          stdout: {
+            text: `${join(root, 'outer.git')}\n`,
+            totalBytes: 0,
+            truncated: false,
+            incomplete: false,
+          },
         }),
       });
       const adapter = createManagedCloneAdapter(buildOptions({ runProcess }));
@@ -228,7 +238,7 @@ describe('createManagedCloneAdapter', () => {
       const runProcess = buildRunProcess({
         showToplevel: launched({
           exitCode: 0,
-          stdout: { text: `${root}\n`, totalBytes: 0, truncated: false },
+          stdout: { text: `${root}\n`, totalBytes: 0, truncated: false, incomplete: false },
         }),
       });
       const adapter = createManagedCloneAdapter(buildOptions({ runProcess }));
@@ -492,6 +502,7 @@ describe('createManagedCloneAdapter', () => {
             text: "fatal: repository 'https://github.com/octo/app.git/' not found\n",
             totalBytes: 60,
             truncated: false,
+            incomplete: false,
           },
         }),
       });
@@ -556,6 +567,7 @@ describe('createManagedCloneAdapter', () => {
             text: `fatal: authentication failed for token ${rawToken}\n`,
             totalBytes: 0,
             truncated: false,
+            incomplete: false,
           },
         }),
       });
@@ -603,8 +615,13 @@ function isGitLfsFetchCall(request: ManagedProcessRequest): boolean {
   );
 }
 
-function captured(text: string): { text: string; totalBytes: number; truncated: boolean } {
-  return { text, totalBytes: text.length, truncated: false };
+function captured(text: string): {
+  text: string;
+  totalBytes: number;
+  truncated: boolean;
+  incomplete: boolean;
+} {
+  return { text, totalBytes: text.length, truncated: false, incomplete: false };
 }
 
 function lfsVersionInstalled(): ManagedProcessResult {
