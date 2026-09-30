@@ -1,0 +1,51 @@
+# Troubleshoot common failures
+
+Fixes for errors that `tevu task add`, `tevu validate`, and `tevu run` report. Each entry names the symptom, then the fix.
+
+## Missing variable
+
+A declared variable is not set. Export the variable named in the error in the same terminal, then rerun the command. In `tevu task add`, the wizard refuses an unset name and asks again.
+
+## Interactive terminal required
+
+`tevu task add` and `tevu assess` exit with `prerequisite "terminal" is not satisfied` when input or output is not a terminal. Run them with both attached to a terminal.
+
+## Unsupported source tree
+
+The starting commit's tree holds a submodule, or a Git LFS pointer that uses Git LFS extensions. Choose a commit without them. The wizard inspects the base commit as soon as you enter it and asks again with your answer filled in. See [Source trees](../reference/repositories.md#source-trees).
+
+## Missing Git LFS objects
+
+The finding names the missing objects.
+
+- When it says Git LFS is not installed, install it from https://git-lfs.com.
+- For a local repository, run the `git lfs fetch` command the finding prints in that repository, with the remote that holds the objects.
+- For a GitHub repository, run `tevu run --dry-run` to fetch them. Run `gh auth login` first when the failure names authentication.
+- When the failure says the repository does not have the objects, or that the fetch finished without them, choose another base commit.
+- For `does not match its pointer`, delete the file the finding names and fetch again.
+
+In `tevu task add`, fix the cause and press Enter to retry. See [Git LFS content](../reference/repositories.md#git-lfs-content).
+
+## Clone or fetch fails
+
+- **Authentication.** Run `gh auth login`, or `gh auth login --hostname <host>` for GitHub Enterprise Server, and retry.
+- **TLS or proxy, on Enterprise Server.** Set `GIT_SSL_CAINFO` or `HTTPS_PROXY` in the environment that launches tevu. Managed clones ignore your Git configuration.
+- **`clone lock already exists`.** The error names the lock directory. Confirm no other tevu command is updating that clone, then remove the directory.
+
+## Case executable only runs in tevu's own environment
+
+The finding names the executable. If the command reads a variable a case does not already give it, declare that variable in `env` or `setup.env`.
+
+For a version-manager shim, find the real executable's path with your version manager's own command, run in the directory where the version applies. Then start tevu with that directory before the shim directory on `PATH`:
+
+```sh
+PATH="/path/to/real/bin:$PATH" tevu validate
+```
+
+## Missing agent capability
+
+Check that `agents.opencode.command` points to the intended executable and that it supports the `run`, `export`, and `models` commands and the options tevu uses. See [Agents](../reference/agents-and-models.md#agents).
+
+## Model or provider errors
+
+See [Make a model reachable](configure-model-access.md#fix-a-failure).

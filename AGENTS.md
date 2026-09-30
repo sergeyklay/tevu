@@ -25,7 +25,7 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 ### Ask first
 
 - Any change to the configuration contract (`version: 1`, strict rejection of unknown fields) or to the layout and format of saved run artifacts. Both are public contracts with existing files on disk.
-- Restructuring `docs/`, which follows Diátaxis: guides, reference, concepts.
+- Restructuring `docs/`, which follows Diátaxis: getting-started, guides, reference, concepts.
 
 ### Never
 
@@ -41,6 +41,6 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 Consult these for the area you are working on, not as a blanket prerequisite:
 
 - `docs/concepts/isolation.md` - why each isolation boundary exists and where it deliberately stops.
-- `docs/reference/configuration.md` - the configuration contract, source-tree rules, and fixed environments.
-- `docs/reference/results.md` - outcomes, metric semantics, artifact files, and regeneration guarantees.
+- `docs/reference/configuration.md` - the configuration file format; `docs/reference/repositories.md` for source-tree rules and `docs/reference/environment.md` for fixed environments.
+- `docs/reference/results.md` and `docs/reference/artifacts.md` - outcomes, metric semantics, artifact files, and regeneration guarantees.
 - `docs/README.md` - full documentation index.

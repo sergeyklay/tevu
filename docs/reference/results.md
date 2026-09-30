@@ -1,6 +1,10 @@
 # Results reference
 
-A run contains n cases for each task/model entry pair, where n is the effective repeat (`run.repeat`, or `--repeat` for that run). Each case is identified as `<task-id>--<model-id>--<attempt>`, with attempts numbered from 1 even when n is 1. The report compares cases per task and summarizes each pair's attempts without selecting a winner or calculating a combined score.
+How a run's cases are identified, the outcome values, and the metrics tevu records. The files that hold them are described in [Artifacts](artifacts.md).
+
+## Cases
+
+A run holds n cases for each task and model entry pair, where n is the effective repeat: `run.repeat`, or `--repeat` for that run. A case ID is `<task-id>--<model-id>--<attempt>`. Attempts are numbered from 1 even when n is 1. The report compares cases per task and summarizes each pair's attempts. It selects no winner and calculates no combined score.
 
 ## Outcomes
 
@@ -9,27 +13,27 @@ A run contains n cases for each task/model entry pair, where n is the effective 
 | `passed` | Every required check passed |
 | `failed` | A required check failed |
 | `pending` | Required checks still need a manual verdict, or a required graded check is awaiting the grader, was left pending by a failed or unparseable grader call, or was graded `undetermined` |
-| `not-evaluated` | Timeout, cancellation, preparation failure, a repository setup failure, or another failure prevented eligible evaluation |
+| `not-evaluated` | A timeout, cancellation, preparation failure, repository setup failure, or another failure prevented eligible evaluation |
 
-Optional failed or pending checks remain visible without changing an otherwise passed outcome. Command checks pass only when they finish before their timeout with a declared success exit code.
+- Optional failed or pending checks stay visible without changing an otherwise passed outcome.
+- A command check passes only when it finishes before its timeout with a declared success exit code.
+- Process status and task outcome are separate. Checks can run after a nonzero agent exit while the workspace is still readable. The solution may pass, but the runtime failure stays in the report and makes `run` return `2`. See [CLI exit codes](cli.md#exit-codes).
+- A timeout or cancellation terminates the managed process group, escalating to a forced kill after `run.stop_grace`. A timed-out case skips acceptance checks and `setup.before_checks`.
+- Successful finalization removes the case workspace. A cleanup failure records a warning with the retained path.
 
-Process status and task outcome are separate. Checks can run after a nonzero agent exit if the workspace is still readable. The solution may pass, but the runtime failure remains in the report and makes `run` return `2`. See [CLI exit codes](cli.md#exit-codes).
+## Pair summary
 
-Timeout and cancellation terminate the managed process group, escalating to forced termination after the configured grace period. A timed-out case skips acceptance checks and `setup.before_checks`. Successful finalization removes its workspace; a cleanup failure records a warning with the retained path.
-
-### Pair summary
-
-The report attaches one summary to every task/model entry pair, counting the outcomes of its n attempts.
+The report attaches one summary to every task and model entry pair.
 
 | Field | Contents |
 | --- | --- |
-| `taskId`, `modelId` | The pair this summary belongs to |
-| `planned` | n, the effective repeat for the run |
+| `taskId`, `modelId` | The pair |
+| `planned` | n, the effective repeat |
 | `outcomes` | Count of attempts by outcome: `passed`, `failed`, `pending`, `not-evaluated` |
 | `passedOfPlanned` | `<passed>/<planned>`, for example `1/3` |
-| `allPassed` | Whether every attempt passed (`outcomes.passed === planned`) |
+| `allPassed` | Whether every attempt passed |
 
-An attempt with no case result, for example one still queued when the run was cancelled, counts as `not-evaluated`, so the four outcome counts always sum to `planned`. `planned` counts every planned attempt, including `pending` and `not-evaluated` ones; no percentage is computed and no winner is selected. Each task section in `report.md` renders its pairs' summaries as a table, one row per model entry.
+An attempt with no case result, such as one still queued when the run was cancelled, counts as `not-evaluated`, so the four counts always sum to `planned`. No percentage is computed. Each task section of `report.md` renders its pairs' summaries as a table, one row per model entry.
 
 ## Metrics
 
@@ -41,101 +45,18 @@ An attempt with no case result, for example one still queued when the run was ca
 | Reliability | API errors |
 | Cost | Agent-reported cost in USD |
 
-Unavailable measurements are shown as unavailable with a reason, never as zero. Cost is not estimated from a model name or token count.
+An unavailable measurement is recorded as unavailable with a reason, never as zero. Cost is never estimated from a model name or token count. See [Evidence and reports](../concepts/evidence-and-reports.md).
 
-The adapter named by a case's `agent` derives token, activity, reliability, and cost metrics from that case's saved records; elapsed time comes from process timing for every agent. For the OpenCode adapter, the root session export is the primary source; events provide a fallback when the export is unavailable. Duplicate records are counted once by identity. A turn is an assistant record with a non-empty finish field; an API call is an assistant record with a finish or error field. Tool and skill calls come from tool records.
+Derivation:
 
-Model metrics cover the root session only, not a total across child sessions. Elapsed time covers the case's agent process. Acceptance-command results are check verdicts, not additional model-quality metrics. Repository setup time and output enter no metric.
+- Elapsed time comes from process timing for every agent.
+- The adapter named by a case's `agent` derives the other metrics from the case's saved records. For OpenCode, the root session export is the source. When it is unavailable, events supply only API errors, tool calls, and skill calls, filtered to the root session, and the other metrics are unavailable.
+- Records are counted once by identity.
+- A turn is an assistant record with a non-empty `finish` field. An API call is an assistant record with a `finish` or `error` field. An API error is an assistant record with an `error` field. Tool calls come from tool records, and skill calls from tool records for the `skill` tool.
+- A malformed export or event file makes every metric except a measured elapsed time unavailable and preserves an `AgentProtocolError`.
 
-The grader's own usage and cost are saved per case in `grading.json`'s `metrics` field and rendered in the report's `Grader metrics` block; they are never added to the case's own metrics, and a metric the grader call did not report is unavailable, never zero.
+Scope:
 
-## Saved files
-
-Files are stored under the configured artifact directory:
-
-```text
-<run-id>/
-  run.json
-  result.json
-  report.md
-  cases/<task-id>--<model-id>--<attempt>/
-    events.jsonl
-    stderr.log
-    session.json
-    solution.patch
-    checks.json
-    grading.json
-    assessment.json
-    result.json
-    setup-before-agent.log
-    setup-before-checks.log
-```
-
-| File | Contents |
-| --- | --- |
-| `run.json` | Run identity, configuration snapshot, `configPath` (the absolute path of the configuration file the run read), tool information (`tools.agentVersions`, one detected version per agent in use; `tools.agentConfigurationFiles`, one entry per agent whose providers the run read, each holding the relative path and SHA-256 of every configuration file tevu wrote into that agent's homes, never the file's text), per-agent capability reports, `execution.repeat` (`value`, the effective repeat; `source`, `config` or `cli`), case records, and findings |
-| Root `result.json` | Normalized report data, including `pairs`, one pair summary per task/model entry pair |
-| `report.md` | Human-readable comparison with links to evidence |
-| `events.jsonl` | Raw agent event records, one JSON value per line; only that case's agent adapter interprets them |
-| `stderr.log` | Process diagnostics, including non-JSON run output |
-| `session.json` | Raw root-session export; only that case's agent adapter interprets it |
-| `solution.patch` | Submitted solution, captured before restore, overlay, and acceptance commands run, relative to the state `before_agent` left when the repository declares one |
-| `checks.json` | Check verdicts, timing, and evidence |
-| `grading.json` | Present only for a case whose task declares a graded check: the grader's identity, its raw call outcome, its own metrics, and a grade or a pending reason per graded check |
-| `assessment.json` | Current manual and grader verdicts, revision, and replacement history |
-| Case `result.json` | Case lifecycle, process result, task outcome, metrics, check-state evidence, repository setup evidence, `artifacts.grading` (the case's `grading.json` path, or `null` when the task declares no graded check), and evidence paths |
-| `setup-before-agent.log` | `before_agent`'s commands, one section each; present only when the repository declares `before_agent` and at least one command started |
-| `setup-before-checks.log` | `before_checks`'s commands, one section each; present only when the repository declares `before_checks` and at least one command started |
-
-The root `result.json`'s top-level `models` array holds one `{id, model, effort}` entry per configured model entry. Every saved case identity, in `run.json` and both levels of `result.json`, carries `modelId`, `effort`, and `attempt` (the attempt number this case represents, 1 through the effective repeat) alongside the unchanged `model` string, plus `agent`: the name of the adapter that ran the case.
-
-Every saved case identity also carries `timeoutMs`: the agent time limit the case ran under, in milliseconds. It is the task's `timeout` when the task declares one and `run.timeout` otherwise, so every case of one task carries the same value. `execution.caseTimeoutMs` in `run.json` holds `run.timeout` in milliseconds.
-
-Isolated replacement environments carry the recipient `agent` or `evaluator`. A process or protocol failure from a case's adapter is recorded with kind `AgentProcessError` or `AgentProtocolError`, each carrying that case's `agent` name.
-
-Some source files are absent when the corresponding evidence was unavailable; assessments appear after the first assessment. Their absence is recorded rather than treated as a successful measurement.
-
-Reports link to patches, transcripts, and complete evaluator output instead of embedding them. Full task prompts and imported issue descriptions are omitted from Markdown reports.
-
-### Check state
-
-A case whose task declares `checks.restore` or `checks.overlay` records what the check-state setup did to the worktree before checks ran, in the case `result.json`'s `checkState` field. `checkState` is absent for a task that declares neither key.
-
-| Field | Contents |
-| --- | --- |
-| `checkState.restore.restored` | Matched paths whose worktree entry differed from `base_commit` and was reset to it |
-| `checkState.restore.removed` | Every path removed: matched untracked entries, and blockers displaced while restoring or overlaying |
-| `checkState.overlay.files[].path` | One overlay file's path, relative to the overlay directory |
-| `checkState.overlay.files[].sha256` | The SHA-256 of that file's bytes as read at run start |
-| `checkState.overlay.removed` | Every blocking entry the overlay step removed |
-
-A restore or overlay failure ends the case with lifecycle `infrastructure-failed` and a `failure` of kind `CheckStateError` carrying `step` (`restore` or `overlay`) and `reason`. The cause can be worktree state the agent left, such as a read-only directory under a matched path, rather than a defect in the setup itself. `checkState.restore.removed` can list `before_agent` output when a restore pattern matches it.
-
-### Repository setup
-
-A case whose repository declares `setup` records every started setup command in the case `result.json`'s `setup` field, present only when at least one command started.
-
-| Field | Contents |
-| --- | --- |
-| `setup.logs.beforeAgent`, `setup.logs.beforeChecks` | Run-relative path of that phase's log, or `null` when the phase started no command or its log write failed |
-| `setup.commands[].phase` | `before_agent` or `before_checks` |
-| `setup.commands[].argv` | The command's literal executable and arguments |
-| `setup.commands[].exitCode` | The command's exit code, or `null` when it did not start or ended without one |
-| `setup.commands[].durationMs` | The command's duration, or `null` when it did not start |
-| `setup.commands[].outcome` | `passed`, `failed`, `timed-out`, `launch-failed`, or `cancelled` |
-
-A `before_agent` or `before_checks` command that fails, times out, or does not start ends the case with lifecycle `infrastructure-failed` and a `failure` of kind `SetupError` carrying `phase`, `argv`, and `reason`; a `before_checks` failure replaces a preserved agent failure the same way `CheckStateError` does. A run cancellation during either phase ends the case with lifecycle `cancelled`.
-
-### Data handling
-
-Configured credential-secret values are redacted before persistent or terminal output. Environment metadata records variable names and classifications rather than values. Private task text, repository content, model output, and check evidence remain in the designated local configuration and run files. File access is governed by host permissions. A failed redaction aborts the affected write.
-
-## Regeneration
-
-`tevu report <run-id>` recomputes normalized results and Markdown from saved evidence, saved grades, and current assessments, resolving each case's metrics through the adapter registered under that case's `agent`. It reads a case's saved `grading.json` only when one exists; it never calls the grader, starts another model session, or contacts Git or an issue tracker. Unchanged source artifacts produce identical regenerated JSON and Markdown.
-
-`tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. A run whose snapshot predates that layout, whose case results or manifest predate the current agent fields (missing `identity.agent` or `tools.agentVersions`), the current repeat fields (missing `identity.attempt` or `execution.repeat`), the current case timeout field (missing `timeoutMs` in a case identity), a non-empty string `configPath`, a case result's `artifacts.grading` field, or an assessment history entry's `source` discriminator, is refused before either command writes anything.
-
-Replacing an assessment retains the old verdict in history, whether it replaces an operator's earlier verdict or a grader's; each history entry's `source` (`operator` or `grader`) records which. Only current verdicts affect the outcome. Artifacts remain until the operator deletes the run directory; there is no automatic retention or upload.
-
-The [benchmark guide](../guides/run-benchmark.md#run-and-review) covers recording verdicts and regenerating reports.
+- Model metrics cover the root session only, not a total across child sessions.
+- Elapsed time covers the case's agent process. Acceptance-command results are check verdicts, not model-quality metrics. Repository setup time and output enter no metric.
+- The grader's usage and cost are saved per case in `grading.json` and rendered as `Grader metrics` in the report. They are never added to the case's own metrics.

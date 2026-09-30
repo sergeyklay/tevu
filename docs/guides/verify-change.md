@@ -1,41 +1,43 @@
-# How to verify a change
+# Verify a change
 
-Use Node.js 24 and Bun from the repository checkout. Git is required for the synthetic-repository integration tests.
+Run the same gates CI runs before you send a change for review.
 
-## Install dependencies
+## Prerequisites
+
+Node.js 24, Bun, and Git from the repository checkout. The synthetic-repository integration tests use Git.
 
 ```sh
 bun install --frozen-lockfile
 ```
 
-Bun installs dependencies and launches scripts. Node.js executes the CLI and Vitest.
+Bun installs dependencies and launches scripts. Node.js runs the CLI and Vitest.
 
-## Run every check
+## Run every gate
 
 ```sh
 bun run check
 ```
 
-This runs the same gates as CI, in the same order: formatting, lint, unused code, types, tests, and build. A change is ready for review only when it passes. The sections below run each gate on its own.
+It runs formatting, lint, unused code, types, tests, and build, in CI's order. A change is ready for review only when it passes. Markdown is not covered: `*.md` is excluded from formatting.
 
-## Check types and behavior
+## Run one gate
+
+Check types and behavior:
 
 ```sh
 bun run typecheck
 bun run test
 ```
 
-Both commands must pass. Type checking is separate from test execution and covers production modules and colocated test files.
+Type checking is separate from test execution and covers production modules and colocated test files. Use `bun run test`, not `bun test`: the second starts Bun's own runner instead of Vitest.
 
-For an evaluation change, run the focused file with:
+Run one test file:
 
 ```sh
 bun run test -- src/evaluation/evaluation.test.ts
 ```
 
-Product tests use fakes, adjacent protocol fixtures, temporary synthetic Git repositories, and bounded local child processes. They do not require private repositories, provider credentials, Jira credentials, or live model sessions. A benchmark task's own acceptance command is separate from this test suite.
-
-## Check the executable
+Check the executable:
 
 ```sh
 bun run build
@@ -43,6 +45,6 @@ bun run build
 ./dist/index.js run --help
 ```
 
-Confirm that help renders and exits successfully without starting a benchmark. The CLI is the public interface; TypeScript module exports are internal.
+Confirm that help renders and exits successfully without starting a benchmark.
 
-For module responsibilities, see the [source layout reference](../reference/source-layout.md).
+The [source layout reference](../reference/source-layout.md) lists what each module holds.

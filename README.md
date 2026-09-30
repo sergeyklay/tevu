@@ -6,7 +6,7 @@
 
 Find which models finish your tasks, how long they take, and what they cost.
 
-[Get started](docs/guides/run-benchmark.md) · [Documentation](docs/README.md)
+[Get started](docs/getting-started/first-comparison.md) · [Documentation](docs/README.md)
 
 </div>
 
@@ -38,7 +38,7 @@ tevu --help
 
 Without `--config`, tevu reads `tevu.yaml` from the current directory, or otherwise the configuration file in the user configuration directory; see the [CLI reference](docs/reference/cli.md) for the search order.
 
-[Create your first comparison](docs/guides/run-benchmark.md). Runs locally on Linux and macOS.
+[Create your first comparison](docs/getting-started/first-comparison.md). Runs locally on Linux and macOS.
 
 ## How It Works
 
