@@ -33,7 +33,7 @@ The [CLI reference](cli.md#configuration-file-search) lists the search order tha
 | `run.concurrency` | Integer from 1 through 32 |
 | `run.repeat` | Optional integer from 1 through 100, default `1`. Attempts per task and model entry pair, each an independent case. `tevu run --repeat <n>` overrides it for one run |
 | `run.timeout` | Duration. The default agent time limit per case. A task's `timeout` replaces it. A timed-out case skips its checks and `setup.before_checks` |
-| `run.stop_grace` | Duration. The delay between the graceful stop and the forced kill of a process group |
+| `run.stop_grace` | Duration. The delay between the graceful stop and the forced kill of a process group. It also bounds how long background processes may hold the output of an agent or command that has exited before they are force-killed |
 | `run.check_timeout` | Optional duration. The time limit of a command check that declares no `timeout` |
 
 ## Path resolution

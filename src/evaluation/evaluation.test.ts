@@ -620,8 +620,8 @@ function succeeded(
     durationMs: 12,
     timedOut: false,
     terminationStage: 'none',
-    stdout: { text: '', totalBytes: 0, truncated: false },
-    stderr: { text: '', totalBytes: 0, truncated: false },
+    stdout: { text: '', totalBytes: 0, truncated: false, incomplete: false },
+    stderr: { text: '', totalBytes: 0, truncated: false, incomplete: false },
     ...overrides,
   };
 }
@@ -990,7 +990,9 @@ describe('evaluateChecks', () => {
 
   it('fails a check whose exit code is not declared as a success exit code', async () => {
     const { adapter } = fakeEvaluatorProcess(() =>
-      succeeded(7, { stdout: { text: 'step failed', totalBytes: 11, truncated: false } }),
+      succeeded(7, {
+        stdout: { text: 'step failed', totalBytes: 11, truncated: false, incomplete: false },
+      }),
     );
     const input = buildEvaluationInput({
       checks: [commandCheck('acc-undeclared')],
@@ -1103,8 +1105,18 @@ describe('evaluateChecks', () => {
   it('redacts credential secrets from captured evidence before it leaves the module', async () => {
     const { adapter } = fakeEvaluatorProcess(() =>
       succeeded(1, {
-        stdout: { text: `token=${PROVIDER_SECRET}`, totalBytes: 40, truncated: false },
-        stderr: { text: `trace ${PARENT_SENTINEL}`, totalBytes: 30, truncated: false },
+        stdout: {
+          text: `token=${PROVIDER_SECRET}`,
+          totalBytes: 40,
+          truncated: false,
+          incomplete: false,
+        },
+        stderr: {
+          text: `trace ${PARENT_SENTINEL}`,
+          totalBytes: 30,
+          truncated: false,
+          incomplete: false,
+        },
       }),
     );
     const input = buildEvaluationInput({
@@ -1126,7 +1138,7 @@ describe('evaluateChecks', () => {
   it('reports capture size and truncation in the evidence', async () => {
     const { adapter } = fakeEvaluatorProcess(() =>
       succeeded(0, {
-        stdout: { text: 'partial capture', totalBytes: 999, truncated: true },
+        stdout: { text: 'partial capture', totalBytes: 999, truncated: true, incomplete: false },
       }),
     );
     const input = buildEvaluationInput({

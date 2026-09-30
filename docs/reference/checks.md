@@ -45,6 +45,7 @@ Execution rules:
 - The shell is `/bin/sh` by absolute path, never looked up on `PATH`. It receives only the check's evaluator environment (see [Environment](environment.md#fixed-evaluator-environment)), so `$VAR` expands from the fixed variables and the names in `env`. Any other name expands to empty text.
 - The check passes when the exit status of the shell, which is the status of the last command it ran, is in `exit_codes`.
 - Timeout and cancellation end the whole process group, background commands included. A grace period set by `run.stop_grace` separates the graceful stop from the forced kill.
+- When the command exits on its own, background commands that still hold its stdout or stderr get up to `run.stop_grace` to finish. Any still running then are force-killed, and that stream's evidence can end early.
 - An array `run` starts its executable directly with literal arguments.
 - Checks run after the solution patch is captured, after restore and overlay, and after `setup.before_checks` when declared. They see the restored and overlaid worktree, not the state the agent left.
 
