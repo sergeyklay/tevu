@@ -46,6 +46,12 @@ PATH="/path/to/real/bin:$PATH" tevu validate
 
 Check that `agents.opencode.command` points to the intended executable and that it supports the `run`, `export`, and `models` commands and the options tevu uses. See [Agents](../reference/agents-and-models.md#agents).
 
+## Cost unavailable because the agent has no price for a model
+
+The report shows a model's cost, or the grader's cost, as unavailable, while tokens, time, and outcomes are present. The agent reported a cost of zero for a model it has no price for, and tevu did not count that zero as a measurement. Give the agent the model's prices, as described in [Give the agent the model's prices](configure-model-access.md#give-the-agent-the-models-prices), and run again.
+
+With OpenCode, the footnote reads `the copied definition of provider "<provider>" defines no price for model "<model>"`: the provider definition in your OpenCode global configuration has no `cost` for that model.
+
 ## Model or provider errors
 
 See [Make a model reachable](configure-model-access.md#fix-a-failure).
