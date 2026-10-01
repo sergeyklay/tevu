@@ -1337,6 +1337,15 @@ function isStoredEfforts(value: unknown): value is {
   );
 }
 
+function snapshotDeclaresGrader(manifest: Record<string, unknown>): boolean {
+  const context = manifest['context'];
+  if (!isRecord(context) || !isRecord(context['config'])) {
+    return false;
+  }
+  const roles = context['config']['roles'];
+  return isRecord(roles) && roles['grader'] !== undefined;
+}
+
 function describeStoredManifestDefect(manifest: unknown, runId: string): string | null {
   if (
     !isRecord(manifest) ||
@@ -1370,7 +1379,9 @@ function describeStoredManifestDefect(manifest: unknown, runId: string): string 
       typeof entry['modelId'] === 'string' &&
       !Object.hasOwn(effortModels, entry['modelId']),
   );
-  if (hasUnlistedAgent || hasUncheckedModelEntry) {
+  const hasUncheckedGrader =
+    manifest['efforts']['grader'] === null && snapshotDeclaresGrader(manifest);
+  if (hasUnlistedAgent || hasUncheckedModelEntry || hasUncheckedGrader) {
     return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
   }
   return null;

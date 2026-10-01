@@ -972,6 +972,16 @@ describe('OpenCode report regeneration matches the pinned baseline', () => {
       },
     },
     {
+      label: 'a null grader effort check while its configuration snapshot declares a grader',
+      mutate: (manifest: Record<string, unknown>) => {
+        const context = manifest['context'] as { config: Record<string, unknown> };
+        context.config['roles'] = {
+          grader: { model: 'vendor/grader-synth', effort: 'effort-high' },
+        };
+        storedEfforts(manifest)['grader'] = null;
+      },
+    },
+    {
       label: 'an invalid grader effort check',
       mutate: (manifest: Record<string, unknown>) => {
         storedEfforts(manifest)['grader'] = { status: 'unverified' };
