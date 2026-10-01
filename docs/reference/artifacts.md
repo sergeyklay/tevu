@@ -48,6 +48,7 @@ Reports link to patches, transcripts, and complete evaluator output instead of e
 - `tools.agentVersions`: one detected version per agent in use.
 - `tools.agentConfigurationFiles`: one entry per agent whose providers the run read, each holding the relative path and SHA-256 of every configuration file tevu wrote into that agent's homes, never the file's text.
 - `tools.copiedProviders`: one entry per agent whose providers the run read, each listing the copied providers and the models whose copied definition defines a price, never a price or any other part of the definition. Regeneration uses it to recompute cost.
+- `efforts`: the [effort check](agents-and-models.md#effort-check) of the validation the run followed. `efforts.models` holds one check per configured model entry ID, and `efforts.grader` holds the check of `roles.grader`, or `null` when the configuration declares no grader. A check is `{status: "verified"}`, or a `status` of `unverified` or `unsupported` with a `reason` text. The root `result.json` carries it inside its embedded manifest.
 
 ### Case identity
 
@@ -97,7 +98,7 @@ Artifacts remain until the operator deletes the run directory. There is no autom
 `tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. They refuse a run that lacks any of:
 
 - the current configuration snapshot layout;
-- `tools.agentVersions`, `tools.copiedProviders` (with an entry for every case's `agent`), `execution.repeat`, or a non-empty string `configPath` in the manifest;
+- `tools.agentVersions`, `tools.copiedProviders` (with an entry for every case's `agent`), `execution.repeat`, a non-empty string `configPath`, or `efforts` (with a valid check for every case's model entry, and a `grader` that is a valid check when the configuration snapshot declares a grader and `null` when it does not) in the manifest;
 - `agent`, `attempt`, `timeoutMs`, or `artifacts.grading` in a case result;
 - the `source` discriminator (`operator` or `grader`) in an assessment history entry.
 

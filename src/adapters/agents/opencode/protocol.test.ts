@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   decodeEvent,
   decodeExport,
+  decodeModelListing,
   eventIdentity,
   isRootSessionErrorEvent,
   listMalformedOptionalMetricFields,
@@ -390,5 +391,151 @@ describe('listMalformedOptionalMetricFields', () => {
     expect(decoded.ok).toBe(true);
     if (!decoded.ok) return;
     expect(listMalformedOptionalMetricFields(decoded.value)).toEqual([]);
+  });
+});
+
+describe('decodeModelListing', () => {
+  const FIXTURE_MODELS = [
+    'alpha/with-variants',
+    'alpha/empty-variants',
+    'alpha/no-variants',
+    'alpha/array-variants',
+    'alpha/unparsable',
+    'alpha/unterminated',
+    'beta/after-unterminated',
+    'beta/bare-identifier',
+    'beta/one-line',
+    'beta/last',
+  ];
+
+  it('lists every identifier of the verbose fixture in order', () => {
+    const decoded = decodeModelListing(readTextFixture('models-verbose.txt'));
+
+    expect(decoded.models).toEqual(FIXTURE_MODELS);
+  });
+
+  it('reports exactly the variants the fixture records declare, sorted by code unit', () => {
+    const decoded = decodeModelListing(readTextFixture('models-verbose.txt'));
+
+    expect([...decoded.variants]).toEqual([
+      ['alpha/with-variants', ['high', 'low', 'medium']],
+      ['alpha/empty-variants', []],
+      ['beta/after-unterminated', ['xhigh']],
+      ['beta/one-line', ['alpha', 'zeta']],
+      ['beta/last', ['max']],
+    ]);
+  });
+
+  it.each([
+    'alpha/no-variants',
+    'alpha/array-variants',
+    'alpha/unparsable',
+    'alpha/unterminated',
+    'beta/bare-identifier',
+  ])('reports no variant data for %s', (model) => {
+    const decoded = decodeModelListing(readTextFixture('models-verbose.txt'));
+
+    expect(decoded.variants.has(model)).toBe(false);
+  });
+
+  it('decodes CRLF line ends exactly as LF line ends', () => {
+    const lf = readTextFixture('models-verbose.txt');
+
+    const decoded = decodeModelListing(lf.replaceAll('\n', '\r\n'));
+
+    expect(decoded).toEqual(decodeModelListing(lf));
+    expect(decoded.models).toEqual(FIXTURE_MODELS);
+  });
+
+  it('returns no record content, only identifiers and variant names', () => {
+    const decoded = decodeModelListing(readTextFixture('models-verbose.txt'));
+
+    const serialized = JSON.stringify({ models: decoded.models, variants: [...decoded.variants] });
+
+    expect(serialized).not.toContain('tenant-marker-value');
+    expect(serialized).not.toContain('reasoningEffort');
+  });
+
+  it('keeps the first record that yields variant data for a repeated identifier', () => {
+    const text = [
+      'a/m',
+      '{',
+      '  "variants": {',
+      '    "first": {}',
+      '  }',
+      '}',
+      'a/m',
+      '{',
+      '  "variants": {',
+      '    "second": {}',
+      '  }',
+      '}',
+    ].join('\n');
+
+    const decoded = decodeModelListing(text);
+
+    expect(decoded.models).toEqual(['a/m']);
+    expect([...decoded.variants]).toEqual([['a/m', ['first']]]);
+  });
+
+  it('lets a later record set the variants when the first record yields none', () => {
+    const text = ['a/m', '{', '  "id": "m"', '}', 'a/m', '{"variants":{"late":{}}}'].join('\n');
+
+    const decoded = decodeModelListing(text);
+
+    expect([...decoded.variants]).toEqual([['a/m', ['late']]]);
+  });
+
+  it('never reads an indented or brace-led line as an identifier', () => {
+    const text = [
+      'a/m',
+      '{',
+      '  "variants": {',
+      '    "low": {}',
+      '  }',
+      '}',
+      '',
+      '\tstray',
+      '  stray',
+      '}',
+    ].join('\n');
+
+    const decoded = decodeModelListing(text);
+
+    expect(decoded.models).toEqual(['a/m']);
+  });
+
+  it('trims trailing spaces and tabs from an identifier but keeps inner characters', () => {
+    const decoded = decodeModelListing('a/m \t\nb/n o');
+
+    expect(decoded.models).toEqual(['a/m', 'b/n o']);
+  });
+
+  it('resumes at the line that ended an unterminated record', () => {
+    const text = ['a/m', '{', '  "variants": {', 'b/n', '{"variants":{"low":{}}}'].join('\n');
+
+    const decoded = decodeModelListing(text);
+
+    expect(decoded.models).toEqual(['a/m', 'b/n']);
+    expect([...decoded.variants]).toEqual([['b/n', ['low']]]);
+  });
+
+  it.each([
+    { name: 'empty text', text: '' },
+    { name: 'only blank lines', text: '\n\n\r\n' },
+    { name: 'a lone brace', text: '{' },
+    { name: 'a lone closing brace', text: '}' },
+    { name: 'an identifier followed by a lone brace', text: 'a/m\n{' },
+    { name: 'a null record', text: 'a/m\n{"variants":null}' },
+    { name: 'an empty one-line record', text: 'a/m\n{}' },
+    { name: 'binary garbage', text: '\u0000\u0001\ufffd{\n"\n}}{{' },
+  ])('does not throw on $name', ({ text }) => {
+    expect(() => decodeModelListing(text)).not.toThrow();
+  });
+
+  it('lists nothing and reports no variants for empty text', () => {
+    const decoded = decodeModelListing('');
+
+    expect(decoded).toEqual({ models: [], variants: new Map() });
   });
 });

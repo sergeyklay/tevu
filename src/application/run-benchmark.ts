@@ -51,6 +51,7 @@ import type {
   CheckStateRecord,
   CheckStateRequest,
   CopiedProvider,
+  EffortChecks,
   EnvironmentVariableNames,
   GitWorkspaceAdapter,
   OverlaySnapshot,
@@ -114,10 +115,14 @@ type RunBenchmarkErrorKind =
  * Each case's `timeoutMs` is its task's `timeout` when declared, otherwise
  * `defaultCaseTimeoutMs`; every case of one task shares the same value,
  * regardless of model entry, attempt, or `repeatOverride`.
+ *
+ * `plan.efforts` records `efforts.models` and the grader's check, or `null`
+ * when the configuration declares no grader; the plan reads no listing itself.
  */
 export function planBenchmark(
   config: TevuConfig,
   configPath: string,
+  efforts: EffortChecks,
   repeatOverride?: number,
 ): BenchmarkPlan {
   const repeat: RepeatSetting =
@@ -154,6 +159,7 @@ export function planBenchmark(
     defaultCaseTimeoutMs,
     terminationGraceMs: durationMs(config.run.stop_grace),
     artifactsDirectory: config.run.output_dir,
+    efforts: { models: { ...efforts.models }, grader: efforts.roles.grader ?? null },
   };
 }
 
@@ -292,6 +298,7 @@ export async function runBenchmark(
       repeat: plan.repeat,
     },
     cases: pinned.value.map((entry) => entry.identity),
+    efforts: plan.efforts,
     context: { config: plan.config, capabilities },
   };
   const started = await dependencies.artifacts.startRun(manifest);

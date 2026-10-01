@@ -43,11 +43,14 @@ export type ModelProviderInspection = { provider: string; definition: OperatorPr
 /** What checking one model found: listed or not, why no answer exists, or a cancellation. */
 export type ModelAccessOutcome =
   | {
-      status: 'listed' | 'not-listed';
+      status: 'listed';
+      /** The model's reported variant names; `null` when the listing carried no readable variant data for it. */
+      variants: readonly string[] | null;
       /** Declared variables tevu's own environment leaves unset; the check ran without them. */
       unsetVariables: readonly string[];
       retainedDirectory: string | null;
     }
+  | { status: 'not-listed'; unsetVariables: readonly string[]; retainedDirectory: string | null }
   | { status: 'provider-rejected'; findings: readonly ValidationFinding[] }
   | { status: 'listing-failed'; detail: string }
   | { status: 'cancelled' };
@@ -171,16 +174,26 @@ export async function checkModelAccess(
     case 'timed-out':
       return {
         status: 'listing-failed',
-        detail: `"${command} models" did not finish within ${listing.limitMs / 1000}s`,
+        detail: `"${command} models --verbose" did not finish within ${listing.limitMs / 1000}s`,
       };
     case 'failed':
-      return { status: 'listing-failed', detail: `"${command} models" ${listing.reason}` };
-    case 'listed':
       return {
-        status: listing.models.includes(request.model) ? 'listed' : 'not-listed',
-        unsetVariables: unset,
-        retainedDirectory: result.retainedDirectory,
+        status: 'listing-failed',
+        detail: `"${command} models --verbose" ${listing.reason}`,
       };
+    case 'listed':
+      return listing.models.includes(request.model)
+        ? {
+            status: 'listed',
+            variants: listing.variants.get(request.model) ?? null,
+            unsetVariables: unset,
+            retainedDirectory: result.retainedDirectory,
+          }
+        : {
+            status: 'not-listed',
+            unsetVariables: unset,
+            retainedDirectory: result.retainedDirectory,
+          };
   }
 }
 

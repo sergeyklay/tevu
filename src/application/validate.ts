@@ -12,6 +12,7 @@ import {
 } from '@/domain/github-reference';
 import { gradedChecksOf } from '@/evaluation/grading';
 
+import { checkEfforts } from './effort-check';
 import { buildEnvironmentVariableNames } from './environment-variable-names';
 import { listModelsInCallEnvironment } from './model-call';
 import {
@@ -73,10 +74,13 @@ export async function validateConfig(
     ...collectGraderRoleFindings(config),
     ...(await collectHostFindings(dependencies)),
     ...environmentResult.findings,
-    ...(await collectSourceFindings(config, dependencies)),
+  ];
+  const sourceResult = await collectSourceFindings(config, dependencies);
+  findings.push(
+    ...sourceResult.findings,
     ...(await collectOverlayFindings(config, dependencies)),
     ...(await collectArtifactFindings(config, dependencies)),
-  ];
+  );
 
   const probeNames = agentNamesInUse(config);
   const probeNamesSeen = new Set(probeNames);
@@ -130,16 +134,30 @@ export async function validateConfig(
     }
   }
 
-  findings.push(
-    ...(await collectModelResolutionFindings(
-      config,
-      dependencies,
-      probeNames,
-      reportedAgents,
-      capabilities,
-      environmentResult.snapshot,
-    )),
+  const resolution = await collectModelResolutionFindings(
+    config,
+    dependencies,
+    probeNames,
+    reportedAgents,
+    capabilities,
+    environmentResult.snapshot,
   );
+  findings.push(...resolution.findings);
+
+  const repositoryConfigurationEntries = new Map<string, readonly string[]>();
+  for (const name of probeNames) {
+    const adapter = agents.get(name);
+    if (adapter !== undefined) {
+      repositoryConfigurationEntries.set(name, adapter.repositoryConfigurationEntries());
+    }
+  }
+  const efforts = checkEfforts({
+    config,
+    listings: resolution.listings,
+    repositoryConfigurationEntries,
+    rootEntries: sourceResult.rootEntries,
+  });
+  findings.push(...efforts.findings);
 
   return {
     ok: true,
@@ -147,6 +165,7 @@ export async function validateConfig(
       valid: !findings.some((finding) => finding.severity === 'error'),
       findings,
       capabilities,
+      efforts: efforts.checks,
     },
   };
 }
@@ -156,7 +175,8 @@ export async function validateConfig(
  * for an agent whose capability probe and environment snapshot both
  * succeeded, lists its models in an environment built like a case agent's
  * and reports every configured model entry and role whose model the agent
- * does not list. Never starts the agent's `run` command.
+ * does not list. Returns the listings that settled as `listed`, keyed by
+ * agent name. Never starts the agent's `run` command.
  */
 async function collectModelResolutionFindings(
   config: TevuConfig,
@@ -165,8 +185,12 @@ async function collectModelResolutionFindings(
   reportedAgents: ReadonlySet<string>,
   capabilities: Record<string, AgentCapabilityReport>,
   snapshot: ParentEnvironmentSnapshot | undefined,
-): Promise<ValidationFinding[]> {
+): Promise<{
+  findings: ValidationFinding[];
+  listings: Map<string, Extract<ModelListing, { outcome: 'listed' }>>;
+}> {
   const findings: ValidationFinding[] = [];
+  const listings = new Map<string, Extract<ModelListing, { outcome: 'listed' }>>();
   for (const name of probeNames) {
     const adapter = dependencies.agents.get(name);
     if (adapter === undefined) {
@@ -189,19 +213,21 @@ async function collectModelResolutionFindings(
     ) {
       continue;
     }
-    findings.push(
-      ...(await collectAgentModelListingFindings(
-        config,
-        dependencies,
-        name,
-        adapter,
-        { secrets: agentSettings.secrets, env: agentSettings.env },
-        snapshot,
-        providers.value.configurationFiles,
-      )),
+    const listed = await collectAgentModelListingFindings(
+      config,
+      dependencies,
+      name,
+      adapter,
+      { secrets: agentSettings.secrets, env: agentSettings.env },
+      snapshot,
+      providers.value.configurationFiles,
     );
+    findings.push(...listed.findings);
+    if (listed.listing !== undefined) {
+      listings.set(name, listed.listing);
+    }
   }
-  return findings;
+  return { findings, listings };
 }
 
 /**
@@ -217,7 +243,10 @@ async function collectAgentModelListingFindings(
   agentVariables: { secrets: readonly string[]; env: readonly string[] },
   snapshot: ParentEnvironmentSnapshot,
   configurationFiles: readonly AgentConfigurationFile[],
-): Promise<ValidationFinding[]> {
+): Promise<{
+  findings: ValidationFinding[];
+  listing: Extract<ModelListing, { outcome: 'listed' }> | undefined;
+}> {
   const result = await listModelsInCallEnvironment(
     adapter,
     { snapshot, agentVariables, configurationFiles },
@@ -238,7 +267,9 @@ async function collectAgentModelListingFindings(
       message: `model listing directory could not be removed; retained at "${result.retainedDirectory}"`,
     });
   }
-  return findings;
+  const listing =
+    result.prepared && result.listing.outcome === 'listed' ? result.listing : undefined;
+  return { findings, listing };
 }
 
 function modelAgentFinding(name: string, message: string): ValidationFinding {
@@ -256,7 +287,7 @@ function describeModelListingOutcome(
     return [
       modelAgentFinding(
         name,
-        `"${command} models" did not finish within ${listing.limitMs / 1000}s in an environment built like a case agent's; the models of agent "${name}" were not checked`,
+        `"${command} models --verbose" did not finish within ${listing.limitMs / 1000}s in an environment built like a case agent's; the models of agent "${name}" were not checked`,
       ),
     ];
   }
@@ -265,7 +296,7 @@ function describeModelListingOutcome(
     return [
       modelAgentFinding(
         name,
-        `"${command} models" ${reason} in an environment built like a case agent's, so the models of agent "${name}" could not be checked`,
+        `"${command} models --verbose" ${reason} in an environment built like a case agent's, so the models of agent "${name}" could not be checked`,
       ),
     ];
   }
@@ -313,7 +344,7 @@ function unlistedModelFinding(
   return {
     severity,
     identifier,
-    message: `"${model}" is not among the models "${command} models" lists in an environment built like a case agent's; add its provider to agents.${name}.providers, or declare its credential variable in agents.${name}.secrets`,
+    message: `"${model}" is not among the models "${command} models --verbose" lists in an environment built like a case agent's; add its provider to agents.${name}.providers, or declare its credential variable in agents.${name}.secrets`,
   };
 }
 
@@ -738,13 +769,15 @@ function escapeControlCharacters(path: string): string {
  * Resolves each task's start commit, inspects its source tree, rejects a task
  * whose agent prompt names the resolved commit, a reference commit, or a
  * pull-request reference, and enforces the reference containment and
- * precedence rules against an available base.
+ * precedence rules against an available base. Also returns the root entries
+ * of every base commit that was inspected, keyed by task ID.
  */
 async function collectSourceFindings(
   config: TevuConfig,
   dependencies: ValidationDependencies,
-): Promise<ValidationFinding[]> {
+): Promise<{ findings: ValidationFinding[]; rootEntries: Map<string, readonly string[]> }> {
   const findings: ValidationFinding[] = [];
+  const rootEntries = new Map<string, readonly string[]>();
   const repositories = new Map(
     config.repositories.map((repository) => [repository.id, repository]),
   );
@@ -791,17 +824,18 @@ async function collectSourceFindings(
     if (resolvedBase === undefined) {
       continue;
     }
+    rootEntries.set(task.id, resolvedBase.rootEntries);
     findings.push(
       ...(await collectReferenceCommitFindings(
         task,
         repository,
-        resolvedBase,
+        resolvedBase.resolvedCommit,
         recorded,
         dependencies,
       )),
     );
   }
-  return findings;
+  return { findings, rootEntries };
 }
 
 /**
@@ -860,7 +894,7 @@ async function resolveTaskBaseForValidation(
   findings: ValidationFinding[],
   validated: Map<string, TevuResult<SourceValidation, 'SourceMaterializationError'>>,
   dependencies: ValidationDependencies,
-): Promise<string | undefined> {
+): Promise<SourceValidation | undefined> {
   const isFullHash = FULL_COMMIT_HASH_PATTERN.test(task.base_commit);
   if (repository.github !== undefined || (task.reference?.kind === 'pull-request' && isFullHash)) {
     const lookup = await dependencies.git.resolveCommit(repository, task.base_commit);
@@ -897,7 +931,7 @@ async function resolveTaskBaseForValidation(
   if (reason !== undefined) {
     findings.push({ severity: 'error', identifier: `tasks.${task.id}`, message: reason });
   }
-  return result.value.resolvedCommit;
+  return result.value;
 }
 
 /**

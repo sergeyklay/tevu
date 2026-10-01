@@ -68,7 +68,7 @@ if (args[0] === "export" && args[1] === "--help") {
   process.exit(0);
 }
 if (args[0] === "models" && args[1] === "--help") {
-  console.log("usage: opencode models");
+  console.log("usage: opencode models [provider] --verbose");
   process.exit(0);
 }
 `;

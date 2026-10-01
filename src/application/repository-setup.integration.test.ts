@@ -11,6 +11,7 @@ import { createEnvironmentAdapter, createEvaluatorProcessAdapter } from '@/adapt
 import { TevuConfigSchema } from '@/config/schema';
 import { unavailableMetric } from '@/domain/types';
 
+import { buildVerifiedEfforts } from './__fixtures__/effort.fixtures';
 import { planBenchmark, runBenchmark } from './run-benchmark';
 
 import type { TevuConfigInput } from '@/config/schema';
@@ -239,7 +240,10 @@ function buildDirectEditAgent(): AgentAdapter {
       return { ok: true, value: { defined: false } };
     },
     async listModels() {
-      return { outcome: 'listed', models: [] };
+      return { outcome: 'listed', models: [], variants: new Map() };
+    },
+    repositoryConfigurationEntries() {
+      return [];
     },
     async run(input) {
       const worktree = input.worktreeDirectory;
@@ -441,7 +445,12 @@ describe('repository setup orchestration end to end (AC-1, P7)', () => {
       cancellation: new AbortController().signal,
     };
 
-    const run = unwrapOk(await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies));
+    const run = unwrapOk(
+      await runBenchmark(
+        planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+        dependencies,
+      ),
+    );
 
     const caseId = 'task-1--c1--1';
     const caseResult = run.cases.find((entry) => entry.identity.caseId === caseId);

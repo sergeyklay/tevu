@@ -12,6 +12,7 @@ import { Command, CommanderError, InvalidArgumentError, Option } from 'commander
 
 import { agentNamesInUse, MAX_REPEAT, RepeatSchema } from '@/config/schema';
 import { CONFIG_TEMPLATE } from '@/config/template';
+import { effortLabel } from '@/domain/types';
 
 import { renderTevuError } from './render-error';
 import { createStatusLine } from './status-line';
@@ -43,6 +44,7 @@ import type {
   BenchmarkPlan,
   CaseLifecycle,
   CaseResult,
+  EffortChecks,
   IssueSnapshot,
   JiraTrackerSettings,
   LoadConfigErrorKind,
@@ -175,7 +177,12 @@ export type ProgramOperations = {
       | 'AgentProtocolError'
     >
   >;
-  planBenchmark(config: TevuConfig, configPath: string, repeatOverride?: number): BenchmarkPlan;
+  planBenchmark(
+    config: TevuConfig,
+    configPath: string,
+    efforts: EffortChecks,
+    repeatOverride?: number,
+  ): BenchmarkPlan;
   executeBenchmark(
     plan: BenchmarkPlan,
     hooks: BenchmarkExecutionHooks,
@@ -675,6 +682,7 @@ async function runBenchmarkCommand(
   const plan = operations.planBenchmark(
     loaded.value.config,
     loaded.value.configPath,
+    validation.value.efforts,
     options.repeat,
   );
   if (options.dryRun === true) {
@@ -801,7 +809,7 @@ function printDryRun(
   out(`Planned cases (${plan.cases.length}, execution order):`);
   for (const identity of plan.cases) {
     out(
-      `  ${identity.caseId}: task ${identity.taskId}, model entry ${identity.modelId} (${identity.model}, effort ${identity.effort}), commit ${identity.sourceCommit}, timeout ${identity.timeoutMs}ms`,
+      `  ${identity.caseId}: task ${identity.taskId}, model entry ${identity.modelId} (${identity.model}, effort ${effortLabel(identity.effort, plan.efforts.models[identity.modelId])}), commit ${identity.sourceCommit}, timeout ${identity.timeoutMs}ms`,
     );
   }
   out(

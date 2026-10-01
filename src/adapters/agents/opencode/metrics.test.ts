@@ -738,7 +738,7 @@ if (args[0] === "export" && args[1] === "--help") {
   process.exit(0);
 }
 if (args[0] === "models" && args[1] === "--help") {
-  console.log("usage: opencode models");
+  console.log("usage: opencode models [provider] --verbose");
   process.exit(0);
 }
 if (args[0] === "run") {
@@ -816,7 +816,37 @@ if (args[0] === "export" && args[1] === "--help") {
   process.exit(0);
 }
 if (args[0] === "models" && args[1] === "--help") {
-  console.log("usage: opencode models");
+  console.log("usage: opencode models [provider] --verbose");
+  process.exit(0);
+}
+process.exit(0);
+`;
+
+/**
+ * Answers the probe with a `--version` that `TEVU_SYNTH_VERSION` controls ("exit"
+ * exits 1) and a `models --help` that names `--verbose` only when
+ * `TEVU_SYNTH_VERBOSE` is "yes".
+ */
+const SYNTHETIC_VERSIONED_SCRIPT = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const version = process.env["TEVU_SYNTH_VERSION"] ?? "";
+if (args[0] === "--version") {
+  if (version === "exit") { process.exit(1); }
+  console.log(version);
+  process.exit(0);
+}
+if (args[0] === "--help") { console.log("usage: versioned-opencode <command>"); process.exit(0); }
+if (args[0] === "run" && args[1] === "--help") {
+  console.log("usage: opencode run --format json --model <model> --variant <variant> <prompt>");
+  process.exit(0);
+}
+if (args[0] === "export" && args[1] === "--help") {
+  console.log("usage: opencode export <session-id>");
+  process.exit(0);
+}
+if (args[0] === "models" && args[1] === "--help") {
+  const verbose = process.env["TEVU_SYNTH_VERBOSE"] === "yes";
+  console.log(verbose ? "usage: opencode models [provider] --verbose" : "usage: opencode models [provider]");
   process.exit(0);
 }
 process.exit(0);
@@ -949,6 +979,7 @@ describe('OpenCode adapter over a synthetic executable', () => {
       { name: 'run command', required: true, availability: 'available' },
       { name: 'export command', required: true, availability: 'available' },
       { name: 'models command', required: true, availability: 'available' },
+      { name: 'models --verbose', required: true, availability: 'available' },
       { name: 'run --format json', required: true, availability: 'available' },
       { name: 'run --model', required: true, availability: 'available' },
       { name: 'run --variant', required: true, availability: 'available' },
@@ -2045,42 +2076,126 @@ describe('OpenCode adapter listModels over an injected fake process', () => {
     expect(listing).toEqual({ outcome: 'timed-out', limitMs: 120_000 });
   });
 
-  it('lists every stdout line trimmed and stripped of a trailing carriage return, dropping empty lines', async () => {
-    const adapter = createOpenCodeAdapter(
-      {
-        agent: 'opencode',
-        executable: 'fake-opencode',
-        providers: [],
-        declaredVariables: { secrets: [], env: [] },
-      },
-      buildDependencies({
-        runProcess: buildFixedResultRunner({
-          launched: true,
-          exitCode: 0,
-          signal: null,
-          startedAt: '2026-01-01T00:00:00.000Z',
-          endedAt: '2026-01-01T00:00:01.000Z',
-          durationMs: 1000,
-          timedOut: false,
-          cancelled: false,
-          terminationStage: 'none',
+  it('lists every identifier trimmed and stripped of a trailing carriage return, dropping empty lines', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: buildFixedResultRunner(
+        buildCompletion({
           stdout: {
             text: 'acme/model-a\r\n\nacme/model-b\r\n   \nacme/model-c',
             totalBytes: 50,
             truncated: false,
             incomplete: false,
           },
-          stderr: { text: '', totalBytes: 0, truncated: false, incomplete: false },
         }),
-      }),
-    );
+      ),
+    });
 
     const listing = await adapter.listModels(buildModelCallEnvironment());
 
     expect(listing).toEqual({
       outcome: 'listed',
       models: ['acme/model-a', 'acme/model-b', 'acme/model-c'],
+      variants: new Map(),
     });
+  });
+
+  it('lists the identifiers and variant names the verbose fixture reports', async () => {
+    const text = readTextFixture('models-verbose.txt');
+    const adapter = buildOpenCodeAdapter({
+      runProcess: buildFixedResultRunner(
+        buildCompletion({
+          stdout: { text, totalBytes: text.length, truncated: false, incomplete: false },
+        }),
+      ),
+    });
+
+    const listing = await adapter.listModels(buildModelCallEnvironment());
+
+    expect(listing).toEqual({
+      outcome: 'listed',
+      models: [
+        'alpha/with-variants',
+        'alpha/empty-variants',
+        'alpha/no-variants',
+        'alpha/array-variants',
+        'alpha/unparsable',
+        'alpha/unterminated',
+        'beta/after-unterminated',
+        'beta/bare-identifier',
+        'beta/one-line',
+        'beta/last',
+      ],
+      variants: new Map([
+        ['alpha/with-variants', ['high', 'low', 'medium']],
+        ['alpha/empty-variants', []],
+        ['beta/after-unterminated', ['xhigh']],
+        ['beta/one-line', ['alpha', 'zeta']],
+        ['beta/last', ['max']],
+      ]),
+    });
+  });
+
+  it('maps an incomplete capture to a failed outcome naming the unread output', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: buildFixedResultRunner(
+        buildCompletion({
+          stdout: { text: 'acme/model-a', totalBytes: 12, truncated: false, incomplete: true },
+        }),
+      ),
+    });
+
+    const listing = await adapter.listModels(buildModelCallEnvironment());
+
+    expect(listing).toEqual({
+      outcome: 'failed',
+      reason: 'prints output tevu could not read to its end',
+    });
+  });
+
+  it('keeps the truncation reason when a capture is both truncated and incomplete', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: buildFixedResultRunner(
+        buildCompletion({
+          stdout: { text: '', totalBytes: 99_999_999, truncated: true, incomplete: true },
+        }),
+      ),
+    });
+
+    const listing = await adapter.listModels(buildModelCallEnvironment());
+
+    expect(listing).toEqual({ outcome: 'failed', reason: 'prints more than 16777216 bytes' });
+  });
+
+  it('runs the verbose listing with file-backed stdout', async () => {
+    const requests: ManagedProcessRequest[] = [];
+    const adapter = buildOpenCodeAdapter({ runProcess: buildFakeRunner('acme/model-a', requests) });
+
+    await adapter.listModels(buildModelCallEnvironment());
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.argv).toEqual(['fake-opencode', 'models', '--verbose']);
+    expect(requests[0]?.stdoutTarget).toBe('file');
+  });
+});
+
+describe('OpenCode adapter repositoryConfigurationEntries', () => {
+  it('names the top-level entries OpenCode reads configuration from', () => {
+    const adapter = buildOpenCodeAdapter();
+
+    expect(adapter.repositoryConfigurationEntries()).toEqual([
+      '.opencode',
+      'opencode.json',
+      'opencode.jsonc',
+    ]);
+  });
+
+  it('starts no process', () => {
+    const requests: ManagedProcessRequest[] = [];
+    const adapter = buildOpenCodeAdapter({ runProcess: buildFakeRunner('', requests) });
+
+    adapter.repositoryConfigurationEntries();
+
+    expect(requests).toEqual([]);
   });
 });
 
@@ -2126,7 +2241,7 @@ describe('OpenCode adapter listModels cancellation over an injected fake process
     await adapter.listModels(buildModelCallEnvironment(), cancellation);
 
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.argv).toEqual(['fake-opencode', 'models']);
+    expect(requests[0]?.argv).toEqual(['fake-opencode', 'models', '--verbose']);
     expect(requests[0]?.cancellation).toBe(cancellation);
   });
 
@@ -2591,6 +2706,83 @@ describe('OpenCode adapter models command capability probe', () => {
       throw new Error(`expected a probe-phase protocol error, got ${JSON.stringify(probe)}`);
     }
     expect(probe.error.reason).toContain('models command');
+  });
+});
+
+describe('OpenCode adapter models --verbose capability probe', () => {
+  const VERSION_ANSWERS = ['1.0.0', '99.0.0', 'exit'];
+  let versionedExecutable: string;
+
+  beforeAll(async () => {
+    versionedExecutable = await writeExecutable(
+      'synthetic-opencode-versioned.mjs',
+      SYNTHETIC_VERSIONED_SCRIPT,
+    );
+  });
+
+  function probeVersioned(version: string, verbose: 'yes' | 'no') {
+    const adapter = createOpenCodeAdapter(
+      {
+        agent: 'opencode',
+        executable: versionedExecutable,
+        providers: [],
+        declaredVariables: { secrets: [], env: [] },
+      },
+      buildDependencies({
+        probeEnvironment: {
+          PATH: process.env['PATH'] ?? '',
+          TEVU_SYNTH_VERSION: version,
+          TEVU_SYNTH_VERBOSE: verbose,
+        },
+      }),
+    );
+    return adapter.probe();
+  }
+
+  it('fails the probe naming models --verbose when models --help lacks --verbose', async () => {
+    const probe = await probeVersioned('1.0.0', 'no');
+
+    expect(probe.ok).toBe(false);
+    if (probe.ok || probe.error.kind !== 'AgentProtocolError') {
+      throw new Error(`expected a probe-phase protocol error, got ${JSON.stringify(probe)}`);
+    }
+    expect(probe.error.reason).toBe(
+      'configured OpenCode executable is missing required capabilities: models --verbose',
+    );
+  });
+
+  it('reports models --verbose as a required, available capability when models --help names it', async () => {
+    const probe = await probeVersioned('1.0.0', 'yes');
+
+    expect(probe.ok).toBe(true);
+    if (!probe.ok) return;
+    expect(probe.value.capabilities).toContainEqual({
+      name: 'models --verbose',
+      required: true,
+      availability: 'available',
+    });
+  });
+
+  it.each(['yes', 'no'] as const)(
+    'gives the same probe result for every version answer when --verbose help is %s',
+    async (verbose) => {
+      const probes = await Promise.all(
+        VERSION_ANSWERS.map((version) => probeVersioned(version, verbose)),
+      );
+
+      const results = probes.map((probe) => (probe.ok ? probe.value.capabilities : probe.error));
+      expect(results[1]).toEqual(results[0]);
+      expect(results[2]).toEqual(results[0]);
+    },
+  );
+
+  it('still reads the version as provenance only', async () => {
+    const probes = await Promise.all(
+      VERSION_ANSWERS.map((version) => probeVersioned(version, 'yes')),
+    );
+
+    const versions = probes.map((probe) => (probe.ok ? probe.value.detectedVersion : undefined));
+    expect(versions).toEqual(['1.0.0', '99.0.0', null]);
   });
 });
 

@@ -146,7 +146,8 @@ const AGENTS_REGISTRY: AgentRegistry = new Map<string, AgentAdapter>([
           value: { agent: AGENT_NAME, configurationFiles: [], findings: [], copiedProviders: [] },
         }),
       inspectOperatorProvider: () => Promise.resolve({ ok: true, value: { defined: false } }),
-      listModels: () => Promise.resolve({ outcome: 'listed', models: [] }),
+      listModels: () => Promise.resolve({ outcome: 'listed', models: [], variants: new Map() }),
+      repositoryConfigurationEntries: () => [],
       run: () => Promise.reject(new Error('unused in report regeneration')),
       exportSession: () => Promise.reject(new Error('unused in report regeneration')),
       normalizeMetrics(input) {
@@ -408,6 +409,16 @@ function buildCapabilityReport(
   };
 }
 
+function buildEfforts(
+  modelIds: readonly string[] = ['alpha'],
+  grader: RunManifest['efforts']['grader'] = null,
+): RunManifest['efforts'] {
+  return {
+    models: Object.fromEntries(modelIds.map((id) => [id, { status: 'verified' as const }])),
+    grader,
+  };
+}
+
 function buildManifest(
   runId: string,
   config: TevuConfig,
@@ -433,6 +444,10 @@ function buildManifest(
       caseTimeoutMs: 60_000,
       repeat: { value: config.run.repeat, source: 'config' },
     },
+    efforts: buildEfforts(
+      config.models.map((entry) => entry.id),
+      config.roles?.grader === undefined ? null : { status: 'verified' },
+    ),
     cases: caseIds.map((caseId) => {
       const [taskId, modelId, attempt] = caseId.split('--') as [string, string, string];
       const model = config.models.find((entry) => entry.id === modelId);
@@ -1689,7 +1704,7 @@ describe('unavailableBenchmarkMetrics', () => {
 });
 
 const GOLDEN_NORMALIZED_JSON =
-  '{\n  "assessments": [],\n  "capabilities": {},\n  "cases": [\n    {\n      "artifacts": {\n        "assessment": null,\n        "checks": null,\n        "diagnostics": null,\n        "events": null,\n        "grading": null,\n        "result": "cases/task-1--alpha--1/result.json",\n        "sessionExport": null,\n        "solutionPatch": null\n      },\n      "checks": [],\n      "failure": null,\n      "identity": {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-1--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-1",\n        "timeoutMs": 1000\n      },\n      "lifecycle": "completed",\n      "metrics": {\n        "apiCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "apiErrors": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "cacheReadTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cacheWriteTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cost": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "USD",\n          "value": null\n        },\n        "elapsed": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "case",\n          "unit": "millisecond",\n          "value": null\n        },\n        "inputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "outputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "reasoningTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "skillCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "toolCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "turns": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        }\n      },\n      "outcome": "passed",\n      "process": {\n        "durationMs": 1500,\n        "endedAt": "2026-09-23T00:00:01.500Z",\n        "exitCode": 0,\n        "signal": null,\n        "startedAt": "2026-09-23T00:00:00.000Z",\n        "terminationStage": "none"\n      },\n      "schemaVersion": 1\n    },\n    {\n      "artifacts": {\n        "assessment": null,\n        "checks": null,\n        "diagnostics": null,\n        "events": null,\n        "grading": null,\n        "result": "cases/task-2--alpha--1/result.json",\n        "sessionExport": null,\n        "solutionPatch": null\n      },\n      "checks": [],\n      "failure": null,\n      "identity": {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-2--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-2",\n        "timeoutMs": 1000\n      },\n      "lifecycle": "completed",\n      "metrics": {\n        "apiCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "apiErrors": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "cacheReadTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cacheWriteTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cost": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "USD",\n          "value": null\n        },\n        "elapsed": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "case",\n          "unit": "millisecond",\n          "value": null\n        },\n        "inputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "outputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "reasoningTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "skillCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "toolCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "turns": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        }\n      },\n      "outcome": "passed",\n      "process": {\n        "durationMs": 1500,\n        "endedAt": "2026-09-23T00:00:01.500Z",\n        "exitCode": 0,\n        "signal": null,\n        "startedAt": "2026-09-23T00:00:00.000Z",\n        "terminationStage": "none"\n      },\n      "schemaVersion": 1\n    }\n  ],\n  "exitCode": 0,\n  "findings": [],\n  "graders": [],\n  "gradings": [],\n  "manifest": {\n    "cases": [\n      {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-1--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-1",\n        "timeoutMs": 1000\n      },\n      {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-2--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-2",\n        "timeoutMs": 1000\n      }\n    ],\n    "completedAt": "2026-01-01T00:05:00.000Z",\n    "configDigest": "sha256-golden-digest",\n    "configPath": "/synthetic/tevu.yaml",\n    "execution": {\n      "caseTimeoutMs": 1000,\n      "concurrency": 1,\n      "repeat": {\n        "source": "config",\n        "value": 1\n      }\n    },\n    "host": {\n      "nodeVersion": "v24.21.0",\n      "platform": "linux"\n    },\n    "runId": "20260101t000000z-golden",\n    "schemaVersion": 1,\n    "startedAt": "2026-01-01T00:00:00.000Z",\n    "tools": {\n      "agentConfigurationFiles": {},\n      "agentVersions": {\n        "opencode": null\n      },\n      "copiedProviders": {},\n      "gitVersion": "git version 2.45.0"\n    }\n  },\n  "models": [],\n  "pairs": [\n    {\n      "allPassed": true,\n      "modelId": "alpha",\n      "outcomes": {\n        "failed": 0,\n        "not-evaluated": 0,\n        "passed": 1,\n        "pending": 0\n      },\n      "passedOfPlanned": "1/1",\n      "planned": 1,\n      "taskId": "task-1"\n    },\n    {\n      "allPassed": true,\n      "modelId": "alpha",\n      "outcomes": {\n        "failed": 0,\n        "not-evaluated": 0,\n        "passed": 1,\n        "pending": 0\n      },\n      "passedOfPlanned": "1/1",\n      "planned": 1,\n      "taskId": "task-2"\n    }\n  ],\n  "repositories": [],\n  "schemaVersion": 1,\n  "tasks": [\n    {\n      "checks": [\n        {\n          "category": "acceptance",\n          "description": "acceptance command exits zero",\n          "evaluator": "command",\n          "id": "acc-acceptance-command",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "manual Definition of Done review",\n          "evaluator": "manual",\n          "id": "dod-manual-review",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "optional manual polish review",\n          "evaluator": "manual",\n          "id": "man-optional-polish",\n          "required": false\n        }\n      ],\n      "description": "synthetic task description for the welcome route",\n      "id": "task-1",\n      "repositoryId": "repo-1",\n      "source": {\n        "kind": "manual",\n        "reference": null,\n        "title": "Synthetic welcome-route task"\n      },\n      "startCommit": "0123456789abcdef0123456789abcdef01234567"\n    },\n    {\n      "checks": [\n        {\n          "category": "acceptance",\n          "description": "acceptance command exits zero",\n          "evaluator": "command",\n          "id": "acc-acceptance-command",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "manual Definition of Done review",\n          "evaluator": "manual",\n          "id": "dod-manual-review",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "optional manual polish review",\n          "evaluator": "manual",\n          "id": "man-optional-polish",\n          "required": false\n        }\n      ],\n      "description": "synthetic task description for the welcome route",\n      "id": "task-2",\n      "repositoryId": "repo-1",\n      "source": {\n        "issueKey": "TEVU-999",\n        "issueUrl": "https://jira.example.com/browse/TEVU-999",\n        "kind": "jira-cloud"\n      },\n      "startCommit": "0123456789abcdef0123456789abcdef01234567"\n    }\n  ]\n}\n';
+  '{\n  "assessments": [],\n  "capabilities": {},\n  "cases": [\n    {\n      "artifacts": {\n        "assessment": null,\n        "checks": null,\n        "diagnostics": null,\n        "events": null,\n        "grading": null,\n        "result": "cases/task-1--alpha--1/result.json",\n        "sessionExport": null,\n        "solutionPatch": null\n      },\n      "checks": [],\n      "failure": null,\n      "identity": {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-1--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-1",\n        "timeoutMs": 1000\n      },\n      "lifecycle": "completed",\n      "metrics": {\n        "apiCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "apiErrors": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "cacheReadTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cacheWriteTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cost": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "USD",\n          "value": null\n        },\n        "elapsed": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "case",\n          "unit": "millisecond",\n          "value": null\n        },\n        "inputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "outputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "reasoningTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "skillCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "toolCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "turns": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        }\n      },\n      "outcome": "passed",\n      "process": {\n        "durationMs": 1500,\n        "endedAt": "2026-09-23T00:00:01.500Z",\n        "exitCode": 0,\n        "signal": null,\n        "startedAt": "2026-09-23T00:00:00.000Z",\n        "terminationStage": "none"\n      },\n      "schemaVersion": 1\n    },\n    {\n      "artifacts": {\n        "assessment": null,\n        "checks": null,\n        "diagnostics": null,\n        "events": null,\n        "grading": null,\n        "result": "cases/task-2--alpha--1/result.json",\n        "sessionExport": null,\n        "solutionPatch": null\n      },\n      "checks": [],\n      "failure": null,\n      "identity": {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-2--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-2",\n        "timeoutMs": 1000\n      },\n      "lifecycle": "completed",\n      "metrics": {\n        "apiCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "apiErrors": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "cacheReadTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cacheWriteTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cost": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "USD",\n          "value": null\n        },\n        "elapsed": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "case",\n          "unit": "millisecond",\n          "value": null\n        },\n        "inputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "outputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "reasoningTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "skillCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "toolCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "turns": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        }\n      },\n      "outcome": "passed",\n      "process": {\n        "durationMs": 1500,\n        "endedAt": "2026-09-23T00:00:01.500Z",\n        "exitCode": 0,\n        "signal": null,\n        "startedAt": "2026-09-23T00:00:00.000Z",\n        "terminationStage": "none"\n      },\n      "schemaVersion": 1\n    }\n  ],\n  "exitCode": 0,\n  "findings": [],\n  "graders": [],\n  "gradings": [],\n  "manifest": {\n    "cases": [\n      {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-1--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-1",\n        "timeoutMs": 1000\n      },\n      {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-2--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-2",\n        "timeoutMs": 1000\n      }\n    ],\n    "completedAt": "2026-01-01T00:05:00.000Z",\n    "configDigest": "sha256-golden-digest",\n    "configPath": "/synthetic/tevu.yaml",\n    "efforts": {\n      "grader": null,\n      "models": {\n        "alpha": {\n          "status": "verified"\n        }\n      }\n    },\n    "execution": {\n      "caseTimeoutMs": 1000,\n      "concurrency": 1,\n      "repeat": {\n        "source": "config",\n        "value": 1\n      }\n    },\n    "host": {\n      "nodeVersion": "v24.21.0",\n      "platform": "linux"\n    },\n    "runId": "20260101t000000z-golden",\n    "schemaVersion": 1,\n    "startedAt": "2026-01-01T00:00:00.000Z",\n    "tools": {\n      "agentConfigurationFiles": {},\n      "agentVersions": {\n        "opencode": null\n      },\n      "copiedProviders": {},\n      "gitVersion": "git version 2.45.0"\n    }\n  },\n  "models": [],\n  "pairs": [\n    {\n      "allPassed": true,\n      "modelId": "alpha",\n      "outcomes": {\n        "failed": 0,\n        "not-evaluated": 0,\n        "passed": 1,\n        "pending": 0\n      },\n      "passedOfPlanned": "1/1",\n      "planned": 1,\n      "taskId": "task-1"\n    },\n    {\n      "allPassed": true,\n      "modelId": "alpha",\n      "outcomes": {\n        "failed": 0,\n        "not-evaluated": 0,\n        "passed": 1,\n        "pending": 0\n      },\n      "passedOfPlanned": "1/1",\n      "planned": 1,\n      "taskId": "task-2"\n    }\n  ],\n  "repositories": [],\n  "schemaVersion": 1,\n  "tasks": [\n    {\n      "checks": [\n        {\n          "category": "acceptance",\n          "description": "acceptance command exits zero",\n          "evaluator": "command",\n          "id": "acc-acceptance-command",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "manual Definition of Done review",\n          "evaluator": "manual",\n          "id": "dod-manual-review",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "optional manual polish review",\n          "evaluator": "manual",\n          "id": "man-optional-polish",\n          "required": false\n        }\n      ],\n      "description": "synthetic task description for the welcome route",\n      "id": "task-1",\n      "repositoryId": "repo-1",\n      "source": {\n        "kind": "manual",\n        "reference": null,\n        "title": "Synthetic welcome-route task"\n      },\n      "startCommit": "0123456789abcdef0123456789abcdef01234567"\n    },\n    {\n      "checks": [\n        {\n          "category": "acceptance",\n          "description": "acceptance command exits zero",\n          "evaluator": "command",\n          "id": "acc-acceptance-command",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "manual Definition of Done review",\n          "evaluator": "manual",\n          "id": "dod-manual-review",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "optional manual polish review",\n          "evaluator": "manual",\n          "id": "man-optional-polish",\n          "required": false\n        }\n      ],\n      "description": "synthetic task description for the welcome route",\n      "id": "task-2",\n      "repositoryId": "repo-1",\n      "source": {\n        "issueKey": "TEVU-999",\n        "issueUrl": "https://jira.example.com/browse/TEVU-999",\n        "kind": "jira-cloud"\n      },\n      "startCommit": "0123456789abcdef0123456789abcdef01234567"\n    }\n  ]\n}\n';
 
 const GOLDEN_MARKDOWN =
   '# tevu run 20260101t000000z-golden\n\n> **Sensitive data:** the tevu configuration file and this artifact directory can contain\n> sensitive private repository, task, Jira, model-output, and evaluator data. They rely on\n> host filesystem access controls.\n>\n> **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,\n> later Git history, host agent state, and benchmark artifacts from normal discovery.\n> It does not claim that a model with shell access cannot probe arbitrary host paths.\n\n## Run\n\n- Configuration digest: `sha256-golden-digest`\n- Started: 2026-01-01T00:00:00.000Z\n- Completed: 2026-01-01T00:05:00.000Z\n- Host: linux, Node.js v24.21.0, Git git version 2.45.0\n- Agent "opencode" version (detected provenance only): not detected\n- Agent "opencode" isolation control (deny outside worktree): not probed\n- Concurrency: 1\n- Case timeout: 1000ms\n- Repeat: 1 (source: config)\n- Run exit code: 0\n\n## Task task-1\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: manual — Synthetic welcome-route task\n\nPair summary:\n\n| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |\n|---|---|---|---|---|---|---|---|\n| alpha | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |\n\n| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|---|\n| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-1--alpha--1\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-1--alpha--1/result.json](cases/task-1--alpha--1/result.json)\n\n## Task task-2\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: Jira snapshot — [TEVU-999](https://jira.example.com/browse/TEVU-999)\n\nPair summary:\n\n| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |\n|---|---|---|---|---|---|---|---|\n| alpha | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |\n\n| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|---|\n| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-2--alpha--1\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-2--alpha--1/result.json](cases/task-2--alpha--1/result.json)\n\n---\n\nTask outcome, runtime failure, and run exit status are reported independently.\nCommand check output is configured acceptance evidence, not an additional model-quality metric.\nNo composite score or winner is computed.\n';
@@ -1787,6 +1802,7 @@ describe('deterministic report regeneration', () => {
         copiedProviders: {},
       },
       execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 1, source: 'config' } },
+      efforts: buildEfforts(),
       cases: [manualCase.identity, jiraCase.identity],
     };
     const input: ReportInput = {
@@ -1837,6 +1853,7 @@ describe('deterministic report regeneration', () => {
         copiedProviders: {},
       },
       execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 1, source: 'config' } },
+      efforts: buildEfforts(),
       cases: [githubCase.identity],
     };
     const input: ReportInput = {
@@ -1890,6 +1907,7 @@ describe('deterministic report regeneration', () => {
         copiedProviders: {},
       },
       execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 3, source: 'config' } },
+      efforts: buildEfforts(),
       cases: [passed.identity, failed.identity, notEvaluatedIdentity],
     };
     const input: ReportInput = {
@@ -1948,6 +1966,7 @@ describe('deterministic report regeneration', () => {
         copiedProviders: {},
       },
       execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 10, source: 'config' } },
+      efforts: buildEfforts(),
       cases: identities,
     };
     const findings: RunFinding[] = [
@@ -1994,6 +2013,7 @@ describe('deterministic report regeneration', () => {
         copiedProviders: {},
       },
       execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 1, source: 'config' } },
+      efforts: buildEfforts(),
       cases,
     });
     const buildInputWithCases = (cases: CaseIdentity[]): ReportInput => ({
@@ -2047,6 +2067,7 @@ describe('deterministic report regeneration', () => {
         copiedProviders: {},
       },
       execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 1, source: 'config' } },
+      efforts: buildEfforts(),
       cases: [
         buildCaseIdentity({ caseId: 'task-a--alpha--1', taskId: 'task-a', timeoutMs: 1000 }),
         buildCaseIdentity({ caseId: 'task-b--alpha--1', taskId: 'task-b', timeoutMs: 1000 }),
@@ -3203,7 +3224,10 @@ function buildGradingArtifact(overrides: Partial<GradingArtifact> = {}): Grading
   };
 }
 
-function buildGradingManifest(caseIds: readonly string[]): RunManifest {
+function buildGradingManifest(
+  caseIds: readonly string[],
+  grader: RunManifest['efforts']['grader'] = { status: 'verified' },
+): RunManifest {
   return {
     schemaVersion: 1,
     runId: '20260923t000000z-grading',
@@ -3219,6 +3243,7 @@ function buildGradingManifest(caseIds: readonly string[]): RunManifest {
       copiedProviders: {},
     },
     execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 1, source: 'config' } },
+    efforts: buildEfforts(['alpha'], grader),
     cases: caseIds.map((caseId) => buildCaseIdentity({ caseId })),
   };
 }
@@ -3285,6 +3310,109 @@ describe('grading rendered in the report', () => {
     );
     expect(markdown).toContain(
       '- Grading: [cases/task-1--alpha--1/grading.json](cases/task-1--alpha--1/grading.json)',
+    );
+  });
+
+  it.each([
+    {
+      name: 'an unverified check',
+      check: { status: 'unverified', reason: 'no variant data was reported' } as const,
+      label: 'high, unverified',
+      suffix: ': no variant data was reported',
+    },
+    {
+      name: 'an unsupported check',
+      check: { status: 'unsupported', reason: 'a grader call would use defaults' } as const,
+      label: 'high, unsupported',
+      suffix: ': a grader call would use defaults',
+    },
+    { name: 'a verified check', check: { status: 'verified' } as const, label: 'high', suffix: '' },
+    { name: 'no recorded check', check: null, label: 'high, not checked', suffix: '' },
+  ])('labels the grader effort and reason for $name', ({ check, label, suffix }) => {
+    const input: ReportInput = {
+      run: {
+        schemaVersion: 1,
+        manifest: buildGradingManifest(['task-1--alpha--1'], check),
+        cases: [
+          buildCaseResult({
+            artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'grading'])),
+          }),
+        ],
+        findings: [],
+        exitCode: 0,
+      },
+      capabilities: {},
+      tasks: [buildGradedTaskRecord()],
+      models: [],
+      repositories: [],
+      assessments: [],
+      gradings: [buildGradingArtifact()],
+    };
+
+    const markdown = buildReport(input).markdown;
+
+    expect(markdown).toContain(
+      `- Grader: openai/grader-model (effort ${label}, agent fake-agent)${suffix}\n`,
+    );
+    expect(markdown).toContain(
+      `Grades by openai/grader-model (effort ${label}, agent fake-agent):\n`,
+    );
+  });
+
+  it('keeps the grader check out of the model entry lines and case labels', () => {
+    const input: ReportInput = {
+      run: {
+        schemaVersion: 1,
+        manifest: buildGradingManifest(['task-1--alpha--1'], {
+          status: 'unsupported',
+          reason: 'grader-only reason',
+        }),
+        cases: [
+          buildCaseResult({
+            artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'grading'])),
+          }),
+        ],
+        findings: [],
+        exitCode: 0,
+      },
+      capabilities: {},
+      tasks: [buildGradedTaskRecord()],
+      models: [{ id: 'alpha', model: 'vendor/model-alpha-synth', effort: 'effort-high' }],
+      repositories: [],
+      assessments: [],
+      gradings: [buildGradingArtifact()],
+    };
+
+    const markdown = buildReport(input).markdown;
+
+    expect(markdown).toContain(
+      '- Model entry alpha: vendor/model-alpha-synth, effort effort-high, verified\n',
+    );
+    expect(markdown).toContain('| effort-high |');
+    expect(markdown).not.toContain('effort-high, unsupported');
+  });
+
+  it('does not read an inherited property as the check of a model entry id', () => {
+    const input: ReportInput = {
+      run: {
+        schemaVersion: 1,
+        manifest: buildGradingManifest(['task-1--alpha--1']),
+        cases: [buildCaseResult()],
+        findings: [],
+        exitCode: 0,
+      },
+      capabilities: {},
+      tasks: [buildGradedTaskRecord()],
+      models: [{ id: 'constructor', model: 'vendor/model-ctor-synth', effort: 'e' }],
+      repositories: [],
+      assessments: [],
+      gradings: [],
+    };
+
+    const markdown = buildReport(input).markdown;
+
+    expect(markdown).toContain(
+      '- Model entry constructor: vendor/model-ctor-synth, effort e, not checked\n',
     );
   });
 

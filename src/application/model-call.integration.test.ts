@@ -119,7 +119,7 @@ if (args[0] === "export" && args[1] === "--help") {
   process.exit(0);
 }
 if (args[0] === "models" && args[1] === "--help") {
-  console.log("usage: opencode models");
+  console.log("usage: opencode models [provider] --verbose");
   process.exit(0);
 }
 `;
@@ -895,7 +895,11 @@ describe('listModelsInCallEnvironment', () => {
 
   function buildListingAgent(
     spies: Spies,
-    listing: ModelListing = { outcome: 'listed', models: ['acme/model-a'] },
+    listing: ModelListing = {
+      outcome: 'listed',
+      models: ['acme/model-a'],
+      variants: new Map(),
+    },
   ): AgentAdapter {
     // The function under test calls only `listModels`.
     return {
@@ -976,7 +980,7 @@ describe('listModelsInCallEnvironment', () => {
 
     expect(outcome).toEqual({
       prepared: true,
-      listing: { outcome: 'listed', models: ['acme/model-a'] },
+      listing: { outcome: 'listed', models: ['acme/model-a'], variants: new Map() },
       retainedDirectory: '/synthetic/call-root',
     });
   });
@@ -1075,7 +1079,7 @@ describe('listModelsInCallEnvironment', () => {
           join(environment.homeDirectory, '.config', 'opencode', 'opencode.json'),
           'utf8',
         );
-        return { outcome: 'listed', models: [] };
+        return { outcome: 'listed', models: [], variants: new Map() };
       },
     } as unknown as AgentAdapter;
 

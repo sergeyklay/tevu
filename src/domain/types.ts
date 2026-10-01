@@ -205,7 +205,12 @@ export type AgentConfigurationFileRecord = { path: string; sha256: string };
 
 /** Outcome of one model listing; `reason` never carries process output. */
 export type ModelListing =
-  | { outcome: 'listed'; models: readonly string[] }
+  | {
+      outcome: 'listed';
+      models: readonly string[];
+      /** Per listed model identifier, its reported variant names in ascending UTF-16 code-unit order; a listed model without a key reported no readable variant data. */
+      variants: ReadonlyMap<string, readonly string[]>;
+    }
   | { outcome: 'timed-out'; limitMs: number }
   | { outcome: 'failed'; reason: string }
   | { outcome: 'cancelled' };
@@ -302,6 +307,36 @@ export type ModelRoleName = 'criteria' | 'grader';
 
 /** One resolved model role: a model entry without `id`, with `agent` materialized. */
 export type ModelRole = Omit<ModelDefinition, 'id'>;
+
+/** Outcome of checking one requested effort against the variants its agent reports for the model. */
+export type EffortCheck =
+  | { status: 'verified' }
+  | { status: 'unverified'; reason: string }
+  | { status: 'unsupported'; reason: string };
+
+/** The effort checks of one validation: every configured model entry and every declared role. */
+export type EffortChecks = {
+  /** Exactly one key per configured model entry ID. */
+  models: Record<string, EffortCheck>;
+  /** Exactly one key per declared role. */
+  roles: Partial<Record<ModelRoleName, EffortCheck>>;
+};
+
+/** The effort checks one run records. */
+type RunEffortChecks = {
+  /** Exactly one key per configured model entry ID. */
+  models: Record<string, EffortCheck>;
+  /** The check of `roles.grader`; `null` when the configuration declares no grader. */
+  grader: EffortCheck | null;
+};
+
+/** Renders an effort for run and report output together with its check. */
+export function effortLabel(effort: string, check: EffortCheck | null | undefined): string {
+  if (check === null || check === undefined) {
+    return `${effort}, not checked`;
+  }
+  return check.status === 'verified' ? effort : `${effort}, ${check.status}`;
+}
 
 /** One-time tracker import snapshot stored on a task. */
 type ImportedTaskSource = {
@@ -497,6 +532,8 @@ export type RunManifest = {
     repeat: RepeatSetting;
   };
   cases: CaseIdentity[];
+  /** The effort checks of the validation the run followed; `report` and `assess` refuse a manifest without them. */
+  efforts: RunEffortChecks;
   context?: {
     /** Decode through `decodeRunConfig`; never read directly as a `TevuConfig`. */
     config: unknown;
@@ -699,6 +736,8 @@ export type SourceValidation = {
   repositoryId: string;
   requestedCommit: string;
   resolvedCommit: string;
+  /** The first path segment of every path in the resolved commit's tree, ascending UTF-16 code-unit order, no repeats. */
+  rootEntries: string[];
 };
 
 /** One sealed case workspace: private repository, worktree, and runtime directory. */
@@ -1112,6 +1151,8 @@ export interface AgentAdapter {
   ): Promise<TevuResult<OperatorProvider, 'ConfigValidationError'>>;
   /** Lists every model the agent resolves in `environment`, without starting a model session. */
   listModels(environment: ModelCallEnvironment, cancellation?: AbortSignal): Promise<ModelListing>;
+  /** Names of top-level worktree entries through which the agent reads configuration from the repository it works in; pure, starts no process. */
+  repositoryConfigurationEntries(): readonly string[];
   run(
     input: AgentRunInput,
   ): Promise<
@@ -1438,6 +1479,7 @@ export type ValidationReport = {
   valid: boolean;
   findings: ValidationFinding[];
   capabilities: Record<string, AgentCapabilityReport>;
+  efforts: EffortChecks;
 };
 
 /** Deterministic attempt-major execution plan derived purely from configuration. */
@@ -1452,6 +1494,7 @@ export type BenchmarkPlan = {
   defaultCaseTimeoutMs: number;
   terminationGraceMs: number;
   artifactsDirectory: string;
+  efforts: RunEffortChecks;
 };
 
 /** Effects injected into the benchmark orchestration use case. */

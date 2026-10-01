@@ -1,0 +1,71 @@
+alpha/with-variants
+{
+  "id": "with-variants",
+  "providerID": "alpha",
+  "name": "With variants",
+  "headers": {
+    "x-tenant": "tenant-marker-value"
+  },
+  "variants": {
+    "medium": {
+      "reasoningEffort": "medium"
+    },
+    "low": {
+      "reasoningEffort": "low"
+    },
+    "high": {
+      "reasoningEffort": "high"
+    }
+  }
+}
+alpha/empty-variants
+{
+  "id": "empty-variants",
+  "providerID": "alpha",
+  "name": "Empty variants",
+  "variants": {}
+}
+alpha/no-variants
+{
+  "id": "no-variants",
+  "providerID": "alpha",
+  "name": "No variants"
+}
+alpha/array-variants
+{
+  "id": "array-variants",
+  "providerID": "alpha",
+  "variants": [
+    "low",
+    "high"
+  ]
+}
+alpha/unparsable
+{
+  "id": "unparsable",
+  "variants": {
+    "low":
+  }
+}
+alpha/unterminated
+{
+  "id": "unterminated",
+  "variants": {
+    "low": {}
+beta/after-unterminated
+{
+  "id": "after-unterminated",
+  "variants": {
+    "xhigh": {}
+  }
+}
+beta/bare-identifier
+beta/one-line
+{"id":"one-line","variants":{"zeta":{},"alpha":{}}}
+beta/last
+{
+  "id": "last",
+  "variants": {
+    "max": {}
+  }
+}

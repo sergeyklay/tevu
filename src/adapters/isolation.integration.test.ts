@@ -546,6 +546,7 @@ describe('sealed Git case materialization', () => {
         repositoryId: 'repo-1',
         requestedCommit: repository.commit,
         resolvedCommit: repository.commit,
+        rootEntries: ['assets', 'docs', 'scripts', 'src'],
       },
     });
     expect(rejected.ok).toBe(false);
@@ -553,6 +554,33 @@ describe('sealed Git case materialization', () => {
       expect(rejected.error.kind).toBe('SourceMaterializationError');
       expect(rejected.error.taskId).toBe('repo-1');
     }
+  });
+
+  it('reports the sorted top-level entries of the base tree as rootEntries', async () => {
+    const repositoryPath = await createBaseRepository('root-entries-source');
+    await writeTextFiles(repositoryPath, {
+      '.opencode/plugin/a.ts': 'export {};\n',
+      '.opencode/agents/b.md': 'agent\n',
+      'src/opencode.json': '{}\n',
+      'b/c/d.txt': 'nested\n',
+    });
+    await symlink('src/opencode.json', join(repositoryPath, 'opencode.json'));
+    const commit = await commitAll(repositoryPath, 'synthetic root entries commit');
+
+    const validated = await createGitAdapter().validateSource(
+      { id: 'repo-1', path: repositoryPath },
+      commit,
+    );
+
+    expect(validated).toEqual({
+      ok: true,
+      value: {
+        repositoryId: 'repo-1',
+        requestedCommit: commit,
+        resolvedCommit: commit,
+        rootEntries: ['.opencode', 'README.md', 'b', 'opencode.json', 'src'],
+      },
+    });
   });
 
   it('names the path when the repository path is not a Git repository', async () => {
@@ -995,7 +1023,12 @@ describe('unsupported source rejection', () => {
 
     expect(result).toEqual({
       ok: true,
-      value: { repositoryId: 'repo-1', requestedCommit: commit, resolvedCommit: commit },
+      value: {
+        repositoryId: 'repo-1',
+        requestedCommit: commit,
+        resolvedCommit: commit,
+        rootEntries: ['README.md', 'docs', 'notes', 'src'],
+      },
     });
     expect(after).toEqual(before);
   });
@@ -1016,7 +1049,12 @@ describe('unsupported source rejection', () => {
 
     expect(result).toEqual({
       ok: true,
-      value: { repositoryId: 'repo-1', requestedCommit: commit, resolvedCommit: commit },
+      value: {
+        repositoryId: 'repo-1',
+        requestedCommit: commit,
+        resolvedCommit: commit,
+        rootEntries: ['.gitattributes', 'README.md'],
+      },
     });
     expect(after).toEqual(before);
   });
@@ -1059,6 +1097,7 @@ describe('Git LFS pointer entries in a source tree', () => {
         repositoryId: 'repo-1',
         requestedCommit: source.commit,
         resolvedCommit: source.commit,
+        rootEntries: ['README.md', 'assets', 'bin', 'shared', 'src', 'we:ird.txt'],
       },
     });
     expect({
@@ -3037,7 +3076,10 @@ function buildTrivialAgentAdapter(): AgentAdapter {
       return { ok: true, value: { defined: false } };
     },
     async listModels() {
-      return { outcome: 'listed', models: [] };
+      return { outcome: 'listed', models: [], variants: new Map() };
+    },
+    repositoryConfigurationEntries() {
+      return [];
     },
     async run(input: AgentRunInput): Promise<TevuResult<AgentRunResult, never>> {
       const value: AgentRunResult = {
@@ -3223,7 +3265,13 @@ describe('file-backed artifact store with repeated attempts (AC-13)', () => {
       cancellation: new AbortController().signal,
     };
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, {
+        models: { m1: { status: 'verified' }, m2: { status: 'verified' } },
+        roles: {},
+      }),
+      dependencies,
+    );
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;

@@ -46,8 +46,11 @@ if (args[0] === 'export' && args[1] === '--help') {
   process.exit(0);
 }
 if (args[0] === 'models' && args[1] === '--help') {
-  console.log('usage: opencode models');
+  console.log('usage: opencode models [provider] --verbose');
   process.exit(0);
+}
+if (args[0] === 'models' && args[1] !== '--verbose') {
+  process.exit(3);
 }
 if (args[0] === 'models') {
   const xdg = process.env.XDG_CONFIG_HOME ?? '';
@@ -57,6 +60,7 @@ if (args[0] === 'models') {
   } catch {}
   writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({
     pid: process.pid,
+    argv: args,
     xdg,
     cwd: process.cwd(),
     hasGit: existsSync(join(process.cwd(), '.git')),
@@ -67,7 +71,7 @@ if (args[0] === 'models') {
       ? 'setInterval(() => {}, 1000);'
       : behavior === 'exit-3'
         ? "console.error('synthetic listing failure'); process.exit(3);"
-        : "console.log(['builtin/model-z', ...providers.map((id) => id + '/model-a')].join('\\n')); process.exit(0);"
+        : "console.log(['builtin/model-z', ...providers.flatMap((id) => [id + '/model-a', JSON.stringify({ id: 'model-a', variants: { low: {}, high: {} } }, null, 2), id + '/model-empty', JSON.stringify({ id: 'model-empty', variants: {} }, null, 2)])].join('\\n')); process.exit(0);"
   }
 } else {
   process.exit(3);
@@ -76,6 +80,7 @@ if (args[0] === 'models') {
 
 type ModelsRecord = {
   pid: number;
+  argv: string[];
   xdg: string;
   cwd: string;
   hasGit: boolean;
@@ -305,8 +310,59 @@ describe('checkModelAccess against a fake OpenCode executable', () => {
       buildDependencies({ operatorRoot }),
     );
 
-    expect(outcome).toEqual({ status: 'listed', unsetVariables: [], retainedDirectory: null });
+    expect(outcome).toEqual({
+      status: 'listed',
+      variants: ['high', 'low'],
+      unsetVariables: [],
+      retainedDirectory: null,
+    });
     expect(existsSync(recordPath)).toBe(true);
+  });
+
+  it('reports an empty variant list for a listed model whose record declares no variants', async () => {
+    const { executable } = await writeFakeExecutable();
+    const operatorRoot = await createOperatorRoot(ACME_DEFINITION);
+
+    const outcome = await checkModelAccess(
+      {
+        configPath: CONFIG_PATH(),
+        agent: buildAgent({ command: executable, providers: [{ id: 'acme' }] }),
+        model: 'acme/model-empty',
+      },
+      buildDependencies({ operatorRoot }),
+    );
+
+    expect(outcome).toMatchObject({ status: 'listed', variants: [] });
+  });
+
+  it('reports no variant data for a listed model the listing prints without a record', async () => {
+    const { executable } = await writeFakeExecutable();
+
+    const outcome = await checkModelAccess(
+      {
+        configPath: CONFIG_PATH(),
+        agent: buildAgent({ command: executable }),
+        model: 'builtin/model-z',
+      },
+      buildDependencies(),
+    );
+
+    expect(outcome).toMatchObject({ status: 'listed', variants: null });
+  });
+
+  it('asks the executable for the verbose listing', async () => {
+    const { executable, recordPath } = await writeFakeExecutable();
+
+    await checkModelAccess(
+      {
+        configPath: CONFIG_PATH(),
+        agent: buildAgent({ command: executable }),
+        model: 'builtin/model-z',
+      },
+      buildDependencies(),
+    );
+
+    expect(readRecord(recordPath).argv).toEqual(['models', '--verbose']);
   });
 
   it('reports a model the fake listing omits as not listed', async () => {
@@ -355,7 +411,7 @@ describe('checkModelAccess against a fake OpenCode executable', () => {
 
     expect(outcome).toEqual({
       status: 'listing-failed',
-      detail: `"${executable} models" exits with code 3`,
+      detail: `"${executable} models --verbose" exits with code 3`,
     });
   });
 
@@ -435,6 +491,7 @@ describe('checkModelAccess against a fake OpenCode executable', () => {
 
     expect(outcome).toEqual({
       status: 'listed',
+      variants: null,
       unsetVariables: [UNSET_VARIABLE],
       retainedDirectory: null,
     });
@@ -476,7 +533,7 @@ describe('checkModelAccess against a fake OpenCode executable', () => {
 
       expect(outcome).toEqual({
         status: 'listing-failed',
-        detail: '"opencode models" did not finish within 120s',
+        detail: '"opencode models --verbose" did not finish within 120s',
       });
     });
 

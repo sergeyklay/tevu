@@ -59,7 +59,7 @@ The wizard runs in two parts, the configuration first and the task second. Press
 | Add another repository? | Enter, for No |
 | Model entry ID, Model | One setting to compare, for example `low` and `openai/your-model` |
 | API key variable for *provider* | The variable name you exported in step 1. Asked only when the model needs a key |
-| Reasoning effort | For example `low` |
+| Reasoning effort | A variant the model offers, for example `low`. `opencode models <provider> --verbose` lists them under `variants` |
 
 The wizard clones the repository as soon as you enter it, which can take a while for a large one. Then it asks for a second model entry, because a comparison needs two. Enter another entry, for example the same model at `high`.
 

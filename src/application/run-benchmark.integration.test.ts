@@ -14,6 +14,7 @@ import { createEnvironmentAdapter, createEvaluatorProcessAdapter } from '@/adapt
 import { durationMs, TevuConfigSchema } from '@/config/schema';
 import { unavailableMetric } from '@/domain/types';
 
+import { buildVerifiedEfforts } from './__fixtures__/effort.fixtures';
 import { planBenchmark, runBenchmark } from './run-benchmark';
 
 import type { TaskInput, TevuConfigInput } from '@/config/schema';
@@ -259,7 +260,10 @@ function buildFakeAgentAdapter(
       return { ok: true, value: { defined: false } };
     },
     async listModels() {
-      return { outcome: 'listed', models: [] };
+      return { outcome: 'listed', models: [], variants: new Map() };
+    },
+    repositoryConfigurationEntries() {
+      return [];
     },
     async run(input: AgentRunInput): Promise<TevuResult<AgentRunResult, never>> {
       capture.prompt = input.prompt;
@@ -406,7 +410,10 @@ describe('runBenchmark tamper-proof check-state (AC-1, P11)', () => {
     const agent = buildFakeAgentAdapter(capture, overlayDirectory);
     const dependencies = buildDependencies(config, agent, testDirectory);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      dependencies,
+    );
 
     const run = unwrapOk(result);
     const caseResult = caseResultOf(run, 'guard-task--m1--1');
@@ -454,7 +461,10 @@ describe.each([
       const agent = buildFakeAgentAdapter(capture, overlayDirectory, mutateOverlay);
       const dependencies = buildDependencies(config, agent, testDirectory);
 
-      const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+      const result = await runBenchmark(
+        planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+        dependencies,
+      );
 
       const run = unwrapOk(result);
       const caseResult = caseResultOf(run, 'guard-task--m1--1');
@@ -484,7 +494,10 @@ describe('runBenchmark records the task timeout in saved artifacts (AC-4)', () =
     const agent = buildFakeAgentAdapter(capture, overlayDirectory);
     const dependencies = buildDependencies(config, agent, testDirectory);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      dependencies,
+    );
 
     const run = unwrapOk(result);
     expect(run.manifest.execution.caseTimeoutMs).toBe(durationMs('30s'));
@@ -553,7 +566,10 @@ describe('runBenchmark providers (AC-1, D10, D11)', () => {
       return realStartRun(manifest);
     };
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      dependencies,
+    );
 
     const run = unwrapOk(result);
     expect(run.cases).toHaveLength(2);
@@ -584,7 +600,10 @@ describe('runBenchmark providers (AC-1, D10, D11)', () => {
     const agent = buildFakeAgentAdapter(capture, overlayDirectory);
     const dependencies = buildDependencies(config, agent, testDirectory);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      dependencies,
+    );
 
     const run = unwrapOk(result);
     expect(run.manifest.tools.agentConfigurationFiles).toEqual({ [FAKE_AGENT_NAME]: [] });
@@ -724,7 +743,10 @@ describe('runBenchmark grading in the case flow', () => {
         return { ok: true, value: { defined: false } };
       },
       async listModels() {
-        return { outcome: 'listed', models: [] };
+        return { outcome: 'listed', models: [], variants: new Map() };
+      },
+      repositoryConfigurationEntries() {
+        return [];
       },
       async run(input: AgentRunInput): Promise<TevuResult<AgentRunResult, never>> {
         const value: AgentRunResult = {
@@ -794,7 +816,10 @@ describe('runBenchmark grading in the case flow', () => {
     }));
     const dependencies = buildGradingDependencies(config, agent, testDirectory);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      dependencies,
+    );
 
     const run = unwrapOk(result);
     // Two model entries each run the graded task once, so the grader is
@@ -814,6 +839,59 @@ describe('runBenchmark grading in the case flow', () => {
     expect(plainCaseM2.artifacts.grading).toBeNull();
   });
 
+  it('records the plan efforts in the stored manifest and keeps every saved identity effort as configured', async () => {
+    const repository = await createSyntheticRepository(testDirectory);
+    const config = buildGradedConfig({
+      repositoryPath: repository.path,
+      commit: repository.commit,
+      outputDirectory: join(testDirectory, 'artifacts'),
+    });
+    const agent = buildGradingFakeAgentAdapter([], async () => ({
+      ok: true,
+      value: repliedGrade(
+        '{"grades":[{"check":"csv-content","verdict":"passed","rationale":"ok"}]}',
+      ),
+    }));
+    const dependencies = buildGradingDependencies(config, agent, testDirectory);
+    const plan = planBenchmark(config, CONFIG_PATH, {
+      models: {
+        m1: { status: 'verified' },
+        m2: { status: 'unverified', reason: 'synthetic unverified reason' },
+      },
+      roles: { grader: { status: 'unsupported', reason: 'synthetic unsupported reason' } },
+    });
+
+    const run = unwrapOk(await runBenchmark(plan, dependencies));
+
+    const storedManifest = unwrapOk(
+      await dependencies.artifacts.readRunManifest(run.manifest.runId),
+    );
+    expect(run.manifest.efforts).toEqual(plan.efforts);
+    expect(storedManifest.efforts).toEqual({
+      models: {
+        m1: { status: 'verified' },
+        m2: { status: 'unverified', reason: 'synthetic unverified reason' },
+      },
+      grader: { status: 'unsupported', reason: 'synthetic unsupported reason' },
+    });
+    expect(storedManifest.cases.map((identity) => [identity.modelId, identity.effort])).toEqual([
+      ['m1', 'fast'],
+      ['m2', 'deep'],
+    ]);
+    for (const caseResult of run.cases) {
+      const storedCase = unwrapOk(
+        await dependencies.artifacts.readCaseResult(run.manifest.runId, caseResult.identity.caseId),
+      );
+      const grading = unwrapOk(
+        await dependencies.artifacts.readGrading(run.manifest.runId, caseResult.identity.caseId),
+      );
+      expect(storedCase.identity.effort).toBe(
+        caseResult.identity.modelId === 'm1' ? 'fast' : 'deep',
+      );
+      expect(grading.grader.effort).toBe('high');
+    }
+  });
+
   it('ends the case cancelled with no grading.json when the run is cancelled during the grader call', async () => {
     const repository = await createSyntheticRepository(testDirectory);
     const config = buildGradedConfig({
@@ -831,7 +909,10 @@ describe('runBenchmark grading in the case flow', () => {
       cancellation: cancelController.signal,
     });
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      dependencies,
+    );
 
     const run = unwrapOk(result);
     const gradedCase = caseResultOf(run, 'graded-task--m1--1');
@@ -893,7 +974,10 @@ describe('runBenchmark grading in the case flow', () => {
       artifacts: failingArtifacts,
     });
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      dependencies,
+    );
 
     const run = unwrapOk(result);
     const firstCase = caseResultOf(run, 'graded-task--m1--1');
@@ -929,7 +1013,10 @@ describe('runBenchmark grading in the case flow', () => {
     }));
     const dependencies = buildGradingDependencies(config, agent, testDirectory);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      dependencies,
+    );
 
     const run = unwrapOk(result);
     const gradedCase = caseResultOf(run, 'graded-task--m1--1');
@@ -984,7 +1071,10 @@ describe('runBenchmark grading in the case flow', () => {
       environments: environmentsWithFailingDispose,
     });
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      dependencies,
+    );
 
     const run = unwrapOk(result);
     const gradedCase = caseResultOf(run, 'graded-task--m1--1');

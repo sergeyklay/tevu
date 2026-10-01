@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { durationMs, TevuConfigSchema } from '@/config/schema';
 import { unavailableBenchmarkMetrics } from '@/domain/types';
 
+import { buildVerifiedEfforts } from './__fixtures__/effort.fixtures';
 import { planBenchmark, reduceRunExitCode, runBenchmark } from './run-benchmark';
 import { buildTaskPrompt } from './task-prompt';
 
@@ -488,6 +489,7 @@ function createHarness(config: TevuConfig) {
           repositoryId: repository.id,
           requestedCommit: commit,
           resolvedCommit: `pinned-${commit}`,
+          rootEntries: [],
         },
       };
     },
@@ -622,7 +624,10 @@ function createHarness(config: TevuConfig) {
       return { ok: true, value: { defined: false } };
     },
     async listModels() {
-      return { outcome: 'listed', models: [] };
+      return { outcome: 'listed', models: [], variants: new Map() };
+    },
+    repositoryConfigurationEntries() {
+      return [];
     },
     async run(input) {
       const caseId = input.identity.caseId;
@@ -972,7 +977,10 @@ async function runCancelledDuringEvaluation(): Promise<{
   harness.evaluatorProcesses.holdChecks();
   const firstCheck = harness.evaluatorProcesses.waitForCheck('/synthetic/acc-required');
 
-  const runPromise = runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+  const runPromise = runBenchmark(
+    planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+    harness.dependencies,
+  );
   await firstCheck;
   harness.cancellation.abort();
   harness.evaluatorProcesses.releaseChecks();
@@ -986,7 +994,10 @@ async function runWithFailingExport(
   const config = buildTevuConfig({ tasks: [buildTask()] });
   const harness = createHarness(config);
   harness.agent.exportFailures.set('session-task-1--c1--1', buildError('task-1--c1--1'));
-  const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+  const result = await runBenchmark(
+    planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+    harness.dependencies,
+  );
   return { run: unwrapOk(result), harness };
 }
 
@@ -1017,7 +1028,7 @@ describe('planBenchmark', () => {
       ],
     });
 
-    const plan = planBenchmark(config, CONFIG_PATH);
+    const plan = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
 
     expect(plan.config).toBe(config);
     expect(plan.repeat).toEqual({ value: 1, source: 'config' });
@@ -1072,7 +1083,7 @@ describe('planBenchmark', () => {
   it('builds each CaseIdentity with keys in the order caseId, taskId, modelId, attempt, sourceCommit, model, effort, agent, timeoutMs', () => {
     const config = buildTevuConfig({ tasks: [buildTask({ id: 'task-1', base_commit: COMMIT_A })] });
 
-    const plan = planBenchmark(config, CONFIG_PATH);
+    const plan = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
 
     expect(Object.keys(plan.cases[0] ?? {})).toEqual([
       'caseId',
@@ -1089,7 +1100,7 @@ describe('planBenchmark', () => {
 
   it('copies the configured limits and artifact destination into the plan', () => {
     const config = buildTevuConfig();
-    const plan = planBenchmark(config, CONFIG_PATH);
+    const plan = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
 
     expect(plan.concurrency).toBe(2);
     expect(plan.defaultCaseTimeoutMs).toBe(60_000);
@@ -1106,7 +1117,7 @@ describe('planBenchmark', () => {
       ],
     });
 
-    const plan = planBenchmark(config, CONFIG_PATH);
+    const plan = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
 
     expect(plan.repeat).toEqual({ value: 3, source: 'config' });
     expect(plan.cases).toHaveLength(12);
@@ -1132,7 +1143,7 @@ describe('planBenchmark', () => {
   it('resolves the effective repeat to repeatOverride with source cli, and leaves plan.config.run.repeat at its loaded value (AC-3, verification property 2)', () => {
     const config = buildTevuConfig({ run: buildRunSettings({ repeat: 3 }) });
 
-    const plan = planBenchmark(config, CONFIG_PATH, 2);
+    const plan = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config), 2);
 
     expect(plan.repeat).toEqual({ value: 2, source: 'cli' });
     expect(
@@ -1145,8 +1156,14 @@ describe('planBenchmark', () => {
   it("resolves plan.repeat.source to cli whatever repeatOverride's value, and to config when it is absent", () => {
     const config = buildTevuConfig({ run: buildRunSettings({ repeat: 3 }) });
 
-    expect(planBenchmark(config, CONFIG_PATH, 3).repeat).toEqual({ value: 3, source: 'cli' });
-    expect(planBenchmark(config, CONFIG_PATH).repeat).toEqual({ value: 3, source: 'config' });
+    expect(planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config), 3).repeat).toEqual({
+      value: 3,
+      source: 'cli',
+    });
+    expect(planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)).repeat).toEqual({
+      value: 3,
+      source: 'config',
+    });
   });
 
   it("resolves every case's timeoutMs from its own task, leaving other tasks under run.timeout (AC-2)", () => {
@@ -1155,7 +1172,7 @@ describe('planBenchmark', () => {
       tasks: [buildTask({ id: 'task-1', timeout: '20m' }), buildTask({ id: 'task-2' })],
     });
 
-    const plan = planBenchmark(config, CONFIG_PATH);
+    const plan = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
 
     expect(plan.cases).toHaveLength(8);
     const task1Cases = plan.cases.filter((identity) => identity.taskId === 'task-1');
@@ -1166,6 +1183,83 @@ describe('planBenchmark', () => {
       Array(4).fill(defaultTimeoutMs),
     );
     expect(plan.defaultCaseTimeoutMs).toBe(durationMs(config.run.timeout));
+  });
+
+  describe('efforts', () => {
+    const unverified = { status: 'unverified', reason: 'synthetic unverified reason' } as const;
+    const unsupported = { status: 'unsupported', reason: 'synthetic unsupported reason' } as const;
+
+    it('records the model entry checks and the grader check of the validation', () => {
+      const config = buildTevuConfig();
+
+      const plan = planBenchmark(config, CONFIG_PATH, {
+        models: { c1: { status: 'verified' }, c2: unsupported },
+        roles: { grader: unverified },
+      });
+
+      expect(plan.efforts).toEqual({
+        models: { c1: { status: 'verified' }, c2: unsupported },
+        grader: unverified,
+      });
+    });
+
+    it('records a null grader check when the validation declared no grader', () => {
+      const config = buildTevuConfig();
+
+      const plan = planBenchmark(config, CONFIG_PATH, {
+        models: { c1: { status: 'verified' }, c2: { status: 'verified' } },
+        roles: {},
+      });
+
+      expect(plan.efforts.grader).toBeNull();
+    });
+
+    it('leaves the criteria check out of the plan', () => {
+      const config = buildTevuConfig();
+
+      const plan = planBenchmark(config, CONFIG_PATH, {
+        models: { c1: { status: 'verified' }, c2: { status: 'verified' } },
+        roles: { criteria: unsupported },
+      });
+
+      expect(plan.efforts).toEqual({
+        models: { c1: { status: 'verified' }, c2: { status: 'verified' } },
+        grader: null,
+      });
+    });
+
+    it('copies the model entry checks, so a later change to the validation does not alter the plan', () => {
+      const config = buildTevuConfig();
+      const efforts = buildVerifiedEfforts(config);
+
+      const plan = planBenchmark(config, CONFIG_PATH, efforts);
+      efforts.models['c1'] = unsupported;
+
+      expect(plan.efforts.models['c1']).toEqual({ status: 'verified' });
+      expect(plan.efforts.models).not.toBe(efforts.models);
+    });
+
+    it('stays deterministic for the same configuration and checks', () => {
+      const config = buildTevuConfig();
+
+      const first = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
+      const second = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
+
+      expect(second).toEqual(first);
+    });
+
+    it('keeps every case identity effort equal to the configured string whatever its check', () => {
+      const config = buildTevuConfig();
+
+      const plan = planBenchmark(config, CONFIG_PATH, {
+        models: { c1: unsupported, c2: unverified },
+        roles: {},
+      });
+
+      expect(
+        new Set(plan.cases.map((identity) => `${identity.modelId}:${identity.effort}`)),
+      ).toEqual(new Set(['c1:fast', 'c2:deep']));
+    });
   });
 });
 
@@ -1265,11 +1359,31 @@ describe('reduceRunExitCode', () => {
 });
 
 describe('runBenchmark', () => {
+  it('writes the plan efforts as the manifest efforts', async () => {
+    const config = buildTevuConfig();
+    const harness = createHarness(config);
+    const plan = planBenchmark(config, CONFIG_PATH, {
+      models: {
+        c1: { status: 'verified' },
+        c2: { status: 'unverified', reason: 'synthetic unverified reason' },
+      },
+      roles: { grader: { status: 'unsupported', reason: 'synthetic unsupported reason' } },
+    });
+
+    unwrapOk(await runBenchmark(plan, harness.dependencies));
+
+    expect(harness.artifacts.startedManifests).toHaveLength(1);
+    expect(harness.artifacts.startedManifests[0]?.efforts).toEqual(plan.efforts);
+  });
+
   it('probes the host once, snapshots the parent environment once, and pins commits before the first write', async () => {
     const config = buildTevuConfig();
     const harness = createHarness(config);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     expect(harness.timeline.slice(0, 5)).toEqual([
@@ -1295,7 +1409,10 @@ describe('runBenchmark', () => {
     const config = buildTevuConfig();
     const harness = createHarness(config);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     const manifest = run.manifest;
@@ -1422,7 +1539,10 @@ describe('runBenchmark', () => {
     it('writes each read agent its own snapshot copiedProviders under the keys of agentConfigurationFiles, as a copy', async () => {
       const { config, harness } = buildTwoAgentHarness();
 
-      const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+      const result = await runBenchmark(
+        planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+        harness.dependencies,
+      );
 
       const { tools } = unwrapOk(result).manifest;
       expect(Object.keys(tools.copiedProviders)).toEqual(
@@ -1441,7 +1561,10 @@ describe('runBenchmark', () => {
     it('hands each case its own agent snapshot copiedProviders when normalizing metrics', async () => {
       const { config, harness, received } = buildTwoAgentHarness();
 
-      const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+      const result = await runBenchmark(
+        planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+        harness.dependencies,
+      );
 
       unwrapOk(result);
       expect(received.get('task-1--c1--1')).toEqual(FIRST_PROVIDERS);
@@ -1458,7 +1581,10 @@ describe('runBenchmark', () => {
     });
     const harness = createHarness(config);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     expect(run.exitCode).toBe(0);
@@ -1487,7 +1613,10 @@ describe('runBenchmark', () => {
     });
     const harness = createHarness(config);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     unwrapOk(result);
     expect(harness.git.createIsolatedCaseRepositories.map((repository) => repository.id)).toEqual([
@@ -1506,7 +1635,10 @@ describe('runBenchmark', () => {
       actual: 'missing',
     };
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const error = unwrapError(result);
     expect(error.kind).toBe('PrerequisiteError');
@@ -1525,7 +1657,10 @@ describe('runBenchmark', () => {
       actual: 'empty',
     };
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const error = unwrapError(result);
     expect(error.kind).toBe('PrerequisiteError');
@@ -1544,7 +1679,10 @@ describe('runBenchmark', () => {
       reason: 'synthetic missing run command',
     };
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const error = unwrapError(result);
     expect(error).toMatchObject({ kind: 'AgentProtocolError', context: { phase: 'probe' } });
@@ -1567,7 +1705,10 @@ describe('runBenchmark', () => {
       ],
     };
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const error = unwrapError(result);
     expect(error).toEqual({
@@ -1590,7 +1731,10 @@ describe('runBenchmark', () => {
     const harness = createHarness(config);
     harness.dependencies.agents = new Map();
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     expect(result).toEqual({
       ok: false,
@@ -1612,7 +1756,10 @@ describe('runBenchmark', () => {
       reason: 'synthetic commit is not readable',
     };
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const error = unwrapError(result);
     expect(error).toMatchObject({ kind: 'SourceMaterializationError', taskId: 'task-1' });
@@ -1629,7 +1776,10 @@ describe('runBenchmark', () => {
     });
     const harness = createHarness(config);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     expect(result).toEqual({
       ok: false,
@@ -1656,7 +1806,10 @@ describe('runBenchmark', () => {
     });
     const harness = createHarness(config);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     expect(result).toEqual({
       ok: false,
@@ -1687,7 +1840,10 @@ describe('runBenchmark', () => {
     });
     const harness = createHarness(config);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     expect(result).toEqual({
       ok: false,
@@ -1717,7 +1873,10 @@ describe('runBenchmark', () => {
     });
     const harness = createHarness(config);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     expect(result).toEqual({
       ok: false,
@@ -1738,7 +1897,10 @@ describe('runBenchmark', () => {
     });
     const harness = createHarness(config);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     const caseTimeline = (caseId: string): string[] => [
@@ -1843,7 +2005,10 @@ describe('runBenchmark', () => {
     const firstStart = harness.agent.waitForCaseStart('task-1--c1--1');
     const secondStart = harness.agent.waitForCaseStart('task-1--c2--1');
 
-    const runPromise = runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const runPromise = runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
     await Promise.all([firstStart, secondStart]);
 
     expect(harness.agent.activeCount).toBe(2);
@@ -1869,7 +2034,10 @@ describe('runBenchmark', () => {
     harness.evaluatorProcesses.holdChecks();
     const firstCheck = harness.evaluatorProcesses.waitForCheck('/synthetic/acc-required');
 
-    const runPromise = runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const runPromise = runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
     await firstCheck;
 
     expect(harness.timeline.filter((entry) => entry.startsWith('prepare:'))).toEqual([
@@ -1914,7 +2082,10 @@ describe('runBenchmark', () => {
       const harness = createHarness(config);
       harness.agent.scripts.set('task-1--c1--1', failedRunScript(buildError('task-1--c1--1')));
 
-      const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+      const result = await runBenchmark(
+        planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+        harness.dependencies,
+      );
 
       const run = unwrapOk(result);
       const failedCase = caseResultOf(run, 'task-1--c1--1');
@@ -2028,7 +2199,10 @@ describe('runBenchmark', () => {
       ),
     );
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     const failedCase = caseResultOf(run, 'task-1--c1--1');
@@ -2072,7 +2246,10 @@ describe('runBenchmark', () => {
       ),
     );
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     const failedCase = caseResultOf(run, 'task-1--c1--1');
@@ -2098,7 +2275,10 @@ describe('runBenchmark', () => {
     const harness = createHarness(config);
     harness.agent.scripts.set('task-1--c1--1', timedOutRunScript());
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     const timedOutCase = caseResultOf(run, 'task-1--c1--1');
@@ -2132,7 +2312,7 @@ describe('runBenchmark', () => {
     });
     const harness = createHarness(config);
     harness.agent.scripts.set('task-1--c1--1', timedOutRunScript());
-    const plan = planBenchmark(config, CONFIG_PATH);
+    const plan = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
 
     const result = await runBenchmark(plan, harness.dependencies);
 
@@ -2163,7 +2343,10 @@ describe('runBenchmark', () => {
       reason: 'synthetic disk full',
     });
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     const failedCase = caseResultOf(run, 'task-1--c1--1');
@@ -2204,7 +2387,10 @@ describe('runBenchmark', () => {
     });
     const caseStart = harness.agent.waitForCaseStart('task-1--c1--1');
 
-    const runPromise = runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const runPromise = runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
     await caseStart;
     harness.cancellation.abort();
     const result = await runPromise;
@@ -2273,7 +2459,10 @@ describe('runBenchmark', () => {
     const harness = createHarness(config);
     harness.cancellation.abort();
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const error = unwrapError(result);
     expect(error).toMatchObject({ kind: 'CancellationError', activeCaseIds: [] });
@@ -2293,7 +2482,10 @@ describe('runBenchmark', () => {
       reason: 'synthetic isolation failure',
     };
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     expect(run.cases).toHaveLength(2);
@@ -2319,7 +2511,10 @@ describe('runBenchmark', () => {
       reason: 'synthetic disposal failure',
     });
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     const disposedCase = caseResultOf(run, 'task-1--c1--1');
@@ -2348,7 +2543,10 @@ describe('runBenchmark', () => {
       reason: 'synthetic persistence failure',
     });
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     const persistedCase = caseResultOf(run, 'task-1--c1--1');
@@ -2414,7 +2612,10 @@ describe('runBenchmark', () => {
         harness.evaluatorProcesses.exitCodes.set('/synthetic/acc-required', acceptanceExitCode);
       }
 
-      const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+      const result = await runBenchmark(
+        planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+        harness.dependencies,
+      );
 
       const run = unwrapOk(result);
       const caseResult = caseResultOf(run, 'task-1--c1--1');
@@ -2444,7 +2645,10 @@ describe('runBenchmark repository setup orchestration (P5, P6, AC-2, AC-3)', () 
     harness.evaluatorProcesses.exitCodes.set('/synthetic/setup-before-agent', 7);
 
     const run = unwrapOk(
-      await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies),
+      await runBenchmark(
+        planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+        harness.dependencies,
+      ),
     );
 
     const caseResult = caseResultOf(run, 'task-1--c1--1');
@@ -2481,7 +2685,10 @@ describe('runBenchmark repository setup orchestration (P5, P6, AC-2, AC-3)', () 
     harness.evaluatorProcesses.exitCodes.set('/synthetic/setup-before-checks', 9);
 
     const run = unwrapOk(
-      await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies),
+      await runBenchmark(
+        planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+        harness.dependencies,
+      ),
     );
 
     const caseResult = caseResultOf(run, 'task-1--c1--1');
@@ -2524,7 +2731,10 @@ describe('runBenchmark check-state orchestration', () => {
     const harness = createHarness(config);
     harness.git.readOverlaySnapshots.set('/synthetic/overlay-a', overlaySnapshot);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     expect(harness.git.readOverlayCalls).toEqual(['/synthetic/overlay-a']);
@@ -2562,7 +2772,10 @@ describe('runBenchmark check-state orchestration', () => {
     };
     harness.git.applyCheckStateError = failure;
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     const failedCase = caseResultOf(run, 'task-1--c1--1');
@@ -2580,7 +2793,10 @@ describe('runBenchmark check-state orchestration', () => {
     const config = buildTevuConfig({ tasks: [buildTask({ id: 'task-1' })] });
     const harness = createHarness(config);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     expect(harness.git.readOverlayCalls).toEqual([]);
@@ -2596,7 +2812,10 @@ describe('runBenchmark check-state orchestration', () => {
     });
     const harness = createHarness(config);
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     const run = unwrapOk(result);
     expect(harness.git.applyCheckStateCalls).toEqual([]);
@@ -2620,7 +2839,10 @@ describe('runBenchmark check-state orchestration', () => {
     };
     harness.git.readOverlayError = failure;
 
-    const result = await runBenchmark(planBenchmark(config, CONFIG_PATH), harness.dependencies);
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
 
     expect(result).toEqual({ ok: false, error: failure });
     expect(harness.timeline.some((entry) => entry.startsWith('startRun:'))).toBe(false);
@@ -2646,6 +2868,7 @@ function buildRunManifest(overrides: Partial<RunManifest> = {}): RunManifest {
     },
     execution: { concurrency: 1, caseTimeoutMs: 1_000, repeat: { value: 1, source: 'config' } },
     cases: [],
+    efforts: { models: {}, grader: null },
     ...overrides,
   };
 }

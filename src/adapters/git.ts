@@ -122,7 +122,12 @@ async function isAncestor(
 }
 
 type ResolvedSourceTree =
-  | { ok: true; resolvedCommit: string; pointerEntries: LfsPointerEntry[] }
+  | {
+      ok: true;
+      resolvedCommit: string;
+      pointerEntries: LfsPointerEntry[];
+      rootEntries: string[];
+    }
   | { ok: false; reason: string };
 
 /**
@@ -154,6 +159,7 @@ async function resolveSourceTree(
     ok: true,
     resolvedCommit: lookup.commit,
     pointerEntries: inspection.pointerEntries,
+    rootEntries: inspection.rootEntries,
   };
 }
 
@@ -165,7 +171,7 @@ async function validateSource(
   if (!resolved.ok) {
     return sourceError(repository.id, resolved.reason);
   }
-  const { resolvedCommit, pointerEntries } = resolved;
+  const { resolvedCommit, pointerEntries, rootEntries } = resolved;
   const extensionFailure = extensionReason(repository, pointerEntries);
   if (extensionFailure !== undefined) {
     return sourceError(repository.id, extensionFailure);
@@ -182,7 +188,12 @@ async function validateSource(
   }
   return {
     ok: true,
-    value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
+    value: {
+      repositoryId: repository.id,
+      requestedCommit: commit,
+      resolvedCommit,
+      rootEntries,
+    },
   };
 }
 
@@ -799,7 +810,8 @@ type LfsPointerEntry = {
 };
 
 type TreeInspection =
-  { ok: true; pointerEntries: LfsPointerEntry[] } | { ok: false; reason: string };
+  | { ok: true; pointerEntries: LfsPointerEntry[]; rootEntries: string[] }
+  | { ok: false; reason: string };
 
 type RegularFileBlob = { mode: LfsPointerEntry['mode']; blobId: string };
 
@@ -947,9 +959,9 @@ async function listLfsPointerEntries(
 }
 
 /**
- * Inspects the pinned tree for unsupported submodule (gitlink) entries and
- * lists its Git LFS pointer entries. Reasons carry counts only; source
- * filenames never enter error messages.
+ * Inspects the pinned tree for unsupported submodule (gitlink) entries, lists
+ * its Git LFS pointer entries, and collects its top-level entry names. Reasons
+ * carry counts only; source filenames never enter error messages.
  */
 async function inspectSourceTree(repositoryPath: string, commit: string): Promise<TreeInspection> {
   const listed = await runGit(repositoryPath, ['ls-tree', '-r', '-z', commit]);
@@ -958,6 +970,7 @@ async function inspectSourceTree(repositoryPath: string, commit: string): Promis
   }
   let submoduleCount = 0;
   const regularFileBlobs = new Map<string, RegularFileBlob>();
+  const rootEntries = new Set<string>();
   for (const entry of listed.stdout.split('\0')) {
     if (entry.length === 0) {
       continue;
@@ -965,6 +978,8 @@ async function inspectSourceTree(repositoryPath: string, commit: string): Promis
     const tabIndex = entry.indexOf('\t');
     const [mode, , objectId] = entry.slice(0, tabIndex).split(' ');
     const path = entry.slice(tabIndex + 1);
+    const separatorIndex = path.indexOf('/');
+    rootEntries.add(separatorIndex === -1 ? path : path.slice(0, separatorIndex));
     if (mode === SUBMODULE_MODE) {
       submoduleCount += 1;
     }
@@ -983,7 +998,7 @@ async function inspectSourceTree(repositoryPath: string, commit: string): Promis
   if (!scan.ok) {
     return { ok: false, reason: scan.reason };
   }
-  return { ok: true, pointerEntries: scan.pointerEntries };
+  return { ok: true, pointerEntries: scan.pointerEntries, rootEntries: [...rootEntries].sort() };
 }
 
 /** Where a repository's Git LFS objects are, and how many of the ones a tree needs are absent. */

@@ -39,7 +39,7 @@ The `tevu task add` setup interview does this for you when it finds the provider
 tevu validate
 ```
 
-Validation lists the models the agent resolves and reports each model entry and role that is not among them. A listed model proves only that OpenCode declares it, not that the provider answers.
+Validation lists the models the agent resolves and reports each model entry and role that is not among them. It also checks each `effort` against the variants OpenCode reports for its model. A listed model proves only that OpenCode declares it, not that the provider answers.
 
 ## Fix a failure
 
@@ -47,4 +47,5 @@ Validation lists the models the agent resolves and reports each model entry and 
 - **A model only a repository's tracked `opencode.json` provides.** `tevu validate` cannot see it and reports it unresolved. Define the provider in `agents.opencode.providers` too.
 - **Provider cannot be copied.** The finding names the value at fault. Reference a declared variable as `{env:NAME}` instead of writing a literal credential. For a credential header or an `env` entry, name a variable listed in `secrets`. Remove any `{file:...}` reference. Set `api_key` instead of writing `options.apiKey` by hand. The full rules are the [copy rules](../reference/agents-and-models.md#copy-rules).
 - **Provider carries no credential warning.** Set `api_key` to a variable in `secrets` when the key lives in the login store. A provider that needs no key can ignore the warning.
-- **Model listing failed or timed out.** Run `<command> models` yourself to see OpenCode's own diagnostic.
+- **Effort not among the model's variants.** Run `opencode models <provider> --verbose` in your own shell and read the model's `variants`. Set `effort` to a name listed there, or define the variant in the provider's definition in your OpenCode global configuration and copy that provider as above. A variant that only a task repository defines draws a warning for a model entry, because the listing runs in an empty repository. For a role, which runs without a repository, it is unsupported: an error for `roles.grader` when a task declares a graded check, otherwise a warning. See [Effort check](../reference/agents-and-models.md#effort-check).
+- **Model listing failed or timed out.** Run `<command> models --verbose` yourself to see OpenCode's own diagnostic.

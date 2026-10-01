@@ -590,6 +590,7 @@ function buildTaskDependencies(overrides: Partial<TaskDependencies> = {}): TaskD
           repositoryId: repository.id,
           requestedCommit: commit,
           resolvedCommit: `resolved-${commit}`,
+          rootEntries: [],
         },
       }),
       resolveCommit: async () => ({ kind: 'not-found' }),

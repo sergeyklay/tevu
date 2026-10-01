@@ -34,6 +34,8 @@ import type {
   CaseIdentity,
   CaseResult,
   ConfigReadCause,
+  EffortCheck,
+  EffortChecks,
   GradeRecord,
   GraderIdentity,
   IssueSnapshot,
@@ -406,11 +408,20 @@ function buildCapabilityReport(
   };
 }
 
+/** Every model entry of `config` verified, and no declared role. */
+function buildEffortChecks(config: TevuConfig = buildTevuConfig()): EffortChecks {
+  return {
+    models: Object.fromEntries(config.models.map((model) => [model.id, { status: 'verified' }])),
+    roles: {},
+  };
+}
+
 function buildValidationReport(overrides: Partial<ValidationReport> = {}): ValidationReport {
   return {
     valid: true,
     findings: [],
     capabilities: { [AGENT_NAME]: buildCapabilityReport() },
+    efforts: buildEffortChecks(),
     ...overrides,
   };
 }
@@ -440,6 +451,7 @@ function buildBenchmarkPlan(
     defaultCaseTimeoutMs: 600_000,
     terminationGraceMs: 5_000,
     artifactsDirectory: config.run.output_dir,
+    efforts: { models: buildEffortChecks(config).models, grader: null },
     ...overrides,
   };
 }
@@ -542,6 +554,7 @@ function buildRunResult(overrides: Partial<RunResult> = {}): RunResult {
       },
       execution: { concurrency: 2, caseTimeoutMs: 600000, repeat: { value: 1, source: 'config' } },
       cases: [identity],
+      efforts: { models: { c1: { status: 'verified' } }, grader: null },
     },
     cases: [buildCaseResult({ identity })],
     findings: [],
@@ -711,6 +724,7 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
     })),
     checkModelAccess: vi.fn(async () => ({
       status: 'listed' as const,
+      variants: null,
       unsetVariables: [],
       retainedDirectory: null,
     })),
@@ -1079,6 +1093,21 @@ const DRAFT_FAILURE_CASES: Array<{
     retryable: false,
   },
   {
+    name: 'an effort the model has no variant for',
+    failure: {
+      cause: 'effort-unsupported',
+      model: 'openai/criteria-model',
+      effort: 'hihg',
+      variants: ['high', 'low'],
+    },
+    lines: [
+      'Criteria effort "hihg" is not a variant OpenCode reports for openai/criteria-model.',
+      'Its variants: high, low.',
+      'Set roles.criteria.effort in tevu.yaml to one of them.',
+    ],
+    retryable: false,
+  },
+  {
     name: 'a timeout',
     failure: { cause: 'timed-out', limit: '10m' },
     lines: ["The model didn't answer within 10m."],
@@ -1178,7 +1207,8 @@ function accessOutcome(
   status: 'listed' | 'not-listed',
   overrides: { unsetVariables?: string[]; retainedDirectory?: string | null } = {},
 ): ModelAccessOutcome {
-  return { status, unsetVariables: [], retainedDirectory: null, ...overrides };
+  const fields = { unsetVariables: [], retainedDirectory: null, ...overrides };
+  return status === 'listed' ? { status, variants: null, ...fields } : { status, ...fields };
 }
 
 function requireAgentBlock(
@@ -1393,8 +1423,9 @@ function criteriaOperations(overrides: Partial<ProgramOperations> = {}): Program
     })),
     draftCriteria: vi.fn(async () => ({
       status: 'drafted' as const,
+      effort: { status: 'verified' as const },
       draft: { acceptance: ['a'], done: ['d'] },
-      retainedDirectory: null,
+      retainedDirectories: [],
     })),
     ...overrides,
   });
@@ -2048,6 +2079,68 @@ describe('tevu CLI', () => {
       expect(err).toEqual([]);
     });
 
+    it('passes the effort checks of the validation to planBenchmark', async () => {
+      const efforts: EffortChecks = {
+        models: {
+          c1: { status: 'verified' },
+          c2: { status: 'unverified', reason: 'synthetic reason' },
+        },
+        roles: { grader: { status: 'unsupported', reason: 'synthetic grader reason' } },
+      };
+      const operations = createOperations({
+        validateConfig: vi.fn(async () => ({
+          ok: true as const,
+          value: buildValidationReport({ efforts }),
+        })),
+      });
+
+      await runCli(['run', '--dry-run'], { operations });
+
+      expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
+        buildTevuConfig(),
+        'tevu.yaml',
+        efforts,
+        undefined,
+      );
+    });
+
+    it.each([
+      { name: 'a verified check', check: { status: 'verified' } as const, label: 'low' },
+      {
+        name: 'an unverified check',
+        check: { status: 'unverified', reason: 'synthetic reason' } as const,
+        label: 'low, unverified',
+      },
+      {
+        name: 'an unsupported check',
+        check: { status: 'unsupported', reason: 'synthetic reason' } as const,
+        label: 'low, unsupported',
+      },
+      { name: 'no check', check: undefined, label: 'low, not checked' },
+    ])('labels the effort of a planned case with $name', async ({ check, label }) => {
+      const config = buildTevuConfig();
+      const verified: EffortCheck = { status: 'verified' };
+      const operations = createOperations({
+        planBenchmark: vi.fn(() =>
+          buildBenchmarkPlan(config, {
+            efforts: {
+              models: check === undefined ? { c1: verified } : { c1: verified, c2: check },
+              grader: null,
+            },
+          }),
+        ),
+      });
+
+      const { out } = await runCli(['run', '--dry-run'], { operations });
+
+      expect(out).toContain(
+        `  case-c1-task-1: task task-1, model entry c1 (provider/model-a, effort high), commit abc123def, timeout 600000ms`,
+      );
+      expect(out).toContain(
+        `  case-c2-task-1: task task-1, model entry c2 (provider/model-b, effort ${label}), commit abc123def, timeout 600000ms`,
+      );
+    });
+
     it('calls exactly loadConfig, validateConfig, and planBenchmark and nothing else', async () => {
       const operations = createOperations();
 
@@ -2061,6 +2154,7 @@ describe('tevu CLI', () => {
       expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
         buildTevuConfig(),
         'tevu.yaml',
+        buildEffortChecks(),
         undefined,
       );
       expect(operations.configExists).not.toHaveBeenCalled();
@@ -2290,6 +2384,7 @@ describe('tevu CLI', () => {
         expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
           buildTevuConfig(),
           'tevu.yaml',
+          buildEffortChecks(),
           value,
         );
       },
@@ -2304,6 +2399,7 @@ describe('tevu CLI', () => {
       expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
         buildTevuConfig(),
         'tevu.yaml',
+        buildEffortChecks(),
         100,
       );
     });
@@ -2329,6 +2425,7 @@ describe('tevu CLI', () => {
       expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
         buildTevuConfig(),
         'tevu.yaml',
+        buildEffortChecks(),
         5,
       );
     });
@@ -2344,6 +2441,7 @@ describe('tevu CLI', () => {
       expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
         buildTevuConfig(),
         'tevu.yaml',
+        buildEffortChecks(),
         7,
       );
     });
@@ -2465,6 +2563,7 @@ describe('tevu CLI', () => {
       expect(vi.mocked(operations.planBenchmark)).toHaveBeenCalledExactlyOnceWith(
         buildTevuConfig(),
         foundPath,
+        buildEffortChecks(),
         undefined,
       );
     });
@@ -4236,8 +4335,9 @@ describe('tevu CLI', () => {
             })),
             draftCriteria: vi.fn(async () => ({
               status: 'drafted' as const,
+              effort: { status: 'verified' as const },
               draft: { acceptance: ['a'], done: ['d'] },
-              retainedDirectory: null,
+              retainedDirectories: [],
             })),
           });
           scriptAnswers(...answers());
@@ -5405,11 +5505,12 @@ describe('tevu CLI', () => {
       ): ReturnType<typeof vi.fn<ProgramOperations['draftCriteria']>> {
         return vi
           .fn<ProgramOperations['draftCriteria']>()
-          .mockResolvedValueOnce({ status: 'failed', failure, retainedDirectory: null })
+          .mockResolvedValueOnce({ status: 'failed', failure, retainedDirectories: [] })
           .mockResolvedValue({
             status: 'drafted',
+            effort: { status: 'verified' as const },
             draft: { acceptance: ['Retried acceptance.'], done: ['Retried done.'] },
-            retainedDirectory: null,
+            retainedDirectories: [],
           });
       }
 
@@ -5625,8 +5726,9 @@ describe('tevu CLI', () => {
           waitInterrupt.take();
           return {
             status: 'drafted' as const,
+            effort: { status: 'verified' as const },
             draft: { acceptance: ['a'], done: ['d'] },
-            retainedDirectory: null,
+            retainedDirectories: [],
           };
         });
         const operations = criteriaOperations({ draftCriteria });
@@ -6100,12 +6202,13 @@ describe('tevu CLI', () => {
                   ? {
                       status: 'failed' as const,
                       failure: { cause: 'call-failed' as const, detail: 'boom' },
-                      retainedDirectory: null,
+                      retainedDirectories: [],
                     }
                   : {
                       status: 'drafted' as const,
+                      effort: { status: 'verified' as const },
                       draft: { acceptance: ['a'], done: ['d'] },
-                      retainedDirectory: null,
+                      retainedDirectories: [],
                     };
               }),
             }),
@@ -6470,7 +6573,7 @@ describe('tevu CLI', () => {
               draftCriteria: vi.fn(async () => ({
                 status: 'failed' as const,
                 failure,
-                retainedDirectory: null,
+                retainedDirectories: [],
               })),
             }),
             answers: [...READY_ANSWERS, clack.CANCEL, true],
@@ -6629,8 +6732,9 @@ describe('tevu CLI', () => {
               })),
               draftCriteria: vi.fn(async () => ({
                 status: 'drafted' as const,
+                effort: { status: 'verified' as const },
                 draft: { acceptance: ['a'], done: ['d'] },
-                retainedDirectory: '/tmp/tevu-call-xyz',
+                retainedDirectories: ['/tmp/tevu-call-xyz'],
               })),
             }),
             answers: [...READY_ANSWERS, clack.CANCEL, true],
@@ -7277,8 +7381,9 @@ describe('tevu CLI', () => {
           })),
           draftCriteria: vi.fn(async () => ({
             status: 'drafted' as const,
+            effort: { status: 'verified' as const },
             draft,
-            retainedDirectory: null,
+            retainedDirectories: [],
           })),
         });
       }
@@ -7318,11 +7423,12 @@ describe('tevu CLI', () => {
       it('hands draftCriteria the same captured bootstrap answers createTask writes when no configuration exists yet', async () => {
         const draftCriteria = vi.fn(async () => ({
           status: 'drafted' as const,
+          effort: { status: 'verified' as const },
           draft: {
             acceptance: ['The export button appears on the table view.'],
             done: ['The change is documented for users.'],
           },
-          retainedDirectory: null,
+          retainedDirectories: [],
         }));
         const operations = createOperations({
           configExists: vi.fn(async () => false),
@@ -7374,11 +7480,12 @@ describe('tevu CLI', () => {
         }));
         const draftCriteria = vi.fn(async () => ({
           status: 'drafted' as const,
+          effort: { status: 'verified' as const },
           draft: {
             acceptance: ['The export button appears on the table view.'],
             done: ['The change is documented for users.'],
           },
-          retainedDirectory: null,
+          retainedDirectories: [],
         }));
         const operations = createOperations({
           loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
@@ -7417,8 +7524,9 @@ describe('tevu CLI', () => {
           })),
           draftCriteria: vi.fn(async () => ({
             status: 'drafted' as const,
+            effort: { status: 'verified' as const },
             draft: { acceptance: ['a'], done: ['d'] },
-            retainedDirectory: null,
+            retainedDirectories: [],
           })),
         });
         scriptAnswers(...READY_ANSWERS, 'accept', false, false, true);
@@ -7445,11 +7553,12 @@ describe('tevu CLI', () => {
           })),
           draftCriteria: vi.fn(async () => ({
             status: 'drafted' as const,
+            effort: { status: 'verified' as const },
             draft: {
               acceptance: [`This touches commit ${REFERENCE_HASH.slice(0, 7)} directly.`],
               done: ['The change is documented for users.'],
             },
-            retainedDirectory: null,
+            retainedDirectories: [],
           })),
         });
         scriptAnswers(...READY_ANSWERS, 'add', clack.CANCEL);
@@ -7498,7 +7607,7 @@ describe('tevu CLI', () => {
             cause: 'call-failed' as const,
             detail: 'ModelCallError (failed): synthetic failure',
           },
-          retainedDirectory: '/tmp/tevu-call-xyz',
+          retainedDirectories: ['/tmp/tevu-call-xyz'],
         }));
         const operations = createOperations({
           loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
@@ -7559,7 +7668,7 @@ describe('tevu CLI', () => {
             draftCriteria: vi.fn(async () => ({
               status: 'failed' as const,
               failure,
-              retainedDirectory: null,
+              retainedDirectories: [],
             })),
           });
           scriptAnswers(
@@ -7586,6 +7695,107 @@ describe('tevu CLI', () => {
         },
       );
 
+      describe('the criteria effort of a drafted outcome', () => {
+        function draftsWith(effort: EffortCheck, retainedDirectories: string[] = []) {
+          return createOperations({
+            loadConfig: vi.fn(async () => ({ ok: true as const, value: buildCriteriaConfig() })),
+            resolveReference: vi.fn(async () => ({
+              ok: true as const,
+              value: buildResolvedCommitReference(),
+            })),
+            draftCriteria: vi.fn(async () => ({
+              status: 'drafted' as const,
+              draft: { acceptance: ['a'], done: ['d'] },
+              effort,
+              retainedDirectories,
+            })),
+          });
+        }
+
+        function effortWarnings() {
+          return clack.state.logs.filter(
+            (log) => log.kind === 'warn' && log.message.startsWith('Criteria effort'),
+          );
+        }
+
+        it.each([
+          { status: 'unverified' as const, reason: 'no variant data was reported' },
+          { status: 'unsupported' as const, reason: 'a criteria call would use defaults' },
+        ])('warns once with the $status status and its reason', async (check) => {
+          const operations = draftsWith(check);
+          scriptAnswers(...READY_ANSWERS, clack.CANCEL, true);
+
+          await runCli(['task', 'add'], { operations });
+
+          expect(effortWarnings()).toEqual([
+            {
+              kind: 'warn',
+              message: `Criteria effort "high" is ${check.status}.\n${check.reason}`,
+            },
+          ]);
+        });
+
+        it('prints no effort warning for a verified effort', async () => {
+          const operations = draftsWith({ status: 'verified' });
+          scriptAnswers(...READY_ANSWERS, clack.CANCEL, true);
+
+          await runCli(['task', 'add'], { operations });
+
+          expect(effortWarnings()).toEqual([]);
+        });
+
+        it('prints one removal warning per retained directory, in the order the outcome lists them', async () => {
+          const operations = draftsWith({ status: 'verified' }, [
+            '/tmp/listing-dir',
+            '/tmp/call-dir',
+          ]);
+          scriptAnswers(...READY_ANSWERS, clack.CANCEL, true);
+
+          await runCli(['task', 'add'], { operations });
+
+          expect(
+            clack.state.logs.filter(
+              (log) => log.kind === 'warn' && log.message.startsWith("Couldn't remove"),
+            ),
+          ).toEqual([
+            {
+              kind: 'warn',
+              message: "Couldn't remove a temporary directory.\n/tmp/listing-dir",
+            },
+            { kind: 'warn', message: "Couldn't remove a temporary directory.\n/tmp/call-dir" },
+          ]);
+        });
+
+        it('prints the retained directories of a failed draft before its cause', async () => {
+          const operations = createOperations({
+            loadConfig: vi.fn(async () => ({ ok: true as const, value: buildCriteriaConfig() })),
+            resolveReference: vi.fn(async () => ({
+              ok: true as const,
+              value: buildResolvedCommitReference(),
+            })),
+            draftCriteria: vi.fn(async () => ({
+              status: 'failed' as const,
+              failure: {
+                cause: 'effort-unsupported' as const,
+                model: 'openai/criteria-model',
+                effort: 'hihg',
+                variants: ['high', 'low'],
+              },
+              retainedDirectories: ['/tmp/listing-dir'],
+            })),
+          });
+          scriptAnswers(...READY_ANSWERS, ...taskInterviewAnswers('repo-1').slice(10), true);
+
+          await runCli(['task', 'add'], { operations });
+
+          const warnings = clack.state.logs.filter((log) => log.kind === 'warn');
+          expect(warnings.map((warning) => warning.message.split('\n')[0])).toEqual([
+            "Couldn't remove a temporary directory.",
+            "Couldn't draft criteria.",
+          ]);
+        });
+      });
+
       it('names the configuration path exactly as the wizard received it when the model is unavailable', async () => {
         const operations = createOperations({
           locateConfig: vi.fn(async () => ({ ok: true as const, value: '/work/bench/tevu.yaml' })),
@@ -7597,7 +7807,7 @@ describe('tevu CLI', () => {
           draftCriteria: vi.fn(async () => ({
             status: 'failed' as const,
             failure: { cause: 'model-unavailable' as const, model: 'acme/model-a' },
-            retainedDirectory: null,
+            retainedDirectories: [],
           })),
         });
         scriptAnswers(...READY_ANSWERS, clack.CANCEL);
@@ -7617,8 +7827,9 @@ describe('tevu CLI', () => {
         const config = buildCriteriaConfig();
         const draftCriteria = vi.fn(async () => ({
           status: 'drafted' as const,
+          effort: { status: 'verified' as const },
           draft: { acceptance: ['Drafted item never saved.'], done: ['Also never saved.'] },
-          retainedDirectory: null,
+          retainedDirectories: [],
         }));
         const operations = createOperations({
           loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
@@ -7660,8 +7871,9 @@ describe('tevu CLI', () => {
         const config = buildCriteriaConfig();
         const draftCriteria = vi.fn(async () => ({
           status: 'drafted' as const,
+          effort: { status: 'verified' as const },
           draft: { acceptance: ['a'], done: ['d'] },
-          retainedDirectory: null,
+          retainedDirectories: [],
         }));
         const operations = createOperations({
           loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
@@ -7685,11 +7897,12 @@ describe('tevu CLI', () => {
         const config = buildCriteriaConfig();
         const draftCriteria = vi.fn(async () => ({
           status: 'drafted' as const,
+          effort: { status: 'verified' as const },
           draft: {
             acceptance: [`This touches commit ${REFERENCE_HASH.slice(0, 7)} directly.`],
             done: ['The change is documented for users.'],
           },
-          retainedDirectory: null,
+          retainedDirectories: [],
         }));
         const operations = createOperations({
           loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
@@ -7730,8 +7943,9 @@ describe('tevu CLI', () => {
         const config = buildCriteriaConfig();
         const draftCriteria = vi.fn(async () => ({
           status: 'drafted' as const,
+          effort: { status: 'verified' as const },
           draft: { acceptance: ['Original wording.'], done: ['The change is documented.'] },
-          retainedDirectory: null,
+          retainedDirectories: [],
         }));
         const operations = createOperations({
           loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
@@ -7765,8 +7979,9 @@ describe('tevu CLI', () => {
         const config = buildCriteriaConfig();
         const draftCriteria = vi.fn(async () => ({
           status: 'drafted' as const,
+          effort: { status: 'verified' as const },
           draft: { acceptance: ['Original wording.'], done: ['The change is documented.'] },
-          retainedDirectory: null,
+          retainedDirectories: [],
         }));
         const operations = createOperations({
           loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
@@ -7806,6 +8021,7 @@ describe('tevu CLI', () => {
         const config = buildCriteriaConfig();
         const draftCriteria = vi.fn(async () => ({
           status: 'drafted' as const,
+          effort: { status: 'verified' as const },
           draft: {
             acceptance: [
               `First item touches commit ${REFERENCE_HASH.slice(0, 7)}.`,
@@ -7813,7 +8029,7 @@ describe('tevu CLI', () => {
             ],
             done: ['Clean done item.'],
           },
-          retainedDirectory: null,
+          retainedDirectories: [],
         }));
         const operations = createOperations({
           loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
@@ -7856,11 +8072,12 @@ describe('tevu CLI', () => {
         const config = buildCriteriaConfig();
         const draftCriteria = vi.fn(async () => ({
           status: 'drafted' as const,
+          effort: { status: 'verified' as const },
           draft: {
             acceptance: ['Original acceptance item.'],
             done: ['The change is documented.'],
           },
-          retainedDirectory: null,
+          retainedDirectories: [],
         }));
         const operations = createOperations({
           loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
@@ -7908,11 +8125,12 @@ describe('tevu CLI', () => {
         const config = buildCriteriaConfig();
         const draftCriteria = vi.fn(async () => ({
           status: 'drafted' as const,
+          effort: { status: 'verified' as const },
           draft: {
             acceptance: ['The export button appears on the table view.'],
             done: ['The change is documented for users.'],
           },
-          retainedDirectory: null,
+          retainedDirectories: [],
         }));
         const operations = createOperations({
           loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
@@ -8956,8 +9174,9 @@ describe('tevu CLI', () => {
         })),
         draftCriteria: vi.fn(async () => ({
           status: 'drafted' as const,
+          effort: { status: 'verified' as const },
           draft: { acceptance: ['The export is documented.'], done: ['The change is reviewed.'] },
-          retainedDirectory: null,
+          retainedDirectories: [],
         })),
       });
 

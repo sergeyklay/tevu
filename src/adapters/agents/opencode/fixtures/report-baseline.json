@@ -784,6 +784,22 @@
         "version": 1
       }
     },
+    "efforts": {
+      "grader": null,
+      "models": {
+        "alpha": {
+          "status": "verified"
+        },
+        "beta": {
+          "reason": "\"effort-low\" is not among the variants \"opencode models --verbose\" reports for \"vendor/model-alpha-synth\" (effort-high), and the repository of each task may define it: task-1 (opencode.json)",
+          "status": "unverified"
+        },
+        "gamma": {
+          "reason": "\"effort-high\" is not among the variants \"opencode models --verbose\" reports for \"vendor/model-gamma-synth\" (max), and these tasks have no agent configuration at the root of their base commit: task-2; their cases would run \"vendor/model-gamma-synth\" with its default options",
+          "status": "unsupported"
+        }
+      }
+    },
     "execution": {
       "caseTimeoutMs": 60000,
       "concurrency": 2,
