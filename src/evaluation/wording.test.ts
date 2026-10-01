@@ -10,6 +10,7 @@ import {
   buildGradedGrade,
   buildGradingArtifact,
   buildModelRecord,
+  buildMultiCallGradingArtifact,
   buildPendingGrade,
   buildTaskRecord,
   FIXTURE_RUN_ID,
@@ -30,6 +31,30 @@ import {
 
 import type { AttemptFacts } from './wording';
 import type { CheckRecord, CheckResult, GradingArtifact, TevuError } from '@/domain/types';
+
+type NoReplyCause = Extract<GradingArtifact['call'], { status: 'no-reply' }>['cause'];
+
+const NO_REPLY_CASES: Array<{
+  cause: NoReplyCause;
+  base: string;
+  opening: string;
+}> = [
+  {
+    cause: 'unfinished',
+    base: 'the grading model stopped before finishing its reply',
+    opening: 'The grading model stopped before finishing its reply',
+  },
+  {
+    cause: 'tool-call',
+    base: 'the grading model asked to use a tool, which grading does not allow',
+    opening: 'The grading model asked to use a tool, which grading does not allow',
+  },
+  {
+    cause: 'other',
+    base: 'the grading model returned no verdict for this solution',
+    opening: 'The grading model returned no verdict for this solution',
+  },
+];
 
 const CASE_ID = 'task-1--m1--1';
 
@@ -768,7 +793,11 @@ describe('describeAttempt', () => {
     }
 
     const noReply = buildGradingArtifact({
-      call: { status: 'no-reply', reason: 'the grader call failed: ModelCallError (failed)' },
+      call: {
+        status: 'no-reply',
+        cause: 'other',
+        reason: 'the grader call failed: ModelCallError (failed)',
+      },
     });
 
     it.each([
@@ -960,6 +989,41 @@ describe('describeAttempt', () => {
       );
     });
 
+    describe.each(NO_REPLY_CASES)('no reply with cause $cause', ({ cause, base, opening }) => {
+      const reason = `the grader call failed: ${cause} detail`;
+      const gradingOf = (callCount: number): GradingArtifact =>
+        buildMultiCallGradingArtifact(callCount, {
+          call: { status: 'no-reply', cause, reason },
+        });
+
+      it('opens with the cause alone after one call', () => {
+        const facts = pendingFacts({
+          checks: [gradedCheck('g1')],
+          grading: buildGradingArtifact({ call: { status: 'no-reply', cause, reason } }),
+        });
+
+        const { pending } = describeAttempt(facts, FIXTURE_RUN_ID);
+
+        expect(pending?.happened).toBe(
+          `${opening}, so 1 required graded check waits for a person's verdict.`,
+        );
+        expect(pending?.detail).toBe(`case ${CASE_ID}: ${reason}`);
+      });
+
+      it('opens with the call count after three calls', () => {
+        const facts = pendingFacts({
+          checks: [gradedCheck('g1'), gradedCheck('g2', false)],
+          grading: gradingOf(3),
+        });
+
+        const { pending } = describeAttempt(facts, FIXTURE_RUN_ID);
+
+        expect(pending?.happened).toBe(
+          `After 3 calls, ${base}, so 1 required and 1 optional graded checks wait for a person's verdict.`,
+        );
+      });
+    });
+
     it('puts the grader call reason in the detail of an attempt that also waits on a manual check', () => {
       const facts = pendingFacts({
         checks: [manualCheck('m1'), gradedCheck('g1')],
@@ -987,7 +1051,9 @@ describe('gradingGapStatement', () => {
   const baseFacts = {
     runId: FIXTURE_RUN_ID,
     caseId: CASE_ID,
-    grading: buildGradingArtifact({ call: { status: 'no-reply', reason: 'call failed' } }),
+    grading: buildGradingArtifact({
+      call: { status: 'no-reply', cause: 'other', reason: 'call failed' },
+    }),
     lifecycle: 'completed' as const,
     pendingGradedChecks: { required: 5, optional: 0 },
   };
@@ -997,8 +1063,9 @@ describe('gradingGapStatement', () => {
 
     expect(statement).toEqual({
       happened:
-        "The grading model returned no verdict for this solution, so the usage and cost of that call are unknown and 5 required graded checks still wait for a person's verdict.",
-      means: 'The grader total for the task leaves this call out.',
+        "The grading model returned no verdict for this solution, so 5 required graded checks still wait for a person's verdict.",
+      means:
+        'The grader total for the task counts a measurement of this grading only when tevu has it for the whole grading.',
       next: `Record the verdicts with \`tevu assess ${FIXTURE_RUN_ID} ${CASE_ID}\`.`,
       detail: `case ${CASE_ID}: call failed`,
     });
@@ -1015,9 +1082,9 @@ describe('gradingGapStatement', () => {
     });
 
     expect(one?.happened).toBe(
-      "The grading model returned no verdict for this solution, so the usage and cost of that call are unknown and 1 optional graded check still waits for a person's verdict.",
+      "The grading model returned no verdict for this solution, so 1 optional graded check still waits for a person's verdict.",
     );
-    expect(both?.happened).toContain('and 1 required and 2 optional graded checks still wait for');
+    expect(both?.happened).toContain('so 1 required and 2 optional graded checks still wait for');
   });
 
   it.each([
@@ -1031,11 +1098,40 @@ describe('gradingGapStatement', () => {
     const statement = gradingGapStatement({ ...baseFacts, ...overrides });
 
     expect(statement).toEqual({
-      happened:
-        'The grading model returned no verdict for this solution, so the usage and cost of that call are unknown.',
-      means: 'The grader total for the task leaves this call out.',
-      next: 'Nothing more is needed for this call.',
+      happened: 'The grading model returned no verdict for this solution.',
+      means:
+        'The grader total for the task counts a measurement of this grading only when tevu has it for the whole grading.',
+      next: 'Nothing more is needed for this grading.',
       detail: `case ${CASE_ID}: call failed`,
+    });
+  });
+
+  describe.each(NO_REPLY_CASES)('cause $cause', ({ cause, base, opening }) => {
+    const reason = `call failed: ${cause} detail`;
+
+    it('names the cause alone after one call', () => {
+      const grading = buildGradingArtifact({ call: { status: 'no-reply', cause, reason } });
+
+      const statement = gradingGapStatement({ ...baseFacts, grading });
+
+      expect(statement?.happened).toBe(
+        `${opening}, so 5 required graded checks still wait for a person's verdict.`,
+      );
+      expect(statement?.detail).toBe(`case ${CASE_ID}: ${reason}`);
+    });
+
+    it('opens with the call count after three calls', () => {
+      const grading = buildMultiCallGradingArtifact(3, {
+        call: { status: 'no-reply', cause, reason },
+      });
+
+      const statement = gradingGapStatement({
+        ...baseFacts,
+        grading,
+        pendingGradedChecks: { required: 0, optional: 0 },
+      });
+
+      expect(statement?.happened).toBe(`After 3 calls, ${base}.`);
     });
   });
 
@@ -1062,11 +1158,11 @@ describe('measurementGapStatement', () => {
     });
   });
 
-  it('describes several measurements of a grading call in the plural', () => {
+  it('describes several measurements of a grading in the plural', () => {
     const statement = measurementGapStatement({ reason: 'no export', count: 3, graderLine: true });
 
     expect(statement).toEqual({
-      happened: 'tevu has no value for these measurements of its grading call.',
+      happened: 'tevu has no value for these measurements of its grading.',
       means: 'They are unknown, not zero.',
       next: "This run's saved files cannot supply them; to measure them, fix the cause in the technical detail and run the comparison again.",
       detail: 'no export',
@@ -1128,17 +1224,33 @@ describe('gradeLines', () => {
     ]);
   });
 
-  it('puts the call reason of a no-reply grading after the technical detail marker', () => {
-    const grading = buildGradingArtifact({
-      call: { status: 'no-reply', reason: 'call failed: boom' },
-    });
+  it.each(NO_REPLY_CASES)(
+    'puts the call reason of a no-reply grading with cause $cause after the technical detail marker',
+    ({ cause, opening }) => {
+      const grading = buildGradingArtifact({
+        call: { status: 'no-reply', cause, reason: 'call failed: boom' },
+      });
 
-    const lines = gradeLines(buildPendingGrade({ checkId: 'g1' }), grading);
+      const lines = gradeLines(buildPendingGrade({ checkId: 'g1' }), grading);
 
-    expect(lines).toEqual([
-      `The grading model returned no verdict for this solution. ${NO_VERDICT_TAIL} Technical detail: call failed: boom`,
-    ]);
-  });
+      expect(lines).toEqual([`${opening}. ${NO_VERDICT_TAIL} Technical detail: call failed: boom`]);
+    },
+  );
+
+  it.each(NO_REPLY_CASES)(
+    'opens with the call count for a no-reply grading with cause $cause after three calls',
+    ({ cause, base }) => {
+      const grading = buildMultiCallGradingArtifact(3, {
+        call: { status: 'no-reply', cause, reason: 'call failed: boom' },
+      });
+
+      const lines = gradeLines(buildPendingGrade({ checkId: 'g1' }), grading);
+
+      expect(lines).toEqual([
+        `After 3 calls, ${base}. ${NO_VERDICT_TAIL} Technical detail: call failed: boom`,
+      ]);
+    },
+  );
 
   it('puts the grade reason of a replied grading after the technical detail marker', () => {
     const grade = buildPendingGrade({ checkId: 'g1', reason: 'reply was not JSON' });

@@ -1431,6 +1431,46 @@ function isMetricValue(value: unknown): boolean {
   return false;
 }
 
+const GRADER_NO_REPLY_CAUSES = new Set(['unfinished', 'tool-call', 'other']);
+
+/** Holds for a decoded `AgentMetrics`: every agent metric key carries a well-formed value. */
+function isAgentMetrics(value: unknown): boolean {
+  return isRecord(value) && AGENT_METRIC_KEYS.every((key) => isMetricValue(value[key]));
+}
+
+/** Holds for a decoded no-reply grader outcome: a declared cause and a string reason. */
+function isGraderNoReply(value: Record<string, unknown>): boolean {
+  return (
+    typeof value['cause'] === 'string' &&
+    GRADER_NO_REPLY_CAUSES.has(value['cause']) &&
+    typeof value['reason'] === 'string'
+  );
+}
+
+/** Holds for a decoded `GraderCall`: an outcome, metrics, an event list, diagnostics text, and a session or `null`. */
+function isGraderCall(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const outcome = value['outcome'];
+  if (!isRecord(outcome)) {
+    return false;
+  }
+  if (
+    outcome['status'] !== 'replied' &&
+    !(outcome['status'] === 'no-reply' && isGraderNoReply(outcome))
+  ) {
+    return false;
+  }
+  const session = value['session'];
+  return (
+    isAgentMetrics(value['metrics']) &&
+    Array.isArray(value['events']) &&
+    typeof value['diagnostics'] === 'string' &&
+    (session === null || isRecord(session))
+  );
+}
+
 function describeGradingDefect(value: unknown, runId: string, caseId: string): string | null {
   const malformed = `grading artifact for "${caseId}" in run "${runId}" has a malformed shape`;
   if (!isRecord(value)) {
@@ -1457,14 +1497,17 @@ function describeGradingDefect(value: unknown, runId: string, caseId: string): s
       return malformed;
     }
   } else if (call['status'] === 'no-reply') {
-    if (typeof call['reason'] !== 'string') {
+    if (!isGraderNoReply(call)) {
       return malformed;
     }
   } else {
     return malformed;
   }
-  const metrics = value['metrics'];
-  if (!isRecord(metrics) || !AGENT_METRIC_KEYS.every((key) => isMetricValue(metrics[key]))) {
+  const calls = value['calls'];
+  if (!Array.isArray(calls) || !calls.every(isGraderCall)) {
+    return malformed;
+  }
+  if (!isAgentMetrics(value['metrics'])) {
     return malformed;
   }
   const grades = value['grades'];

@@ -1,8 +1,10 @@
 /**
- * One-shot grading call for a case's graded checks, built on top of
- * `callModelRole`. Grades every graded check of a task in one call, never
- * writes an artifact itself, and never returns an error result: a redaction
- * failure, a call error, or cancellation each become a typed outcome instead.
+ * Grading of a case's graded checks, built on top of `callModelRole`. Grades
+ * every graded check of a task from one reply, calling the grader again only
+ * when its model stopped before finishing, up to a fixed number of calls.
+ * Never writes an artifact itself and never returns an error result: a
+ * redaction failure, a call error, or cancellation each become a typed
+ * outcome instead.
  *
  * Entry point: {@link gradeCase}.
  */
@@ -14,16 +16,22 @@ import {
   deriveGrades,
   gradedChecksOf,
   pendingGrades,
+  sumGraderCallMetrics,
 } from '@/evaluation/grading';
 
 import type {
+  AgentMetrics,
   CaseGrading,
+  GraderIdentity,
   ModelCallDependencies,
+  ModelCallEvidence,
   ProviderSnapshot,
   Redactor,
   TaskDefinition,
   TevuConfig,
+  TevuError,
 } from '@/domain/types';
+import type { GradedCheckSummary } from '@/evaluation/grading';
 
 /** Everything one grading call needs; `patch` is the case's captured solution patch. */
 export type GradeCaseRequest = {
@@ -60,29 +68,56 @@ function requireGraderRole(config: TevuConfig, task: TaskDefinition) {
   return { grader, checks };
 }
 
+/** A grader call that fails with cause `unfinished` is made again until this many calls ran. */
+const GRADER_CALL_LIMIT = 3;
+
+function unredactedPromptOutcome(
+  grader: GraderIdentity,
+  checks: readonly GradedCheckSummary[],
+): GradeCaseOutcome {
+  const reason = 'the grader prompt could not be redacted; the grader was not called';
+  return {
+    status: 'graded',
+    grading: {
+      grader,
+      call: { status: 'no-reply', cause: 'other', reason },
+      calls: [],
+      metrics: unavailableAgentMetrics(reason),
+      grades: pendingGrades(checks, reason),
+    },
+    retainedDirectory: null,
+  };
+}
+
+/** Only a `ModelCallError` of cause `unfinished` or `tool-call` has a cause of its own. */
+function noReplyCauseOf(error: TevuError): 'unfinished' | 'tool-call' | 'other' {
+  return error.kind === 'ModelCallError' &&
+    (error.cause === 'unfinished' || error.cause === 'tool-call')
+    ? error.cause
+    : 'other';
+}
+
+/** `calls` is never empty where this runs: every exit of the call loop follows a push. */
+function sumCallMetrics(calls: CaseGrading['calls']): AgentMetrics {
+  const [first, ...rest] = calls.map((call) => call.metrics);
+  return sumGraderCallMetrics([first, ...rest]);
+}
+
 /**
- * Grades every graded check of `request.task` in one redacted, error-safe
- * model call: a prompt-redaction failure or any non-cancellation call error
- * leaves every graded check pending with the failure's reason, and every
- * grader metric unavailable with that same reason; cancellation during the
- * call returns `{ status: 'cancelled' }` with nothing to persist.
+ * Grades every graded check of `request.task` through up to
+ * {@link GRADER_CALL_LIMIT} redacted, error-safe model calls with one prompt.
+ * Only a call whose model stopped before finishing its reply is made again;
+ * a reply, a tool call, or any other failure ends the grading. A grading
+ * without a reply leaves every graded check pending with the last call's
+ * reason. Every call is recorded with the redacted records it left, and the
+ * grading's metrics sum the calls'. Cancellation during any call returns
+ * `{ status: 'cancelled' }` with nothing to persist.
  */
 export async function gradeCase(
   request: GradeCaseRequest,
   dependencies: ModelCallDependencies,
 ): Promise<GradeCaseOutcome> {
   const { grader, checks } = requireGraderRole(request.config, request.task);
-
-  const noReply = (reason: string): GradeCaseOutcome => ({
-    status: 'graded',
-    grading: {
-      grader,
-      call: { status: 'no-reply', reason },
-      metrics: unavailableAgentMetrics(reason),
-      grades: pendingGrades(checks, reason),
-    },
-    retainedDirectory: null,
-  });
 
   const prompt = buildGraderPrompt({
     prompt: request.task.prompt,
@@ -95,38 +130,73 @@ export async function gradeCase(
   try {
     redacted = request.redact(prompt);
   } catch {
-    return noReply('the grader prompt could not be redacted; the grader was not called');
+    return unredactedPromptOutcome(grader, checks);
   }
   // The redactor is injected; a non-string result must fail closed.
   if (typeof (redacted as unknown) !== 'string') {
-    return noReply('the grader prompt could not be redacted; the grader was not called');
+    return unredactedPromptOutcome(grader, checks);
   }
 
-  const result = await callModelRole(
-    {
-      config: request.config,
-      role: 'grader',
-      prompt: redacted,
-      timeoutMs: request.timeoutMs,
-      cancellation: request.cancellation,
-      providers: request.providers,
-    },
-    dependencies,
-  );
-  if (!result.ok) {
+  const calls: CaseGrading['calls'] = [];
+  for (;;) {
+    let evidence: ModelCallEvidence | undefined;
+    const result = await callModelRole(
+      {
+        config: request.config,
+        role: 'grader',
+        prompt: redacted,
+        timeoutMs: request.timeoutMs,
+        cancellation: request.cancellation,
+        providers: request.providers,
+        onEvidence: (delivered) => {
+          evidence = delivered;
+        },
+      },
+      dependencies,
+    );
+    const records = {
+      events: evidence?.events ?? [],
+      diagnostics: evidence?.diagnostics ?? '',
+      session: evidence?.session?.export ?? null,
+    };
+
+    if (result.ok) {
+      calls.push({ outcome: { status: 'replied' }, metrics: result.value.metrics, ...records });
+      return {
+        status: 'graded',
+        grading: {
+          grader,
+          call: { status: 'replied', reply: result.value.text },
+          calls,
+          metrics: sumCallMetrics(calls),
+          grades: deriveGrades(result.value.text, checks),
+        },
+        retainedDirectory: result.value.retainedDirectory,
+      };
+    }
+
     if (result.error.kind === 'CancellationError') {
       return { status: 'cancelled' };
     }
-    return noReply(`the grader call failed: ${describeModelCallFailure(result.error)}`);
+    const cause = noReplyCauseOf(result.error);
+    const reason = `the grader call failed: ${describeModelCallFailure(result.error)}`;
+    calls.push({
+      outcome: { status: 'no-reply', cause, reason },
+      metrics: evidence?.session?.metrics ?? unavailableAgentMetrics(reason),
+      ...records,
+    });
+    if (cause !== 'unfinished' || calls.length >= GRADER_CALL_LIMIT) {
+      return {
+        status: 'graded',
+        grading: {
+          grader,
+          call: { status: 'no-reply', cause, reason },
+          calls,
+          metrics: sumCallMetrics(calls),
+          grades: pendingGrades(checks, reason),
+        },
+        retainedDirectory: null,
+      };
+    }
   }
-  return {
-    status: 'graded',
-    grading: {
-      grader,
-      call: { status: 'replied', reply: result.value.text },
-      metrics: result.value.metrics,
-      grades: deriveGrades(result.value.text, checks),
-    },
-    retainedDirectory: result.value.retainedDirectory,
-  };
 }

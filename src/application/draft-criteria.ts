@@ -297,7 +297,8 @@ export async function draftCriteria(
           ? { agentMessage: error.agentMessage }
           : {}),
         detail:
-          error.kind === 'ModelCallError' && error.cause === 'failed'
+          error.kind === 'ModelCallError' &&
+          (error.cause === 'failed' || error.cause === 'unfinished' || error.cause === 'tool-call')
             ? error.reason
             : describeModelCallFailure(error),
       },

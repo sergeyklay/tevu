@@ -24,6 +24,7 @@ import type {
   ManagedProcessResult,
   ManagedProcessRunner,
   ModelCallEnvironment,
+  ModelCallEvidence,
   RedactedCapture,
   SecretRedactor,
   TevuError,
@@ -3545,6 +3546,473 @@ describe('OpenCode adapter cost evidence over an injected fake process', () => {
           agent: 'opencode',
           context: { phase: 'case', caseId: CASE_ID },
           reason: 'copied providers redaction failed',
+        },
+      });
+    });
+  });
+});
+
+describe('OpenCode adapter callModel permission and evidence over an injected fake process', () => {
+  const SESSION_ID = 'ses-evidence-0001';
+  const SECRET = 'sk-evidence-secret';
+  const RUN_STDERR = 'run stderr capture';
+  const DENY_EVERY_TOOL = '{"*":"deny"}';
+
+  type ExportMessageOptions = {
+    finish?: string | undefined;
+    error?: unknown;
+    toolNames?: readonly (string | undefined)[];
+    text?: string;
+  };
+
+  function assistantMessage(id: string, options: ExportMessageOptions = {}) {
+    const info: Record<string, unknown> = {
+      id,
+      sessionID: SESSION_ID,
+      role: 'assistant',
+      parentID: 'msg-u1',
+      cost: 0.5,
+      tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } },
+    };
+    if ('finish' in options) {
+      if (options.finish !== undefined) info['finish'] = options.finish;
+    } else {
+      info['finish'] = 'stop';
+    }
+    if (options.error !== undefined) info['error'] = options.error;
+    const toolParts = (options.toolNames ?? []).map((tool, index) => ({
+      id: `prt-${id}-tool-${index}`,
+      sessionID: SESSION_ID,
+      messageID: id,
+      type: 'tool',
+      ...(tool === undefined ? {} : { tool }),
+    }));
+    const textParts =
+      options.text === undefined
+        ? []
+        : [
+            {
+              id: `prt-${id}-text`,
+              sessionID: SESSION_ID,
+              messageID: id,
+              type: 'text',
+              text: options.text,
+            },
+          ];
+    return { info, parts: [...toolParts, ...textParts] };
+  }
+
+  function buildExport(...assistants: ReturnType<typeof assistantMessage>[]): OpenCodeExport {
+    return {
+      info: { id: SESSION_ID },
+      messages: [
+        { info: { id: 'msg-u1', sessionID: SESSION_ID, role: 'user' }, parts: [] },
+        ...assistants,
+      ],
+    } as OpenCodeExport;
+  }
+
+  function stepStartLine(extraText?: string): string {
+    return `${JSON.stringify({
+      type: 'step_start',
+      timestamp: 1,
+      sessionID: SESSION_ID,
+      part: {
+        id: 'prt-1',
+        sessionID: SESSION_ID,
+        messageID: 'msg-a1',
+        type: 'step-start',
+        ...(extraText === undefined ? {} : { note: extraText }),
+      },
+    })}\n`;
+  }
+
+  function buildCapture(text: string): RedactedCapture {
+    return { text, totalBytes: text.length, truncated: false, incomplete: false };
+  }
+
+  type RunnerOptions = {
+    stdout?: string;
+    runResult?: Partial<Extract<ManagedProcessResult, { launched: true }>>;
+    exportResult?: ManagedProcessResult;
+    exportText?: string;
+    requests?: ManagedProcessRequest[];
+  };
+
+  /** Answers `run` with a step-start event and `export` with the given session, recording every request. */
+  function buildEvidenceRunner(options: RunnerOptions): ManagedProcessRunner {
+    return async (request) => {
+      options.requests?.push(request);
+      if (request.argv[1] === 'export') {
+        return (
+          options.exportResult ??
+          buildCompletion({ stdout: buildCapture(options.exportText ?? '{}') })
+        );
+      }
+      const stdout = options.stdout ?? stepStartLine();
+      request.onStdout?.(stdout);
+      return buildCompletion({
+        stdout: buildCapture(stdout),
+        stderr: buildCapture(RUN_STDERR),
+        ...options.runResult,
+      });
+    };
+  }
+
+  function callModelCollectingEvidence(
+    options: RunnerOptions & {
+      variables?: Record<string, string>;
+      secrets?: SecretRedactor;
+      cancellation?: AbortSignal;
+    },
+  ) {
+    const evidence: ModelCallEvidence[] = [];
+    const adapter = buildOpenCodeAdapter({
+      runProcess: buildEvidenceRunner(options),
+      ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
+    });
+    const outcome = adapter.callModel({
+      role: 'grader',
+      model: 'acme/model-a',
+      effort: 'high',
+      prompt: 'synthetic prompt',
+      environment: buildModelCallEnvironment({ variables: options.variables ?? {} }),
+      timeoutMs: 10_000,
+      terminationGraceMs: 250,
+      cancellation: options.cancellation ?? new AbortController().signal,
+      copiedProviders: [],
+      onEvidence: (delivered) => evidence.push(delivered),
+    });
+    return { outcome, evidence };
+  }
+
+  const REPLY_EXPORT = JSON.stringify(buildExport(assistantMessage('msg-a1', { text: 'done' })));
+
+  describe('OPENCODE_PERMISSION', () => {
+    it('denies every tool in the run environment while keeping the other variables', async () => {
+      const requests: ManagedProcessRequest[] = [];
+
+      await callModelCollectingEvidence({
+        exportText: REPLY_EXPORT,
+        requests,
+        variables: { KEEP_ME: 'kept' },
+      }).outcome;
+
+      const run = requests.find((request) => request.argv[1] === 'run');
+      expect(run?.environment).toEqual({ KEEP_ME: 'kept', OPENCODE_PERMISSION: DENY_EVERY_TOOL });
+    });
+
+    it('replaces a value the supplied variables hold', async () => {
+      const requests: ManagedProcessRequest[] = [];
+
+      await callModelCollectingEvidence({
+        exportText: REPLY_EXPORT,
+        requests,
+        variables: { OPENCODE_PERMISSION: '{"bash":"allow"}' },
+      }).outcome;
+
+      const run = requests.find((request) => request.argv[1] === 'run');
+      expect(run?.environment['OPENCODE_PERMISSION']).toBe(DENY_EVERY_TOOL);
+    });
+
+    it('leaves the export environment without a permission of its own', async () => {
+      const requests: ManagedProcessRequest[] = [];
+
+      await callModelCollectingEvidence({
+        exportText: REPLY_EXPORT,
+        requests,
+        variables: { KEEP_ME: 'kept' },
+      }).outcome;
+
+      const exported = requests.find((request) => request.argv[1] === 'export');
+      expect(exported?.environment).toHaveProperty('KEEP_ME', 'kept');
+      expect(exported?.environment).not.toHaveProperty('OPENCODE_PERMISSION');
+    });
+
+    it('keeps the value an operator supplied in the export environment', async () => {
+      const requests: ManagedProcessRequest[] = [];
+
+      await callModelCollectingEvidence({
+        exportText: REPLY_EXPORT,
+        requests,
+        variables: { OPENCODE_PERMISSION: '{"bash":"allow"}' },
+      }).outcome;
+
+      const exported = requests.find((request) => request.argv[1] === 'export');
+      expect(exported?.environment['OPENCODE_PERMISSION']).toBe('{"bash":"allow"}');
+    });
+
+    it('adds no permission to the run environment of a case agent', async () => {
+      const requests: ManagedProcessRequest[] = [];
+      const adapter = buildOpenCodeAdapter({
+        runProcess: buildFakeRunner(stepStartLine(), requests),
+      });
+
+      await adapter.run(buildRunInput());
+
+      expect(requests[0]?.environment).not.toHaveProperty('OPENCODE_PERMISSION');
+    });
+  });
+
+  describe('onEvidence', () => {
+    it('delivers the events, the stderr text, and the session with its metrics once for a reply', async () => {
+      const { outcome, evidence } = callModelCollectingEvidence({ exportText: REPLY_EXPORT });
+
+      const result = await outcome;
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]?.events).toEqual([JSON.parse(stepStartLine())]);
+      expect(evidence[0]?.diagnostics).toBe(RUN_STDERR);
+      expect(evidence[0]?.session?.export).toEqual(JSON.parse(REPLY_EXPORT));
+      expect(result.value.metrics).toEqual(evidence[0]?.session?.metrics);
+      expect(result.value.text).toBe('done');
+    });
+
+    it.each([
+      {
+        name: 'a timeout',
+        options: { runResult: { timedOut: true, exitCode: null } },
+        cause: 'timed-out',
+      },
+      { name: 'a nonzero exit', options: { runResult: { exitCode: 2 } }, cause: 'failed' },
+      {
+        name: 'a signal',
+        options: { runResult: { exitCode: null, signal: 'SIGKILL' } },
+        cause: 'failed',
+      },
+      {
+        name: 'an error event',
+        options: {
+          stdout: `${JSON.stringify({ type: 'error', timestamp: 1, sessionID: SESSION_ID, error: { message: 'boom' } })}\n`,
+        },
+        cause: 'failed',
+      },
+    ] satisfies { name: string; options: RunnerOptions; cause: string }[])(
+      'delivers the events and stderr once without a session after $name',
+      async ({ options, cause }) => {
+        const { outcome, evidence } = callModelCollectingEvidence(options);
+
+        const result = await outcome;
+
+        expect(result).toMatchObject({ ok: false, error: { cause } });
+        expect(evidence).toHaveLength(1);
+        expect(evidence[0]?.diagnostics).toBe(RUN_STDERR);
+        expect(evidence[0]?.session).toBeNull();
+      },
+    );
+
+    it('delivers the events once without a session when the run named no root session', async () => {
+      const { outcome, evidence } = callModelCollectingEvidence({ stdout: '' });
+
+      const result = await outcome;
+
+      expect(result.ok).toBe(false);
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]).toEqual({ events: [], diagnostics: RUN_STDERR, session: null });
+    });
+
+    it('delivers the evidence once without a session when the export process fails', async () => {
+      const { outcome, evidence } = callModelCollectingEvidence({
+        exportResult: buildCompletion({ exitCode: 1 }),
+      });
+
+      const result = await outcome;
+
+      expect(result).toMatchObject({ ok: false, error: { cause: 'failed' } });
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]?.events).toHaveLength(1);
+      expect(evidence[0]?.session).toBeNull();
+    });
+
+    it('delivers the evidence once when the run was cancelled after it launched', async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      const { outcome, evidence } = callModelCollectingEvidence({
+        runResult: { cancelled: true, exitCode: null },
+        cancellation: controller.signal,
+      });
+
+      const result = await outcome;
+
+      expect(result).toMatchObject({ ok: false, error: { kind: 'CancellationError' } });
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]?.session).toBeNull();
+    });
+
+    it('delivers no evidence when the run did not launch', async () => {
+      const evidence: ModelCallEvidence[] = [];
+      const adapter = buildOpenCodeAdapter({
+        runProcess: async () => ({ launched: false, reason: 'spawn ENOENT' }),
+      });
+
+      const result = await adapter.callModel({
+        role: 'grader',
+        model: 'acme/model-a',
+        effort: 'high',
+        prompt: 'synthetic prompt',
+        environment: buildModelCallEnvironment(),
+        timeoutMs: 10_000,
+        terminationGraceMs: 250,
+        cancellation: new AbortController().signal,
+        copiedProviders: [],
+        onEvidence: (delivered) => evidence.push(delivered),
+      });
+
+      expect(result).toMatchObject({ ok: false, error: { cause: 'launch-failed' } });
+      expect(evidence).toEqual([]);
+    });
+
+    it('replaces a secret in the delivered events and session and hands the run the secret values for stderr', async () => {
+      const requests: ManagedProcessRequest[] = [];
+      const secretExport = JSON.stringify(
+        buildExport(assistantMessage('msg-a1', { text: `the key is ${SECRET}` })),
+      );
+
+      const { outcome, evidence } = callModelCollectingEvidence({
+        stdout: stepStartLine(`leaked ${SECRET}`),
+        exportText: secretExport,
+        requests,
+        secrets: buildSecretRedactor([SECRET]),
+      });
+
+      const result = await outcome;
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const delivered = JSON.stringify(evidence);
+      expect(delivered).not.toContain(SECRET);
+      expect(delivered).toContain('[REDACTED]');
+      expect(JSON.stringify(result.value)).not.toContain(SECRET);
+      expect(requests.find((request) => request.argv[1] === 'run')?.secretValues).toContain(SECRET);
+    });
+  });
+
+  describe('tool-call failure', () => {
+    const TOOLS_DENIED = 'although every tool is denied to a model call';
+
+    it.each([
+      {
+        name: 'none',
+        toolNames: [undefined],
+        reason: `the session holds a tool call ${TOOLS_DENIED}`,
+      },
+      {
+        name: 'one',
+        toolNames: ['read'],
+        reason: `the session called the tool "read" ${TOOLS_DENIED}`,
+      },
+      {
+        name: 'several',
+        toolNames: ['read', 'bash', 'read'],
+        reason: `the session called the tools "read", "bash" ${TOOLS_DENIED}`,
+      },
+    ])(
+      'names $name tool name(s) of a session that ended in a tool call',
+      async ({ toolNames, reason }) => {
+        const toolSession = JSON.stringify(
+          buildExport(assistantMessage('msg-a1', { finish: 'tool-calls', toolNames })),
+        );
+
+        const { outcome, evidence } = callModelCollectingEvidence({ exportText: toolSession });
+
+        const result = await outcome;
+
+        expect(result).toEqual({
+          ok: false,
+          error: {
+            kind: 'ModelCallError',
+            role: 'grader',
+            agent: 'opencode',
+            cause: 'tool-call',
+            reason,
+          },
+        });
+        expect(evidence).toHaveLength(1);
+        expect(evidence[0]?.session?.export).toEqual(JSON.parse(toolSession));
+      },
+    );
+
+    it('discards a final reply when an earlier assistant message called a tool', async () => {
+      const toolSession = JSON.stringify(
+        buildExport(
+          assistantMessage('msg-a1', { finish: 'tool-calls', toolNames: ['webfetch'] }),
+          assistantMessage('msg-a2', { text: 'verdicts follow' }),
+        ),
+      );
+
+      const { outcome } = callModelCollectingEvidence({ exportText: toolSession });
+
+      const result = await outcome;
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          cause: 'tool-call',
+          reason: `the session called the tool "webfetch" ${TOOLS_DENIED}`,
+        },
+      });
+    });
+  });
+
+  describe('finish classification', () => {
+    it.each([
+      {
+        name: 'length',
+        finish: 'length',
+        reason: 'final assistant message finished with "length"',
+      },
+      {
+        name: 'tool-calls without a tool part',
+        finish: 'tool-calls',
+        reason: 'final assistant message finished with "tool-calls"',
+      },
+      {
+        name: 'no finish',
+        finish: undefined,
+        reason: 'final assistant message has no finish reason',
+      },
+    ])('fails with cause unfinished for $name', async ({ finish, reason }) => {
+      const stopped = JSON.stringify(buildExport(assistantMessage('msg-a1', { finish })));
+
+      const { outcome, evidence } = callModelCollectingEvidence({ exportText: stopped });
+
+      const result = await outcome;
+
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          kind: 'ModelCallError',
+          role: 'grader',
+          agent: 'opencode',
+          cause: 'unfinished',
+          reason,
+        },
+      });
+      expect(evidence[0]?.session?.metrics.cost).toMatchObject({ value: 0.5 });
+    });
+
+    it('keeps cause failed for an assistant message that carries an error', async () => {
+      const errored = JSON.stringify(
+        buildExport(
+          assistantMessage('msg-a1', {
+            finish: 'length',
+            error: { name: 'UnknownError', data: { message: 'provider refused' } },
+          }),
+        ),
+      );
+
+      const { outcome } = callModelCollectingEvidence({ exportText: errored });
+
+      const result = await outcome;
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          cause: 'failed',
+          reason: 'final assistant message carries an error: provider refused',
         },
       });
     });

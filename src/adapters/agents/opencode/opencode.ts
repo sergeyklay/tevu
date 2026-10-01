@@ -28,6 +28,7 @@ import type {
   ManagedProcessResult,
   ManagedProcessRunner,
   ModelCallEnvironment,
+  ModelCallEvidence,
   ModelCallInput,
   ModelCallResult,
   ModelListing,
@@ -608,6 +609,15 @@ function modelCallFailed(
   };
 }
 
+function modelCallStopped(
+  role: ModelRoleName,
+  agent: string,
+  cause: 'unfinished' | 'tool-call',
+  reason: string,
+): { ok: false; error: Extract<TevuError, { kind: 'ModelCallError' }> } {
+  return { ok: false, error: { kind: 'ModelCallError', role, agent, cause, reason } };
+}
+
 /**
  * Extracts a one-line failure summary from a decoded, redacted `error` event
  * or an assistant message's info: the error's `data.message` when it is a
@@ -644,13 +654,38 @@ function isAssistantMessage(
   return message.info.role === 'assistant';
 }
 
+/** Names the distinct tools the export's assistant messages called, in export order. */
+function toolCallReason(sessionExport: OpenCodeExport): string {
+  const names: string[] = [];
+  for (const message of sessionExport.messages.filter(isAssistantMessage)) {
+    for (const part of message.parts) {
+      const { tool } = part as Partial<{ tool: unknown }>;
+      if (part.type === 'tool' && isNonEmptyString(tool) && !names.includes(tool)) {
+        names.push(tool);
+      }
+    }
+  }
+  const denied = 'although every tool is denied to a model call';
+  if (names.length === 0) {
+    return `the session holds a tool call ${denied}`;
+  }
+  const quoted = names.map((name) => `"${name}"`).join(', ');
+  return `the session called the ${names.length === 1 ? 'tool' : 'tools'} ${quoted} ${denied}`;
+}
+
+function hasToolPart(sessionExport: OpenCodeExport): boolean {
+  return sessionExport.messages
+    .filter(isAssistantMessage)
+    .some((message) => message.parts.some((part) => part.type === 'tool'));
+}
+
 /**
  * Builds the reply text of one model call from its redacted root-session
  * export: the last assistant message's non-synthetic, non-ignored text parts,
  * joined by a line feed and redacted as whole text. Fails closed on a missing
- * assistant message, an assistant error or non-`stop` finish, a non-string
- * text part, or a whole-text redaction failure, per the reasons this
- * function's caller renders to the terminal.
+ * assistant message, an assistant error, a non-`stop` finish (cause
+ * `unfinished`), a non-string text part, or a whole-text redaction failure,
+ * per the reasons this function's caller renders to the terminal.
  */
 function replyText(
   sessionExport: OpenCodeExport,
@@ -674,9 +709,10 @@ function replyText(
     );
   }
   if (info.finish !== 'stop') {
-    return modelCallFailed(
+    return modelCallStopped(
       context.role,
       agent,
+      'unfinished',
       isNonEmptyString(info.finish)
         ? `final assistant message finished with "${info.finish}"`
         : 'final assistant message has no finish reason',
@@ -724,6 +760,13 @@ function redactCopiedProviders(
   return redacted.ok ? (redacted.value as readonly CopiedProvider[]) : undefined;
 }
 
+/**
+ * Permission JSON every model call's `run` process receives. A tool the
+ * model may call but the process cannot approve ends the session with finish
+ * `tool-calls` and no reply, so no tool is offered to a model call at all.
+ */
+const MODEL_CALL_PERMISSION = '{"*":"deny"}';
+
 async function runModelCall(
   settings: OpenCodeAdapterSettings,
   dependencies: OpenCodeAdapterDependencies,
@@ -737,8 +780,10 @@ async function runModelCall(
     return agentProtocolError(settings.agent, context, COPIED_PROVIDERS_REDACTION_REASON);
   }
   let lastError: unknown = null;
+  const events: ModelCallEvidence['events'] = [];
 
   const consumer = createRunOutputConsumer(context, dependencies.secrets, (value) => {
+    events.push(value);
     if (isRecord(value) && value['type'] === 'error') {
       lastError = value;
     }
@@ -758,7 +803,7 @@ async function runModelCall(
     ],
     stdinText: input.prompt,
     cwd: input.environment.workingDirectory,
-    environment: input.environment.variables,
+    environment: { ...input.environment.variables, OPENCODE_PERMISSION: MODEL_CALL_PERMISSION },
     timeoutMs: input.timeoutMs,
     terminationGraceMs: input.terminationGraceMs,
     cancellation: input.cancellation,
@@ -768,18 +813,32 @@ async function runModelCall(
   });
   const { sessionId, protocolFailure } = await consumer.flush();
 
+  const evidence: ModelCallEvidence = {
+    events,
+    diagnostics: runOutcome.launched ? runOutcome.stderr.text : '',
+    session: null,
+  };
+  const reportEvidence = (): void => {
+    if (runOutcome.launched) {
+      input.onEvidence?.(evidence);
+    }
+  };
+
   const settledRun = settle(runOutcome, 'run', input.timeoutMs);
   if (!settledRun.ok) {
+    reportEvidence();
     return {
       ok: false,
       error: toModelCallOrCancellation(input.role, settings.agent, settledRun.error),
     };
   }
   if (protocolFailure !== null) {
+    reportEvidence();
     return { ok: false, error: toAgentProtocolError(settings.agent, protocolFailure) };
   }
   const run = settledRun.value;
   if (run.exitCode !== null && run.exitCode !== 0) {
+    reportEvidence();
     const detail = summary(lastError);
     return modelCallFailed(
       input.role,
@@ -791,6 +850,7 @@ async function runModelCall(
     );
   }
   if (run.exitCode === null) {
+    reportEvidence();
     return modelCallFailed(
       input.role,
       settings.agent,
@@ -798,6 +858,7 @@ async function runModelCall(
     );
   }
   if (lastError !== null) {
+    reportEvidence();
     const detail = summary(lastError);
     return modelCallFailed(
       input.role,
@@ -807,6 +868,7 @@ async function runModelCall(
     );
   }
   if (sessionId === null) {
+    reportEvidence();
     return agentProtocolError(
       settings.agent,
       context,
@@ -824,9 +886,11 @@ async function runModelCall(
     input.cancellation,
   );
   if (exportOutcome.settled === 'protocol-error') {
+    reportEvidence();
     return { ok: false, error: toAgentProtocolError(settings.agent, exportOutcome.error) };
   }
   if (exportOutcome.settled === 'process') {
+    reportEvidence();
     const settledExport = settle(exportOutcome.outcome, 'export', EXPORT_TIMEOUT_MS);
     if (!settledExport.ok) {
       return {
@@ -856,17 +920,22 @@ async function runModelCall(
     );
   }
 
+  const metrics = normalizeFromExport(exportOutcome.value, copiedProviders);
+  evidence.session = { export: exportOutcome.value, metrics };
+  reportEvidence();
+  if (hasToolPart(exportOutcome.value)) {
+    return modelCallStopped(
+      input.role,
+      settings.agent,
+      'tool-call',
+      toolCallReason(exportOutcome.value),
+    );
+  }
   const replied = replyText(exportOutcome.value, context, settings.agent, dependencies.secrets);
   if (!replied.ok) {
     return replied;
   }
-  return {
-    ok: true,
-    value: {
-      text: replied.value,
-      metrics: normalizeFromExport(exportOutcome.value, copiedProviders),
-    },
-  };
+  return { ok: true, value: { text: replied.value, metrics } };
 }
 
 /**

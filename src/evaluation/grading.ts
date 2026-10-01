@@ -5,18 +5,21 @@
  * process start; every effect lives in `src/application/grade-case.ts`.
  *
  * Entry points: {@link gradedChecksOf}, {@link buildGraderPrompt},
- * {@link deriveGrades}, {@link pendingGrades}, {@link applyGrades}.
+ * {@link deriveGrades}, {@link pendingGrades}, {@link sumGraderCallMetrics},
+ * {@link applyGrades}.
  */
 
 import { codeFenceFor, decodeReplyObject } from '@/domain/model-text';
 import { checkEvaluator } from '@/domain/types';
 
 import type {
+  AgentMetrics,
   CaseGrading,
   CheckCategory,
   CheckResult,
   GradeRecord,
   GradeVerdict,
+  MetricValue,
   TaskDefinition,
 } from '@/domain/types';
 
@@ -219,6 +222,72 @@ export function deriveGrades(reply: string, checks: readonly GradedCheckSummary[
       rationale: entry.rationale,
     };
   });
+}
+
+/**
+ * Sums the metrics of a grading's calls, key by key, in call order. A key is
+ * unavailable with the first gap's reason when any call lacks a value for it,
+ * because a partial sum would be an estimate; one call returns unchanged.
+ */
+export function sumGraderCallMetrics(
+  metrics: readonly [AgentMetrics, ...AgentMetrics[]],
+): AgentMetrics {
+  const [first, ...rest] = metrics;
+  if (rest.length === 0) {
+    return first;
+  }
+  const sum = (key: keyof AgentMetrics): MetricValue =>
+    sumMetricValues(
+      first[key],
+      rest.map((m) => m[key]),
+    );
+  return {
+    inputTokens: sum('inputTokens'),
+    outputTokens: sum('outputTokens'),
+    reasoningTokens: sum('reasoningTokens'),
+    cacheReadTokens: sum('cacheReadTokens'),
+    cacheWriteTokens: sum('cacheWriteTokens'),
+    turns: sum('turns'),
+    apiCalls: sum('apiCalls'),
+    apiErrors: sum('apiErrors'),
+    toolCalls: sum('toolCalls'),
+    skillCalls: sum('skillCalls'),
+    cost: sum('cost'),
+  };
+}
+
+function sumMetricValues(first: MetricValue, rest: readonly MetricValue[]): MetricValue {
+  const { unit, scope } = first;
+  const sources: string[] = [];
+  let total = 0;
+  for (const metric of [first, ...rest]) {
+    if (metric.availability.status === 'unavailable') {
+      return {
+        value: null,
+        unit,
+        scope,
+        availability: { status: 'unavailable', reason: metric.availability.reason },
+      };
+    }
+    if (metric.value === null) {
+      return {
+        value: null,
+        unit,
+        scope,
+        availability: { status: 'unavailable', reason: 'no value recorded' },
+      };
+    }
+    total += metric.value;
+    if (!sources.includes(metric.availability.source)) {
+      sources.push(metric.availability.source);
+    }
+  }
+  return {
+    value: total,
+    unit,
+    scope,
+    availability: { status: 'available', source: sources.join(', ') },
+  };
 }
 
 /**
