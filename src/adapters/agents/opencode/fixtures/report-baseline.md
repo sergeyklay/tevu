@@ -19,6 +19,9 @@
 - Concurrency: 2
 - Case timeout: 60000ms
 - Repeat: 1 (source: config)
+- Model entry alpha: vendor/model-alpha-synth, effort effort-high, verified
+- Model entry beta: vendor/model-alpha-synth, effort effort-low, unverified: "effort-low" is not among the variants "opencode models --verbose" reports for "vendor/model-alpha-synth" (effort-high), and the repository of each task may define it: task-1 (opencode.json)
+- Model entry gamma: vendor/model-gamma-synth, effort effort-high, unsupported: "effort-high" is not among the variants "opencode models --verbose" reports for "vendor/model-gamma-synth" (max), and these tasks have no agent configuration at the root of their base commit: task-2; their cases would run "vendor/model-gamma-synth" with its default options
 - Run exit code: 2
 
 ## Run findings
@@ -43,7 +46,7 @@ Pair summary:
 | Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |
 |---|---|---|---|---|---|---|---|
 | passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | 1500 millisecond (case, source: process) |
-| failed | beta | 1 | vendor/model-alpha-synth | effort-low | completed | AgentProcessError | 900 millisecond (case, source: process) |
+| failed | beta | 1 | vendor/model-alpha-synth | effort-low, unverified | completed | AgentProcessError | 900 millisecond (case, source: process) |
 
 ### Case task-1--alpha--1
 
@@ -90,7 +93,7 @@ Assessments (revision 2):
 
 ### Case task-1--beta--1
 
-- Model entry: beta (vendor/model-alpha-synth, effort effort-low)
+- Model entry: beta (vendor/model-alpha-synth, effort effort-low, unverified)
 - Lifecycle: completed
 - Task outcome: failed
 - Process: exit code 1, 900ms, termination stage none
@@ -140,11 +143,11 @@ Pair summary:
 
 | Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |
 |---|---|---|---|---|---|---|---|
-| not-evaluated | gamma | 1 | vendor/model-gamma-synth | effort-high | timed-out | CaseTimeoutError | 42000 millisecond (case, source: process) |
+| not-evaluated | gamma | 1 | vendor/model-gamma-synth | effort-high, unsupported | timed-out | CaseTimeoutError | 42000 millisecond (case, source: process) |
 
 ### Case task-2--alpha--1
 
-- Model entry: gamma (vendor/model-gamma-synth, effort effort-high)
+- Model entry: gamma (vendor/model-gamma-synth, effort effort-high, unsupported)
 - Lifecycle: timed-out
 - Task outcome: not-evaluated
 - Process: signal SIGKILL, 42000ms, termination stage forced

@@ -2218,6 +2218,7 @@ async function interviewCriteria(
       prompt,
       description,
     },
+    role.effort,
     progress,
   );
   if (draft === undefined) {
@@ -2271,6 +2272,7 @@ async function draftCriteriaUntilDone(
   dependencies: TaskWizardDependencies,
   configPath: string,
   request: Omit<CriteriaDraftRequest, 'configPath'>,
+  effort: string,
   progress: WizardProgress,
 ): Promise<CriteriaDraft | undefined> {
   for (;;) {
@@ -2282,10 +2284,16 @@ async function draftCriteriaUntilDone(
     if (outcome.status === 'cancelled') {
       throw new WizardCancelledError();
     }
-    if (outcome.retainedDirectory !== null) {
-      warnRetainedDirectory(io, dependencies.redact, outcome.retainedDirectory);
+    for (const directory of outcome.retainedDirectories) {
+      warnRetainedDirectory(io, dependencies.redact, directory);
     }
     if (outcome.status === 'drafted') {
+      if (outcome.effort.status !== 'verified') {
+        warnLines(io, dependencies.redact, {
+          headline: `Criteria effort "${effort}" is ${outcome.effort.status}.`,
+          details: [outcome.effort.reason],
+        });
+      }
       return outcome.draft;
     }
     const { cause, details } = describeDraftFailure(outcome.failure, configPath);
@@ -2321,6 +2329,7 @@ function isRetryableDraftCause(cause: CriteriaDraftFailure['cause']): boolean {
     case 'variables-unset':
     case 'prompt-unredactable':
     case 'model-unavailable':
+    case 'effort-unsupported':
       return false;
   }
 }
@@ -2347,6 +2356,14 @@ function describeDraftFailure(
       return {
         cause: `OpenCode can't find ${failure.model} in tevu's environment.`,
         details: [`Add its provider to agents.opencode.providers in ${configPath}.`],
+      };
+    case 'effort-unsupported':
+      return {
+        cause: `Criteria effort "${failure.effort}" is not a variant OpenCode reports for ${failure.model}.`,
+        details: [
+          `Its variants: ${failure.variants.join(', ')}.`,
+          `Set roles.criteria.effort in ${configPath} to one of them.`,
+        ],
       };
     case 'timed-out':
       return { cause: `The model didn't answer within ${failure.limit}.`, details: [] };

@@ -1312,6 +1312,31 @@ function isCopiedProvidersRecord(value: unknown): value is Record<string, unknow
   );
 }
 
+function isStoredEffortCheck(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (value['status'] === 'verified') {
+    return true;
+  }
+  return (
+    (value['status'] === 'unverified' || value['status'] === 'unsupported') &&
+    isNonEmptyString(value['reason'])
+  );
+}
+
+function isStoredEfforts(value: unknown): value is {
+  models: Record<string, unknown>;
+  grader: unknown;
+} {
+  return (
+    isRecord(value) &&
+    isRecord(value['models']) &&
+    Object.values(value['models']).every(isStoredEffortCheck) &&
+    (value['grader'] === null || isStoredEffortCheck(value['grader']))
+  );
+}
+
 function describeStoredManifestDefect(manifest: unknown, runId: string): string | null {
   if (
     !isRecord(manifest) ||
@@ -1324,6 +1349,7 @@ function describeStoredManifestDefect(manifest: unknown, runId: string): string 
     !isRecord(manifest['execution']) ||
     !isRepeatSetting(manifest['execution']['repeat']) ||
     !isNonEmptyString(manifest['configPath']) ||
+    !isStoredEfforts(manifest['efforts']) ||
     !manifest['cases'].every(
       (entry) => isRecord(entry) && isPositiveSafeInteger(entry['timeoutMs']),
     )
@@ -1331,13 +1357,20 @@ function describeStoredManifestDefect(manifest: unknown, runId: string): string 
     return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
   }
   const copiedProviders = manifest['tools']['copiedProviders'];
+  const effortModels = manifest['efforts']['models'];
   const hasUnlistedAgent = manifest['cases'].some(
     (entry) =>
       isRecord(entry) &&
       typeof entry['agent'] === 'string' &&
       !Object.hasOwn(copiedProviders, entry['agent']),
   );
-  if (hasUnlistedAgent) {
+  const hasUncheckedModelEntry = manifest['cases'].some(
+    (entry) =>
+      isRecord(entry) &&
+      typeof entry['modelId'] === 'string' &&
+      !Object.hasOwn(effortModels, entry['modelId']),
+  );
+  if (hasUnlistedAgent || hasUncheckedModelEntry) {
     return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
   }
   return null;

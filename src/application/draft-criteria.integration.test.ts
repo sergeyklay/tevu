@@ -25,6 +25,7 @@ import type { OpenCodeAdapterDependencies } from '@/adapters/agents/opencode/ope
 import type { TevuConfigInput } from '@/config/schema';
 import type {
   AgentAdapter,
+  EnvironmentAdapter,
   PullRequestReader,
   RepositoryDefinition,
   SecretRedactor,
@@ -46,7 +47,14 @@ function buildSecretRedactor(secretValues: readonly string[]): SecretRedactor {
 }
 
 type RunBehavior = 'ok' | 'error-exit-1' | 'sleep';
-type ModelsBehavior = 'fail' | 'lists-role-model' | 'omits-role-model' | 'sleep';
+type ModelsBehavior =
+  | 'fail'
+  | 'lists-role-model'
+  | 'omits-role-model'
+  | 'reports-matching-variant'
+  | 'reports-other-variants'
+  | 'reports-no-variants'
+  | 'sleep';
 type ExportBehavior = 'reply' | 'garbage';
 
 type FakeBehavior = {
@@ -71,7 +79,7 @@ if (args[0] === "export" && args[1] === "--help") {
   process.exit(0);
 }
 if (args[0] === "models" && args[1] === "--help") {
-  console.log("usage: opencode models");
+  console.log("usage: opencode models [provider] --verbose");
   process.exit(0);
 }
 `;
@@ -104,6 +112,25 @@ if (args[0] === "run") {
 `;
 }
 
+const CRITERIA_MODEL = 'openai/criteria-model';
+
+function listingText(behavior: Exclude<ModelsBehavior, 'fail' | 'sleep'>): string {
+  const withVariants = (variants: Record<string, object>): string =>
+    [CRITERIA_MODEL, JSON.stringify({ id: 'criteria-model', variants }, null, 2)].join('\n');
+  switch (behavior) {
+    case 'lists-role-model':
+      return CRITERIA_MODEL;
+    case 'omits-role-model':
+      return 'openai/other-model';
+    case 'reports-matching-variant':
+      return withVariants({ low: {}, high: {} });
+    case 'reports-other-variants':
+      return withVariants({ medium: {}, low: {} });
+    case 'reports-no-variants':
+      return withVariants({});
+  }
+}
+
 function renderModelsSection(behavior: ModelsBehavior, invocationsPath: string): string {
   if (behavior === 'fail') {
     return '';
@@ -111,10 +138,11 @@ function renderModelsSection(behavior: ModelsBehavior, invocationsPath: string):
   const listing =
     behavior === 'sleep'
       ? 'setInterval(function () {}, 1000); await new Promise(function () {});'
-      : `console.log(${JSON.stringify(behavior === 'lists-role-model' ? 'openai/criteria-model' : 'openai/other-model')}); process.exit(0);`;
+      : `console.log(${JSON.stringify(listingText(behavior))}); process.exit(0);`;
   return `
 if (args[0] === "models") {
   appendFileSync(${JSON.stringify(invocationsPath)}, "models\\n");
+  if (args[1] !== "--verbose") { process.exit(3); }
   ${listing}
 }
 `;
@@ -258,6 +286,8 @@ type BuildOptions = {
   registerSecrets?: (names: readonly string[]) => void;
   cancellation?: AbortSignal;
   git?: CriteriaDraftDependencies['git'];
+  environments?: EnvironmentAdapter;
+  wrapAdapter?: (adapter: AgentAdapter) => AgentAdapter;
 };
 
 function buildBootstrapAnswers(): Omit<TevuConfigInput, 'version' | 'tasks'> {
@@ -299,10 +329,11 @@ async function draftWithFakeAgent(
     probeDirectory: process.cwd(),
     operatorDirectories: { home: undefined, xdgConfigHome: undefined },
   };
-  const adapter: AgentAdapter = createOpenCodeAdapter(
+  const created: AgentAdapter = createOpenCodeAdapter(
     { agent: 'opencode', executable, providers: [], declaredVariables: { secrets: [], env: [] } },
     dependencies,
   );
+  const adapter = options.wrapAdapter?.(created) ?? created;
   const config = options.config ?? buildConfig();
   const repository = options.repository ?? { id: 'repo-1', path: '/unused' };
   const request: CriteriaDraftRequest = {
@@ -315,7 +346,7 @@ async function draftWithFakeAgent(
   };
   const criteriaDependencies: CriteriaDraftDependencies = {
     agentsFor: () => new Map([['opencode', adapter]]),
-    environments: createEnvironmentAdapter(),
+    environments: options.environments ?? createEnvironmentAdapter(),
     git:
       options.git ??
       createGitWorkspaceAdapter({ workspacesDirectory: join(tempRoot, 'workspaces') }),
@@ -344,6 +375,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
 
     const outcome = await draftWithFakeAgent({
       run: 'ok',
+      models: 'reports-matching-variant',
       reference: buildResolvedCommitReference(repository.commit),
       repository: { id: 'repo-1', path: repository.path },
     });
@@ -354,7 +386,8 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
         acceptance: ['The export button appears on the table view.'],
         done: ['The change is documented for users.'],
       },
-      retainedDirectory: null,
+      effort: { status: 'verified' },
+      retainedDirectories: [],
     });
   });
 
@@ -363,6 +396,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
 
     const outcome = await draftWithFakeAgent({
       run: 'ok',
+      models: 'reports-matching-variant',
       configuration: { kind: 'bootstrap', answers: buildBootstrapAnswers() },
       reference: buildResolvedCommitReference(repository.commit),
       repository: { id: 'repo-1', path: repository.path },
@@ -374,7 +408,8 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
         acceptance: ['The export button appears on the table view.'],
         done: ['The change is documented for users.'],
       },
-      retainedDirectory: null,
+      effort: { status: 'verified' },
+      retainedDirectories: [],
     });
   });
 
@@ -396,7 +431,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
     expect(outcome).toEqual({
       status: 'failed',
       failure: { cause: 'prompt-unredactable' },
-      retainedDirectory: null,
+      retainedDirectories: [],
     });
   });
 
@@ -427,7 +462,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
     expect(outcome.status).toBe('failed');
     if (outcome.status !== 'failed') return;
     expect(outcome.failure).toEqual({ cause: 'changes-unreadable', detail: expect.any(String) });
-    expect(outcome.retainedDirectory).toBeNull();
+    expect(outcome.retainedDirectories).toEqual([]);
   });
 
   it('fails as unredactable when the redactor throws', async () => {
@@ -445,7 +480,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
     expect(outcome).toEqual({
       status: 'failed',
       failure: { cause: 'prompt-unredactable' },
-      retainedDirectory: null,
+      retainedDirectories: [],
     });
   });
 
@@ -465,7 +500,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
       agentMessage: 'Synthetic failure',
       detail: 'run process exited with code 1: Synthetic failure',
     });
-    expect(outcome.retainedDirectory).toBeNull();
+    expect(outcome.retainedDirectories).toEqual([]);
   });
 
   it('fails as an invalid reply when the reply is malformed', async () => {
@@ -481,7 +516,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
     expect(outcome).toEqual({
       status: 'failed',
       failure: { cause: 'reply-invalid', defect: 'done is not an array' },
-      retainedDirectory: null,
+      retainedDirectories: [],
     });
   });
 
@@ -574,12 +609,14 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
     }
   }
 
-  it('fails as model-unavailable when the call fails and the agent does not list the criteria model', async () => {
+  it('fails as model-unavailable before any call when the agent does not list the criteria model', async () => {
     const repository = await createSyntheticRepository();
+    const invocationsPath = join(tempRoot, nextScriptName());
 
     const outcome = await draftWithFakeAgent({
-      run: 'error-exit-1',
+      run: 'ok',
       models: 'omits-role-model',
+      invocationsPath,
       reference: buildResolvedCommitReference(repository.commit),
       repository: { id: 'repo-1', path: repository.path },
     });
@@ -587,8 +624,9 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
     expect(outcome).toEqual({
       status: 'failed',
       failure: { cause: 'model-unavailable', model: 'openai/criteria-model' },
-      retainedDirectory: null,
+      retainedDirectories: [],
     });
+    expect(await readInvocations(invocationsPath)).toEqual(['models']);
   });
 
   it("fails as call-failed with the agent's own message when the call fails and the agent lists the model", async () => {
@@ -608,7 +646,7 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
         agentMessage: 'Synthetic failure',
         detail: 'run process exited with code 1: Synthetic failure',
       },
-      retainedDirectory: null,
+      retainedDirectories: [],
     });
   });
 
@@ -645,7 +683,7 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
     expect(outcome).toEqual({
       status: 'failed',
       failure: { cause: 'variables-unset', names: [UNSET_VARIABLE, OTHER_UNSET_VARIABLE] },
-      retainedDirectory: null,
+      retainedDirectories: [],
     });
     expect(diffCommit).not.toHaveBeenCalled();
     expect(await readInvocations(invocationsPath)).toEqual([]);
@@ -691,17 +729,17 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
     expect(outcome).toEqual({
       status: 'failed',
       failure: { cause: 'timed-out', limit: '400ms' },
-      retainedDirectory: null,
+      retainedDirectories: [],
     });
   });
 
-  it('is cancelled when the signal aborts while the failed call is being explained', async () => {
+  it('is cancelled before any call when the signal aborts during the model listing', async () => {
     const repository = await createSyntheticRepository();
     const invocationsPath = join(tempRoot, nextScriptName());
     const controller = new AbortController();
 
     const pending = draftWithFakeAgent({
-      run: 'error-exit-1',
+      run: 'ok',
       models: 'sleep',
       invocationsPath,
       cancellation: controller.signal,
@@ -712,5 +750,243 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
     controller.abort();
 
     expect(await pending).toEqual({ status: 'cancelled' });
+    expect(await readInvocations(invocationsPath)).toEqual(['models']);
+  });
+});
+
+describe('draftCriteria effort check against a fake OpenCode executable', () => {
+  function readInvocationLog(path: string): string[] {
+    return existsSync(path)
+      ? readFileSync(path, 'utf8')
+          .split('\n')
+          .filter((line) => line.length > 0)
+      : [];
+  }
+
+  async function draft(options: Partial<BuildOptions> & { invocationsPath?: string }) {
+    const repository = await createSyntheticRepository();
+    return draftWithFakeAgent({
+      run: 'ok',
+      reference: buildResolvedCommitReference(repository.commit),
+      repository: { id: 'repo-1', path: repository.path },
+      ...options,
+    });
+  }
+
+  /** Wraps the environment adapter so every disposal fails, and records each root it created in order. */
+  function buildRetainingEnvironments(): { environments: EnvironmentAdapter; roots: string[] } {
+    const real = createEnvironmentAdapter();
+    const roots: string[] = [];
+    const environments: EnvironmentAdapter = {
+      ...real,
+      createModelCallEnvironment: async (snapshot, agentVariables, configurationFiles) => {
+        const created = await real.createModelCallEnvironment(
+          snapshot,
+          agentVariables,
+          configurationFiles,
+        );
+        if (!created.ok) {
+          return created;
+        }
+        roots.push(created.value.rootDirectory);
+        return {
+          ok: true,
+          value: {
+            ...created.value,
+            dispose: async () => {
+              await created.value.dispose();
+              return {
+                ok: false,
+                error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
+              };
+            },
+          },
+        };
+      },
+    };
+    return { environments, roots };
+  }
+
+  it('fails as effort-unsupported before any call when the reported variants exclude the effort', async () => {
+    const invocationsPath = join(tempRoot, nextScriptName());
+
+    const outcome = await draft({ models: 'reports-other-variants', invocationsPath });
+
+    expect(outcome).toEqual({
+      status: 'failed',
+      failure: {
+        cause: 'effort-unsupported',
+        model: 'openai/criteria-model',
+        effort: 'high',
+        variants: ['low', 'medium'],
+      },
+      retainedDirectories: [],
+    });
+    expect(readInvocationLog(invocationsPath)).toEqual(['models']);
+  });
+
+  it('drafts with an unverified check when the listing carries no variant data for the model', async () => {
+    const outcome = await draft({ models: 'lists-role-model' });
+
+    expect(outcome).toMatchObject({
+      status: 'drafted',
+      effort: {
+        status: 'unverified',
+        reason: expect.stringContaining(
+          'reports no variant data for "openai/criteria-model", so effort "high" is used as requested without verification',
+        ) as string,
+      },
+    });
+  });
+
+  it('drafts with an unsupported check when the model reports no variants at all', async () => {
+    const outcome = await draft({ models: 'reports-no-variants' });
+
+    expect(outcome).toMatchObject({
+      status: 'drafted',
+      effort: {
+        status: 'unsupported',
+        reason: expect.stringContaining(
+          'reports no variants for "openai/criteria-model", so effort "high" selects none, so a criteria call runs "openai/criteria-model" with its default options',
+        ) as string,
+      },
+    });
+  });
+
+  it('drafts with an unverified check when the model listing failed', async () => {
+    const outcome = await draft({});
+
+    expect(outcome).toMatchObject({
+      status: 'drafted',
+      effort: {
+        status: 'unverified',
+        reason:
+          'the variants of "openai/criteria-model" were not read because agent "opencode" produced no model listing',
+      },
+      retainedDirectories: [],
+    });
+  });
+
+  it('drafts with an unverified check when the provider snapshot was rejected for the listing', async () => {
+    let reads = 0;
+
+    const outcome = await draft({
+      models: 'reports-matching-variant',
+      wrapAdapter: (adapter) => ({
+        ...adapter,
+        readProviders: async () => {
+          reads += 1;
+          return reads === 1
+            ? {
+                ok: false,
+                error: {
+                  kind: 'ConfigValidationError',
+                  findings: [
+                    {
+                      severity: 'error',
+                      identifier: 'agents.opencode.providers.acme',
+                      message: 'rejected',
+                    },
+                  ],
+                },
+              }
+            : adapter.readProviders();
+        },
+      }),
+    });
+
+    expect(outcome).toMatchObject({
+      status: 'drafted',
+      effort: {
+        status: 'unverified',
+        reason: expect.stringContaining('produced no model listing'),
+      },
+    });
+  });
+
+  it('keeps the call-failed text unchanged for a failed call after a listing without variant data', async () => {
+    const outcome = await draft({ run: 'error-exit-1', models: 'lists-role-model' });
+
+    expect(outcome).toEqual({
+      status: 'failed',
+      failure: {
+        cause: 'call-failed',
+        agentMessage: 'Synthetic failure',
+        detail: 'run process exited with code 1: Synthetic failure',
+      },
+      retainedDirectories: [],
+    });
+  });
+
+  it('lists the retained directory of the listing, then of the call, on a drafted outcome', async () => {
+    const { environments, roots } = buildRetainingEnvironments();
+
+    const outcome = await draft({ models: 'reports-matching-variant', environments });
+
+    expect(roots).toHaveLength(2);
+    expect(outcome).toMatchObject({ status: 'drafted', retainedDirectories: roots });
+  });
+
+  it('lists the retained directory of the listing, then of the call, when the reply is invalid', async () => {
+    const { environments, roots } = buildRetainingEnvironments();
+
+    const outcome = await draft({
+      models: 'reports-matching-variant',
+      replyText: MALFORMED_REPLY,
+      environments,
+    });
+
+    expect(roots).toHaveLength(2);
+    expect(outcome).toMatchObject({ status: 'failed', retainedDirectories: roots });
+  });
+
+  it('carries the retained directory of the listing on a failure before the call', async () => {
+    const { environments, roots } = buildRetainingEnvironments();
+
+    const outcome = await draft({
+      models: 'reports-matching-variant',
+      environments,
+      redact: () => {
+        throw new Error('redaction failure');
+      },
+    });
+
+    expect(roots).toHaveLength(1);
+    expect(outcome).toEqual({
+      status: 'failed',
+      failure: { cause: 'prompt-unredactable' },
+      retainedDirectories: roots,
+    });
+  });
+
+  it.each([
+    { name: 'effort-unsupported', models: 'reports-other-variants' as const },
+    { name: 'model-unavailable', models: 'omits-role-model' as const },
+  ])('carries the retained directory of the listing on $name', async ({ models }) => {
+    const { environments, roots } = buildRetainingEnvironments();
+
+    const outcome = await draft({ models, environments });
+
+    expect(roots).toHaveLength(1);
+    expect(outcome).toMatchObject({ status: 'failed', retainedDirectories: roots });
+  });
+
+  it('carries the retained directory of the listing when the call times out', async () => {
+    const { environments, roots } = buildRetainingEnvironments();
+    const config = buildConfig();
+
+    const outcome = await draft({
+      run: 'sleep',
+      models: 'reports-matching-variant',
+      environments,
+      config: { ...config, run: { ...config.run, timeout: '400ms' } },
+    });
+
+    expect(roots).toHaveLength(2);
+    expect(outcome).toMatchObject({
+      status: 'failed',
+      failure: { cause: 'timed-out' },
+      retainedDirectories: [roots[0]],
+    });
   });
 });

@@ -36,7 +36,7 @@ Accepting stays blocked while the acceptance list is empty or an item names the 
 
 ## When the draft fails
 
-The wizard names the cause. For unreadable changes, a timeout, a failed OpenCode call, or an unusable reply, it asks `Draft the criteria again?`. Each retry starts another model session that the provider charges for. Answer No to write the criteria by hand. Any other cause, such as a model OpenCode cannot find or an unset variable, falls back to writing the criteria by hand.
+The wizard names the cause. For unreadable changes, a timeout, a failed OpenCode call, or an unusable reply, it asks `Draft the criteria again?`. Each retry starts another model session that the provider charges for. Answer No to write the criteria by hand. Any other cause, such as a model OpenCode cannot find, an effort the model has no variant for, or an unset variable, falls back to writing the criteria by hand.
 
 Cancelling at any point in the review writes nothing.
 

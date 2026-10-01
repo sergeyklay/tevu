@@ -211,6 +211,7 @@ function buildGit(
         repositoryId: repository.id,
         requestedCommit: commit,
         resolvedCommit: `resolved-${commit}`,
+        rootEntries: [],
       },
     })),
     resolveCommit: vi.fn(async () => ({ kind: 'not-found' as const })),
@@ -323,6 +324,17 @@ function buildPrerequisites(overrides: Partial<PrerequisiteAdapter> = {}): Prere
   };
 }
 
+const FIXTURE_MODELS = [
+  'anthropic/claude-4',
+  'anthropic/criteria-model',
+  'openai/criteria-model',
+  'openai/gpt-5',
+  'openai/grader-model',
+  'openai/your-criteria-model',
+  'openai/your-grader-model',
+  'other/model',
+];
+
 function buildFakeAgentAdapter(overrides: Partial<AgentAdapter> = {}): AgentAdapter {
   return {
     probe: vi.fn(async () => ({
@@ -337,21 +349,15 @@ function buildFakeAgentAdapter(overrides: Partial<AgentAdapter> = {}): AgentAdap
       ok: true as const,
       value: { defined: false as const },
     })),
-    // Every `model` string this file's fixtures declare, so the model-resolution
-    // stage reports nothing new for a test that does not override this stub.
+    // Every `model` string this file's fixtures declare, each reporting every
+    // effort they request, so the model-resolution and effort stages report
+    // nothing new for a test that does not override this stub.
     listModels: vi.fn(async () => ({
       outcome: 'listed' as const,
-      models: [
-        'anthropic/claude-4',
-        'anthropic/criteria-model',
-        'openai/criteria-model',
-        'openai/gpt-5',
-        'openai/grader-model',
-        'openai/your-criteria-model',
-        'openai/your-grader-model',
-        'other/model',
-      ],
+      models: FIXTURE_MODELS,
+      variants: new Map(FIXTURE_MODELS.map((model) => [model, ['high', 'max', 'medium']])),
     })),
+    repositoryConfigurationEntries: vi.fn(() => []),
     run: vi.fn(async () => ({
       ok: false as const,
       error: { kind: 'CancellationError' as const, activeCaseIds: [] },
@@ -3271,6 +3277,7 @@ describe('createTask', () => {
           repositoryId: repository.id,
           requestedCommit: commit,
           resolvedCommit: 'resolved-head',
+          rootEntries: [],
         },
       }));
       const resolveCommit = vi.fn();
@@ -3304,6 +3311,7 @@ describe('createTask', () => {
           repositoryId: repository.id,
           requestedCommit: commit,
           resolvedCommit: `resolved-${commit}`,
+          rootEntries: [],
         },
       }));
       const dependencies = buildTaskDependencies({
@@ -3583,7 +3591,12 @@ describe('validateConfig', () => {
       git: buildFullGit({
         validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
           ok: true as const,
-          value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
+          value: {
+            repositoryId: repository.id,
+            requestedCommit: commit,
+            resolvedCommit,
+            rootEntries: [],
+          },
         })),
       }),
     });
@@ -3617,7 +3630,12 @@ describe('validateConfig', () => {
       git: buildFullGit({
         validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
           ok: true as const,
-          value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
+          value: {
+            repositoryId: repository.id,
+            requestedCommit: commit,
+            resolvedCommit,
+            rootEntries: [],
+          },
         })),
       }),
     });
@@ -3654,7 +3672,12 @@ describe('validateConfig', () => {
         git: buildFullGit({
           validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
             ok: true as const,
-            value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
+            value: {
+              repositoryId: repository.id,
+              requestedCommit: commit,
+              resolvedCommit,
+              rootEntries: [],
+            },
           })),
           ...overrides,
         }),
@@ -3787,7 +3810,12 @@ describe('validateConfig', () => {
         git: buildFullGit({
           validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
             ok: true as const,
-            value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit },
+            value: {
+              repositoryId: repository.id,
+              requestedCommit: commit,
+              resolvedCommit,
+              rootEntries: [],
+            },
           })),
           ...overrides,
         }),
@@ -4181,7 +4209,12 @@ describe('validateConfig', () => {
         git: buildFullGit({
           validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
             ok: true as const,
-            value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit: BASE },
+            value: {
+              repositoryId: repository.id,
+              requestedCommit: commit,
+              resolvedCommit: BASE,
+              rootEntries: [],
+            },
           })),
           resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) =>
             commit === BASE
@@ -4220,7 +4253,12 @@ describe('validateConfig', () => {
         git: buildFullGit({
           validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
             ok: true as const,
-            value: { repositoryId: repository.id, requestedCommit: commit, resolvedCommit: BASE },
+            value: {
+              repositoryId: repository.id,
+              requestedCommit: commit,
+              resolvedCommit: BASE,
+              rootEntries: [],
+            },
           })),
           resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) =>
             commit === MERGE_COMMIT

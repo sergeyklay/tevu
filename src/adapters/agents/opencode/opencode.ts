@@ -7,7 +7,7 @@
  */
 
 import { normalizeFromExport, normalizeMetrics as normalizeOpenCodeMetrics } from './metrics';
-import { decodeEvent, decodeExport, isRootSessionErrorEvent } from './protocol';
+import { decodeEvent, decodeExport, decodeModelListing, isRootSessionErrorEvent } from './protocol';
 import { inspectOpenCodeProvider, readOpenCodeProviders } from './providers';
 
 import type { OpenCodeExport, ProtocolContext, ProtocolErrorShape } from './protocol';
@@ -102,6 +102,9 @@ export function createOpenCodeAdapter(
       cancellation?: AbortSignal,
     ): Promise<ModelListing> {
       return runListModels(settings, dependencies, environment, cancellation);
+    },
+    repositoryConfigurationEntries(): readonly string[] {
+      return ['.opencode', 'opencode.json', 'opencode.jsonc'];
     },
     async run(
       input: AgentRunInput,
@@ -867,9 +870,10 @@ async function runModelCall(
 }
 
 /**
- * Lists every model the agent resolves in `environment` by running
- * `<executable> models`, without starting a model session. A cancellation
- * terminates the listing's process group.
+ * Lists every model the agent resolves in `environment`, with the variants it
+ * reports for each, by running `<executable> models --verbose` without
+ * starting a model session. A cancellation terminates the listing's process
+ * group.
  */
 async function runListModels(
   settings: OpenCodeAdapterSettings,
@@ -878,13 +882,16 @@ async function runListModels(
   cancellation: AbortSignal | undefined,
 ): Promise<ModelListing> {
   const outcome = await dependencies.runProcess({
-    argv: [settings.executable, 'models'],
+    argv: [settings.executable, 'models', '--verbose'],
     cwd: environment.workingDirectory,
     environment: environment.variables,
     timeoutMs: MODEL_LISTING_TIMEOUT_MS,
     terminationGraceMs: MODEL_LISTING_TERMINATION_GRACE_MS,
     cancellation,
     secretValues: dependencies.secrets.secretValues(),
+    // OpenCode exits right after printing, which can drop a pending pipe write
+    // of a listing this large.
+    stdoutTarget: 'file',
     maxCaptureBytes: MODEL_LISTING_MAX_CAPTURE_BYTES,
   });
   if (!outcome.launched) {
@@ -910,11 +917,11 @@ async function runListModels(
       reason: `prints more than ${MODEL_LISTING_MAX_CAPTURE_BYTES} bytes`,
     };
   }
-  const models = outcome.stdout.text
-    .split('\n')
-    .map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line).trim())
-    .filter((line) => line.length > 0);
-  return { outcome: 'listed', models };
+  if (outcome.stdout.incomplete) {
+    return { outcome: 'failed', reason: 'prints output tevu could not read to its end' };
+  }
+  const { models, variants } = decodeModelListing(outcome.stdout.text);
+  return { outcome: 'listed', models, variants };
 }
 
 async function probeCapabilities(
@@ -978,6 +985,17 @@ async function probeCapabilities(
       required: true,
       availability: availableWhen(
         helpSucceeded(modelsHelp) && combinedOutput(modelsHelp).includes('opencode models'),
+      ),
+    },
+    {
+      // Root help has no `--verbose`, so a root-help answer for an unknown
+      // subcommand cannot satisfy this.
+      name: 'models --verbose',
+      required: true,
+      availability: availableWhen(
+        helpSucceeded(modelsHelp) &&
+          combinedOutput(modelsHelp).includes('opencode models') &&
+          combinedOutput(modelsHelp).includes('--verbose'),
       ),
     },
     {

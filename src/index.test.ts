@@ -1,7 +1,8 @@
 // @vitest-environment node
 
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -9,6 +10,7 @@ import { Readable, Writable } from 'node:stream';
 import { setImmediate } from 'node:timers/promises';
 import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { stringify } from 'yaml';
 
 import { TevuConfigSchema } from '@/config/schema';
 import { runProgram } from '@/interface/program';
@@ -17,6 +19,8 @@ import { composeProgramDependencies, ignoreClosedReader } from './index';
 
 import type { AgentDraft } from '@/application/model-access';
 import type { TevuConfigInput } from '@/config/schema';
+import type { BenchmarkPlan, TevuConfig } from '@/domain/types';
+import type { ProgramOperations } from '@/interface/program';
 
 type TevuTaskInput = NonNullable<TevuConfigInput['tasks']>[number];
 
@@ -31,6 +35,19 @@ function closedPipe(): Writable {
       callback(writeError('EPIPE'));
     },
   });
+}
+
+/** Plans a run with the effort checks of the validation `tevu run` performs first. */
+async function planThroughValidation(
+  operations: ProgramOperations,
+  config: TevuConfig,
+  configPath: string,
+): Promise<BenchmarkPlan> {
+  const validation = await operations.validateConfig(config);
+  if (!validation.ok) {
+    throw new Error(`validation failed: ${JSON.stringify(validation.error)}`);
+  }
+  return operations.planBenchmark(config, configPath, validation.value.efforts);
 }
 
 function capture(): { stream: Writable; text: () => string } {
@@ -116,17 +133,20 @@ if (args[0] === 'export' && args[1] === '--help') {
   process.exit(0);
 }
 if (args[0] === 'models' && args[1] === '--help') {
-  console.log('usage: opencode models');
+  console.log('usage: opencode models [provider] --verbose');
   process.exit(0);
 }
 if (args[0] === 'models') {
+  if (args[1] !== '--verbose') { process.exit(3); }
   const configPath = join(process.env.XDG_CONFIG_HOME ?? '', 'opencode', 'opencode.json');
   let doc = {};
   try { doc = JSON.parse(readFileSync(configPath, 'utf8')); } catch { /* no config written */ }
   const providers = doc && typeof doc === 'object' && doc.provider ? Object.keys(doc.provider) : [];
   for (const id of providers) {
-    console.log(\`\${id}/synthetic-model-a\`);
-    console.log(\`\${id}/synthetic-model-b\`);
+    for (const name of ['synthetic-model-a', 'synthetic-model-b']) {
+      console.log(\`\${id}/\${name}\`);
+      console.log(JSON.stringify({ id: name, variants: { low: {}, high: {} } }, null, 2));
+    }
   }
   process.exit(0);
 }
@@ -407,6 +427,99 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     expect(outcome.value.valid).toBe(true);
   });
 
+  describe('effort check', () => {
+    async function buildMisspelledConfig(executable: string) {
+      const repositoryPath = join(testDirectory, 'repo');
+      const baseCommit = await createSourceRepository(repositoryPath);
+      const input = buildConfigInput({
+        executable,
+        repositoryPath,
+        baseCommit,
+        outputDirectory: join(testDirectory, 'artifacts'),
+      });
+      const models = input.models ?? [];
+      return { ...input, models: [models[0], { ...models[1], effort: 'hihg' }] };
+    }
+
+    it('refuses an effort outside the reported variants before any case starts', async () => {
+      const executable = await writeFakeExecutable();
+      await writeOperatorFixture();
+      const input = await buildMisspelledConfig(executable);
+      const configPath = join(testDirectory, 'tevu.yaml');
+      await writeFile(configPath, stringify(input));
+      const stdout = capture();
+      const stderr = capture();
+      const dependencies = composeProgramDependencies({
+        io: { stdin: Readable.from([]), stdout: stdout.stream, stderr: stderr.stream },
+      });
+
+      const code = await runProgram(['run', '--config', configPath], dependencies);
+
+      expect(code).toBe(1);
+      expect(stdout.text() + stderr.text()).toContain('models.beta.effort');
+      expect(stdout.text() + stderr.text()).toContain(
+        `"hihg" is not among the variants "${executable} models --verbose" reports for "acme/synthetic-model-b" (high, low)`,
+      );
+      expect(existsSync(join(testDirectory, 'artifacts'))).toBe(false);
+    });
+
+    it('reports valid false with one error at the misspelled entry through validateConfig', async () => {
+      const executable = await writeFakeExecutable();
+      await writeOperatorFixture();
+      const config = TevuConfigSchema.parse(await buildMisspelledConfig(executable));
+      const { operations } = composeProgramDependencies();
+
+      const outcome = await operations.validateConfig(config);
+
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.value.valid).toBe(false);
+      expect(
+        outcome.value.findings.filter((finding) => finding.identifier.endsWith('.effort')),
+      ).toEqual([expect.objectContaining({ severity: 'error', identifier: 'models.beta.effort' })]);
+      expect(outcome.value.efforts.models['alpha']).toEqual({ status: 'verified' });
+      expect(outcome.value.efforts.models['beta']?.status).toBe('unsupported');
+    });
+
+    it('records the checks of the validation in run.json', async () => {
+      const executable = await writeFakeExecutable();
+      await writeOperatorFixture();
+      const repositoryPath = join(testDirectory, 'repo');
+      const baseCommit = await createSourceRepository(repositoryPath);
+      const config = TevuConfigSchema.parse(
+        buildConfigInput({
+          executable,
+          repositoryPath,
+          baseCommit,
+          outputDirectory: join(testDirectory, 'artifacts'),
+        }),
+      );
+      const dependencies = composeProgramDependencies();
+      const plan = await planThroughValidation(
+        dependencies.operations,
+        config,
+        join(testDirectory, 'tevu.yaml'),
+      );
+
+      const result = await dependencies.operations.executeBenchmark(plan, {
+        cancellation: new AbortController().signal,
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const stored = JSON.parse(
+        await readFile(
+          join(testDirectory, 'artifacts', result.value.manifest.runId, 'run.json'),
+          'utf8',
+        ),
+      ) as { manifest: { efforts: unknown } };
+      expect(stored.manifest.efforts).toEqual({
+        models: { alpha: { status: 'verified' }, beta: { status: 'verified' } },
+        grader: null,
+      });
+    });
+  });
+
   describe('model access operations', () => {
     const UNSET_VARIABLE = 'TEVU_INDEX_UNSET_KEY';
     const OPERATOR_LITERAL = 'placeholder';
@@ -473,7 +586,12 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
       const listed = await operations.checkModelAccess(configPath, agent, 'acme/synthetic-model-a');
       const notListed = await operations.checkModelAccess(configPath, agent, 'acme/unknown-model');
 
-      expect(listed).toEqual({ status: 'listed', unsetVariables: [], retainedDirectory: null });
+      expect(listed).toEqual({
+        status: 'listed',
+        variants: ['high', 'low'],
+        unsetVariables: [],
+        retainedDirectory: null,
+      });
       expect(notListed).toEqual({
         status: 'not-listed',
         unsetVariables: [],
@@ -514,6 +632,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
 
       expect(outcome).toEqual({
         status: 'listed',
+        variants: ['high', 'low'],
         unsetVariables: [UNSET_VARIABLE],
         retainedDirectory: null,
       });
@@ -534,7 +653,11 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
       }),
     );
     const dependencies = composeProgramDependencies();
-    const plan = dependencies.operations.planBenchmark(config, join(testDirectory, 'tevu.yaml'));
+    const plan = await planThroughValidation(
+      dependencies.operations,
+      config,
+      join(testDirectory, 'tevu.yaml'),
+    );
 
     const result = await dependencies.operations.executeBenchmark(plan, {
       cancellation: new AbortController().signal,
@@ -568,7 +691,11 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
       }),
     );
     const dependencies = composeProgramDependencies();
-    const plan = dependencies.operations.planBenchmark(config, join(testDirectory, 'tevu.yaml'));
+    const plan = await planThroughValidation(
+      dependencies.operations,
+      config,
+      join(testDirectory, 'tevu.yaml'),
+    );
 
     const result = await dependencies.operations.executeBenchmark(plan, {
       cancellation: new AbortController().signal,
@@ -613,7 +740,11 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
       }),
     );
     const dependencies = composeProgramDependencies();
-    const plan = dependencies.operations.planBenchmark(config, join(testDirectory, 'tevu.yaml'));
+    const plan = await planThroughValidation(
+      dependencies.operations,
+      config,
+      join(testDirectory, 'tevu.yaml'),
+    );
 
     const result = await dependencies.operations.executeBenchmark(plan, {
       cancellation: new AbortController().signal,
@@ -669,7 +800,11 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
         }),
       );
       const dependencies = composeProgramDependencies();
-      const plan = dependencies.operations.planBenchmark(config, join(testDirectory, 'tevu.yaml'));
+      const plan = await planThroughValidation(
+        dependencies.operations,
+        config,
+        join(testDirectory, 'tevu.yaml'),
+      );
 
       return dependencies.operations.executeBenchmark(plan, {
         cancellation: new AbortController().signal,

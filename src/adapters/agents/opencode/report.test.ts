@@ -310,6 +310,13 @@ function buildCapabilityReport(
   };
 }
 
+const BETA_EFFORT_REASON =
+  '"effort-low" is not among the variants "opencode models --verbose" reports for "vendor/model-alpha-synth" (effort-high), and the repository of each task may define it: task-1 (opencode.json)';
+const GAMMA_EFFORT_REASON =
+  '"effort-high" is not among the variants "opencode models --verbose" reports for "vendor/model-gamma-synth" (max), and these tasks have no agent configuration at the root of their base commit: task-2; their cases would run "vendor/model-gamma-synth" with its default options';
+const GRADER_EFFORT_REASON =
+  '"opencode models --verbose" reports no variant data for "vendor/grader-synth", so effort "effort-high" is used as requested without verification';
+
 function buildManifest(
   runId: string,
   config: TevuConfig,
@@ -349,6 +356,14 @@ function buildManifest(
         effort: model?.effort ?? 'effort-high',
       });
     }),
+    efforts: {
+      models: {
+        alpha: { status: 'verified' },
+        beta: { status: 'unverified', reason: BETA_EFFORT_REASON },
+        gamma: { status: 'unsupported', reason: GAMMA_EFFORT_REASON },
+      },
+      grader: { status: 'unverified', reason: GRADER_EFFORT_REASON },
+    },
     context: { config, capabilities: { opencode: capabilities } },
   };
 }
@@ -672,6 +687,14 @@ async function collectSourceDigests(root: string, runId: string): Promise<string
   return digests;
 }
 
+function storedEfforts(manifest: Record<string, unknown>): Record<string, unknown> {
+  return manifest['efforts'] as Record<string, unknown>;
+}
+
+function storedEffortModels(manifest: Record<string, unknown>): Record<string, unknown> {
+  return storedEfforts(manifest)['models'] as Record<string, unknown>;
+}
+
 beforeAll(() => {
   process.env[PROVIDER_ENV_NAME] = PROVIDER_SECRET;
 });
@@ -893,17 +916,69 @@ describe('OpenCode report regeneration matches the pinned baseline', () => {
 
   it.each([
     {
-      label: 'missing',
+      label: 'a missing configPath',
       mutate: (manifest: Record<string, unknown>) => delete manifest['configPath'],
     },
     {
-      label: 'an empty string',
+      label: 'an empty configPath',
       mutate: (manifest: Record<string, unknown>) => {
         manifest['configPath'] = '';
       },
     },
+    {
+      label: 'no efforts',
+      mutate: (manifest: Record<string, unknown>) => delete manifest['efforts'],
+    },
+    {
+      label: 'efforts that is not an object',
+      mutate: (manifest: Record<string, unknown>) => {
+        manifest['efforts'] = [];
+      },
+    },
+    {
+      label: 'efforts without models',
+      mutate: (manifest: Record<string, unknown>) => {
+        delete storedEfforts(manifest)['models'];
+      },
+    },
+    {
+      label: 'efforts.models without the model entry of a case',
+      mutate: (manifest: Record<string, unknown>) => {
+        delete storedEffortModels(manifest)['beta'];
+      },
+    },
+    {
+      label: 'an effort check with an unknown status',
+      mutate: (manifest: Record<string, unknown>) => {
+        storedEffortModels(manifest)['alpha'] = { status: 'confirmed' };
+      },
+    },
+    {
+      label: 'an unverified effort check without a reason',
+      mutate: (manifest: Record<string, unknown>) => {
+        storedEffortModels(manifest)['beta'] = { status: 'unverified' };
+      },
+    },
+    {
+      label: 'an unsupported effort check with an empty reason',
+      mutate: (manifest: Record<string, unknown>) => {
+        storedEffortModels(manifest)['beta'] = { status: 'unsupported', reason: '' };
+      },
+    },
+    {
+      label: 'efforts without a grader key',
+      mutate: (manifest: Record<string, unknown>) => {
+        delete storedEfforts(manifest)['grader'];
+      },
+    },
+    {
+      label: 'an invalid grader effort check',
+      mutate: (manifest: Record<string, unknown>) => {
+        storedEfforts(manifest)['grader'] = { status: 'unverified' };
+      },
+    },
   ])(
-    'refuses a run whose manifest has $label configPath, before any write for both report and assess (V10)',
+    'refuses a run whose manifest has $label, before any write for both report and assess (V10)',
     async ({ mutate }) => {
       const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-p10-'));
       try {
@@ -947,6 +1022,84 @@ describe('OpenCode report regeneration matches the pinned baseline', () => {
       }
     },
   );
+});
+
+describe('OpenCode report regeneration of effort checks', () => {
+  async function rebuildMarkdown(
+    edit?: (manifest: { efforts: { models: Record<string, unknown> } }) => void,
+  ): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-efforts-'));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      if (edit !== undefined) {
+        const runJsonPath = join(root, 'artifacts', runId, 'run.json');
+        const stored = JSON.parse(await readFile(runJsonPath, 'utf8')) as {
+          manifest: { efforts: { models: Record<string, unknown> } };
+        };
+        edit(stored.manifest);
+        await writeFile(runJsonPath, JSON.stringify(stored, null, 2), 'utf8');
+      }
+      const rebuilt = await rebuildReport(runId, store, AGENTS_REGISTRY);
+      if (!rebuilt.ok) {
+        throw new Error(`rebuildReport failed: ${JSON.stringify(rebuilt.error)}`);
+      }
+      return rebuilt.value.markdown;
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  it('lists one Model entry line per configured entry between the Repeat and exit code lines', async () => {
+    const markdown = await rebuildMarkdown();
+
+    expect(markdown).toContain(
+      [
+        '- Repeat: 1 (source: config)',
+        '- Model entry alpha: vendor/model-alpha-synth, effort effort-high, verified',
+        `- Model entry beta: vendor/model-alpha-synth, effort effort-low, unverified: ${BETA_EFFORT_REASON}`,
+        `- Model entry gamma: vendor/model-gamma-synth, effort effort-high, unsupported: ${GAMMA_EFFORT_REASON}`,
+        '- Run exit code: 2',
+      ].join('\n'),
+    );
+  });
+
+  it('labels the case table effort with the check of its model entry', async () => {
+    const markdown = await rebuildMarkdown();
+
+    expect(markdown).toContain(
+      '| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed |',
+    );
+    expect(markdown).toContain(
+      '| failed | beta | 1 | vendor/model-alpha-synth | effort-low, unverified | completed |',
+    );
+  });
+
+  it('labels the effort of a case with the check of its model entry', async () => {
+    const markdown = await rebuildMarkdown();
+
+    expect(markdown).toContain(
+      '- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)',
+    );
+    expect(markdown).toContain(
+      '- Model entry: beta (vendor/model-alpha-synth, effort effort-low, unverified)',
+    );
+    expect(markdown).toContain(
+      '- Model entry: gamma (vendor/model-gamma-synth, effort effort-high, unsupported)',
+    );
+  });
+
+  it('marks an effort as not checked where the run recorded no check for the model entry', async () => {
+    const markdown = await rebuildMarkdown((manifest) => {
+      delete manifest.efforts.models['gamma'];
+    });
+
+    expect(markdown).toContain(
+      '- Model entry gamma: vendor/model-gamma-synth, effort effort-high, not checked\n',
+    );
+    expect(markdown).toContain(
+      '- Model entry: gamma (vendor/model-gamma-synth, effort effort-high, not checked)',
+    );
+  });
 });
 
 describe('OpenCode report regeneration of copied providers', () => {

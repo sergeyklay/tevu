@@ -6,6 +6,8 @@ How a run's cases are identified, the outcome values, and the metrics tevu recor
 
 A run holds n cases for each task and model entry pair, where n is the effective repeat: `run.repeat`, or `--repeat` for that run. A case ID is `<task-id>--<model-id>--<attempt>`. Attempts are numbered from 1 even when n is 1. The report compares cases per task and summarizes each pair's attempts. It selects no winner and calculates no combined score.
 
+A case's effort is the configured string, whether or not the model has a variant of that name. When the effort is `unverified` or `unsupported`, the case may have run the model with its default options, and `report.md` marks the effort of every model entry, the grader, and each case with its status. See [Effort check](agents-and-models.md#effort-check).
+
 ## Outcomes
 
 | Outcome | Meaning |

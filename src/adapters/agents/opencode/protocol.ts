@@ -190,6 +190,77 @@ export function decodeExport(
   return { ok: true, value: input as unknown as OpenCodeExport };
 }
 
+/**
+ * Decodes `models --verbose` output into listed identifiers and their reported
+ * variant names; never throws.
+ *
+ * Identifier extraction does not depend on record parsing: a record that does
+ * not parse costs only that model's variant data. Only identifiers and variant
+ * names leave the function, because records can hold resolved header values.
+ * The first record seen for an identifier wins.
+ */
+export function decodeModelListing(text: string): {
+  models: string[];
+  variants: Map<string, string[]>;
+} {
+  const lines = text.split('\n').map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line));
+  const models: string[] = [];
+  const variants = new Map<string, string[]>();
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index] ?? '';
+    index += 1;
+    if (line === '' || /^[ \t{}]/.test(line)) {
+      continue;
+    }
+    const id = line.replace(/[ \t]+$/, '');
+    if (!models.includes(id)) {
+      models.push(id);
+    }
+    const first = lines[index];
+    if (first === undefined || !first.startsWith('{')) {
+      continue;
+    }
+    let block = first;
+    if (first === '{') {
+      let end = index + 1;
+      while (end < lines.length && isRecordBodyLine(lines[end] ?? '')) {
+        end += 1;
+      }
+      if (lines[end] !== '}') {
+        index = end;
+        continue;
+      }
+      block = lines.slice(index, end + 1).join('\n');
+      index = end + 1;
+    } else {
+      index += 1;
+    }
+    const names = readVariantNames(block);
+    if (names !== undefined && !variants.has(id)) {
+      variants.set(id, names);
+    }
+  }
+  return { models, variants };
+}
+
+function isRecordBodyLine(line: string): boolean {
+  return line !== '}' && (line === '' || line.startsWith(' ') || line.startsWith('\t'));
+}
+
+function readVariantNames(block: string): string[] | undefined {
+  let record: unknown;
+  try {
+    record = JSON.parse(block);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(record) || !isRecord(record['variants'])) {
+    return undefined;
+  }
+  return Object.keys(record['variants']).sort();
+}
+
 /** Deduplication identity of one decoded event: `(sessionID, part.id)`, or the ordinal for errors. */
 export function eventIdentity(event: OpenCodeRunEvent, ordinal: number): string {
   if (event.type === 'error') {

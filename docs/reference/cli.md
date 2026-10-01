@@ -41,6 +41,7 @@ When the file cannot be read, these commands print its absolute path and the rea
 - the capabilities of every agent a model entry or role names;
 - that every case executable starts; see [Environment](environment.md#case-executables);
 - that the agent resolves every model entry and role; see [Model resolution](agents-and-models.md#model-resolution);
+- that every model entry's and role's effort is a variant the agent reports for its model; see [Effort check](agents-and-models.md#effort-check);
 - that a task declaring a graded check has `roles.grader`.
 
 It prints findings, then `Configuration is valid.` or `Configuration is invalid.` (exit `1`). It starts no model session. It never clones or fetches: a missing GitHub clone or commit is a finding that names `tevu run --dry-run`. It checks `trackers.jira` for structure only.
@@ -50,7 +51,7 @@ It prints findings, then `Configuration is valid.` or `Configuration is invalid.
 - `--repeat <n>` replaces `run.repeat` for this run and works with `--dry-run`. An `<n>` that is not a whole number from 1 through 100 ends the command with code `1` before the configuration is read.
 - Before validation, `run` clones or fetches every GitHub repository entry a task names and fetches the Git LFS objects each distinct base commit lacks. Progress and warnings print before the validation output.
 - After each case's checks run, `run` grades that case's graded checks through `roles.grader`, which it requires declared before any case starts.
-- `--dry-run` prints the plan without creating run artifacts or workspaces, contacting Jira, or starting a model session. The plan lists each planned case with its task, model entry, commit, and timeout, then the number of planned cases and manual assessments and the output directory. It still clones and fetches, so a missing clone, commit, or Git LFS object is ready for the next `run`.
+- `--dry-run` prints the plan without creating run artifacts or workspaces, contacting Jira, or starting a model session. The plan lists each planned case with its task, model entry, commit, and timeout, marking an effort that is not verified, then the number of planned cases and manual assessments and the output directory. It still clones and fetches, so a missing clone, commit, or Git LFS object is ready for the next `run`.
 - A run prints `Run <id> started.`, one summary line per case starting with the case ID, `Artifacts: <dir>`, and `Report: <dir>/report.md`. When output is a terminal, progress lines start with the case ID.
 
 ## Assessment
@@ -74,10 +75,10 @@ The [assessment guide](../guides/assess-results.md) covers the workflow.
 
 | Command | Network use |
 | --- | --- |
-| `tevu task add` | Jira or gh, as described in [Trackers](trackers.md). Clone and fetch for a selected GitHub repository entry. `git ls-remote` for each GitHub repository answer. A Git LFS object fetch for each base-commit answer whose tree lacks objects. With `roles.criteria` and a reference solution, a diff read (`gh api` for a pull request) and a model session. In a setup interview, the agent capability probe and one `<command> models` listing per model answer, which may reach the network on its own |
+| `tevu task add` | Jira or gh, as described in [Trackers](trackers.md). Clone and fetch for a selected GitHub repository entry. `git ls-remote` for each GitHub repository answer. A Git LFS object fetch for each base-commit answer whose tree lacks objects. With `roles.criteria` and a reference solution, a diff read (`gh api` for a pull request), one `<command> models --verbose` listing before each draft, and a model session. In a setup interview, the agent capability probe and one `<command> models --verbose` listing per model answer, which may reach the network on its own |
 | `tevu run` | Preparation clone and fetch, only for a missing clone or commit. A Git LFS object fetch, only for a base commit whose tree lacks objects. Model listing during validation. Model sessions |
 | `tevu run --dry-run` | The same as `run`, except no model session |
-| `tevu validate` | The model listing for each agent a model entry or role names, which may reach the network on its own. `git lfs version` locally, only when a Git LFS object is missing. Each case executable started with `--version` |
+| `tevu validate` | The `<command> models --verbose` listing for each agent a model entry or role names, which may reach the network on its own. `git lfs version` locally, only when a Git LFS object is missing. Each case executable started with `--version` |
 | `tevu assess`, `tevu report`, `tevu config example` | None. `assess` and `report` read saved artifacts only |
 
 ## Exit codes

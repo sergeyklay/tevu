@@ -36,7 +36,7 @@ Every question that takes variable names refuses a name that is not set in the t
 
 ### Model checks
 
-Each model, including the grader and criteria models, is checked by listing the models the agent resolves in an environment built like a case agent's (see [Model resolution](agents-and-models.md#model-resolution)). A command or model that fails its check is reported, and Enter tries again with the answer filled in.
+Each model, including the grader and criteria models, is checked by listing the models the agent resolves with `<command> models --verbose`, in an environment built like a case agent's (see [Model resolution](agents-and-models.md#model-resolution)). A command or model that fails its check is reported, and Enter tries again with the answer filled in.
 
 - When your OpenCode global configuration defines the model's provider, the wizard copies it into `agents.opencode.providers` and declares the variables it references as secrets, without asking when the definition names its key variable.
 - It asks `API key variable for <provider>` when the definition names no key variable, holds a literal key, or the provider is a built-in one OpenCode did not list. The question follows `Model` and precedes `Reasoning effort`. An empty answer is accepted.
@@ -93,6 +93,8 @@ With `roles.criteria` declared and a reference solution resolved, the wizard dra
 | Write my own instead | Falls back to the check questions |
 
 Accepting always needs an explicit choice, even for an unedited draft. The Definition of Done list may be empty. After Accept the wizard asks for more acceptance and Definition of Done checks of any kind, which are stored after the drafted ones.
+
+Before each draft the wizard lists the models the agent resolves, as in the model checks, so an unusable model or effort fails before a model session starts. A model the agent does not list, or a `Reasoning effort` outside the variants OpenCode reports for it, falls back to writing the criteria by hand. For an effort outside the variants, the wizard prints the variants and names `roles.criteria.effort` in the configuration file. An effort tevu cannot verify, or one on a model that reports no variants, is used as requested: the draft goes ahead after a warning that gives the reason. See [Effort check](agents-and-models.md#effort-check).
 
 A failed draft names its cause. For unreadable changes, a timeout, a failed OpenCode call, or an unusable reply, the wizard asks `Draft the criteria again?` with Yes selected, and each retry starts another model session. Any other cause, and a prompt that cannot be redacted, falls back to writing the criteria by hand without the question. The draft call incurs the provider's usual charges and runs until it finishes or reaches `run.timeout`.
 

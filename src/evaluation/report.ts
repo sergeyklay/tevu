@@ -1,9 +1,12 @@
+import { effortLabel } from '@/domain/types';
+
 import type {
   AgentCapabilityReport,
   AgentMetrics,
   AssessmentArtifact,
   CaseIdentity,
   CaseResult,
+  EffortCheck,
   GraderIdentity,
   GradingArtifact,
   MetricValue,
@@ -293,7 +296,8 @@ function renderMarkdownReport(model: NormalizedRunModel): string {
     `- Case timeout: ${manifest.execution.caseTimeoutMs}ms`,
     ...renderTaskCaseTimeoutLine(manifest.cases, manifest.execution.caseTimeoutMs),
     `- Repeat: ${manifest.execution.repeat.value} (source: ${manifest.execution.repeat.source})`,
-    ...renderGraderLines(model.graders),
+    ...renderModelEffortLines(model.models, manifest.efforts),
+    ...renderGraderLines(model.graders, manifest.efforts.grader),
     `- Run exit code: ${model.exitCode}`,
     '',
   );
@@ -347,7 +351,7 @@ function renderMarkdownReport(model: NormalizedRunModel): string {
       for (const caseResult of taskCases) {
         const identity = caseResult.identity;
         lines.push(
-          `| ${caseResult.outcome} | ${cell(identity.modelId)} | ${identity.attempt} | ${cell(identity.model)} | ${cell(identity.effort)} | ${caseResult.lifecycle} | ${caseResult.failure ? cell(caseResult.failure.error.kind) : 'none'} | ${cell(formatMetricValue(caseResult.metrics.elapsed))} |`,
+          `| ${caseResult.outcome} | ${cell(identity.modelId)} | ${identity.attempt} | ${cell(identity.model)} | ${cell(effortLabel(identity.effort, effortCheckOf(manifest.efforts, identity.modelId)))} | ${caseResult.lifecycle} | ${caseResult.failure ? cell(caseResult.failure.error.kind) : 'none'} | ${cell(formatMetricValue(caseResult.metrics.elapsed))} |`,
         );
       }
       lines.push('');
@@ -359,6 +363,7 @@ function renderMarkdownReport(model: NormalizedRunModel): string {
           task,
           assessmentsByCase.get(caseResult.identity.caseId),
           gradingsByCase.get(caseResult.identity.caseId),
+          manifest.efforts,
         );
       }
     }
@@ -393,12 +398,37 @@ function renderAgentCapabilityLines(
   return lines;
 }
 
+/** The check recorded for model entry `modelId`; `undefined` when the run recorded none. */
+function effortCheckOf(efforts: RunManifest['efforts'], modelId: string): EffortCheck | undefined {
+  return Object.hasOwn(efforts.models, modelId) ? efforts.models[modelId] : undefined;
+}
+
+/** Renders `: <reason>` for a check that carries one, otherwise nothing. */
+function renderEffortReason(check: EffortCheck | null | undefined): string {
+  return check === null || check === undefined || check.status === 'verified'
+    ? ''
+    : `: ${check.reason}`;
+}
+
+/** Renders one `- Model entry:` line per model entry with its effort check, in `models` order. */
+function renderModelEffortLines(
+  models: readonly ModelRecord[],
+  efforts: RunManifest['efforts'],
+): string[] {
+  return models.map((entry) => {
+    const check = effortCheckOf(efforts, entry.id);
+    return `- Model entry ${entry.id}: ${entry.model}, effort ${entry.effort}, ${check?.status ?? 'not checked'}${renderEffortReason(check)}`;
+  });
+}
+
 /** Renders one `- Grader:` line, and a shared-model-entry note when one applies, per distinct grader identity. */
-function renderGraderLines(graders: readonly GraderSummary[]): string[] {
+function renderGraderLines(graders: readonly GraderSummary[], check: EffortCheck | null): string[] {
   const lines: string[] = [];
   for (const summary of graders) {
     const { grader, sharedModelEntryIds } = summary;
-    lines.push(`- Grader: ${grader.model} (effort ${grader.effort}, agent ${grader.agent})`);
+    lines.push(
+      `- Grader: ${grader.model} (effort ${effortLabel(grader.effort, check)}, agent ${grader.agent})${renderEffortReason(check)}`,
+    );
     if (sharedModelEntryIds.length > 0) {
       lines.push(
         `- Grader model ${grader.model} is also benchmarked as model entry ${sharedModelEntryIds.join(', ')} (informational; tevu does not forbid it)`,
@@ -461,6 +491,7 @@ function renderCase(
   task: TaskRecord | undefined,
   assessment: AssessmentArtifact | undefined,
   grading: GradingArtifact | undefined,
+  efforts: RunManifest['efforts'],
 ): void {
   const identity = caseResult.identity;
   const definitions = new Map((task?.checks ?? []).map((check) => [check.id, check]));
@@ -468,7 +499,7 @@ function renderCase(
   lines.push(
     `### Case ${identity.caseId}`,
     '',
-    `- Model entry: ${identity.modelId} (${identity.model}, effort ${identity.effort})`,
+    `- Model entry: ${identity.modelId} (${identity.model}, effort ${effortLabel(identity.effort, effortCheckOf(efforts, identity.modelId))})`,
     `- Lifecycle: ${caseResult.lifecycle}`,
     `- Task outcome: ${caseResult.outcome}`,
   );
@@ -530,7 +561,7 @@ function renderCase(
   lines.push('');
 
   if (grading !== undefined) {
-    lines.push(...renderGradingBlock(grading));
+    lines.push(...renderGradingBlock(grading, efforts.grader));
   }
 
   lines.push('Artifacts:', '');
@@ -568,9 +599,9 @@ function sortedMetricEntries(caseResult: CaseResult): Array<[string, MetricValue
  * check in `checkId` order, and the grader's own metrics, kept in a block
  * separate from the case's agent metrics above it and never added to them.
  */
-function renderGradingBlock(grading: GradingArtifact): string[] {
+function renderGradingBlock(grading: GradingArtifact, check: EffortCheck | null): string[] {
   const lines: string[] = [
-    `Grades by ${grading.grader.model} (effort ${grading.grader.effort}, agent ${grading.grader.agent}):`,
+    `Grades by ${grading.grader.model} (effort ${effortLabel(grading.grader.effort, check)}, agent ${grading.grader.agent}):`,
     '',
   ];
   if (grading.call.status === 'no-reply') {

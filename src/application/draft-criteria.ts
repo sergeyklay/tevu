@@ -17,21 +17,23 @@ import { durationMs } from '@/config/schema';
 import { codeFenceFor, decodeReplyObject } from '@/domain/model-text';
 
 import { collectBaseSecretNames } from './create-task';
+import { checkRoleEffort } from './effort-check';
 import { checkModelAccess } from './model-access';
 import { callModelRole, describeModelCallFailure } from './model-call';
 
+import type { ModelVariantEvidence } from './effort-check';
 import type { AgentDraft } from './model-access';
 import type { ResolvedReferenceSolution } from './reference-solution';
 import type { RepositoryInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentRegistry,
+  EffortCheck,
   EnvironmentAdapter,
   GitWorkspaceAdapter,
   ModelRole,
   PullRequestReader,
   Redactor,
   TevuConfig,
-  TevuError,
 } from '@/domain/types';
 
 /** Both drafted lists in reply order: `acceptance` holds at least one item, `done` may be empty. */
@@ -57,14 +59,26 @@ export type CriteriaDraftFailure =
   | { cause: 'prompt-unredactable' }
   | { cause: 'variables-unset'; names: readonly string[] }
   | { cause: 'model-unavailable'; model: string }
+  | { cause: 'effort-unsupported'; model: string; effort: string; variants: readonly string[] }
   | { cause: 'timed-out'; limit: string }
   | { cause: 'call-failed'; agentMessage?: string; detail: string }
   | { cause: 'reply-invalid'; defect: string };
 
-/** Outcome of one criteria-drafting call; a failure or cancellation drafts nothing to review. */
+/**
+ * Outcome of one criteria-drafting call; a failure or cancellation drafts nothing to review.
+ *
+ * `retainedDirectories` lists the call directories left behind because removing
+ * them failed: the model listing's, then the model call's. An outcome returned
+ * before the listing carries none.
+ */
 export type CriteriaDraftOutcome =
-  | { status: 'drafted'; draft: CriteriaDraft; retainedDirectory: string | null }
-  | { status: 'failed'; failure: CriteriaDraftFailure; retainedDirectory: string | null }
+  | {
+      status: 'drafted';
+      draft: CriteriaDraft;
+      effort: EffortCheck;
+      retainedDirectories: readonly string[];
+    }
+  | { status: 'failed'; failure: CriteriaDraftFailure; retainedDirectories: readonly string[] }
   | { status: 'cancelled' };
 
 /** Effects injected into the criteria-drafting use case. */
@@ -217,9 +231,21 @@ export async function draftCriteria(
     }
   }
 
+  const criteria =
+    criteriaRole === undefined || roleAgent === undefined
+      ? undefined
+      : await checkCriteriaEffort(request.configPath, criteriaRole, roleAgent, dependencies);
+  if (criteria?.status === 'failed' || criteria?.status === 'cancelled') {
+    return criteria;
+  }
+  const listingDirectories = criteria?.retainedDirectories ?? [];
+
   const changes = await readReferenceChanges(request, dependencies);
-  if (changes.status !== 'read') {
+  if (changes.status === 'cancelled') {
     return changes;
+  }
+  if (changes.status === 'failed') {
+    return draftFailure(changes.failure, listingDirectories);
   }
 
   const prompt = buildCriteriaPrompt({
@@ -232,11 +258,11 @@ export async function draftCriteria(
   try {
     redacted = dependencies.redact(prompt);
   } catch {
-    return draftFailure({ cause: 'prompt-unredactable' });
+    return draftFailure({ cause: 'prompt-unredactable' }, listingDirectories);
   }
   // The redactor is injected; a non-string result must fail closed.
   if (typeof (redacted as unknown) !== 'string') {
-    return draftFailure({ cause: 'prompt-unredactable' });
+    return draftFailure({ cause: 'prompt-unredactable' }, listingDirectories);
   }
 
   const result = await callModelRole(
@@ -259,68 +285,110 @@ export async function draftCriteria(
       return { status: 'cancelled' };
     }
     if (error.kind === 'ModelCallError' && error.cause === 'timed-out') {
-      return draftFailure({ cause: 'timed-out', limit: callConfig.run.timeout });
+      return draftFailure(
+        { cause: 'timed-out', limit: callConfig.run.timeout },
+        listingDirectories,
+      );
     }
-    if (error.kind === 'ModelCallError' && error.cause === 'failed') {
-      return explainFailedCall(error, criteriaRole, roleAgent, request.configPath, dependencies);
-    }
-    return draftFailure({
-      cause: 'call-failed',
-      ...(error.kind === 'ModelCallError' && error.agentMessage !== undefined
-        ? { agentMessage: error.agentMessage }
-        : {}),
-      detail: describeModelCallFailure(error),
-    });
+    return draftFailure(
+      {
+        cause: 'call-failed',
+        ...(error.kind === 'ModelCallError' && error.agentMessage !== undefined
+          ? { agentMessage: error.agentMessage }
+          : {}),
+        detail:
+          error.kind === 'ModelCallError' && error.cause === 'failed'
+            ? error.reason
+            : describeModelCallFailure(error),
+      },
+      listingDirectories,
+    );
   }
 
+  const retainedDirectories = withRetained(listingDirectories, result.value.retainedDirectory);
   const parsed = parseCriteriaReply(result.value.text);
   if (!parsed.ok) {
-    return {
-      status: 'failed',
-      failure: { cause: 'reply-invalid', defect: parsed.defect },
-      retainedDirectory: result.value.retainedDirectory,
-    };
+    return draftFailure({ cause: 'reply-invalid', defect: parsed.defect }, retainedDirectories);
   }
-  return {
-    status: 'drafted',
-    draft: parsed.draft,
-    retainedDirectory: result.value.retainedDirectory,
-  };
+  if (criteria === undefined) {
+    // Unreachable: `callModelRole` refuses a criteria role it cannot resolve,
+    // so a reply implies the role and the check above.
+    return draftFailure(
+      { cause: 'call-failed', detail: 'the criteria role is not configured' },
+      retainedDirectories,
+    );
+  }
+  return { status: 'drafted', draft: parsed.draft, effort: criteria.effort, retainedDirectories };
 }
 
+/** Outcome of the pre-draft effort check: the check itself, or the outcome `draftCriteria` returns directly. */
+type CriteriaEffortOutcome =
+  | { status: 'checked'; effort: EffortCheck; retainedDirectories: readonly string[] }
+  | Extract<CriteriaDraftOutcome, { status: 'failed' | 'cancelled' }>;
+
 /**
- * Tells a model the agent cannot resolve from a call that failed for another
- * reason: the call already failed, so the extra model listing costs nothing
- * when a draft succeeds.
+ * Lists the models the criteria role's agent resolves, so a model the agent
+ * lacks, or an effort it reports no variant for, fails before the paid call.
+ * A listing that gives no answer leaves the effort unverified and the draft
+ * going ahead.
  */
-async function explainFailedCall(
-  error: Extract<TevuError, { kind: 'ModelCallError' }>,
-  role: ModelRole | undefined,
-  agent: AgentDraft | undefined,
+async function checkCriteriaEffort(
   configPath: string,
+  role: ModelRole,
+  agent: AgentDraft,
   dependencies: CriteriaDraftDependencies,
-): Promise<CriteriaDraftOutcome> {
-  const callFailed = draftFailure({
-    cause: 'call-failed',
-    ...(error.agentMessage === undefined ? {} : { agentMessage: error.agentMessage }),
-    detail: error.reason,
-  });
-  if (role === undefined || agent === undefined) {
-    return callFailed;
-  }
+): Promise<CriteriaEffortOutcome> {
   const access = await checkModelAccess({ configPath, agent, model: role.model }, dependencies);
   if (access.status === 'cancelled') {
     return { status: 'cancelled' };
   }
-  return access.status === 'not-listed'
-    ? draftFailure({ cause: 'model-unavailable', model: role.model })
-    : callFailed;
+  if (access.status === 'not-listed') {
+    return draftFailure(
+      { cause: 'model-unavailable', model: role.model },
+      withRetained([], access.retainedDirectory),
+    );
+  }
+  const evidence: ModelVariantEvidence =
+    access.status === 'listed'
+      ? { kind: 'listed', variants: access.variants }
+      : { kind: 'no-listing' };
+  const effort = checkRoleEffort({
+    role: 'criteria',
+    agent: role.agent,
+    command: agent.command,
+    model: role.model,
+    effort: role.effort,
+    evidence,
+  });
+  const retainedDirectories =
+    access.status === 'listed' ? withRetained([], access.retainedDirectory) : [];
+  if (
+    effort.status === 'unsupported' &&
+    evidence.kind === 'listed' &&
+    evidence.variants !== null &&
+    evidence.variants.length > 0
+  ) {
+    return draftFailure(
+      {
+        cause: 'effort-unsupported',
+        model: role.model,
+        effort: role.effort,
+        variants: evidence.variants,
+      },
+      retainedDirectories,
+    );
+  }
+  return { status: 'checked', effort, retainedDirectories };
+}
+
+function withRetained(directories: readonly string[], directory: string | null): string[] {
+  return directory === null ? [...directories] : [...directories, directory];
 }
 
 /** Outcome of reading the reference's changes: the diff text, or the outcome `draftCriteria` should return directly. */
 type ReferenceChangesOutcome =
   | { status: 'read'; value: string }
-  | Extract<CriteriaDraftOutcome, { status: 'failed' }>
+  | { status: 'failed'; failure: CriteriaDraftFailure }
   | { status: 'cancelled' };
 
 async function readReferenceChanges(
@@ -361,11 +429,12 @@ async function readReferenceChanges(
 }
 
 function changesUnreadable(detail: string): Extract<ReferenceChangesOutcome, { status: 'failed' }> {
-  return draftFailure({ cause: 'changes-unreadable', detail });
+  return { status: 'failed', failure: { cause: 'changes-unreadable', detail } };
 }
 
 function draftFailure(
   failure: CriteriaDraftFailure,
+  retainedDirectories: readonly string[] = [],
 ): Extract<CriteriaDraftOutcome, { status: 'failed' }> {
-  return { status: 'failed', failure, retainedDirectory: null };
+  return { status: 'failed', failure, retainedDirectories };
 }

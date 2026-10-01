@@ -72,11 +72,17 @@ async function runGit(cwd: string, args: readonly string[]): Promise<void> {
   });
 }
 
-/** Initializes a Git repository with one commit and returns its full commit hash. */
-async function createSourceRepository(directory: string): Promise<string> {
+/** Initializes a Git repository with one commit holding `README.md` and `extraFiles`, and returns its full commit hash. */
+async function createSourceRepository(
+  directory: string,
+  extraFiles: readonly string[] = [],
+): Promise<string> {
   await mkdir(directory, { recursive: true });
   await runGit(directory, ['init', '--quiet', '-b', 'main']);
   await writeFile(join(directory, 'README.md'), 'synthetic\n');
+  for (const file of extraFiles) {
+    await writeFile(join(directory, file), '{}\n');
+  }
   await runGit(directory, ['add', '-A']);
   await runGit(directory, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'base']);
   const { stdout } = await execa('git', ['rev-parse', 'HEAD'], { cwd: directory });
@@ -95,6 +101,7 @@ function buildFakeAgentAdapter(
   overrides: {
     readProviders?: AgentAdapter['readProviders'];
     listModels?: AgentAdapter['listModels'];
+    repositoryConfigurationEntries?: readonly string[];
   } = {},
 ): FakeAgent {
   const probe = vi.fn(async () => ({
@@ -124,13 +131,21 @@ function buildFakeAgentAdapter(
         value: { defined: false as const },
       })),
       // Lists exactly what buildValidatableConfig's fixed `models` entries name,
-      // so the model-resolution stage reports nothing new for these fixtures.
+      // with the variants their efforts request, so the model-resolution and
+      // effort stages report nothing new for these fixtures.
       listModels:
         overrides.listModels ??
         vi.fn(async () => ({
           outcome: 'listed' as const,
           models: ['openai/gpt-5', 'anthropic/claude-4'],
+          variants: new Map([
+            ['openai/gpt-5', ['high']],
+            ['anthropic/claude-4', ['max']],
+          ]),
         })),
+      repositoryConfigurationEntries: vi.fn(
+        () => overrides.repositoryConfigurationEntries ?? ['.opencode', 'opencode.json'],
+      ),
       run: vi.fn(unused),
       exportSession: vi.fn(unused),
       normalizeMetrics: vi.fn(unused),
@@ -464,8 +479,9 @@ function buildModelResolutionConfig(options: {
   repositoryPath: string;
   baseCommit: string;
   outputDirectory: string;
-  models: Array<{ id: string; model: `${string}/${string}` }>;
+  models: Array<{ id: string; model: `${string}/${string}`; effort?: string }>;
   roles?: { criteria?: `${string}/${string}`; grader?: `${string}/${string}` };
+  roleEffort?: string;
   gradedCheck?: boolean;
 }): TevuConfig {
   return parseConfig({
@@ -481,7 +497,7 @@ function buildModelResolutionConfig(options: {
     models: options.models.map((entry) => ({
       id: entry.id,
       model: entry.model,
-      effort: 'high',
+      effort: entry.effort ?? 'high',
       agent: 'opencode',
     })),
     ...(options.roles === undefined
@@ -490,10 +506,22 @@ function buildModelResolutionConfig(options: {
           roles: {
             ...(options.roles.criteria === undefined
               ? {}
-              : { criteria: { agent: 'opencode', model: options.roles.criteria, effort: 'high' } }),
+              : {
+                  criteria: {
+                    agent: 'opencode',
+                    model: options.roles.criteria,
+                    effort: options.roleEffort ?? 'high',
+                  },
+                }),
             ...(options.roles.grader === undefined
               ? {}
-              : { grader: { agent: 'opencode', model: options.roles.grader, effort: 'high' } }),
+              : {
+                  grader: {
+                    agent: 'opencode',
+                    model: options.roles.grader,
+                    effort: options.roleEffort ?? 'high',
+                  },
+                }),
           },
         }),
     tasks: [
@@ -528,8 +556,12 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
       );
       const text = await readFile(configPath, 'utf8').catch(() => '');
       return text.includes('"acme"')
-        ? { outcome: 'listed' as const, models: [...listedModels] }
-        : { outcome: 'listed' as const, models: [] };
+        ? {
+            outcome: 'listed' as const,
+            models: [...listedModels],
+            variants: new Map(listedModels.map((model) => [model, ['high', 'low', 'turbo']])),
+          }
+        : { outcome: 'listed' as const, models: [], variants: new Map<string, string[]>() };
     });
   }
 
@@ -573,7 +605,9 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
       (finding) => finding.identifier === 'models.beta.model',
     );
     expect(beta?.severity).toBe('error');
-    expect(beta?.message).toContain('"acme/model-missing" is not among the models');
+    expect(beta?.message).toContain(
+      `"acme/model-missing" is not among the models "${agentScript} models --verbose" lists`,
+    );
     expect(
       outcome.value.findings.some((finding) => finding.identifier === 'models.alpha.model'),
     ).toBe(false);
@@ -751,19 +785,19 @@ describe('validateConfig model listing outcomes', () => {
       name: 'a timeout',
       listing: { outcome: 'timed-out' as const, limitMs: 120_000 },
       message: (command: string) =>
-        `"${command} models" did not finish within 120s in an environment built like a case agent's; the models of agent "opencode" were not checked`,
+        `"${command} models --verbose" did not finish within 120s in an environment built like a case agent's; the models of agent "opencode" were not checked`,
     },
     {
       name: 'a failure',
       listing: { outcome: 'failed' as const, reason: 'exits with code 4' },
       message: (command: string) =>
-        `"${command} models" exits with code 4 in an environment built like a case agent's, so the models of agent "opencode" could not be checked`,
+        `"${command} models --verbose" exits with code 4 in an environment built like a case agent's, so the models of agent "opencode" could not be checked`,
     },
     {
       name: 'a cancellation',
       listing: { outcome: 'cancelled' as const },
       message: (command: string) =>
-        `"${command} models" is cancelled in an environment built like a case agent's, so the models of agent "opencode" could not be checked`,
+        `"${command} models --verbose" is cancelled in an environment built like a case agent's, so the models of agent "opencode" could not be checked`,
     },
   ])('reports $name of the listing as one error at the agent', async ({ listing, message }) => {
     const command = join(workspace, 'agent-ok.sh');
@@ -834,5 +868,203 @@ describe('validateConfig model listing outcomes', () => {
     expect(findings[1]?.message).toMatch(
       /^model listing directory could not be removed; retained at ".+"$/,
     );
+  });
+});
+
+describe('validateConfig effort check', () => {
+  const VARIANT_MODEL = 'acme/model-a';
+
+  function listVariants(variants: readonly string[]): AgentAdapter['listModels'] {
+    return vi.fn(async () => ({
+      outcome: 'listed' as const,
+      models: [VARIANT_MODEL],
+      variants: new Map([[VARIANT_MODEL, [...variants]]]),
+    }));
+  }
+
+  async function validateEfforts(options: {
+    efforts: readonly string[];
+    listModels: AgentAdapter['listModels'];
+    baseFiles?: readonly string[];
+    configurationEntries?: readonly string[];
+    roles?: { criteria?: `${string}/${string}`; grader?: `${string}/${string}` };
+    roleEffort?: string;
+    gradedCheck?: boolean;
+  }) {
+    const repositoryPath = join(workspace, 'repo');
+    const baseCommit = await createSourceRepository(repositoryPath, options.baseFiles);
+    const agentScript = join(workspace, 'agent-ok.sh');
+    await writeExecutable(agentScript, shellScript('exit 0\n'));
+    const config = buildModelResolutionConfig({
+      agentCommand: agentScript,
+      repositoryPath,
+      baseCommit,
+      outputDirectory: join(workspace, 'artifacts'),
+      models: options.efforts.map((effort, index) => ({
+        id: index === 0 ? 'known' : 'typo',
+        model: VARIANT_MODEL,
+        effort,
+      })),
+      ...(options.roles === undefined ? {} : { roles: options.roles }),
+      ...(options.roleEffort === undefined ? {} : { roleEffort: options.roleEffort }),
+      ...(options.gradedCheck === undefined ? {} : { gradedCheck: options.gradedCheck }),
+    });
+    const { adapter } = buildFakeAgentAdapter({
+      readProviders: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          agent: 'opencode',
+          configurationFiles: [
+            { relativePath: 'opencode/opencode.json', text: '{"provider":{"acme":{}}}\n' },
+          ],
+          findings: [],
+          copiedProviders: [],
+        },
+      })),
+      listModels: options.listModels,
+      ...(options.configurationEntries === undefined
+        ? {}
+        : { repositoryConfigurationEntries: options.configurationEntries }),
+    });
+
+    const outcome = await validateConfig(config, buildDependencies(adapter));
+
+    if (!outcome.ok) {
+      throw new Error(`expected validateConfig to succeed: ${JSON.stringify(outcome.error)}`);
+    }
+    return { report: outcome.value, adapter, command: agentScript };
+  }
+
+  function effortFindings(findings: readonly ValidationFinding[]): ValidationFinding[] {
+    return findings.filter((finding) => finding.identifier.endsWith('.effort'));
+  }
+
+  it('refuses the misspelled effort with one error naming the variants, before any paid call', async () => {
+    const { report, adapter, command } = await validateEfforts({
+      efforts: ['high', 'hihg'],
+      listModels: listVariants(['high', 'low']),
+    });
+
+    const reason = `"hihg" is not among the variants "${command} models --verbose" reports for "${VARIANT_MODEL}" (high, low), and these tasks have no agent configuration at the root of their base commit: write-report; their cases would run "${VARIANT_MODEL}" with its default options`;
+    expect(report.valid).toBe(false);
+    expect(effortFindings(report.findings)).toEqual([
+      { severity: 'error', identifier: 'models.typo.effort', message: reason },
+    ]);
+    expect(report.efforts).toEqual({
+      models: { known: { status: 'verified' }, typo: { status: 'unsupported', reason } },
+      roles: {},
+    });
+    expect(adapter.run).not.toHaveBeenCalled();
+    expect(adapter.callModel).not.toHaveBeenCalled();
+  });
+
+  it('keeps the configuration valid for a built-in variant', async () => {
+    const { report } = await validateEfforts({
+      efforts: ['high', 'low'],
+      listModels: listVariants(['high', 'low']),
+    });
+
+    expect(report.valid).toBe(true);
+    expect(effortFindings(report.findings)).toEqual([]);
+    expect(report.efforts.models).toEqual({
+      known: { status: 'verified' },
+      typo: { status: 'verified' },
+    });
+  });
+
+  it('keeps the configuration valid for a variant reported only because a copied provider defines it', async () => {
+    const { report } = await validateEfforts({
+      efforts: ['high', 'turbo'],
+      listModels: vi.fn(async (environment) => {
+        const written = await readFile(
+          join(environment.variables.XDG_CONFIG_HOME ?? '', 'opencode', 'opencode.json'),
+          'utf8',
+        ).catch(() => '');
+        return {
+          outcome: 'listed' as const,
+          models: [VARIANT_MODEL],
+          variants: new Map([
+            [VARIANT_MODEL, written.includes('"acme"') ? ['high', 'turbo'] : ['high']],
+          ]),
+        };
+      }),
+    });
+
+    expect(report.valid).toBe(true);
+    expect(report.efforts.models['typo']).toEqual({ status: 'verified' });
+  });
+
+  it('only warns for a variant a task repository may define in its own configuration', async () => {
+    const { report } = await validateEfforts({
+      efforts: ['high', 'repo-defined'],
+      listModels: listVariants(['high', 'low']),
+      baseFiles: ['opencode.json'],
+    });
+
+    expect(report.valid).toBe(true);
+    expect(effortFindings(report.findings)).toEqual([
+      expect.objectContaining({ severity: 'warning', identifier: 'models.typo.effort' }),
+    ]);
+    expect(report.efforts.models['typo']).toMatchObject({
+      status: 'unverified',
+      reason: expect.stringContaining('task repository') as string,
+    });
+  });
+
+  it('reads the configuration entries from the adapter, not from a fixed list', async () => {
+    const { report } = await validateEfforts({
+      efforts: ['high', 'hihg'],
+      listModels: listVariants(['high', 'low']),
+      baseFiles: ['custom.cfg'],
+      configurationEntries: ['custom.cfg'],
+    });
+
+    expect(report.valid).toBe(true);
+    expect(report.efforts.models['typo']?.status).toBe('unverified');
+  });
+
+  it('leaves every effort unverified without an effort finding when the listing failed', async () => {
+    const { report } = await validateEfforts({
+      efforts: ['high', 'hihg'],
+      listModels: vi.fn(async () => ({ outcome: 'failed' as const, reason: 'exits with code 4' })),
+    });
+
+    expect(effortFindings(report.findings)).toEqual([]);
+    expect(report.efforts.models).toEqual({
+      known: expect.objectContaining({ status: 'unverified' }) as unknown,
+      typo: expect.objectContaining({ status: 'unverified' }) as unknown,
+    });
+    expect(report.findings.filter((finding) => finding.severity === 'error')).toHaveLength(1);
+  });
+
+  it('records a grader effort outside the reported variants as a blocking error when a task declares a graded check', async () => {
+    const { report } = await validateEfforts({
+      efforts: ['high', 'low'],
+      listModels: listVariants(['high', 'low']),
+      roles: { grader: VARIANT_MODEL },
+      roleEffort: 'hihg',
+      gradedCheck: true,
+    });
+
+    expect(report.valid).toBe(false);
+    expect(effortFindings(report.findings)).toEqual([
+      expect.objectContaining({ severity: 'error', identifier: 'roles.grader.effort' }),
+    ]);
+    expect(report.efforts.roles.grader?.status).toBe('unsupported');
+  });
+
+  it('only warns for a criteria effort outside the reported variants', async () => {
+    const { report } = await validateEfforts({
+      efforts: ['high', 'low'],
+      listModels: listVariants(['high', 'low']),
+      roles: { criteria: VARIANT_MODEL },
+      roleEffort: 'hihg',
+    });
+
+    expect(report.valid).toBe(true);
+    expect(effortFindings(report.findings)).toEqual([
+      expect.objectContaining({ severity: 'warning', identifier: 'roles.criteria.effort' }),
+    ]);
+    expect(report.efforts.roles.criteria?.status).toBe('unsupported');
   });
 });
