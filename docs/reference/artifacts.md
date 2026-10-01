@@ -98,7 +98,7 @@ Artifacts remain until the operator deletes the run directory. There is no autom
 `tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. They refuse a run that lacks any of:
 
 - the current configuration snapshot layout;
-- `tools.agentVersions`, `tools.copiedProviders` (with an entry for every case's `agent`), `execution.repeat`, a non-empty string `configPath`, or `efforts` (with a valid check for every case's model entry, and a valid `grader` check, or `null` only when the configuration snapshot declares no grader) in the manifest;
+- `tools.agentVersions`, `tools.copiedProviders` (with an entry for every case's `agent`), `execution.repeat`, a non-empty string `configPath`, or `efforts` (with a valid check for every case's model entry, and a `grader` that is a valid check when the configuration snapshot declares a grader and `null` when it does not) in the manifest;
 - `agent`, `attempt`, `timeoutMs`, or `artifacts.grading` in a case result;
 - the `source` discriminator (`operator` or `grader`) in an assessment history entry.
 

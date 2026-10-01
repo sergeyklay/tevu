@@ -1379,9 +1379,9 @@ function describeStoredManifestDefect(manifest: unknown, runId: string): string 
       typeof entry['modelId'] === 'string' &&
       !Object.hasOwn(effortModels, entry['modelId']),
   );
-  const hasUncheckedGrader =
-    manifest['efforts']['grader'] === null && snapshotDeclaresGrader(manifest);
-  if (hasUnlistedAgent || hasUncheckedModelEntry || hasUncheckedGrader) {
+  const hasMismatchedGrader =
+    (manifest['efforts']['grader'] === null) === snapshotDeclaresGrader(manifest);
+  if (hasUnlistedAgent || hasUncheckedModelEntry || hasMismatchedGrader) {
     return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
   }
   return null;

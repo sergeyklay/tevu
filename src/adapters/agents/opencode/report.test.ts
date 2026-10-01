@@ -314,8 +314,6 @@ const BETA_EFFORT_REASON =
   '"effort-low" is not among the variants "opencode models --verbose" reports for "vendor/model-alpha-synth" (effort-high), and the repository of each task may define it: task-1 (opencode.json)';
 const GAMMA_EFFORT_REASON =
   '"effort-high" is not among the variants "opencode models --verbose" reports for "vendor/model-gamma-synth" (max), and these tasks have no agent configuration at the root of their base commit: task-2; their cases would run "vendor/model-gamma-synth" with its default options';
-const GRADER_EFFORT_REASON =
-  '"opencode models --verbose" reports no variant data for "vendor/grader-synth", so effort "effort-high" is used as requested without verification';
 
 function buildManifest(
   runId: string,
@@ -362,7 +360,7 @@ function buildManifest(
         beta: { status: 'unverified', reason: BETA_EFFORT_REASON },
         gamma: { status: 'unsupported', reason: GAMMA_EFFORT_REASON },
       },
-      grader: { status: 'unverified', reason: GRADER_EFFORT_REASON },
+      grader: null,
     },
     context: { config, capabilities: { opencode: capabilities } },
   };
@@ -979,6 +977,12 @@ describe('OpenCode report regeneration matches the pinned baseline', () => {
           grader: { model: 'vendor/grader-synth', effort: 'effort-high' },
         };
         storedEfforts(manifest)['grader'] = null;
+      },
+    },
+    {
+      label: 'a grader effort check while its configuration snapshot declares no grader',
+      mutate: (manifest: Record<string, unknown>) => {
+        storedEfforts(manifest)['grader'] = { status: 'verified' };
       },
     },
     {

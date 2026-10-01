@@ -785,10 +785,7 @@
       }
     },
     "efforts": {
-      "grader": {
-        "reason": "\"opencode models --verbose\" reports no variant data for \"vendor/grader-synth\", so effort \"effort-high\" is used as requested without verification",
-        "status": "unverified"
-      },
+      "grader": null,
       "models": {
         "alpha": {
           "status": "verified"
