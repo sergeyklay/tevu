@@ -1,5 +1,22 @@
 # tevu run 20260923t000000z-synthetic
 
+## Comparison: task-1
+
+| Model | Effort | Outcome | Checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| [vendor/model-alpha-synth](#case-task-1--alpha--1) | effort-high | passed | 2/2 | 1.5 s | $0.0125 | 1 | 2 | 130 | 30 | 10 | 45 | 16 | 2 | none |
+| [vendor/model-alpha-synth](#case-task-1--beta--1) | effort-low, unverified | failed | 0/2 | 0.9 s | - \[1\] | - \[1\] | 1 | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | 1 | AgentProcessError |
+
+1. the preserved case artifacts contain no session export
+
+## Comparison: task-2
+
+| Model | Effort | Outcome | Checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| vendor/model-alpha-synth | effort-high | not-evaluated | 0/2 | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] |
+
+1. no case result was saved
+
 > **Sensitive data:** the tevu configuration file and this artifact directory can contain
 > sensitive private repository, task, Jira, model-output, and evaluator data. They rely on
 > host filesystem access controls.

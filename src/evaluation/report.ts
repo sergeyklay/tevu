@@ -4,6 +4,7 @@ import type {
   AgentCapabilityReport,
   AgentMetrics,
   AssessmentArtifact,
+  BenchmarkMetrics,
   CaseIdentity,
   CaseResult,
   EffortCheck,
@@ -29,6 +30,7 @@ export type ReportInput = {
   run: RunResult;
   capabilities: Readonly<Record<string, AgentCapabilityReport>>;
   tasks: readonly TaskRecord[];
+  /** In configuration order; that order decides the comparison-table row order. */
   models: readonly ModelRecord[];
   repositories: readonly RepositoryRecord[];
   assessments: readonly AssessmentArtifact[];
@@ -272,17 +274,33 @@ export function buildReport(input: ReportInput): ReportResult {
   return {
     runId: model.manifest.runId,
     normalizedJson: serializeNormalizedRun(model),
-    markdown: renderMarkdownReport(model),
+    markdown: renderMarkdownReport(
+      model,
+      input.models.map((entry) => entry.id),
+    ),
   };
 }
 
-/** Renders the Markdown report from an already-sorted report model. */
-function renderMarkdownReport(model: NormalizedRunModel): string {
+/**
+ * Renders the Markdown report from an already-sorted report model.
+ * `configurationModelIds` is the configuration order of the model entries,
+ * which the comparison tables use as their row order.
+ */
+function renderMarkdownReport(
+  model: NormalizedRunModel,
+  configurationModelIds: readonly string[],
+): string {
   const lines: string[] = [];
   const manifest = model.manifest;
   const tools = manifest.tools;
 
-  lines.push(`# tevu run ${manifest.runId}`, '', renderSensitiveDataNotice(), '');
+  lines.push(
+    `# tevu run ${manifest.runId}`,
+    '',
+    ...renderComparisonBlocks(model, configurationModelIds),
+    renderSensitiveDataNotice(),
+    '',
+  );
 
   lines.push(
     '## Run',
@@ -379,6 +397,441 @@ function renderMarkdownReport(model: NormalizedRunModel): string {
   );
 
   return lines.join('\n');
+}
+
+const COMPARISON_HEADER_ROW =
+  '| Model | Effort | Outcome | Checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |';
+const COMPARISON_SEPARATOR_ROW = '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|';
+
+const NO_CASE_RESULT_REASON = 'no case result was saved';
+
+const OUTCOME_ORDER: readonly CaseResult['outcome'][] = [
+  'passed',
+  'failed',
+  'pending',
+  'not-evaluated',
+];
+
+type MeasurementColumn = {
+  metric: keyof BenchmarkMetrics;
+  format: (value: number) => string;
+};
+
+/** Measurement columns of a comparison row, in column order. */
+const ROW_MEASUREMENT_COLUMNS: readonly MeasurementColumn[] = [
+  { metric: 'elapsed', format: formatElapsed },
+  { metric: 'cost', format: formatCost },
+  { metric: 'turns', format: formatCount },
+  { metric: 'toolCalls', format: formatCount },
+  { metric: 'inputTokens', format: formatCount },
+  { metric: 'cacheReadTokens', format: formatCount },
+  { metric: 'cacheWriteTokens', format: formatCount },
+  { metric: 'outputTokens', format: formatCount },
+  { metric: 'reasoningTokens', format: formatCount },
+  { metric: 'apiErrors', format: formatCount },
+];
+
+/** Values of the grader line, in line order. */
+const GRADER_TOTALS: readonly {
+  label: string;
+  metric: keyof AgentMetrics;
+  format: MeasurementColumn['format'];
+}[] = [
+  { label: 'input', metric: 'inputTokens', format: formatCount },
+  { label: 'cache read', metric: 'cacheReadTokens', format: formatCount },
+  { label: 'cache write', metric: 'cacheWriteTokens', format: formatCount },
+  { label: 'output', metric: 'outputTokens', format: formatCount },
+  { label: 'reasoning', metric: 'reasoningTokens', format: formatCount },
+  { label: 'cost', metric: 'cost', format: formatCost },
+];
+
+/** One attempt of a pair with its case result, absent when none was saved. */
+type Attempt = { identity: CaseIdentity; result: CaseResult | undefined };
+
+/**
+ * Renders the lines of every comparison block, in task order. Each block ends
+ * with one empty line, so the lines that follow never continue its table.
+ */
+function renderComparisonBlocks(
+  model: NormalizedRunModel,
+  configurationModelIds: readonly string[],
+): string[] {
+  const lines: string[] = [];
+  const taskIds = [...new Set(model.pairs.map((pair) => pair.taskId))].sort(compareStrings);
+
+  for (const taskId of taskIds) {
+    const footnotes = createFootnoteRegistry();
+    const pairs = orderPairsForRows(
+      model.pairs.filter((pair) => pair.taskId === taskId),
+      configurationModelIds,
+    );
+    const collidingModelIds = findCollidingModelIds(model, pairs);
+
+    lines.push(
+      `## Comparison: ${taskId}`,
+      '',
+      COMPARISON_HEADER_ROW,
+      COMPARISON_SEPARATOR_ROW,
+      ...pairs.flatMap((pair) => renderComparisonRow(pair, model, footnotes, collidingModelIds)),
+      '',
+    );
+
+    const gradings = gradingsOfTask(model, taskId);
+    if (gradings.length > 0) {
+      lines.push(renderGraderLine(gradings, footnotes), '');
+    }
+
+    const footnoteLines = footnotes.lines();
+    if (footnoteLines.length > 0) {
+      lines.push(...footnoteLines, '');
+    }
+  }
+  return lines;
+}
+
+/**
+ * Renders the row of one pair, building cells left to right so footnote
+ * numbers follow use order. A pair without a planned attempt renders no row.
+ */
+function renderComparisonRow(
+  pair: PairSummary,
+  model: NormalizedRunModel,
+  footnotes: FootnoteRegistry,
+  collidingModelIds: ReadonlySet<string>,
+): string[] {
+  const attempts = attemptsOfPair(model, pair);
+  const [lowest] = attempts;
+  if (lowest === undefined) {
+    return [];
+  }
+  const task = model.tasks.find((candidate) => candidate.id === pair.taskId);
+  const cells = [
+    renderModelCell(lowest.identity, pair, attempts, collidingModelIds.has(pair.modelId)),
+    renderEffortCell(lowest.identity, pair, model.manifest.efforts),
+    renderOutcomeCell(pair),
+    renderChecksCell(attempts, task),
+    ...ROW_MEASUREMENT_COLUMNS.map(({ metric, format }) =>
+      renderMeasurementCell(
+        attempts.map((attempt) =>
+          measurementItemOf(String(attempt.identity.attempt), attempt.result?.metrics[metric]),
+        ),
+        lowerMedian,
+        format,
+        'attempt',
+        footnotes,
+      ),
+    ),
+    renderRuntimeFailureCell(attempts, footnotes),
+  ];
+  return [`| ${cells.join(' | ')} |`];
+}
+
+/**
+ * Resolves the attempts of `pair` in ascending attempt order, each with the
+ * case result that has the same task, model entry, and attempt.
+ */
+function attemptsOfPair(model: NormalizedRunModel, pair: PairSummary): Attempt[] {
+  return model.manifest.cases
+    .filter((identity) => identity.taskId === pair.taskId && identity.modelId === pair.modelId)
+    .sort((a, b) => a.attempt - b.attempt)
+    .map((identity) => ({
+      identity,
+      result: model.cases.find(
+        (candidate) =>
+          candidate.identity.taskId === identity.taskId &&
+          candidate.identity.modelId === identity.modelId &&
+          candidate.identity.attempt === identity.attempt,
+      ),
+    }));
+}
+
+/**
+ * Orders pairs by the position of their model entry in the configuration.
+ * Pairs whose model entry is not configured follow, in input order. No
+ * outcome, check, or metric takes part, so the order is never a ranking.
+ */
+function orderPairsForRows(
+  pairs: readonly PairSummary[],
+  configurationModelIds: readonly string[],
+): PairSummary[] {
+  const rankOf = (pair: PairSummary): number => {
+    const index = configurationModelIds.indexOf(pair.modelId);
+    return index === -1 ? configurationModelIds.length : index;
+  };
+  return [...pairs].sort((a, b) => rankOf(a) - rankOf(b));
+}
+
+/** Model entry IDs whose lowest attempt shares model and raw effort with another pair's. */
+function findCollidingModelIds(
+  model: NormalizedRunModel,
+  pairs: readonly PairSummary[],
+): Set<string> {
+  const keyed = pairs.flatMap((pair) => {
+    const identity = attemptsOfPair(model, pair)[0]?.identity;
+    return identity === undefined
+      ? []
+      : [{ modelId: pair.modelId, key: `${identity.model}\u0000${identity.effort}` }];
+  });
+  const counts = new Map<string, number>();
+  for (const { key } of keyed) {
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return new Set(
+    keyed.filter(({ key }) => (counts.get(key) ?? 0) > 1).map((entry) => entry.modelId),
+  );
+}
+
+function caseResultsOf(attempts: readonly Attempt[]): CaseResult[] {
+  return attempts.flatMap((attempt) => (attempt.result === undefined ? [] : [attempt.result]));
+}
+
+function renderModelCell(
+  identity: CaseIdentity,
+  pair: PairSummary,
+  attempts: readonly Attempt[],
+  showsEntryId: boolean,
+): string {
+  const text = showsEntryId
+    ? `${cell(identity.model)} (${cell(pair.modelId)})`
+    : cell(identity.model);
+  const linked = caseResultsOf(attempts)[0];
+  return linked === undefined ? text : `[${text}](#case-${linked.identity.caseId})`;
+}
+
+function renderEffortCell(
+  identity: CaseIdentity,
+  pair: PairSummary,
+  efforts: RunManifest['efforts'],
+): string {
+  return cell(effortLabel(identity.effort, effortCheckOf(efforts, pair.modelId)));
+}
+
+function renderOutcomeCell(pair: PairSummary): string {
+  const present = OUTCOME_ORDER.filter((outcome) => pair.outcomes[outcome] > 0);
+  if (pair.planned === 1) {
+    return present.join(', ');
+  }
+  return present
+    .map(
+      (outcome) => `${formatCount(pair.outcomes[outcome])}/${formatCount(pair.planned)} ${outcome}`,
+    )
+    .join(', ');
+}
+
+/** Counts passed required checks across attempts against the required checks of all attempts. */
+function renderChecksCell(attempts: readonly Attempt[], task: TaskRecord | undefined): string {
+  const requiredIds = (task?.checks ?? [])
+    .filter((check) => check.required)
+    .map((check) => check.id);
+  const passed = caseResultsOf(attempts).reduce(
+    (total, result) =>
+      total +
+      requiredIds.filter((id) =>
+        result.checks.some((check) => check.checkId === id && check.verdict === 'passed'),
+      ).length,
+    0,
+  );
+  return `${formatCount(passed)}/${formatCount(requiredIds.length * attempts.length)}`;
+}
+
+function renderRuntimeFailureCell(
+  attempts: readonly Attempt[],
+  footnotes: FootnoteRegistry,
+): string {
+  const lacking = attempts
+    .filter((attempt) => attempt.result === undefined)
+    .map((attempt) => ({ label: String(attempt.identity.attempt), reason: NO_CASE_RESULT_REASON }));
+  const marker =
+    lacking.length === 0
+      ? ''
+      : renderFootnoteMarker(
+          footnotes.numberFor(describeLackingItems(lacking, attempts.length, 'attempt')),
+        );
+  const results = caseResultsOf(attempts);
+  if (results.length === 0) {
+    return `- ${marker}`;
+  }
+
+  const countsByKind = new Map<string, number>();
+  for (const result of results) {
+    if (result.failure !== null) {
+      const kind = result.failure.error.kind;
+      countsByKind.set(kind, (countsByKind.get(kind) ?? 0) + 1);
+    }
+  }
+  const kinds = [...countsByKind].sort(([a], [b]) => compareStrings(a, b));
+  let text = 'none';
+  if (kinds.length > 0) {
+    text = kinds
+      .map(([kind, count]) =>
+        attempts.length === 1
+          ? cell(kind)
+          : `${formatCount(count)}/${formatCount(attempts.length)} ${cell(kind)}`,
+      )
+      .join(', ');
+  }
+  return lacking.length === 0 ? text : `${text} ${marker}`;
+}
+
+type MeasurementItem =
+  | { kind: 'reported'; label: string; value: number }
+  | { kind: 'lacking'; label: string; reason: string };
+
+/** Classifies one item's metric as reported or lacking; `undefined` means no case result. */
+function measurementItemOf(label: string, metric: MetricValue | undefined): MeasurementItem {
+  if (metric === undefined) {
+    return { kind: 'lacking', label, reason: NO_CASE_RESULT_REASON };
+  }
+  if (metric.availability.status === 'unavailable') {
+    return { kind: 'lacking', label, reason: metric.availability.reason };
+  }
+  if (metric.value === null) {
+    return { kind: 'lacking', label, reason: 'no value recorded' };
+  }
+  return { kind: 'reported', label, value: metric.value };
+}
+
+/** The value at zero-based index floor((k - 1) / 2) of the ascending sort. */
+function lowerMedian(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor((sorted.length - 1) / 2)] ?? Number.NaN;
+}
+
+function sum(values: number[]): number {
+  return values.reduce((total, value) => total + value, 0);
+}
+
+/**
+ * Renders one measurement cell: the aggregate when every item reports, the
+ * aggregate with a `(k/n)` count and footnote marker when some do, and a dash
+ * with a footnote marker when none do. An unavailable value never renders as a number.
+ */
+function renderMeasurementCell(
+  items: readonly MeasurementItem[],
+  aggregate: (values: number[]) => number,
+  format: (value: number) => string,
+  noun: 'attempt' | 'case',
+  footnotes: FootnoteRegistry,
+): string {
+  const reported: number[] = [];
+  const lacking: { label: string; reason: string }[] = [];
+  for (const item of items) {
+    if (item.kind === 'reported') {
+      reported.push(item.value);
+    } else {
+      lacking.push({ label: item.label, reason: item.reason });
+    }
+  }
+  if (lacking.length === 0) {
+    return format(aggregate(reported));
+  }
+  const marker = renderFootnoteMarker(
+    footnotes.numberFor(describeLackingItems(lacking, items.length, noun)),
+  );
+  if (reported.length === 0) {
+    return `- ${marker}`;
+  }
+  return `${format(aggregate(reported))} (${formatCount(reported.length)}/${formatCount(items.length)}) ${marker}`;
+}
+
+/**
+ * Describes why items lack a value: the bare reason for a single item, and
+ * otherwise the items grouped by identical reason in order of first appearance.
+ */
+function describeLackingItems(
+  lacking: readonly { label: string; reason: string }[],
+  total: number,
+  noun: 'attempt' | 'case',
+): string {
+  const labelsByReason = new Map<string, string[]>();
+  for (const { label, reason } of lacking) {
+    const labels = labelsByReason.get(reason);
+    if (labels === undefined) {
+      labelsByReason.set(reason, [label]);
+    } else {
+      labels.push(label);
+    }
+  }
+  return [...labelsByReason]
+    .map(([reason, labels]) =>
+      total === 1
+        ? reason
+        : `${noun}${labels.length === 1 ? '' : 's'} ${labels.join(', ')}: ${reason}`,
+    )
+    .join('; ');
+}
+
+/** The gradings that the case sections of `taskId` render, in `model.gradings` order. */
+function gradingsOfTask(model: NormalizedRunModel, taskId: string): GradingArtifact[] {
+  const caseIds = new Set(
+    model.cases
+      .filter((caseResult) => caseResult.identity.taskId === taskId)
+      .map((caseResult) => caseResult.identity.caseId),
+  );
+  return model.gradings.filter((grading) => caseIds.has(grading.caseId));
+}
+
+/** Renders the grader's summed usage and cost, read from grading metrics only. */
+function renderGraderLine(
+  gradings: readonly GradingArtifact[],
+  footnotes: FootnoteRegistry,
+): string {
+  const totals = GRADER_TOTALS.map(({ label, metric, format }) => {
+    const items = gradings.map((grading) =>
+      measurementItemOf(grading.caseId, grading.metrics[metric]),
+    );
+    return `${label} ${renderMeasurementCell(items, sum, format, 'case', footnotes)}`;
+  });
+  const count =
+    gradings.length === 1 ? '1 graded case' : `${formatCount(gradings.length)} graded cases`;
+  return `Grader total for this task, not added to any row: ${count}, ${totals.join(', ')}.`;
+}
+
+/** Numbers footnote texts by first use; an identical text reuses its number. */
+type FootnoteRegistry = {
+  numberFor(text: string): number;
+  /** One `<n>. <text>` line per footnote in ascending number. */
+  lines(): string[];
+};
+
+function createFootnoteRegistry(): FootnoteRegistry {
+  const numbers = new Map<string, number>();
+  return {
+    numberFor(text) {
+      const existing = numbers.get(text);
+      if (existing !== undefined) {
+        return existing;
+      }
+      const next = numbers.size + 1;
+      numbers.set(text, next);
+      return next;
+    },
+    lines() {
+      return [...numbers].map(([text, number]) => `${number}. ${cell(text)}`);
+    },
+  };
+}
+
+/** Brackets are escaped so a link reference definition in a task description cannot turn a marker into a link. */
+function renderFootnoteMarker(number: number): string {
+  return `\\[${number}\\]`;
+}
+
+// Digit grouping is manual because locale-aware formatting would make regenerated reports differ between hosts.
+function formatCount(value: number): string {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    return String(value);
+  }
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+function formatCost(value: number): string {
+  return `$${value.toFixed(4)}`;
+}
+
+function formatElapsed(milliseconds: number): string {
+  const seconds = (milliseconds / 1000).toFixed(1);
+  return Number(seconds) < 60 ? `${seconds} s` : `${(milliseconds / 60000).toFixed(1)} min`;
 }
 
 /** Renders one version and isolation line per agent in use, in `compareStrings` order. */

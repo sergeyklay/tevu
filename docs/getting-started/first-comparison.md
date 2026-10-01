@@ -134,7 +134,9 @@ Exit code `2` means a case timed out, had a runtime failure, or has a failed or 
 
 ## 7. Read the report
 
-Open the `report.md` path tevu printed. For each model setting it shows:
+Open the `report.md` path tevu printed. It opens with one comparison table per task, with one row per model setting in the order of your configuration. Read across a row for the task outcome, the checks passed, time, cost, tokens, tool calls, and any runtime failure. A `-` means tevu could not measure the value, and a value followed by `[n]` means some attempts could not. The numbered footnote under the table gives the reason. The Model cell links to that setting's case details. See [Comparison table](../reference/results.md#comparison-table) for every column.
+
+Below the tables, each case has its own section. For each model setting it shows:
 
 - the task outcome, and every check with its verdict;
 - for each graded check, the grading model's verdict and its rationale;
