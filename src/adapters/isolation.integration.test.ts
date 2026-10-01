@@ -1764,6 +1764,278 @@ describe('tracked paths an ignore rule matches (D1)', () => {
   }, 30_000);
 });
 
+const FORCE_ADDED_LINE = 'force-added line';
+
+/** A sealed source whose committed `.gitignore` matches `*.fixture` and that tracks no path the rule matches. */
+async function createForceAddSource(): Promise<{ path: string; commit: string }> {
+  const path = join(testDirectory, 'force-add-source');
+  await mkdir(path, { recursive: true });
+  await writeFile(join(path, '.gitignore'), '*.fixture\n');
+  await writeFile(join(path, 'README.md'), 'synthetic readme\n');
+  await runGit(path, ['init', '--quiet', '-b', 'main']);
+  await runGit(path, ['add', '.gitignore', 'README.md']);
+  await runGit(path, [
+    ...GIT_IDENTITY_FLAGS,
+    'commit',
+    '--quiet',
+    '-m',
+    'synthetic force-add commit',
+  ]);
+  const commit = (await runGit(path, ['rev-parse', 'HEAD'])).stdout.trim();
+  return { path, commit };
+}
+
+async function sealCaseFromSource(source: { path: string; commit: string }): Promise<{
+  adapter: GitWorkspaceAdapter;
+  workspace: CaseWorkspace;
+}> {
+  const adapter = createGitAdapter();
+  const sealed = await adapter.createIsolatedCase(buildIdentity('task-1--c1', source.commit), {
+    id: 'repo-1',
+    path: source.path,
+  });
+  return { adapter, workspace: unwrapOk(sealed) };
+}
+
+/** V1 precondition: `relativePath` is ignore-rule matched and listed by the case index, and either committed with `committedContent` or only staged. */
+async function assertForceAdded(
+  workspace: CaseWorkspace,
+  relativePath: string,
+  committedContent?: string,
+): Promise<void> {
+  const ignored = await runGit(workspace.worktreeDirectory, [
+    'check-ignore',
+    '--no-index',
+    '--quiet',
+    relativePath,
+  ]);
+  const listed = await runGit(workspace.worktreeDirectory, [
+    'ls-files',
+    '--error-unmatch',
+    relativePath,
+  ]);
+  expect(ignored.exitCode).toBe(0);
+  expect(listed.exitCode).toBe(0);
+  if (committedContent === undefined) {
+    const inHead = await runGit(workspace.worktreeDirectory, [
+      'cat-file',
+      '-e',
+      `HEAD:${relativePath}`,
+    ]);
+    expect(inHead.exitCode).not.toBe(0);
+  } else {
+    const shown = await runGit(workspace.worktreeDirectory, ['show', `HEAD:${relativePath}`]);
+    expect(shown.stdout).toBe(committedContent.trimEnd());
+  }
+}
+
+async function listCaseIndexPaths(workspace: CaseWorkspace): Promise<string[]> {
+  const listed = await runGit(workspace.worktreeDirectory, ['ls-files']);
+  return listed.stdout.split('\n');
+}
+
+async function forceAddFile(
+  workspace: CaseWorkspace,
+  relativePath: string,
+  content: string,
+): Promise<void> {
+  await mkdir(dirname(join(workspace.worktreeDirectory, relativePath)), { recursive: true });
+  await writeFile(join(workspace.worktreeDirectory, relativePath), content);
+  await runGit(workspace.worktreeDirectory, ['add', '--force', relativePath]);
+}
+
+async function commitStaged(workspace: CaseWorkspace): Promise<void> {
+  await runGit(workspace.worktreeDirectory, [
+    ...GIT_IDENTITY_FLAGS,
+    'commit',
+    '--quiet',
+    '-m',
+    'agent commit',
+  ]);
+}
+
+/** Replaces the file `tracked.txt` with a directory holding a force-added `x.fixture`, as the agent would. */
+async function replaceTrackedFileWithStagedDirectory(workspace: CaseWorkspace): Promise<void> {
+  await rm(join(workspace.worktreeDirectory, 'tracked.txt'));
+  await forceAddFile(workspace, 'tracked.txt/x.fixture', 'staged beneath a former file\n');
+}
+
+/** Runs `action` and asserts it left the case index file and the worktree status exactly as they were. */
+async function expectCaseIndexUntouched<T>(
+  workspace: CaseWorkspace,
+  action: () => Promise<T>,
+): Promise<T> {
+  const readState = async (): Promise<{ indexSha256: string; status: string }> => {
+    const status = await runGit(workspace.worktreeDirectory, [
+      'status',
+      '--porcelain=v1',
+      '--ignored',
+      '--untracked-files=all',
+    ]);
+    const index = await readFile(join(workspace.repositoryDirectory, 'index'));
+    return { indexSha256: sha256Hex(index), status: status.stdout };
+  };
+  const before = await readState();
+
+  const result = await action();
+
+  expect(await readState()).toEqual(before);
+  return result;
+}
+
+/** Splits a `git diff` into its per-file sections, each starting at `a/<path> b/<path>`. */
+function findFileSection(diff: string, relativePath: string): string | undefined {
+  return diff
+    .split(/^diff --git /m)
+    .slice(1)
+    .find((section) => section.startsWith(`a/${relativePath} b/${relativePath}\n`));
+}
+
+function countFileSections(diff: string): number {
+  return diff.split(/^diff --git /m).length - 1;
+}
+
+describe('new paths the case repository index tracks', () => {
+  it.each([
+    { state: 'staged', isCommitted: false, hasBase: false, baseNote: 'without a patch base' },
+    { state: 'committed', isCommitted: true, hasBase: false, baseNote: 'without a patch base' },
+    { state: 'staged', isCommitted: false, hasBase: true, baseNote: 'with a patch base' },
+    { state: 'committed', isCommitted: true, hasBase: true, baseNote: 'with a patch base' },
+  ])(
+    'retains a $state force-added ignored file $baseNote and leaves the case index untouched',
+    async ({ isCommitted, hasBase }) => {
+      const { adapter, workspace } = await sealCaseFromSource(await createForceAddSource());
+      const base = hasBase
+        ? unwrapOk(
+            await expectCaseIndexUntouched(workspace, () => adapter.snapshotPatchBase(workspace)),
+          )
+        : undefined;
+      await forceAddFile(workspace, 'accepted.fixture', `${FORCE_ADDED_LINE}\n`);
+      if (isCommitted) {
+        await commitStaged(workspace);
+      }
+      await writeFile(
+        join(workspace.worktreeDirectory, 'build.fixture'),
+        'untracked build output\n',
+      );
+      await writeFile(
+        join(workspace.worktreeDirectory, 'new-included.txt'),
+        'new unignored file\n',
+      );
+      await assertForceAdded(
+        workspace,
+        'accepted.fixture',
+        isCommitted ? `${FORCE_ADDED_LINE}\n` : undefined,
+      );
+
+      const patch = unwrapOk(
+        await expectCaseIndexUntouched(workspace, () => adapter.capturePatch(workspace, base)),
+      );
+
+      const section = findFileSection(patch.content, 'accepted.fixture');
+      expect(patch.isEmpty).toBe(false);
+      expect(section).toContain('new file mode');
+      expect(section).toContain(`+${FORCE_ADDED_LINE}`);
+      expect(patch.content).not.toContain('build.fixture');
+      expect(findFileSection(patch.content, 'new-included.txt')).toContain('new file mode');
+    },
+    30_000,
+  );
+
+  it('keeps a path force-added before the patch base out of the patch when nothing changes afterwards', async () => {
+    const { adapter, workspace } = await sealCaseFromSource(await createForceAddSource());
+    await forceAddFile(workspace, 'setup.fixture', 'added by a before_agent command\n');
+    await assertForceAdded(workspace, 'setup.fixture');
+    const base = unwrapOk(await adapter.snapshotPatchBase(workspace));
+
+    const patch = unwrapOk(await adapter.capturePatch(workspace, base));
+
+    expect(patch.content).toBe('');
+    expect(patch.isEmpty).toBe(true);
+  }, 30_000);
+
+  it('records a symbolic link that replaced a directory without following it to an ignored file', async () => {
+    const { adapter, workspace } = await sealCaseFromSource(await createForceAddSource());
+    await forceAddFile(workspace, 'dir/a.fixture', 'committed beneath dir\n');
+    await commitStaged(workspace);
+    await assertForceAdded(workspace, 'dir/a.fixture', 'committed beneath dir\n');
+    await rm(join(workspace.worktreeDirectory, 'dir'), { recursive: true });
+    await mkdir(join(workspace.worktreeDirectory, 'real'));
+    await writeFile(
+      join(workspace.worktreeDirectory, 'real/a.fixture'),
+      'untracked behind a link\n',
+    );
+    await symlink('real', join(workspace.worktreeDirectory, 'dir'));
+
+    const patch = unwrapOk(await adapter.capturePatch(workspace));
+
+    expect(findFileSection(patch.content, 'dir')).toContain('new file mode 120000');
+    expect(patch.content).not.toContain('a.fixture');
+  });
+
+  it('reports a file replaced by a directory as deleted and records the force-added path beneath it', async () => {
+    const { adapter, workspace } = await sealCaseFromSource(await createIgnoredTrackedPathSource());
+    await assertTrackedAndIgnored(workspace, 'tracked.txt');
+    await replaceTrackedFileWithStagedDirectory(workspace);
+    const listed = await listCaseIndexPaths(workspace);
+    const ignored = await runGit(workspace.worktreeDirectory, [
+      'check-ignore',
+      '--no-index',
+      '--quiet',
+      'tracked.txt/x.fixture',
+    ]);
+    expect(listed).toContain('tracked.txt/x.fixture');
+    expect(listed).not.toContain('tracked.txt');
+    expect(ignored.exitCode).toBe(0);
+
+    const patch = unwrapOk(await adapter.capturePatch(workspace));
+
+    expect(findFileSection(patch.content, 'tracked.txt')).toContain('deleted file mode');
+    expect(findFileSection(patch.content, 'tracked.txt/x.fixture')).toContain('new file mode');
+  });
+
+  it('skips a listed path beneath a restored regular file and still records an unrelated force-added path', async () => {
+    const { adapter, workspace } = await sealCaseFromSource(await createIgnoredTrackedPathSource());
+    await assertTrackedAndIgnored(workspace, 'tracked.txt');
+    await replaceTrackedFileWithStagedDirectory(workspace);
+    await rm(join(workspace.worktreeDirectory, 'tracked.txt'), { recursive: true });
+    await writeFile(join(workspace.worktreeDirectory, 'tracked.txt'), 'base tracked line\n');
+    await forceAddFile(workspace, 'new-excluded.txt', 'new ignored file\n');
+    const listed = await listCaseIndexPaths(workspace);
+    expect(listed).toContain('new-excluded.txt');
+    expect(listed).toContain('tracked.txt/x.fixture');
+    expect(listed).not.toContain('tracked.txt');
+
+    const patch = unwrapOk(await adapter.capturePatch(workspace));
+
+    expect(countFileSections(patch.content)).toBe(1);
+    expect(findFileSection(patch.content, 'new-excluded.txt')).toContain('new file mode');
+  });
+
+  it('skips a listed path whose worktree entry became a directory', async () => {
+    const { adapter, workspace } = await sealCaseFromSource(await createForceAddSource());
+    await forceAddFile(workspace, 'a.fixture', 'staged before the replacement\n');
+    await assertForceAdded(workspace, 'a.fixture');
+    await rm(join(workspace.worktreeDirectory, 'a.fixture'));
+    await mkdir(join(workspace.worktreeDirectory, 'a.fixture'));
+    await writeFile(
+      join(workspace.worktreeDirectory, 'a.fixture/inner.txt'),
+      'inside a directory\n',
+    );
+    const listed = await runGit(workspace.worktreeDirectory, [
+      'ls-files',
+      '--error-unmatch',
+      'a.fixture',
+    ]);
+    expect(listed.exitCode).toBe(0);
+
+    const patch = unwrapOk(await adapter.capturePatch(workspace));
+
+    expect(patch.content).toBe('');
+    expect(patch.isEmpty).toBe(true);
+  });
+});
+
 describe('isolated case environments', () => {
   it('builds separate replacement environments with private homes and no host state', async () => {
     const config = buildConfig('/synthetic/source', 'f'.repeat(40));

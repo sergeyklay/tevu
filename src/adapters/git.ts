@@ -273,11 +273,6 @@ export function createGitWorkspaceAdapter(
       // With a patch base, `GIT_OBJECT_DIRECTORY` reads through its private
       // object directory and the diff target becomes the base's tree, so
       // `before_agent` output the base already holds never appears as added.
-      // `add --all` applies ignore rules to every path missing from the
-      // index, so the index starts from the diff target's tree. The case
-      // repository's configuration is agent-writable, and a sparse checkout
-      // enabled there makes `add --all` skip changed tracked paths without
-      // an error.
       const patchIndexFile = join(workspace.runtimeDirectory, 'patch-index');
       const indexEnvironment = {
         GIT_INDEX_FILE: patchIndexFile,
@@ -286,19 +281,13 @@ export function createGitWorkspaceAdapter(
       const diffTarget = base?.tree ?? workspace.syntheticCommit;
       try {
         await rm(patchIndexFile, { force: true });
-        const seeded = await runGit(workspace.worktreeDirectory, ['read-tree', diffTarget], {
-          environment: indexEnvironment,
-        });
-        if (seeded.exitCode !== 0) {
-          return artifactError('capture-patch', describeGitFailure('read-tree', seeded));
-        }
-        const staged = await runGit(
+        const staged = await stageWorktree(
           workspace.worktreeDirectory,
-          ['-c', 'core.sparseCheckout=false', 'add', '--all'],
-          { environment: indexEnvironment },
+          diffTarget,
+          indexEnvironment,
         );
-        if (staged.exitCode !== 0) {
-          return artifactError('capture-patch', describeGitFailure('add --all', staged));
+        if (!staged.ok) {
+          return artifactError('capture-patch', staged.reason);
         }
         const diff = await runGit(
           workspace.worktreeDirectory,
@@ -350,23 +339,13 @@ export function createGitWorkspaceAdapter(
       const indexFile = join(baseDirectory, 'index');
       const environment = { GIT_INDEX_FILE: indexFile, GIT_OBJECT_DIRECTORY: objectDirectory };
       try {
-        // Seeds and stages as `capturePatch` does, so the base and the
-        // capture judge the worktree by the same rules.
-        const seeded = await runGit(
+        const staged = await stageWorktree(
           workspace.worktreeDirectory,
-          ['read-tree', workspace.syntheticCommit],
-          { environment },
+          workspace.syntheticCommit,
+          environment,
         );
-        if (seeded.exitCode !== 0) {
-          return artifactError('snapshot-patch-base', describeGitFailure('read-tree', seeded));
-        }
-        const staged = await runGit(
-          workspace.worktreeDirectory,
-          ['-c', 'core.sparseCheckout=false', 'add', '--all'],
-          { environment },
-        );
-        if (staged.exitCode !== 0) {
-          return artifactError('snapshot-patch-base', describeGitFailure('add --all', staged));
+        if (!staged.ok) {
+          return artifactError('snapshot-patch-base', staged.reason);
         }
         const written = await runGit(workspace.worktreeDirectory, ['write-tree'], { environment });
         if (written.exitCode !== 0 || written.stdout.length === 0) {
@@ -1350,6 +1329,119 @@ async function lstatOrNull(
     }
     return checkStateFailure(step, `read failed for "${relativePath}": ${describeCause(cause)}`);
   }
+}
+
+type WorktreeEntryProbe = { ok: true; isStageable: boolean } | { ok: false; reason: string };
+
+/**
+ * Reports whether `update-index` can record a worktree-relative path as it
+ * stands: every leading segment is a real directory and the last segment is a
+ * regular file or a symbolic link. Walks with `lstat`, one call at a time, so
+ * no symbolic link is followed and no file content is read.
+ */
+async function probeStageableEntry(
+  worktreeDirectory: string,
+  relativePath: string,
+): Promise<WorktreeEntryProbe> {
+  const segments = relativePath.split('/');
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    return { ok: true, isStageable: false };
+  }
+  for (let depth = 1; depth <= segments.length; depth += 1) {
+    let stats: Stats;
+    try {
+      stats = await lstat(join(worktreeDirectory, ...segments.slice(0, depth)));
+    } catch (cause) {
+      const code = systemErrorCode(cause);
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        return { ok: true, isStageable: false };
+      }
+      return {
+        ok: false,
+        reason: `worktree entry cannot be inspected: ${code ?? 'unknown error'}`,
+      };
+    }
+    if (depth === segments.length) {
+      return { ok: true, isStageable: stats.isFile() || stats.isSymbolicLink() };
+    }
+    if (!stats.isDirectory()) {
+      return { ok: true, isStageable: false };
+    }
+  }
+  return { ok: true, isStageable: false };
+}
+
+type StagingOutcome = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Stages the complete worktree state into the private index that
+ * `environment` selects, seeded from `tree`. The seed makes `add --all` record
+ * only changes against the diff target, and `add --all` runs with
+ * `core.sparseCheckout=false` because the case repository's configuration is
+ * agent-writable and a sparse checkout enabled there makes `add --all` skip
+ * changed tracked paths without an error.
+ *
+ * `add --all` applies ignore rules to every path missing from the index it
+ * stages into, so a path the case index tracks but `tree` lacks, such as a
+ * force-added ignored file, is recorded with `update-index` first. `--replace`
+ * is safe there because only paths whose shape matches the worktree are
+ * admitted, so the entry it displaces is one `add --all` would remove anyway.
+ * The case index is only read, never written. Both patch capture and the patch
+ * base stage through this helper so they judge the worktree by the same rules.
+ */
+async function stageWorktree(
+  worktreeDirectory: string,
+  tree: string,
+  environment: Record<string, string>,
+): Promise<StagingOutcome> {
+  const seeded = await runGit(worktreeDirectory, ['read-tree', tree], { environment });
+  if (seeded.exitCode !== 0) {
+    return { ok: false, reason: describeGitFailure('read-tree', seeded) };
+  }
+  const listed = await runGit(worktreeDirectory, ['ls-files', '-z'], { keepFinalNewline: true });
+  if (listed.exitCode !== 0) {
+    return { ok: false, reason: describeGitFailure('ls-files', listed) };
+  }
+  const inTree = await runGit(worktreeDirectory, ['ls-tree', '-r', '-z', '--name-only', tree], {
+    environment,
+    keepFinalNewline: true,
+  });
+  if (inTree.exitCode !== 0) {
+    return { ok: false, reason: describeGitFailure('ls-tree', inTree) };
+  }
+  const treePaths = new Set(splitNulSeparated(inTree.stdout));
+  const stageable: string[] = [];
+  for (const path of new Set(splitNulSeparated(listed.stdout))) {
+    if (treePaths.has(path)) {
+      continue;
+    }
+    const probe = await probeStageableEntry(worktreeDirectory, path);
+    if (!probe.ok) {
+      return probe;
+    }
+    if (probe.isStageable) {
+      stageable.push(path);
+    }
+  }
+  if (stageable.length > 0) {
+    const added = await runGit(
+      worktreeDirectory,
+      ['update-index', '--add', '--replace', '-z', '--stdin'],
+      { environment, stdin: stageable.map((path) => `${path}\0`).join('') },
+    );
+    if (added.exitCode !== 0) {
+      return { ok: false, reason: describeGitFailure('update-index --add', added) };
+    }
+  }
+  const staged = await runGit(
+    worktreeDirectory,
+    ['-c', 'core.sparseCheckout=false', 'add', '--all'],
+    { environment },
+  );
+  if (staged.exitCode !== 0) {
+    return { ok: false, reason: describeGitFailure('add --all', staged) };
+  }
+  return { ok: true };
 }
 
 async function tryMkdir(
