@@ -18,7 +18,11 @@ import { renderConfigDocument } from '@/config/document';
 import { loadConfig } from '@/config/load';
 import { decodeRunConfig } from '@/config/run-snapshot';
 import { TevuConfigSchema } from '@/config/schema';
-import { unavailableAgentMetrics, unavailableBenchmarkMetrics } from '@/domain/types';
+import {
+  unavailableAgentMetrics,
+  unavailableBenchmarkMetrics,
+  unavailableMetric,
+} from '@/domain/types';
 
 import {
   buildCheckEnvironment,
@@ -42,6 +46,7 @@ import type {
   ArtifactStore,
   AssessmentArtifact,
   AssessmentDecision,
+  BenchmarkMetrics,
   CaseIdentity,
   CaseResult,
   CheckRecord,
@@ -50,8 +55,11 @@ import type {
   EvaluatorProcessAdapter,
   EvaluatorProcessRequest,
   EvaluatorProcessResult,
+  FailureRecord,
   GraderIdentity,
   GradingArtifact,
+  MetricValue,
+  ModelRecord,
   ProcessResult,
   RepositoryDefinition,
   RunFinding,
@@ -1707,7 +1715,7 @@ const GOLDEN_NORMALIZED_JSON =
   '{\n  "assessments": [],\n  "capabilities": {},\n  "cases": [\n    {\n      "artifacts": {\n        "assessment": null,\n        "checks": null,\n        "diagnostics": null,\n        "events": null,\n        "grading": null,\n        "result": "cases/task-1--alpha--1/result.json",\n        "sessionExport": null,\n        "solutionPatch": null\n      },\n      "checks": [],\n      "failure": null,\n      "identity": {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-1--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-1",\n        "timeoutMs": 1000\n      },\n      "lifecycle": "completed",\n      "metrics": {\n        "apiCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "apiErrors": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "cacheReadTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cacheWriteTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cost": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "USD",\n          "value": null\n        },\n        "elapsed": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "case",\n          "unit": "millisecond",\n          "value": null\n        },\n        "inputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "outputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "reasoningTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "skillCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "toolCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "turns": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        }\n      },\n      "outcome": "passed",\n      "process": {\n        "durationMs": 1500,\n        "endedAt": "2026-09-23T00:00:01.500Z",\n        "exitCode": 0,\n        "signal": null,\n        "startedAt": "2026-09-23T00:00:00.000Z",\n        "terminationStage": "none"\n      },\n      "schemaVersion": 1\n    },\n    {\n      "artifacts": {\n        "assessment": null,\n        "checks": null,\n        "diagnostics": null,\n        "events": null,\n        "grading": null,\n        "result": "cases/task-2--alpha--1/result.json",\n        "sessionExport": null,\n        "solutionPatch": null\n      },\n      "checks": [],\n      "failure": null,\n      "identity": {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-2--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-2",\n        "timeoutMs": 1000\n      },\n      "lifecycle": "completed",\n      "metrics": {\n        "apiCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "apiErrors": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "cacheReadTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cacheWriteTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "cost": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "USD",\n          "value": null\n        },\n        "elapsed": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "case",\n          "unit": "millisecond",\n          "value": null\n        },\n        "inputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "outputTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "reasoningTokens": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "token",\n          "value": null\n        },\n        "skillCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "toolCalls": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        },\n        "turns": {\n          "availability": {\n            "reason": "not yet normalized",\n            "status": "unavailable"\n          },\n          "scope": "root-session",\n          "unit": "count",\n          "value": null\n        }\n      },\n      "outcome": "passed",\n      "process": {\n        "durationMs": 1500,\n        "endedAt": "2026-09-23T00:00:01.500Z",\n        "exitCode": 0,\n        "signal": null,\n        "startedAt": "2026-09-23T00:00:00.000Z",\n        "terminationStage": "none"\n      },\n      "schemaVersion": 1\n    }\n  ],\n  "exitCode": 0,\n  "findings": [],\n  "graders": [],\n  "gradings": [],\n  "manifest": {\n    "cases": [\n      {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-1--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-1",\n        "timeoutMs": 1000\n      },\n      {\n        "agent": "opencode",\n        "attempt": 1,\n        "caseId": "task-2--alpha--1",\n        "effort": "effort-high",\n        "model": "vendor/model-alpha-synth",\n        "modelId": "alpha",\n        "sourceCommit": "0123456789abcdef0123456789abcdef01234567",\n        "taskId": "task-2",\n        "timeoutMs": 1000\n      }\n    ],\n    "completedAt": "2026-01-01T00:05:00.000Z",\n    "configDigest": "sha256-golden-digest",\n    "configPath": "/synthetic/tevu.yaml",\n    "efforts": {\n      "grader": null,\n      "models": {\n        "alpha": {\n          "status": "verified"\n        }\n      }\n    },\n    "execution": {\n      "caseTimeoutMs": 1000,\n      "concurrency": 1,\n      "repeat": {\n        "source": "config",\n        "value": 1\n      }\n    },\n    "host": {\n      "nodeVersion": "v24.21.0",\n      "platform": "linux"\n    },\n    "runId": "20260101t000000z-golden",\n    "schemaVersion": 1,\n    "startedAt": "2026-01-01T00:00:00.000Z",\n    "tools": {\n      "agentConfigurationFiles": {},\n      "agentVersions": {\n        "opencode": null\n      },\n      "copiedProviders": {},\n      "gitVersion": "git version 2.45.0"\n    }\n  },\n  "models": [],\n  "pairs": [\n    {\n      "allPassed": true,\n      "modelId": "alpha",\n      "outcomes": {\n        "failed": 0,\n        "not-evaluated": 0,\n        "passed": 1,\n        "pending": 0\n      },\n      "passedOfPlanned": "1/1",\n      "planned": 1,\n      "taskId": "task-1"\n    },\n    {\n      "allPassed": true,\n      "modelId": "alpha",\n      "outcomes": {\n        "failed": 0,\n        "not-evaluated": 0,\n        "passed": 1,\n        "pending": 0\n      },\n      "passedOfPlanned": "1/1",\n      "planned": 1,\n      "taskId": "task-2"\n    }\n  ],\n  "repositories": [],\n  "schemaVersion": 1,\n  "tasks": [\n    {\n      "checks": [\n        {\n          "category": "acceptance",\n          "description": "acceptance command exits zero",\n          "evaluator": "command",\n          "id": "acc-acceptance-command",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "manual Definition of Done review",\n          "evaluator": "manual",\n          "id": "dod-manual-review",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "optional manual polish review",\n          "evaluator": "manual",\n          "id": "man-optional-polish",\n          "required": false\n        }\n      ],\n      "description": "synthetic task description for the welcome route",\n      "id": "task-1",\n      "repositoryId": "repo-1",\n      "source": {\n        "kind": "manual",\n        "reference": null,\n        "title": "Synthetic welcome-route task"\n      },\n      "startCommit": "0123456789abcdef0123456789abcdef01234567"\n    },\n    {\n      "checks": [\n        {\n          "category": "acceptance",\n          "description": "acceptance command exits zero",\n          "evaluator": "command",\n          "id": "acc-acceptance-command",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "manual Definition of Done review",\n          "evaluator": "manual",\n          "id": "dod-manual-review",\n          "required": true\n        },\n        {\n          "category": "definition-of-done",\n          "description": "optional manual polish review",\n          "evaluator": "manual",\n          "id": "man-optional-polish",\n          "required": false\n        }\n      ],\n      "description": "synthetic task description for the welcome route",\n      "id": "task-2",\n      "repositoryId": "repo-1",\n      "source": {\n        "issueKey": "TEVU-999",\n        "issueUrl": "https://jira.example.com/browse/TEVU-999",\n        "kind": "jira-cloud"\n      },\n      "startCommit": "0123456789abcdef0123456789abcdef01234567"\n    }\n  ]\n}\n';
 
 const GOLDEN_MARKDOWN =
-  '# tevu run 20260101t000000z-golden\n\n> **Sensitive data:** the tevu configuration file and this artifact directory can contain\n> sensitive private repository, task, Jira, model-output, and evaluator data. They rely on\n> host filesystem access controls.\n>\n> **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,\n> later Git history, host agent state, and benchmark artifacts from normal discovery.\n> It does not claim that a model with shell access cannot probe arbitrary host paths.\n\n## Run\n\n- Configuration digest: `sha256-golden-digest`\n- Started: 2026-01-01T00:00:00.000Z\n- Completed: 2026-01-01T00:05:00.000Z\n- Host: linux, Node.js v24.21.0, Git git version 2.45.0\n- Agent "opencode" version (detected provenance only): not detected\n- Agent "opencode" isolation control (deny outside worktree): not probed\n- Concurrency: 1\n- Case timeout: 1000ms\n- Repeat: 1 (source: config)\n- Run exit code: 0\n\n## Task task-1\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: manual — Synthetic welcome-route task\n\nPair summary:\n\n| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |\n|---|---|---|---|---|---|---|---|\n| alpha | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |\n\n| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|---|\n| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-1--alpha--1\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-1--alpha--1/result.json](cases/task-1--alpha--1/result.json)\n\n## Task task-2\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: Jira snapshot — [TEVU-999](https://jira.example.com/browse/TEVU-999)\n\nPair summary:\n\n| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |\n|---|---|---|---|---|---|---|---|\n| alpha | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |\n\n| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|---|\n| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-2--alpha--1\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-2--alpha--1/result.json](cases/task-2--alpha--1/result.json)\n\n---\n\nTask outcome, runtime failure, and run exit status are reported independently.\nCommand check output is configured acceptance evidence, not an additional model-quality metric.\nNo composite score or winner is computed.\n';
+  '# tevu run 20260101t000000z-golden\n\n## Comparison: task-1\n\n| Model | Effort | Outcome | Checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n| [vendor/model-alpha-synth](#case-task-1--alpha--1) | effort-high | passed | 0/2 | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | none |\n\n1. not yet normalized\n\n## Comparison: task-2\n\n| Model | Effort | Outcome | Checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n| [vendor/model-alpha-synth](#case-task-2--alpha--1) | effort-high | passed | 0/2 | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | - \\[1\\] | none |\n\n1. not yet normalized\n\n> **Sensitive data:** the tevu configuration file and this artifact directory can contain\n> sensitive private repository, task, Jira, model-output, and evaluator data. They rely on\n> host filesystem access controls.\n>\n> **Isolation boundary:** context isolation is non-adversarial. It withholds sibling runs,\n> later Git history, host agent state, and benchmark artifacts from normal discovery.\n> It does not claim that a model with shell access cannot probe arbitrary host paths.\n\n## Run\n\n- Configuration digest: `sha256-golden-digest`\n- Started: 2026-01-01T00:00:00.000Z\n- Completed: 2026-01-01T00:05:00.000Z\n- Host: linux, Node.js v24.21.0, Git git version 2.45.0\n- Agent "opencode" version (detected provenance only): not detected\n- Agent "opencode" isolation control (deny outside worktree): not probed\n- Concurrency: 1\n- Case timeout: 1000ms\n- Repeat: 1 (source: config)\n- Run exit code: 0\n\n## Task task-1\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: manual — Synthetic welcome-route task\n\nPair summary:\n\n| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |\n|---|---|---|---|---|---|---|---|\n| alpha | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |\n\n| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|---|\n| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-1--alpha--1\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-1--alpha--1/result.json](cases/task-1--alpha--1/result.json)\n\n## Task task-2\n\nsynthetic task description for the welcome route\n\n- Repository: repo-1\n- Source commit: `0123456789abcdef0123456789abcdef01234567`\n- Source: Jira snapshot — [TEVU-999](https://jira.example.com/browse/TEVU-999)\n\nPair summary:\n\n| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |\n|---|---|---|---|---|---|---|---|\n| alpha | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |\n\n| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |\n|---|---|---|---|---|---|---|---|\n| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | unavailable: not yet normalized |\n\n### Case task-2--alpha--1\n\n- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)\n- Lifecycle: completed\n- Task outcome: passed\n- Process: exit code 0, 1500ms, termination stage none\n\nMetrics:\n\n- apiCalls: unavailable: not yet normalized\n- apiErrors: unavailable: not yet normalized\n- cacheReadTokens: unavailable: not yet normalized\n- cacheWriteTokens: unavailable: not yet normalized\n- cost: unavailable: not yet normalized\n- elapsed: unavailable: not yet normalized\n- inputTokens: unavailable: not yet normalized\n- outputTokens: unavailable: not yet normalized\n- reasoningTokens: unavailable: not yet normalized\n- skillCalls: unavailable: not yet normalized\n- toolCalls: unavailable: not yet normalized\n- turns: unavailable: not yet normalized\n\nArtifacts:\n\n- Solution patch: missing\n- Events: missing\n- Diagnostics: missing\n- Session export: missing\n- Check evidence: missing\n- Result: [cases/task-2--alpha--1/result.json](cases/task-2--alpha--1/result.json)\n\n---\n\nTask outcome, runtime failure, and run exit status are reported independently.\nCommand check output is configured acceptance evidence, not an additional model-quality metric.\nNo composite score or winner is computed.\n';
 
 describe('deterministic report regeneration', () => {
   it('sorts every collection by stable identity regardless of input order', () => {
@@ -1735,7 +1743,7 @@ describe('deterministic report regeneration', () => {
       run,
       capabilities: { [AGENT_NAME]: records.capabilities },
       tasks: [...decoded.value.tasks].reverse(),
-      models: [...decoded.value.models].reverse(),
+      models: decoded.value.models,
       repositories: [...decoded.value.repositories].reverse(),
       assessments: [records.assessment],
       gradings: [],
@@ -2510,6 +2518,1094 @@ describe('deterministic report regeneration', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('comparison table in the report', () => {
+  type ResultOverrides = Partial<Omit<CaseResult, 'identity' | 'metrics'>> & {
+    metrics?: Partial<BenchmarkMetrics>;
+  };
+
+  type ComparisonOptions = {
+    models?: readonly ModelRecord[];
+    taskIds?: readonly string[];
+    tasks?: readonly TaskRecord[];
+    repeat?: number;
+    /** Returns `null` for an attempt whose case result was never saved. */
+    results?: (identity: CaseIdentity) => ResultOverrides | null;
+    gradings?: readonly GradingArtifact[];
+    efforts?: RunManifest['efforts'];
+  };
+
+  type FailureKind = 'AgentProcessError' | 'CaseTimeoutError';
+
+  const NOTICE_START = '> **Sensitive data:**';
+  const HEADER_ROW =
+    '| Model | Effort | Outcome | Checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |';
+  const SEPARATOR_ROW = '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|';
+  const FIRST_MARKER = '\\[1\\]';
+  const NO_CASE_RESULT = 'no case result was saved';
+  const MEASUREMENT_COLUMNS = [
+    'Elapsed',
+    'Cost',
+    'Turns',
+    'Tool calls',
+    'Input',
+    'Cache read',
+    'Cache write',
+    'Output',
+    'Reasoning',
+    'API errors',
+  ];
+
+  function buildModelRecord(overrides: Partial<ModelRecord> = {}): ModelRecord {
+    return { id: 'alpha', model: 'vendor/model-alpha-synth', effort: 'effort-high', ...overrides };
+  }
+
+  /** Entries that differ in model, so no Model cell carries an entry ID suffix. */
+  function buildDistinctModels(ids: readonly string[]): ModelRecord[] {
+    return ids.map((id) => buildModelRecord({ id, model: `vendor/model-${id}-synth` }));
+  }
+
+  function linkTo(taskId: string, modelId: string, attempt = 1): string {
+    return `[vendor/model-${modelId}-synth](#case-${taskId}--${modelId}--${attempt})`;
+  }
+
+  function reported(value: number, unit: MetricValue['unit']): MetricValue {
+    return {
+      value,
+      unit,
+      availability: { status: 'available', source: 'root-session export' },
+      scope: unit === 'millisecond' ? 'case' : 'root-session',
+    };
+  }
+
+  function availableWithoutValue(unit: MetricValue['unit']): MetricValue {
+    return { ...reported(0, unit), value: null };
+  }
+
+  function byAttempt<T>(identity: CaseIdentity, values: readonly T[]): T {
+    const value = values[identity.attempt - 1];
+    if (value === undefined) {
+      throw new Error(`no value for attempt ${identity.attempt}`);
+    }
+    return value;
+  }
+
+  function buildFailure(kind: FailureKind, caseId: string): FailureRecord {
+    const occurredAt = '2026-09-23T00:00:00.950Z';
+    return kind === 'AgentProcessError'
+      ? { error: { kind, agent: AGENT_NAME, caseId, exitCode: 1, signal: null }, occurredAt }
+      : { error: { kind, caseId, timeoutMs: 60_000 }, occurredAt };
+  }
+
+  function passedChecks(checkIds: readonly string[]): CheckResult[] {
+    return checkIds.map((checkId) => buildCheckResult({ checkId }));
+  }
+
+  function buildComparisonInput(options: ComparisonOptions = {}): ReportInput {
+    const {
+      models = [buildModelRecord()],
+      taskIds = ['task-1'],
+      repeat = 1,
+      results = (): ResultOverrides => ({}),
+      gradings = [],
+    } = options;
+    const identities = taskIds.flatMap((taskId) =>
+      models.flatMap((entry) =>
+        Array.from({ length: repeat }, (_, index) =>
+          buildCaseIdentity({
+            caseId: `${taskId}--${entry.id}--${index + 1}`,
+            taskId,
+            modelId: entry.id,
+            attempt: index + 1,
+            model: entry.model,
+            effort: entry.effort,
+          }),
+        ),
+      ),
+    );
+    const defaultMetrics: BenchmarkMetrics = {
+      elapsed: reported(1500, 'millisecond'),
+      ...buildAgentMetrics(),
+    };
+    const cases = identities.flatMap((identity) => {
+      const overrides = results(identity);
+      if (overrides === null) {
+        return [];
+      }
+      const { metrics, ...rest } = overrides;
+      return [
+        buildCaseResult({
+          identity,
+          artifacts: buildArtifactIndex(identity.caseId, new Set(['result'])),
+          metrics: { ...defaultMetrics, ...metrics },
+          ...rest,
+        }),
+      ];
+    });
+    const manifest: RunManifest = {
+      schemaVersion: 1,
+      runId: '20260923t000000z-comparison',
+      configDigest: 'sha256-comparison-digest',
+      configPath: '/synthetic/tevu.yaml',
+      startedAt: '2026-09-23T00:00:00.000Z',
+      completedAt: '2026-09-23T00:05:00.000Z',
+      host: { platform: 'linux', nodeVersion: 'v24.21.0' },
+      tools: {
+        gitVersion: 'git version 2.45.0',
+        agentVersions: { [AGENT_NAME]: null },
+        agentConfigurationFiles: {},
+        copiedProviders: {},
+      },
+      execution: {
+        concurrency: 1,
+        caseTimeoutMs: 60_000,
+        repeat: { value: repeat, source: 'config' },
+      },
+      efforts: options.efforts ?? buildEfforts(models.map((entry) => entry.id)),
+      cases: identities,
+    };
+    return {
+      run: { schemaVersion: 1, manifest, cases, findings: [], exitCode: 0 },
+      capabilities: {},
+      tasks: options.tasks ?? taskIds.map((taskId) => buildTaskRecord({ id: taskId })),
+      models,
+      repositories: [],
+      assessments: [],
+      gradings,
+    };
+  }
+
+  /** The lines of one comparison block, from its heading through its closing empty line. */
+  function comparisonBlock(markdown: string, taskId: string): string[] {
+    const lines = markdown.split('\n');
+    const start = lines.indexOf(`## Comparison: ${taskId}`);
+    if (start === -1) {
+      throw new Error(`no comparison block for ${taskId}`);
+    }
+    const length = lines
+      .slice(start + 1)
+      .findIndex((line) => line.startsWith('## ') || line.startsWith(NOTICE_START));
+    return lines.slice(start, start + 1 + length);
+  }
+
+  function footnotesOf(markdown: string, taskId: string): string[] {
+    return comparisonBlock(markdown, taskId).filter((line) => /^\d+\. /.test(line));
+  }
+
+  function splitRow(line: string): string[] {
+    return line.slice(2, -2).split(' | ');
+  }
+
+  function comparisonRows(markdown: string, taskId = 'task-1'): Record<string, string>[] {
+    const [header, , ...rows] = comparisonBlock(markdown, taskId).filter((line) =>
+      line.startsWith('|'),
+    );
+    if (header === undefined) {
+      throw new Error(`no table in the comparison block of ${taskId}`);
+    }
+    const columns = splitRow(header);
+    return rows.map((row) =>
+      Object.fromEntries(
+        splitRow(row).map((value, index) => [columns[index] ?? `column ${index}`, value]),
+      ),
+    );
+  }
+
+  function comparisonRow(markdown: string, taskId = 'task-1'): Record<string, string> {
+    const [row] = comparisonRows(markdown, taskId);
+    if (row === undefined) {
+      throw new Error(`no row in the comparison block of ${taskId}`);
+    }
+    return row;
+  }
+
+  function reportOf(options: ComparisonOptions = {}): string {
+    return buildReport(buildComparisonInput(options)).markdown;
+  }
+
+  describe('layout', () => {
+    it('opens with the title, then one block per task in task ID order, ahead of the notice', () => {
+      const input = buildComparisonInput({ taskIds: ['task-2', 'task-1'] });
+
+      const lines = buildReport(input).markdown.split('\n');
+
+      const noticeIndex = lines.findIndex((line) => line.startsWith(NOTICE_START));
+      expect(lines.slice(0, 3)).toEqual([
+        `# tevu run ${input.run.manifest.runId}`,
+        '',
+        '## Comparison: task-1',
+      ]);
+      expect(lines.filter((line) => line.startsWith('## '))).toEqual([
+        '## Comparison: task-1',
+        '## Comparison: task-2',
+        '## Run',
+        '## Task task-1',
+        '## Task task-2',
+      ]);
+      expect(lines[noticeIndex - 1]).toBe('');
+      expect(lines[noticeIndex - 2]).toMatch(/^\| /);
+    });
+
+    it('renders no block when the run plans no case', () => {
+      const input = buildComparisonInput({ taskIds: [] });
+
+      const markdown = buildReport(input).markdown;
+
+      expect(markdown).not.toContain('## Comparison');
+      expect(markdown.startsWith(`# tevu run ${input.run.manifest.runId}\n\n${NOTICE_START}`)).toBe(
+        true,
+      );
+    });
+
+    it.each(['task-1', 'task-2'])(
+      'renders the fixed header and separator rows in the block of %s',
+      (taskId) => {
+        const markdown = reportOf({ taskIds: ['task-1', 'task-2'] });
+
+        const block = comparisonBlock(markdown, taskId);
+
+        expect(block.slice(2, 4)).toEqual([HEADER_ROW, SEPARATOR_ROW]);
+      },
+    );
+
+    it('renders every column of a fully reported row in column order', () => {
+      const markdown = reportOf({
+        results: () => ({
+          checks: [
+            buildCheckResult({ checkId: 'acc-acceptance-command' }),
+            buildCheckResult({
+              checkId: 'dod-manual-review',
+              category: 'definition-of-done',
+            }),
+          ],
+        }),
+      });
+
+      const block = comparisonBlock(markdown, 'task-1');
+
+      expect(block).toEqual([
+        '## Comparison: task-1',
+        '',
+        HEADER_ROW,
+        SEPARATOR_ROW,
+        '| [vendor/model-alpha-synth](#case-task-1--alpha--1) | effort-high | passed | 2/2 | 1.5 s | $0.0125 | 1 | 2 | 130 | 30 | 10 | 45 | 16 | 1 | none |',
+        '',
+      ]);
+    });
+
+    it('shows the effort check status in the Effort cell', () => {
+      const models = buildDistinctModels(['alpha', 'beta', 'gamma', 'delta']);
+      const efforts: RunManifest['efforts'] = {
+        models: {
+          alpha: { status: 'verified' },
+          beta: { status: 'unverified', reason: 'no variant data was reported' },
+          gamma: { status: 'unsupported', reason: 'the model has no variants' },
+        },
+        grader: null,
+      };
+
+      const rows = comparisonRows(reportOf({ models, efforts }));
+
+      expect(rows.map((row) => row['Effort'])).toEqual([
+        'effort-high',
+        'effort-high, unverified',
+        'effort-high, unsupported',
+        'effort-high, not checked',
+      ]);
+    });
+
+    it('escapes table-breaking characters in model text and footnote text', () => {
+      const models = [buildModelRecord({ model: 'vendor/odd|model' })];
+
+      const markdown = reportOf({
+        models,
+        results: () => ({ metrics: { cost: unavailableMetric('USD', 'upstream said a|b') } }),
+      });
+
+      expect(comparisonRow(markdown)['Model']).toBe('[vendor/odd\\|model](#case-task-1--alpha--1)');
+      expect(footnotesOf(markdown, 'task-1')).toEqual(['1. upstream said a\\|b']);
+    });
+
+    it('escapes brackets and backslashes in linked model text so the link stays intact', () => {
+      const models = [buildModelRecord({ model: 'vendor/odd]model[\\x' })];
+
+      const markdown = reportOf({ models });
+
+      expect(comparisonRow(markdown)['Model']).toBe(
+        '[vendor/odd\\]model\\[\\\\x](#case-task-1--alpha--1)',
+      );
+    });
+  });
+
+  describe('Model cell', () => {
+    it('links a row with a case result to its case section and leaves a row without one as plain text', () => {
+      const models = buildDistinctModels(['alpha', 'beta']);
+
+      const markdown = reportOf({
+        models,
+        results: (identity) => (identity.modelId === 'beta' ? null : {}),
+      });
+
+      expect(comparisonRows(markdown).map((row) => row['Model'])).toEqual([
+        linkTo('task-1', 'alpha'),
+        'vendor/model-beta-synth',
+      ]);
+      expect(markdown).toContain('### Case task-1--alpha--1\n');
+    });
+
+    it('links to the lowest attempt that has a case result', () => {
+      const markdown = reportOf({
+        repeat: 2,
+        results: (identity) => (identity.attempt === 1 ? null : {}),
+      });
+
+      expect(comparisonRow(markdown)['Model']).toBe(
+        '[vendor/model-alpha-synth](#case-task-1--alpha--2)',
+      );
+      expect(markdown).toContain('### Case task-1--alpha--2\n');
+    });
+
+    it('appends the entry ID, inside the link text, to rows that share model and effort', () => {
+      const models = [
+        buildModelRecord({ id: 'alpha' }),
+        buildModelRecord({ id: 'beta', effort: 'effort-low' }),
+        buildModelRecord({ id: 'delta' }),
+      ];
+
+      const rows = comparisonRows(reportOf({ models }));
+
+      expect(rows.map((row) => row['Model'])).toEqual([
+        '[vendor/model-alpha-synth (alpha)](#case-task-1--alpha--1)',
+        '[vendor/model-alpha-synth](#case-task-1--beta--1)',
+        '[vendor/model-alpha-synth (delta)](#case-task-1--delta--1)',
+      ]);
+    });
+
+    it('drops every suffix once the efforts differ', () => {
+      const models = [
+        buildModelRecord({ id: 'alpha' }),
+        buildModelRecord({ id: 'beta', effort: 'effort-low' }),
+        buildModelRecord({ id: 'delta', effort: 'effort-medium' }),
+      ];
+
+      const rows = comparisonRows(reportOf({ models }));
+
+      expect(rows.map((row) => row['Model'])).toEqual([
+        '[vendor/model-alpha-synth](#case-task-1--alpha--1)',
+        '[vendor/model-alpha-synth](#case-task-1--beta--1)',
+        '[vendor/model-alpha-synth](#case-task-1--delta--1)',
+      ]);
+    });
+
+    it('renders the suffixed text of a colliding row without a case result as plain text', () => {
+      const models = [buildModelRecord({ id: 'alpha' }), buildModelRecord({ id: 'delta' })];
+
+      const rows = comparisonRows(
+        reportOf({ models, results: (identity) => (identity.modelId === 'delta' ? null : {}) }),
+      );
+
+      expect(rows.map((row) => row['Model'])).toEqual([
+        '[vendor/model-alpha-synth (alpha)](#case-task-1--alpha--1)',
+        'vendor/model-alpha-synth (delta)',
+      ]);
+    });
+
+    it('compares the raw effort, so a different effort check status does not remove the suffix', () => {
+      const models = [buildModelRecord({ id: 'alpha' }), buildModelRecord({ id: 'delta' })];
+      const efforts: RunManifest['efforts'] = {
+        models: {
+          alpha: { status: 'verified' },
+          delta: { status: 'unverified', reason: 'no variant data was reported' },
+        },
+        grader: null,
+      };
+
+      const rows = comparisonRows(reportOf({ models, efforts }));
+
+      expect(rows.map((row) => row['Model'])).toEqual([
+        '[vendor/model-alpha-synth (alpha)](#case-task-1--alpha--1)',
+        '[vendor/model-alpha-synth (delta)](#case-task-1--delta--1)',
+      ]);
+      expect(rows.map((row) => row['Effort'])).toEqual(['effort-high', 'effort-high, unverified']);
+    });
+  });
+
+  describe('row order', () => {
+    const models = buildDistinctModels(['gamma', 'alpha', 'beta']);
+
+    it.each(['task-1', 'task-2'])('lists the rows of %s in configuration order', (taskId) => {
+      const input = buildComparisonInput({ models, taskIds: ['task-1', 'task-2'] });
+
+      const markdown = buildReport(input).markdown;
+      const reversed = buildReport({ ...input, models: [...models].reverse() }).markdown;
+
+      expect(comparisonRows(markdown, taskId).map((row) => row['Model'])).toEqual([
+        linkTo(taskId, 'gamma'),
+        linkTo(taskId, 'alpha'),
+        linkTo(taskId, 'beta'),
+      ]);
+      expect(comparisonRows(reversed, taskId).map((row) => row['Model'])).toEqual([
+        linkTo(taskId, 'beta'),
+        linkTo(taskId, 'alpha'),
+        linkTo(taskId, 'gamma'),
+      ]);
+    });
+
+    it('keeps the normalized JSON and every line outside the blocks unchanged when the order changes', () => {
+      const input = buildComparisonInput({ models, taskIds: ['task-1', 'task-2'] });
+
+      const original = buildReport(input);
+      const reversed = buildReport({ ...input, models: [...models].reverse() });
+
+      expect(reversed.normalizedJson).toBe(original.normalizedJson);
+      expect(reversed.markdown.slice(reversed.markdown.indexOf(NOTICE_START))).toBe(
+        original.markdown.slice(original.markdown.indexOf(NOTICE_START)),
+      );
+    });
+
+    it('places entries missing from the configuration after the configured ones, in pair order', () => {
+      const input = buildComparisonInput({ models });
+
+      const markdown = buildReport({
+        ...input,
+        models: models.filter((entry) => entry.id === 'beta'),
+      }).markdown;
+
+      expect(comparisonRows(markdown).map((row) => row['Model'])).toEqual([
+        linkTo('task-1', 'beta'),
+        linkTo('task-1', 'alpha'),
+        linkTo('task-1', 'gamma'),
+      ]);
+    });
+  });
+
+  describe('unavailable values and footnotes', () => {
+    const REASON = 'the provider reported no cost';
+
+    it('renders a measured zero as a number and an unavailable value as a dash with a footnote', () => {
+      const models = buildDistinctModels(['alpha', 'beta', 'gamma']);
+
+      const markdown = reportOf({
+        models,
+        results: ({ modelId }) => ({
+          metrics:
+            modelId === 'alpha'
+              ? { apiErrors: reported(0, 'count') }
+              : modelId === 'beta'
+                ? { cost: reported(0, 'USD') }
+                : { cost: unavailableMetric('USD', REASON) },
+        }),
+      });
+
+      const rows = comparisonRows(markdown);
+      const block = comparisonBlock(markdown, 'task-1');
+      expect(rows.map((row) => row['API errors'])).toEqual(['0', '1', '1']);
+      expect(rows.map((row) => row['Cost'])).toEqual(['$0.0125', '$0.0000', `- ${FIRST_MARKER}`]);
+      expect(block.slice(-3)).toEqual(['', `1. ${REASON}`, '']);
+      expect(block[block.length - 4]).toMatch(/^\| /);
+    });
+
+    it('reads an available metric without a value as no value recorded', () => {
+      const markdown = reportOf({
+        results: () => ({ metrics: { turns: availableWithoutValue('count') } }),
+      });
+
+      expect(comparisonRow(markdown)['Turns']).toBe(`- ${FIRST_MARKER}`);
+      expect(footnotesOf(markdown, 'task-1')).toEqual(['1. no value recorded']);
+    });
+
+    it('shares one number between identical reasons and restarts the numbering in each block', () => {
+      const models = buildDistinctModels(['alpha', 'beta']);
+
+      const markdown = reportOf({
+        models,
+        taskIds: ['task-1', 'task-2'],
+        results: ({ taskId, modelId }) => {
+          const cost = unavailableMetric('USD', 'cost was not reported');
+          return taskId === 'task-1' && modelId === 'alpha'
+            ? {
+                metrics: {
+                  cost,
+                  elapsed: unavailableMetric('millisecond', 'elapsed was not recorded'),
+                },
+              }
+            : { metrics: { cost } };
+        },
+      });
+
+      const firstRows = comparisonRows(markdown, 'task-1');
+      expect(firstRows.map((row) => row['Elapsed'])).toEqual([`- ${FIRST_MARKER}`, '1.5 s']);
+      expect(firstRows.map((row) => row['Cost'])).toEqual(['- \\[2\\]', '- \\[2\\]']);
+      expect(footnotesOf(markdown, 'task-1')).toEqual([
+        '1. elapsed was not recorded',
+        '2. cost was not reported',
+      ]);
+      expect(comparisonRows(markdown, 'task-2').map((row) => row['Cost'])).toEqual([
+        `- ${FIRST_MARKER}`,
+        `- ${FIRST_MARKER}`,
+      ]);
+      expect(footnotesOf(markdown, 'task-2')).toEqual(['1. cost was not reported']);
+    });
+
+    it('writes every marker with escaped brackets so a link reference definition in a task description cannot capture it', () => {
+      const description = 'Imported issue text.\n\n[1]: https://example.com';
+      const taskIds = ['task-1', 'task-2'];
+
+      const markdown = reportOf({
+        taskIds,
+        tasks: taskIds.map((id) => buildTaskRecord({ id, description })),
+        results: () => ({ metrics: { cost: unavailableMetric('USD', REASON) } }),
+      });
+
+      const blocks = markdown.slice(0, markdown.indexOf(NOTICE_START));
+      expect(markdown).toContain('[1]: https://example.com');
+      expect(blocks).toContain(FIRST_MARKER);
+      expect(blocks).not.toMatch(/(?<!\\)\[\d+\]/);
+    });
+  });
+
+  describe('value formats', () => {
+    type FormatCase = {
+      column: string;
+      metric: keyof BenchmarkMetrics;
+      unit: MetricValue['unit'];
+      value: number;
+      expected: string;
+    };
+
+    it.each<FormatCase>([
+      { column: 'Turns', metric: 'turns', unit: 'count', value: 0, expected: '0' },
+      { column: 'Turns', metric: 'turns', unit: 'count', value: 999, expected: '999' },
+      { column: 'Turns', metric: 'turns', unit: 'count', value: 1000, expected: '1,000' },
+      {
+        column: 'Input',
+        metric: 'inputTokens',
+        unit: 'token',
+        value: 1_234_567,
+        expected: '1,234,567',
+      },
+      { column: 'Turns', metric: 'turns', unit: 'count', value: 1234.5, expected: '1234.5' },
+      { column: 'Turns', metric: 'turns', unit: 'count', value: -5, expected: '-5' },
+      { column: 'Cost', metric: 'cost', unit: 'USD', value: 0.0125, expected: '$0.0125' },
+      { column: 'Cost', metric: 'cost', unit: 'USD', value: 0, expected: '$0.0000' },
+      { column: 'Cost', metric: 'cost', unit: 'USD', value: 0.00004, expected: '$0.0000' },
+      { column: 'Cost', metric: 'cost', unit: 'USD', value: 0.00005, expected: '$0.0001' },
+      { column: 'Cost', metric: 'cost', unit: 'USD', value: 1.23, expected: '$1.2300' },
+      { column: 'Elapsed', metric: 'elapsed', unit: 'millisecond', value: 0, expected: '0.0 s' },
+      { column: 'Elapsed', metric: 'elapsed', unit: 'millisecond', value: 900, expected: '0.9 s' },
+      {
+        column: 'Elapsed',
+        metric: 'elapsed',
+        unit: 'millisecond',
+        value: 59_949,
+        expected: '59.9 s',
+      },
+      {
+        column: 'Elapsed',
+        metric: 'elapsed',
+        unit: 'millisecond',
+        value: 59_950,
+        expected: '1.0 min',
+      },
+      {
+        column: 'Elapsed',
+        metric: 'elapsed',
+        unit: 'millisecond',
+        value: 522_000,
+        expected: '8.7 min',
+      },
+      {
+        column: 'Elapsed',
+        metric: 'elapsed',
+        unit: 'millisecond',
+        value: 7_200_000,
+        expected: '120.0 min',
+      },
+    ])(
+      'renders $value in the $column column as $expected',
+      ({ column, metric, unit, value, expected }) => {
+        const markdown = reportOf({
+          results: () => ({ metrics: { [metric]: reported(value, unit) } }),
+        });
+
+        expect(comparisonRow(markdown)[column]).toBe(expected);
+      },
+    );
+  });
+
+  describe('repeats', () => {
+    const COST_REASON = 'the provider reported no cost';
+
+    it('counts outcomes, takes the lower median, and marks a partly reported cost with its count', () => {
+      const markdown = reportOf({
+        repeat: 3,
+        results: (identity) => ({
+          outcome: byAttempt<CaseResult['outcome']>(identity, ['passed', 'failed', 'passed']),
+          metrics: {
+            elapsed: reported(byAttempt(identity, [120_000, 60_000, 90_000]), 'millisecond'),
+            cost: byAttempt(identity, [
+              reported(0.03, 'USD'),
+              unavailableMetric('USD', COST_REASON),
+              reported(0.01, 'USD'),
+            ]),
+          },
+        }),
+      });
+
+      const row = comparisonRow(markdown);
+
+      expect(row['Outcome']).toBe('2/3 passed, 1/3 failed');
+      expect(row['Elapsed']).toBe('1.5 min');
+      expect(row['Cost']).toBe(`$0.0100 (2/3) ${FIRST_MARKER}`);
+      expect(row['Runtime failure']).toBe('none');
+      expect(footnotesOf(markdown, 'task-1')).toEqual([`1. attempt 2: ${COST_REASON}`]);
+    });
+
+    it('lists every outcome above zero in the fixed outcome order', () => {
+      const markdown = reportOf({
+        repeat: 4,
+        results: (identity) => ({
+          outcome: byAttempt<CaseResult['outcome']>(identity, [
+            'not-evaluated',
+            'pending',
+            'failed',
+            'passed',
+          ]),
+        }),
+      });
+
+      expect(comparisonRow(markdown)['Outcome']).toBe(
+        '1/4 passed, 1/4 failed, 1/4 pending, 1/4 not-evaluated',
+      );
+    });
+
+    it('groups lacking attempts by reason in order of first appearance and shares numbers with other cells', () => {
+      const markdown = reportOf({
+        repeat: 4,
+        results: (identity) =>
+          identity.attempt === 2
+            ? null
+            : {
+                metrics: {
+                  cost:
+                    identity.attempt === 4
+                      ? reported(0.0125, 'USD')
+                      : unavailableMetric('USD', 'reason X'),
+                },
+              },
+      });
+
+      const row = comparisonRow(markdown);
+
+      expect(row['Elapsed']).toBe('1.5 s (3/4) \\[1\\]');
+      expect(row['Cost']).toBe('$0.0125 (1/4) \\[2\\]');
+      expect(row['Runtime failure']).toBe('none \\[1\\]');
+      expect(footnotesOf(markdown, 'task-1')).toEqual([
+        `1. attempt 2: ${NO_CASE_RESULT}`,
+        `2. attempts 1, 3: reason X; attempt 2: ${NO_CASE_RESULT}`,
+      ]);
+    });
+  });
+
+  describe('Checks cell', () => {
+    function buildRequiredChecksTask(): TaskRecord {
+      return buildTaskRecord({
+        checks: [
+          ...['req-1', 'req-2', 'req-3', 'req-4', 'req-5', 'req-6'].map((id) =>
+            buildCheckRecord({ id }),
+          ),
+          buildCheckRecord({ id: 'opt-1', required: false }),
+        ],
+      });
+    }
+
+    it('counts passed required checks across attempts and ignores optional and undefined checks', () => {
+      const requiredIds = ['req-1', 'req-2', 'req-3', 'req-4', 'req-5', 'req-6'];
+
+      const markdown = reportOf({
+        repeat: 3,
+        tasks: [buildRequiredChecksTask()],
+        results: (identity) => ({
+          checks: [
+            ...passedChecks([...requiredIds.slice(0, 5), 'opt-1', 'undefined-check']),
+            buildCheckResult({
+              checkId: 'req-6',
+              verdict: identity.attempt === 3 ? 'failed' : 'passed',
+            }),
+          ],
+        }),
+      });
+
+      expect(comparisonRow(markdown)['Checks']).toBe('17/18');
+    });
+
+    it('adds nothing to the passed count for an attempt without a case result but keeps its required checks', () => {
+      const markdown = reportOf({
+        repeat: 2,
+        results: (identity) =>
+          identity.attempt === 2
+            ? null
+            : { checks: passedChecks(['acc-acceptance-command', 'dod-manual-review']) },
+      });
+
+      expect(comparisonRow(markdown)['Checks']).toBe('2/4');
+    });
+  });
+
+  describe('Runtime failure cell', () => {
+    it.each<{
+      name: string;
+      kinds: readonly (FailureKind | null)[];
+      expected: string;
+    }>([
+      { name: 'one failed attempt', kinds: ['AgentProcessError'], expected: 'AgentProcessError' },
+      { name: 'one attempt without a failure', kinds: [null], expected: 'none' },
+      {
+        name: 'one failure among three attempts',
+        kinds: [null, 'AgentProcessError', null],
+        expected: '1/3 AgentProcessError',
+      },
+      { name: 'three attempts without a failure', kinds: [null, null, null], expected: 'none' },
+      {
+        name: 'two kinds across three attempts',
+        kinds: ['CaseTimeoutError', 'AgentProcessError', 'AgentProcessError'],
+        expected: '2/3 AgentProcessError, 1/3 CaseTimeoutError',
+      },
+    ])('renders $expected for $name', ({ kinds, expected }) => {
+      const markdown = reportOf({
+        repeat: kinds.length,
+        results: (identity) => {
+          const kind = byAttempt(identity, kinds);
+          return { failure: kind === null ? null : buildFailure(kind, identity.caseId) };
+        },
+      });
+
+      expect(comparisonRow(markdown)['Runtime failure']).toBe(expected);
+    });
+
+    it('ends with a space and the marker when some attempts have no case result', () => {
+      const markdown = reportOf({
+        repeat: 3,
+        results: (identity) =>
+          identity.attempt === 3
+            ? null
+            : {
+                failure:
+                  identity.attempt === 1
+                    ? buildFailure('AgentProcessError', identity.caseId)
+                    : null,
+              },
+      });
+
+      expect(comparisonRow(markdown)['Runtime failure']).toBe(
+        `1/3 AgentProcessError ${FIRST_MARKER}`,
+      );
+      expect(footnotesOf(markdown, 'task-1')).toEqual([`1. attempt 3: ${NO_CASE_RESULT}`]);
+    });
+  });
+
+  describe('attempts without a case result', () => {
+    it('marks every measurement and the runtime failure of ten planned attempts with a shared footnote', () => {
+      const markdown = reportOf({ repeat: 10, tasks: [], results: () => null });
+
+      const row = comparisonRow(markdown);
+
+      expect(row['Model']).toBe('vendor/model-alpha-synth');
+      expect(row['Outcome']).toBe('10/10 not-evaluated');
+      expect(row['Checks']).toBe('0/0');
+      expect([...MEASUREMENT_COLUMNS, 'Runtime failure'].map((column) => row[column])).toEqual(
+        Array.from({ length: MEASUREMENT_COLUMNS.length + 1 }, () => `- ${FIRST_MARKER}`),
+      );
+      expect(footnotesOf(markdown, 'task-1')).toEqual([
+        `1. attempts 1, 2, 3, 4, 5, 6, 7, 8, 9, 10: ${NO_CASE_RESULT}`,
+      ]);
+    });
+
+    it('reads the single planned attempt of a row without a case result as the bare reason', () => {
+      const markdown = reportOf({ results: () => null });
+
+      expect(comparisonRow(markdown)['Outcome']).toBe('not-evaluated');
+      expect(footnotesOf(markdown, 'task-1')).toEqual([`1. ${NO_CASE_RESULT}`]);
+    });
+  });
+
+  describe('grader line', () => {
+    const GRADER_LINE_START = 'Grader total for this task, not added to any row: ';
+
+    function graderLineOf(markdown: string, taskId: string): string | undefined {
+      return comparisonBlock(markdown, taskId).find((line) => line.startsWith(GRADER_LINE_START));
+    }
+
+    it('keeps grader usage out of the rows and states it on the line', () => {
+      const withGradings = buildComparisonInput({
+        gradings: [
+          buildGradingArtifact({
+            metrics: buildAgentMetrics({ inputTokens: reported(7000, 'token') }),
+          }),
+        ],
+      });
+      const withoutGradings = { ...withGradings, gradings: [] };
+
+      const markdown = buildReport(withGradings).markdown;
+      const markdownWithoutGradings = buildReport(withoutGradings).markdown;
+
+      expect(comparisonRow(markdown)['Input']).toBe('130');
+      expect(graderLineOf(markdown, 'task-1')).toContain('input 7,000');
+      expect(comparisonRows(markdown)).toEqual(comparisonRows(markdownWithoutGradings));
+    });
+
+    it('keeps the strings that locate the case sections out of the part before the first task', () => {
+      const markdown = reportOf({ gradings: [buildGradingArtifact()] });
+
+      const beforeTasks = markdown.slice(0, markdown.indexOf('## Task '));
+
+      expect(markdown).toContain('Grades by openai/grader-model');
+      expect(beforeTasks).not.toContain('Metrics:');
+      expect(beforeTasks).not.toContain('Grades by');
+      expect(beforeTasks).not.toContain('Grader metrics');
+    });
+
+    it('sums the gradings of the task and shares the footnote numbering with the rows', () => {
+      const models = buildDistinctModels(['alpha', 'beta']);
+      const unreportedReasoning = unavailableMetric('token', 'the grader reported no reasoning');
+
+      const markdown = reportOf({
+        models,
+        results: ({ modelId }) =>
+          modelId === 'alpha' ? { metrics: { cost: unavailableMetric('USD', 'row reason') } } : {},
+        gradings: [
+          buildGradingArtifact({
+            caseId: 'task-1--alpha--1',
+            metrics: buildAgentMetrics({
+              inputTokens: reported(1000, 'token'),
+              cacheReadTokens: reported(0, 'token'),
+              cacheWriteTokens: reported(0, 'token'),
+              outputTokens: reported(300, 'token'),
+              reasoningTokens: unreportedReasoning,
+              cost: reported(0.003, 'USD'),
+            }),
+          }),
+          buildGradingArtifact({
+            caseId: 'task-1--beta--1',
+            metrics: buildAgentMetrics({
+              inputTokens: reported(200, 'token'),
+              cacheReadTokens: reported(0, 'token'),
+              cacheWriteTokens: reported(0, 'token'),
+              outputTokens: reported(40, 'token'),
+              reasoningTokens: unreportedReasoning,
+              cost: reported(0.0012, 'USD'),
+            }),
+          }),
+        ],
+      });
+
+      expect(comparisonBlock(markdown, 'task-1').slice(-6)).toEqual([
+        '',
+        `${GRADER_LINE_START}2 graded cases, input 1,200, cache read 0, cache write 0, output 340, reasoning - \\[2\\], cost $0.0042.`,
+        '',
+        '1. row reason',
+        '2. cases task-1--alpha--1, task-1--beta--1: the grader reported no reasoning',
+        '',
+      ]);
+    });
+
+    it('names a single graded case in the singular and gives the bare reason of a missing value', () => {
+      const markdown = reportOf({
+        gradings: [
+          buildGradingArtifact({
+            metrics: buildAgentMetrics({
+              reasoningTokens: unavailableMetric('token', 'the grader export is missing'),
+            }),
+          }),
+        ],
+      });
+
+      expect(graderLineOf(markdown, 'task-1')).toBe(
+        `${GRADER_LINE_START}1 graded case, input 130, cache read 30, cache write 10, output 45, reasoning - \\[1\\], cost $0.0125.`,
+      );
+      expect(footnotesOf(markdown, 'task-1')).toEqual(['1. the grader export is missing']);
+    });
+
+    it('marks a total that only some gradings reported with its reporting count', () => {
+      const models = buildDistinctModels(['alpha', 'beta']);
+
+      const markdown = reportOf({
+        models,
+        gradings: [
+          buildGradingArtifact({ caseId: 'task-1--alpha--1', metrics: buildAgentMetrics() }),
+          buildGradingArtifact({
+            caseId: 'task-1--beta--1',
+            metrics: buildAgentMetrics({
+              cost: unavailableMetric('USD', 'grader cost unavailable'),
+            }),
+          }),
+        ],
+      });
+
+      expect(graderLineOf(markdown, 'task-1')).toContain('cost $0.0125 (1/2) \\[1\\].');
+      expect(footnotesOf(markdown, 'task-1')).toEqual([
+        '1. case task-1--beta--1: grader cost unavailable',
+      ]);
+    });
+
+    it('renders the line only in the block of the task whose case was graded', () => {
+      const markdown = reportOf({
+        taskIds: ['task-1', 'task-2'],
+        gradings: [buildGradingArtifact({ caseId: 'task-2--alpha--1' })],
+      });
+
+      expect(graderLineOf(markdown, 'task-1')).toBeUndefined();
+      expect(graderLineOf(markdown, 'task-2')).toContain('1 graded case, ');
+    });
+
+    it('renders no line for a grading whose case has no case result', () => {
+      const markdown = reportOf({
+        results: () => null,
+        gradings: [buildGradingArtifact()],
+      });
+
+      expect(graderLineOf(markdown, 'task-1')).toBeUndefined();
+    });
+  });
+
+  describe('regeneration from saved artifacts', () => {
+    async function createRunWithPendingManualCheck(root: string): Promise<{
+      runId: string;
+      store: ReturnType<typeof createArtifactStore>;
+    }> {
+      const runId = '20260923t000000z-comparison-regen';
+      const store = createArtifactStore({
+        artifactsDirectory: join(root, 'artifacts'),
+        redact: (text) => text,
+      });
+      const config = rekeyToFakeAgent(buildSyntheticConfig());
+      const manifest = buildManifest(
+        runId,
+        { ...config, models: [...config.models].reverse() },
+        buildCapabilityReport(),
+        ['task-1--alpha--1', 'task-1--beta--1'],
+      );
+      const started = await store.startRun(manifest);
+      if (!started.ok) {
+        throw new Error(`startRun failed: ${JSON.stringify(started.error)}`);
+      }
+      const cases = manifest.cases.map((identity) =>
+        buildCaseResult({
+          identity,
+          outcome: 'pending',
+          checks: [
+            buildCheckResult({ checkId: 'acc-acceptance-command' }),
+            buildCheckResult({
+              checkId: 'dod-manual-review',
+              category: 'definition-of-done',
+              verdict: 'pending',
+              evidence: 'awaiting manual assessment',
+              durationMs: null,
+            }),
+          ],
+          artifacts: buildArtifactIndex(identity.caseId, new Set(['result', 'checks'])),
+        }),
+      );
+      for (const caseResult of cases) {
+        await writeChecksOrThrow(store, caseResult.identity.caseId, caseResult.checks);
+        const finalized = await store.finalizeCase(caseResult);
+        if (!finalized.ok) {
+          throw new Error(`finalizeCase failed: ${JSON.stringify(finalized.error)}`);
+        }
+      }
+      const runFinalized = await store.finalizeRun({
+        schemaVersion: 1,
+        manifest,
+        cases,
+        findings: [],
+        exitCode: 2,
+      });
+      if (!runFinalized.ok) {
+        throw new Error(`finalizeRun failed: ${JSON.stringify(runFinalized.error)}`);
+      }
+      return { runId, store };
+    }
+
+    const BETA_LINK = '[vendor/model-alpha-synth](#case-task-1--beta--1)';
+    const ALPHA_LINK = '[vendor/model-alpha-synth](#case-task-1--alpha--1)';
+
+    it('regenerates identical blocks in the order of the saved configuration', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'tevu-eval-comparison-regen-'));
+      try {
+        const { runId, store } = await createRunWithPendingManualCheck(root);
+
+        const first = await rebuildReport(runId, store, AGENTS_REGISTRY);
+        const second = await rebuildReport(runId, store, AGENTS_REGISTRY);
+
+        expect(first.ok).toBe(true);
+        expect(second.ok).toBe(true);
+        if (!first.ok || !second.ok) return;
+        expect(second.value.markdown).toBe(first.value.markdown);
+        expect(comparisonRows(first.value.markdown).map((row) => row['Model'])).toEqual([
+          BETA_LINK,
+          ALPHA_LINK,
+        ]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('shows the new outcome and checks of a row after a manual verdict is recorded', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'tevu-eval-comparison-assess-'));
+      try {
+        const { runId, store } = await createRunWithPendingManualCheck(root);
+        const before = await rebuildReport(runId, store, AGENTS_REGISTRY);
+        expect(before.ok).toBe(true);
+        if (!before.ok) return;
+
+        const assessed = await assessCase(
+          {
+            runId,
+            caseId: 'task-1--alpha--1',
+            decisions: [
+              {
+                checkId: 'dod-manual-review',
+                verdict: 'passed',
+                assessor: 'curator',
+                note: 'confirmed by reviewer',
+                replaceExisting: false,
+              },
+              {
+                checkId: 'man-optional-polish',
+                verdict: 'passed',
+                assessor: 'curator',
+                note: 'polish confirmed',
+                replaceExisting: false,
+              },
+            ],
+            assessedAt: '2026-09-23T02:00:00.000Z',
+          },
+          store,
+          AGENTS_REGISTRY,
+        );
+
+        expect(assessed.ok).toBe(true);
+        const after = await readFile(join(root, 'artifacts', runId, 'report.md'), 'utf8');
+        const summarize = (markdown: string): string[][] =>
+          comparisonRows(markdown).map((row) => [
+            row['Model'] ?? '',
+            row['Outcome'] ?? '',
+            row['Checks'] ?? '',
+          ]);
+        expect(summarize(before.value.markdown)).toEqual([
+          [BETA_LINK, 'pending', '1/2'],
+          [ALPHA_LINK, 'pending', '1/2'],
+        ]);
+        expect(summarize(after)).toEqual([
+          [BETA_LINK, 'pending', '1/2'],
+          [ALPHA_LINK, 'passed', '2/2'],
+        ]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
   });
 });
 
@@ -3388,7 +4484,7 @@ describe('grading rendered in the report', () => {
     expect(markdown).toContain(
       '- Model entry alpha: vendor/model-alpha-synth, effort effort-high, verified\n',
     );
-    expect(markdown).toContain('| effort-high |');
+    expect(markdown).toContain('| alpha | 1 | vendor/model-alpha-synth | effort-high |');
     expect(markdown).not.toContain('effort-high, unsupported');
   });
 

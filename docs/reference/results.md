@@ -4,7 +4,7 @@ How a run's cases are identified, the outcome values, and the metrics tevu recor
 
 ## Cases
 
-A run holds n cases for each task and model entry pair, where n is the effective repeat: `run.repeat`, or `--repeat` for that run. A case ID is `<task-id>--<model-id>--<attempt>`. Attempts are numbered from 1 even when n is 1. The report compares cases per task and summarizes each pair's attempts. It selects no winner and calculates no combined score.
+A run holds n cases for each task and model entry pair, where n is the effective repeat: `run.repeat`, or `--repeat` for that run. A case ID is `<task-id>--<model-id>--<attempt>`. Attempts are numbered from 1 even when n is 1. The report compares cases per task, opening with a [comparison table](#comparison-table) for each task, and summarizes each pair's attempts. It selects no winner and calculates no combined score.
 
 A case's effort is the configured string, whether or not the model has a variant of that name. When the effort is `unverified` or `unsupported`, the case may have run the model with its default options, and `report.md` marks the effort of every model entry, the grader, and each case with its status. See [Effort check](agents-and-models.md#effort-check).
 
@@ -37,6 +37,48 @@ The report attaches one summary to every task and model entry pair.
 
 An attempt with no case result, such as one still queued when the run was cancelled, counts as `not-evaluated`, so the four counts always sum to `planned`. No percentage is computed. Each task section of `report.md` renders its pairs' summaries as a table, one row per model entry.
 
+## Comparison table
+
+`report.md` opens with one comparison block per task, directly under the title and ahead of the run parameters and every task section. The blocks follow the task ID order of the task sections. Each block has a `## Comparison: <task-id>` heading, a table, an optional grader line, and an optional list of numbered footnotes. The task sections, pair summaries, case tables, and case sections follow unchanged, as the detail to open when a row raises a question.
+
+The table has one row per model entry, in the order of the `models` list in the configuration. The order is not a ranking: no row is sorted by an outcome, check, or metric, and tevu computes no composite score and names no winner.
+
+| Column | Contents |
+| --- | --- |
+| Model | The model of the entry's first attempt, linked to its first case section when a case result exists |
+| Effort | The configured effort with its status, as in the case table, for example `high, unverified` |
+| Outcome | The pair's outcome, or the count of attempts per outcome when n is above 1 |
+| Checks | Passed required checks over required checks, counted across all attempts |
+| Elapsed | Agent-process execution time of the case |
+| Cost | Agent-reported cost in USD |
+| Turns, Tool calls | Activity counts |
+| Input, Cache read, Cache write, Output, Reasoning | Token counts |
+| API errors | Errors the model API returned |
+| Runtime failure | The error kind of the runtime failure, or `none` |
+
+Values use fixed formats, so the same artifacts always render the same text.
+
+| Value | Format | Examples |
+| --- | --- | --- |
+| Count | Whole number with `,` between groups of three digits. A value that is not a non-negative whole number appears as saved | `0`, `1,234,567`, `1234.5` |
+| Cost | `$` and four decimal places. A measured cost below $0.00005, zero included, reads `$0.0000` | `$0.0125`, `$0.0000` |
+| Elapsed | Seconds with one decimal place below 60 seconds, minutes with one decimal place from there | `0.9 s`, `1.0 min`, `8.7 min` |
+
+An unavailable value appears as `-` followed by a footnote marker such as `[1]`, and the numbered footnote under the table gives the reason. A measured zero appears as `0`, or `$0.0000` for cost, and is never confused with an unavailable value. Footnotes are numbered from 1 in each block in the order the cells use them, and cells with the same reason share one footnote.
+
+An attempt with no case result, such as one still queued when the run was cancelled, has no values. Its metrics and runtime failure are unavailable with the reason `no case result was saved`, and the pair counts it as `not-evaluated`. A row with no case result at all shows its model as plain text, because no case section exists to link to.
+
+With n above 1, a row aggregates the pair's attempts:
+
+- Outcome lists the count of attempts per outcome, for example `2/3 passed, 1/3 failed`, in the order `passed`, `failed`, `pending`, `not-evaluated`.
+- Checks counts required check verdicts across attempts, for example `17/18` for three attempts of a task with six required checks. Optional checks are not counted.
+- A measurement is the lower median of the values from the attempts that reported it: the value at position (k - 1) / 2, rounded down, of the sorted values. The median is always a value one attempt reported, so nothing is averaged or rounded before formatting. When only k of the n attempts reported the value, the cell adds `(k/n)` and a footnote marker, and the footnote names the attempts that lack it and why. When none reported it, the cell is `-` with a marker.
+- Runtime failure counts attempts per error kind, for example `1/3 AgentProcessError`, and reads `none` when no attempt had a failure. When some attempts have no case result, the cell ends with a footnote marker for them.
+
+When two rows of one table share a model and an effort, each of those rows shows its model entry ID in parentheses after the model, for example `vendor/model (alpha)`. Without such a twin, a row shows the model alone.
+
+When a task has gradings, a line under the table totals the grader's usage and cost for the task: the number of graded cases, then input, cache read, cache write, output, and reasoning tokens, and cost. Each total sums the grading metrics and follows the same unavailable rules as a cell. Grader usage never enters a row; rows read only the case's own metrics.
+
 ## Metrics
 
 | Category | Measurements |
@@ -66,4 +108,4 @@ Scope:
 
 - Model metrics cover the root session only, not a total across child sessions.
 - Elapsed time covers the case's agent process. Acceptance-command results are check verdicts, not model-quality metrics. Repository setup time and output enter no metric.
-- The grader's usage and cost are saved per case in `grading.json` and rendered as `Grader metrics` in the report. They are never added to the case's own metrics.
+- The grader's usage and cost are saved per case in `grading.json` and rendered as `Grader metrics` in the report. They are never added to the case's own metrics. Each comparison block totals them for its task on one line, apart from the rows.
