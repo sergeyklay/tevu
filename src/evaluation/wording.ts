@@ -41,6 +41,8 @@ export type AttemptFacts = {
   result: CaseResult | undefined;
   checks: readonly CheckRecord[];
   grading: GradingArtifact | undefined;
+  /** The check's reader name from the run's `ReaderNames`, so every surface names it alike. */
+  checkName(checkId: string): string;
 };
 
 /** The statements of one attempt; a statement is `null` when the attempt has nothing to say in that role. */
@@ -274,7 +276,10 @@ function row(error: TevuError | undefined): ErrorRow {
     case 'AgentSessionError':
       return {
         happened: 'The agent reported an error during its session.',
-        next: "Read the agent's message in the technical detail and the attempt's event log.",
+        next:
+          error.agentMessage === undefined
+            ? "Read the attempt's event log to find out why."
+            : "Read the agent's message in the technical detail and the attempt's event log.",
       };
     case 'AgentProtocolError':
       return {
@@ -505,12 +510,11 @@ function optionalAssessCommand(runId: string, caseId: string, count: number): st
 }
 
 /** Names the attempt's failed required checks, e.g. `Failed: Type checking and the test suite pass.` */
-function failedRequiredChecks(checks: readonly CheckRecord[], result: CaseResult): string | null {
-  const names = nameChecks(checks);
-  const failed = checks
+function failedRequiredChecks(facts: AttemptFacts, result: CaseResult): string | null {
+  const failed = facts.checks
     .filter((check) => check.required)
     .filter((check) => result.checks.some((r) => r.checkId === check.id && r.verdict === 'failed'))
-    .map((check) => (names.get(check.id) ?? check.id).replace(/\.$/, ''));
+    .map((check) => facts.checkName(check.id).replace(/\.$/, ''));
   return failed.length === 0 ? null : `Failed: ${failed.join('; ')}.`;
 }
 
@@ -556,7 +560,7 @@ function pendingStatement(
     happened: sentences.join(' '),
     means:
       result.outcome === 'failed'
-        ? [outcomeMeans('failed'), failedRequiredChecks(facts.checks, result)]
+        ? [outcomeMeans('failed'), failedRequiredChecks(facts, result)]
             .filter((sentence) => sentence !== null)
             .join(' ')
         : outcomeMeans(result.outcome),

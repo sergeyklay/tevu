@@ -35,7 +35,7 @@ Each case that has a saved result has a section in `report.md`, preceded by an H
 
 - the outcome with its required checks, the model with its effort, and how the agent process ended;
 - one paragraph per statement that explains the attempt, as described in [Messages](#messages), and, when the attempt completed, has manual or graded checks, and none of them waits for a verdict, the `tevu assess <run-id> <case-id>` command to record or replace verdicts;
-- a table of every check with its verdict, name, category (`acceptance` or `Definition of Done`), whether it is `required` or `optional`, its evaluator (`command`, `manual`, or `graded`), duration, and a link to the check evidence;
+- a table of every check with its verdict, name, category (`acceptance` or `Definition of Done`), whether it is `required` or `optional`, its evaluator (`command`, `manual`, or `grader`), duration, and a link to the check evidence;
 - the metrics tevu measured, then one `Not measured` line per reason for the metrics it could not measure;
 - for a graded case, the grades by the grading model, one line per check, and the grading model's own metrics, apart from the attempt's;
 - links to the case's artifacts, including the setup logs when a setup command ran, and the current assessments.
@@ -135,7 +135,7 @@ The Runtime failure column and the case table show a label, and the statement ex
 | `time limit reached` | `CaseTimeoutError` | Raise the task's `timeout`, or `run.timeout`, and run the comparison again |
 | `cancelled` | `CancellationError` | Run the comparison again |
 | `agent process failed` | `AgentProcessError` | Read the attempt's diagnostics log |
-| `agent reported an error` | `AgentSessionError` | Read the agent's message in the technical detail and the attempt's event log |
+| `agent reported an error` | `AgentSessionError` | Read the agent's message in the technical detail and the attempt's event log; without a message, read the event log |
 | `agent records unreadable` | `AgentProtocolError` | Find the record the technical detail names in the event log or session export |
 | `setup command failed` | `SetupError` | Fix the command, using its setup log, and run the comparison again |
 | `check files not prepared` | `CheckStateError` | Fix the cause the technical detail names, such as a read-only directory the agent left, and run again |

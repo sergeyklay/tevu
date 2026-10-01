@@ -434,6 +434,7 @@ function buildFacts(overrides: Partial<AttemptFacts> = {}): AttemptFacts {
     result: buildCaseResult(),
     checks: [],
     grading: undefined,
+    checkName: (checkId) => checkId,
     ...overrides,
   };
 }
@@ -633,7 +634,7 @@ describe('describeAttempt', () => {
         label: 'AgentSessionError without a message',
         error: { kind: 'AgentSessionError', agent: 'opencode', caseId: CASE_ID },
         happened: 'The agent reported an error during its session.',
-        next: "Read the agent's message in the technical detail and the attempt's event log.",
+        next: "Read the attempt's event log to find out why.",
         detail: 'AgentSessionError',
       },
       {
@@ -883,7 +884,7 @@ describe('describeAttempt', () => {
       expect(pending?.means).toBe('Optional checks do not change the outcome, which stays passed.');
     });
 
-    it('names the failed required checks and softens the advice once the outcome is failed', () => {
+    it('names the failed required checks by their run names and softens the advice once the outcome is failed', () => {
       const failedChecks = [
         buildCheckRecord({ id: 'c1', description: 'Type checking and the test suite pass.' }),
         buildCheckRecord({ id: 'c2', description: 'Lint passes' }),
@@ -891,6 +892,10 @@ describe('describeAttempt', () => {
       ];
       const facts = buildFacts({
         checks: [...failedChecks, manualCheck('m1'), manualCheck('m2')],
+        checkName: (checkId) =>
+          checkId === 'c2'
+            ? 'Lint passes (2)'
+            : (failedChecks.find((check) => check.id === checkId)?.description ?? checkId),
         result: buildCaseResult({
           lifecycle: 'completed',
           outcome: 'failed',
@@ -907,7 +912,7 @@ describe('describeAttempt', () => {
       const { pending } = describeAttempt(facts, FIXTURE_RUN_ID);
 
       expect(pending?.means).toBe(
-        'The outcome is already failed, whatever these verdicts are. Failed: Type checking and the test suite pass; Lint passes.',
+        'The outcome is already failed, whatever these verdicts are. Failed: Type checking and the test suite pass; Lint passes (2).',
       );
       expect(pending?.next).toBe(
         `These verdicts no longer change the outcome; you can still record them for completeness with \`tevu assess ${FIXTURE_RUN_ID} ${CASE_ID}\`.`,

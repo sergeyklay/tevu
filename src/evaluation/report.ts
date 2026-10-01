@@ -340,6 +340,7 @@ function createReportContext(
       result: resultsByAttempt.get(attemptKey(identity)),
       checks: tasksById.get(identity.taskId)?.checks ?? [],
       grading: gradingsByCase.get(identity.caseId),
+      checkName: (checkId) => names.check(identity.taskId, checkId),
     };
     return [
       identity.caseId,
