@@ -34,7 +34,7 @@ Some files are absent when the evidence was unavailable. Their absence is record
 | `events.jsonl` | Raw agent event records, one JSON value per line. Only the case's agent adapter interprets them |
 | `stderr.log` | Process diagnostics, including non-JSON run output |
 | `session.json` | Raw root-session export. Only the case's agent adapter interprets it |
-| `solution.patch` | The submitted solution, captured before restore, overlay, and acceptance commands run, relative to the state `before_agent` left when the repository declares one |
+| `solution.patch` | The submitted solution, captured before restore, overlay, and acceptance commands run. It is relative to the [patch base](repositories.md#setup) (the state `before_agent` left) when the repository declares `before_agent`, otherwise to the synthetic root commit. A path present in that base or commit enters the patch when the agent changed or removed it, even if an ignore rule matches it. A new path enters it when no ignore rule matches it, or when the case repository's Git index tracks it, for example after `git add --force`, whether or not the agent committed it. A new path an ignore rule matches and the index does not track, such as build output, stays out of the patch. |
 | `checks.json` | Check verdicts, timing, and evidence |
 | `grading.json` | Present only when the case reached grading. The grader's identity, its raw call outcome, its own metrics, and a grade or a pending reason per graded check |
 | `assessment.json` | Current manual and grader verdicts, revision, and replacement history |
