@@ -472,11 +472,13 @@ export interface TevuConfig {
  */
 export type TaskRecord = {
   id: string;
+  /** The task's `title` from the run's configuration snapshot; the reader-facing name of the task. */
+  title: string;
   repositoryId: string;
   startCommit: string;
   description: string;
   source:
-    | { kind: 'manual'; reference: string | null; title: string }
+    | { kind: 'manual' }
     | { kind: 'jira-cloud'; issueKey: string; issueUrl: string }
     | { kind: 'github-issue'; issueKey: string; issueUrl: string };
   checks: CheckRecord[];
@@ -1302,11 +1304,21 @@ export interface AssessmentLock {
   release(): Promise<TevuResult<void, 'ArtifactError'>>;
 }
 
-/** Regenerated normalized JSON and Markdown report content for one run. */
+/** Terminal lines rendered from the same report model as the Markdown, so both describe a state in the same words. */
+export type ReportSummary = {
+  /** One entry per planned attempt, in comparison order. */
+  attempts: Array<{ caseId: string; lines: string[] }>;
+  /** One line per run finding, in report order. */
+  findings: string[];
+};
+
+/** Regenerated normalized JSON and Markdown report content for one run, with the terminal summary of the same model. */
 export type ReportResult = {
   runId: string;
   normalizedJson: string;
   markdown: string;
+  /** Not persisted: `ArtifactStore.writeReport` writes `normalizedJson` and `markdown` only. */
+  summary: ReportSummary;
 };
 
 /** Run-level finding for cases without a final result, cleanup warnings, and cancellations. */

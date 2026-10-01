@@ -50,7 +50,7 @@ Check that `agents.opencode.command` points to the intended executable and that 
 
 The report shows a model's cost, or the grader's cost, as unavailable, while tokens, time, and outcomes are present. The agent reported a cost of zero for a model it has no price for, and tevu did not count that zero as a measurement. Give the agent the model's prices, as described in [Give the agent the model's prices](configure-model-access.md#give-the-agent-the-models-prices), and run again.
 
-With OpenCode, the footnote reads `the copied definition of provider "<provider>" defines no price for model "<model>"`: the provider definition in your OpenCode global configuration has no `cost` for that model.
+With OpenCode, the reason appears after `Technical detail:` in the footnote as `the copied definition of provider "<provider>" defines no price for model "<model>"`: the provider definition in your OpenCode global configuration has no `cost` for that model.
 
 ## Model or provider errors
 

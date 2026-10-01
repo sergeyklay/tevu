@@ -1,5 +1,21 @@
 import { effortLabel } from '@/domain/types';
 
+import {
+  buildReaderNames,
+  countRequiredChecks,
+  describeAttempt,
+  effortStatement,
+  failureLabel,
+  formatCost,
+  formatCount,
+  formatElapsed,
+  formatRequiredChecks,
+  gradingGapStatement,
+  measurementGapStatement,
+  renderStatement,
+} from './wording';
+
+import type { AttemptFacts, AttemptStatements, ReaderNames, Statement } from './wording';
 import type {
   AgentCapabilityReport,
   AgentMetrics,
@@ -7,12 +23,14 @@ import type {
   BenchmarkMetrics,
   CaseIdentity,
   CaseResult,
+  CheckRecord,
   EffortCheck,
   GraderIdentity,
   GradingArtifact,
   MetricValue,
   ModelRecord,
   ReportResult,
+  ReportSummary,
   RepositoryRecord,
   RunFinding,
   RunManifest,
@@ -29,6 +47,7 @@ import type {
 export type ReportInput = {
   run: RunResult;
   capabilities: Readonly<Record<string, AgentCapabilityReport>>;
+  /** In configuration order; that order decides the names of checks and of tasks that share a title. */
   tasks: readonly TaskRecord[];
   /** In configuration order; that order decides the comparison-table row order. */
   models: readonly ModelRecord[];
@@ -264,32 +283,89 @@ function renderSensitiveDataNotice(): string {
   ].join('\n');
 }
 
+/** One planned attempt with the facts and statements every surface of the report shares. */
+type Attempt = AttemptFacts & { statements: AttemptStatements };
+
+/** Everything the renderers read, resolved once so every surface describes an attempt identically. */
+type ReportContext = {
+  model: NormalizedRunModel;
+  names: ReaderNames;
+  /** The configuration order of the model entries, which the comparison tables use as their row order. */
+  configurationModelIds: readonly string[];
+  tasksById: ReadonlyMap<string, TaskRecord>;
+  /** Every planned attempt, keyed by case ID. */
+  attemptsByCaseId: ReadonlyMap<string, Attempt>;
+};
+
 /**
- * Builds the normalized JSON and Markdown report for one run. Pure and
- * deterministic: no I/O, no generation timestamps, no composite score, and no
- * winner selection.
+ * Builds the normalized JSON, the Markdown report, and the terminal summary
+ * for one run. Pure and deterministic: no I/O, no generation timestamps, no
+ * composite score, and no winner selection.
  */
 export function buildReport(input: ReportInput): ReportResult {
   const model = buildNormalizedRun(input);
+  // Names come from the input order: `buildNormalizedRun` sorts tasks and their checks by ID.
+  const names = buildReaderNames({
+    tasks: input.tasks,
+    models: input.models,
+    repeat: input.run.manifest.execution.repeat.value,
+    cases: input.run.manifest.cases,
+  });
+  const context = createReportContext(
+    model,
+    names,
+    input.models.map((entry) => entry.id),
+  );
   return {
     runId: model.manifest.runId,
     normalizedJson: serializeNormalizedRun(model),
-    markdown: renderMarkdownReport(
-      model,
-      input.models.map((entry) => entry.id),
-    ),
+    markdown: renderMarkdownReport(context),
+    summary: buildSummary(context),
   };
 }
 
-/**
- * Renders the Markdown report from an already-sorted report model.
- * `configurationModelIds` is the configuration order of the model entries,
- * which the comparison tables use as their row order.
- */
-function renderMarkdownReport(
+function createReportContext(
   model: NormalizedRunModel,
+  names: ReaderNames,
   configurationModelIds: readonly string[],
-): string {
+): ReportContext {
+  const tasksById = new Map(model.tasks.map((task) => [task.id, task]));
+  const gradingsByCase = new Map(model.gradings.map((grading) => [grading.caseId, grading]));
+  const resultsByAttempt = new Map(
+    model.cases.map((result) => [attemptKey(result.identity), result]),
+  );
+  const attempts = model.manifest.cases.map((identity): [string, Attempt] => {
+    const facts: AttemptFacts = {
+      identity,
+      result: resultsByAttempt.get(attemptKey(identity)),
+      checks: tasksById.get(identity.taskId)?.checks ?? [],
+      grading: gradingsByCase.get(identity.caseId),
+      checkName: (checkId) => names.check(identity.taskId, checkId),
+    };
+    return [
+      identity.caseId,
+      { ...facts, statements: describeAttempt(facts, model.manifest.runId) },
+    ];
+  });
+  return {
+    model,
+    names,
+    configurationModelIds,
+    tasksById,
+    attemptsByCaseId: new Map(attempts),
+  };
+}
+
+function attemptKey(identity: CaseIdentity): string {
+  return `${identity.taskId}\u0000${identity.modelId}\u0000${identity.attempt}`;
+}
+
+/**
+ * Renders the Markdown report from the context. The comparison tables and the
+ * task sections both walk tasks in `compareStrings` order of their IDs.
+ */
+function renderMarkdownReport(context: ReportContext): string {
+  const { model, names } = context;
   const lines: string[] = [];
   const manifest = model.manifest;
   const tools = manifest.tools;
@@ -297,7 +373,7 @@ function renderMarkdownReport(
   lines.push(
     `# tevu run ${manifest.runId}`,
     '',
-    ...renderComparisonBlocks(model, configurationModelIds),
+    ...renderComparisonBlocks(context),
     renderSensitiveDataNotice(),
     '',
   );
@@ -312,10 +388,10 @@ function renderMarkdownReport(
     ...renderAgentCapabilityLines(tools.agentVersions, model.capabilities),
     `- Concurrency: ${manifest.execution.concurrency}`,
     `- Case timeout: ${manifest.execution.caseTimeoutMs}ms`,
-    ...renderTaskCaseTimeoutLine(manifest.cases, manifest.execution.caseTimeoutMs),
+    ...renderTaskCaseTimeoutLine(manifest.cases, manifest.execution.caseTimeoutMs, names),
     `- Repeat: ${manifest.execution.repeat.value} (source: ${manifest.execution.repeat.source})`,
-    ...renderModelEffortLines(model.models, manifest.efforts),
-    ...renderGraderLines(model.graders, manifest.efforts.grader),
+    ...renderModelEffortLines(model.models, manifest.efforts, names),
+    ...renderGraderLines(model.graders, manifest.efforts.grader, names),
     `- Run exit code: ${model.exitCode}`,
     '',
   );
@@ -323,66 +399,59 @@ function renderMarkdownReport(
   if (model.findings.length > 0) {
     lines.push('## Run findings', '');
     for (const finding of model.findings) {
-      lines.push(
-        `- ${finding.severity}${finding.caseId ? ` (case ${finding.caseId})` : ''}: ${finding.message}`,
-      );
+      lines.push(`- ${renderFinding(finding, context)}`);
     }
     lines.push('');
   }
 
-  const tasksById = new Map(model.tasks.map((task) => [task.id, task]));
   const repositoriesById = new Map(
     model.repositories.map((repository) => [repository.id, repository]),
   );
   const assessmentsByCase = new Map(
     model.assessments.map((artifact) => [artifact.caseId, artifact]),
   );
-  const gradingsByCase = new Map(model.gradings.map((grading) => [grading.caseId, grading]));
 
-  const taskIds = [...new Set(model.pairs.map((pair) => pair.taskId))].sort(compareStrings);
-
-  for (const taskId of taskIds) {
-    const task = tasksById.get(taskId);
+  for (const taskId of sortedTaskIds(model)) {
+    const task = context.tasksById.get(taskId);
     const taskCases = model.cases.filter((caseResult) => caseResult.identity.taskId === taskId);
     const taskPairs = model.pairs.filter((pair) => pair.taskId === taskId);
 
-    lines.push(`## Task ${taskId}`, '');
+    lines.push(`## Task: ${cell(names.task(taskId))}`, '');
     if (task !== undefined) {
       const repository = repositoriesById.get(task.repositoryId);
       lines.push(
         task.description,
         '',
-        `- Repository: ${task.repositoryId}${repository ? ` (\`${repository.path}\`)` : ''}`,
+        `- Repository: \`${repository?.path ?? task.repositoryId}\``,
         `- Source commit: \`${task.startCommit}\``,
-        `- Source: ${describeTaskSource(task.source)}`,
+        ...describeTaskSource(task.source),
         '',
       );
     }
 
-    lines.push(...renderPairSummary(taskPairs));
+    lines.push(...renderPairSummary(taskPairs, names));
 
     if (taskCases.length > 0) {
       lines.push(
-        '| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |',
-        '|---|---|---|---|---|---|---|---|',
+        '| Attempt | Outcome | Required checks | Runtime failure | Elapsed |',
+        '|---|---|---|---|---|',
       );
       for (const caseResult of taskCases) {
-        const identity = caseResult.identity;
-        lines.push(
-          `| ${caseResult.outcome} | ${cell(identity.modelId)} | ${identity.attempt} | ${cell(identity.model)} | ${cell(effortLabel(identity.effort, effortCheckOf(manifest.efforts, identity.modelId)))} | ${caseResult.lifecycle} | ${caseResult.failure ? cell(caseResult.failure.error.kind) : 'none'} | ${cell(formatMetricValue(caseResult.metrics.elapsed))} |`,
-        );
+        lines.push(renderCaseRow(caseResult, task, names));
       }
       lines.push('');
 
       for (const caseResult of taskCases) {
-        renderCase(
-          lines,
-          caseResult,
-          task,
-          assessmentsByCase.get(caseResult.identity.caseId),
-          gradingsByCase.get(caseResult.identity.caseId),
-          manifest.efforts,
-        );
+        const attempt = context.attemptsByCaseId.get(caseResult.identity.caseId);
+        if (attempt !== undefined) {
+          renderCase(
+            lines,
+            attempt,
+            caseResult,
+            assessmentsByCase.get(caseResult.identity.caseId),
+            context,
+          );
+        }
       }
     }
   }
@@ -399,11 +468,60 @@ function renderMarkdownReport(
   return lines.join('\n');
 }
 
-const COMPARISON_HEADER_ROW =
-  '| Model | Effort | Outcome | Checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |';
-const COMPARISON_SEPARATOR_ROW = '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|';
+function sortedTaskIds(model: NormalizedRunModel): string[] {
+  return [...new Set(model.pairs.map((pair) => pair.taskId))].sort(compareStrings);
+}
 
-const NO_CASE_RESULT_REASON = 'no case result was saved';
+/** One line per finding, naming the planned case it belongs to when it names one. */
+function renderFinding(finding: RunFinding, context: ReportContext): string {
+  const attempt =
+    finding.caseId === null ? undefined : context.attemptsByCaseId.get(finding.caseId);
+  const severity = finding.severity === 'error' ? 'Error' : 'Warning';
+  const subject = attempt === undefined ? '' : ` for ${context.names.caseName(attempt.identity)}`;
+  return `${severity}${subject}: ${finding.message.replace(/\r?\n/g, ' ')}`;
+}
+
+/**
+ * Builds the terminal summary from the statements the footnotes use: one entry
+ * per planned attempt in report order, and one line per run finding.
+ */
+function buildSummary(context: ReportContext): ReportSummary {
+  const attempts = sortedTaskIds(context.model).flatMap((taskId) =>
+    orderPairsForRows(
+      context.model.pairs.filter((pair) => pair.taskId === taskId),
+      context.configurationModelIds,
+    ).flatMap((pair) => attemptsOfPair(context, pair)),
+  );
+  return {
+    attempts: attempts.map((attempt) => ({
+      caseId: attempt.identity.caseId,
+      lines: summarizeAttempt(attempt, context),
+    })),
+    findings: context.model.findings.map((finding) => renderFinding(finding, context)),
+  };
+}
+
+function summarizeAttempt(attempt: Attempt, context: ReportContext): string[] {
+  const outcome = attempt.result?.outcome ?? 'not-evaluated';
+  const counts = formatRequiredChecks(countRequiredChecks([attempt], attempt.checks));
+  const statementLines = statementsOf(attempt).map(
+    (statement) => `  ${renderStatement(statement)}`,
+  );
+  return [
+    `${context.names.caseName(attempt.identity)}: ${outcome}; required checks ${counts}.`,
+    ...statementLines.filter((line, index) => statementLines.indexOf(line) === index),
+  ];
+}
+
+/** The statements an attempt has, in the order stop, failure, pending. */
+function statementsOf(attempt: Attempt): Statement[] {
+  const { stop, failure, pending } = attempt.statements;
+  return [stop, failure, pending].flatMap((statement) => (statement === null ? [] : [statement]));
+}
+
+const COMPARISON_HEADER_ROW =
+  '| Model | Effort | Outcome | Required checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |';
+const COMPARISON_SEPARATOR_ROW = '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|';
 
 const OUTCOME_ORDER: readonly CaseResult['outcome'][] = [
   'passed',
@@ -445,40 +563,56 @@ const GRADER_TOTALS: readonly {
   { label: 'cost', metric: 'cost', format: formatCost },
 ];
 
-/** One attempt of a pair with its case result, absent when none was saved. */
-type Attempt = { identity: CaseIdentity; result: CaseResult | undefined };
+/** Metric lines of a case section, in line order; a grading's metrics have no `elapsed`. */
+const METRIC_LINES: readonly {
+  label: string;
+  metric: keyof BenchmarkMetrics;
+  format: MeasurementColumn['format'];
+}[] = [
+  { label: 'Elapsed', metric: 'elapsed', format: formatElapsed },
+  { label: 'Cost', metric: 'cost', format: formatCost },
+  { label: 'Turns', metric: 'turns', format: formatCount },
+  { label: 'API calls', metric: 'apiCalls', format: formatCount },
+  { label: 'Tool calls', metric: 'toolCalls', format: formatCount },
+  { label: 'Skill calls', metric: 'skillCalls', format: formatCount },
+  { label: 'Input tokens', metric: 'inputTokens', format: formatCount },
+  { label: 'Cache read tokens', metric: 'cacheReadTokens', format: formatCount },
+  { label: 'Cache write tokens', metric: 'cacheWriteTokens', format: formatCount },
+  { label: 'Output tokens', metric: 'outputTokens', format: formatCount },
+  { label: 'Reasoning tokens', metric: 'reasoningTokens', format: formatCount },
+  { label: 'API errors', metric: 'apiErrors', format: formatCount },
+];
+
+/** A statement a table cell refers to, with the attempt it describes. */
+type Footnoted = { attemptName: string; statement: Statement };
 
 /**
  * Renders the lines of every comparison block, in task order. Each block ends
  * with one empty line, so the lines that follow never continue its table.
  */
-function renderComparisonBlocks(
-  model: NormalizedRunModel,
-  configurationModelIds: readonly string[],
-): string[] {
+function renderComparisonBlocks(context: ReportContext): string[] {
+  const { model, names } = context;
   const lines: string[] = [];
-  const taskIds = [...new Set(model.pairs.map((pair) => pair.taskId))].sort(compareStrings);
 
-  for (const taskId of taskIds) {
+  for (const taskId of sortedTaskIds(model)) {
     const footnotes = createFootnoteRegistry();
     const pairs = orderPairsForRows(
       model.pairs.filter((pair) => pair.taskId === taskId),
-      configurationModelIds,
+      context.configurationModelIds,
     );
-    const collidingModelIds = findCollidingModelIds(model, pairs);
 
     lines.push(
-      `## Comparison: ${taskId}`,
+      `## Comparison: ${cell(names.task(taskId))}`,
       '',
       COMPARISON_HEADER_ROW,
       COMPARISON_SEPARATOR_ROW,
-      ...pairs.flatMap((pair) => renderComparisonRow(pair, model, footnotes, collidingModelIds)),
+      ...pairs.flatMap((pair) => renderComparisonRow(pair, context, footnotes)),
       '',
     );
 
-    const gradings = gradingsOfTask(model, taskId);
-    if (gradings.length > 0) {
-      lines.push(renderGraderLine(gradings, footnotes), '');
+    const graded = gradedAttemptsOfTask(context, taskId);
+    if (graded.length > 0) {
+      lines.push(renderGraderLine(graded, context, footnotes), '');
     }
 
     const footnoteLines = footnotes.lines();
@@ -495,54 +629,39 @@ function renderComparisonBlocks(
  */
 function renderComparisonRow(
   pair: PairSummary,
-  model: NormalizedRunModel,
+  context: ReportContext,
   footnotes: FootnoteRegistry,
-  collidingModelIds: ReadonlySet<string>,
 ): string[] {
-  const attempts = attemptsOfPair(model, pair);
+  const attempts = attemptsOfPair(context, pair);
   const [lowest] = attempts;
   if (lowest === undefined) {
     return [];
   }
-  const task = model.tasks.find((candidate) => candidate.id === pair.taskId);
   const cells = [
-    renderModelCell(lowest.identity, pair, attempts, collidingModelIds.has(pair.modelId)),
-    renderEffortCell(lowest.identity, pair, model.manifest.efforts),
-    renderOutcomeCell(pair),
-    renderChecksCell(attempts, task),
+    renderModelCell(lowest.identity, attempts, context.names),
+    renderEffortCell(lowest.identity, pair, context.model.manifest.efforts),
+    renderOutcomeCell(pair, attempts, context.names, footnotes),
+    formatRequiredChecks(
+      countRequiredChecks(attempts, context.tasksById.get(pair.taskId)?.checks ?? []),
+    ),
     ...ROW_MEASUREMENT_COLUMNS.map(({ metric, format }) =>
       renderMeasurementCell(
-        attempts.map((attempt) =>
-          measurementItemOf(String(attempt.identity.attempt), attempt.result?.metrics[metric]),
-        ),
+        attempts.map((attempt) => rowMeasurementItem(attempt, metric, context.names)),
         lowerMedian,
         format,
-        'attempt',
         footnotes,
       ),
     ),
-    renderRuntimeFailureCell(attempts, footnotes),
+    renderRuntimeFailureCell(attempts, context.names, footnotes),
   ];
   return [`| ${cells.join(' | ')} |`];
 }
 
-/**
- * Resolves the attempts of `pair` in ascending attempt order, each with the
- * case result that has the same task, model entry, and attempt.
- */
-function attemptsOfPair(model: NormalizedRunModel, pair: PairSummary): Attempt[] {
-  return model.manifest.cases
-    .filter((identity) => identity.taskId === pair.taskId && identity.modelId === pair.modelId)
-    .sort((a, b) => a.attempt - b.attempt)
-    .map((identity) => ({
-      identity,
-      result: model.cases.find(
-        (candidate) =>
-          candidate.identity.taskId === identity.taskId &&
-          candidate.identity.modelId === identity.modelId &&
-          candidate.identity.attempt === identity.attempt,
-      ),
-    }));
+/** The planned attempts of `pair` in ascending attempt order. */
+function attemptsOfPair(context: ReportContext, pair: PairSummary): Attempt[] {
+  return [...context.attemptsByCaseId.values()]
+    .filter(({ identity }) => identity.taskId === pair.taskId && identity.modelId === pair.modelId)
+    .sort((a, b) => a.identity.attempt - b.identity.attempt);
 }
 
 /**
@@ -561,37 +680,16 @@ function orderPairsForRows(
   return [...pairs].sort((a, b) => rankOf(a) - rankOf(b));
 }
 
-/** Model entry IDs whose lowest attempt shares model and raw effort with another pair's. */
-function findCollidingModelIds(
-  model: NormalizedRunModel,
-  pairs: readonly PairSummary[],
-): Set<string> {
-  const keyed = pairs.flatMap((pair) => {
-    const identity = attemptsOfPair(model, pair)[0]?.identity;
-    return identity === undefined
-      ? []
-      : [{ modelId: pair.modelId, key: `${identity.model}\u0000${identity.effort}` }];
-  });
-  const counts = new Map<string, number>();
-  for (const { key } of keyed) {
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return new Set(
-    keyed.filter(({ key }) => (counts.get(key) ?? 0) > 1).map((entry) => entry.modelId),
-  );
-}
-
 function caseResultsOf(attempts: readonly Attempt[]): CaseResult[] {
   return attempts.flatMap((attempt) => (attempt.result === undefined ? [] : [attempt.result]));
 }
 
 function renderModelCell(
   identity: CaseIdentity,
-  pair: PairSummary,
   attempts: readonly Attempt[],
-  showsEntryId: boolean,
+  names: ReaderNames,
 ): string {
-  const text = showsEntryId ? `${identity.model} (${pair.modelId})` : identity.model;
+  const text = names.settingModel(identity.modelId);
   const linked = caseResultsOf(attempts)[0];
   return linked === undefined
     ? cell(text)
@@ -611,89 +709,129 @@ function renderEffortCell(
   return cell(effortLabel(identity.effort, effortCheckOf(efforts, pair.modelId)));
 }
 
-function renderOutcomeCell(pair: PairSummary): string {
-  const present = OUTCOME_ORDER.filter((outcome) => pair.outcomes[outcome] > 0);
-  if (pair.planned === 1) {
-    return present.join(', ');
-  }
-  return present
-    .map(
-      (outcome) => `${formatCount(pair.outcomes[outcome])}/${formatCount(pair.planned)} ${outcome}`,
-    )
-    .join(', ');
-}
-
-/** Counts passed required checks across attempts against the required checks of all attempts. */
-function renderChecksCell(attempts: readonly Attempt[], task: TaskRecord | undefined): string {
-  const requiredIds = (task?.checks ?? [])
-    .filter((check) => check.required)
-    .map((check) => check.id);
-  const passed = caseResultsOf(attempts).reduce(
-    (total, result) =>
-      total +
-      requiredIds.filter((id) =>
-        result.checks.some((check) => check.checkId === id && check.verdict === 'passed'),
-      ).length,
-    0,
-  );
-  return `${formatCount(passed)}/${formatCount(requiredIds.length * attempts.length)}`;
-}
-
-function renderRuntimeFailureCell(
+function renderOutcomeCell(
+  pair: PairSummary,
   attempts: readonly Attempt[],
+  names: ReaderNames,
   footnotes: FootnoteRegistry,
 ): string {
-  const lacking = attempts
-    .filter((attempt) => attempt.result === undefined)
-    .map((attempt) => ({ label: String(attempt.identity.attempt), reason: NO_CASE_RESULT_REASON }));
-  const marker =
-    lacking.length === 0
-      ? ''
-      : renderFootnoteMarker(
-          footnotes.numberFor(describeLackingItems(lacking, attempts.length, 'attempt')),
-        );
+  const present = OUTCOME_ORDER.filter((outcome) => pair.outcomes[outcome] > 0);
+  const text =
+    pair.planned === 1
+      ? present.join(', ')
+      : present
+          .map(
+            (outcome) =>
+              `${formatCount(pair.outcomes[outcome])}/${formatCount(pair.planned)} ${outcome}`,
+          )
+          .join(', ');
+  const markers = footnoteMarkers(
+    attempts.flatMap((attempt) =>
+      [attempt.statements.stop, attempt.statements.pending].flatMap((statement) =>
+        statement === null ? [] : [{ attemptName: names.attempt(attempt.identity), statement }],
+      ),
+    ),
+    footnotes,
+  );
+  return appendMarkers(text, markers);
+}
+
+/**
+ * Renders the Runtime failure cell: the label of one attempt's failure, or a
+ * `<k>/<n> <label>` count per distinct label, then the markers of the
+ * attempts' failure statements.
+ */
+function renderRuntimeFailureCell(
+  attempts: readonly Attempt[],
+  names: ReaderNames,
+  footnotes: FootnoteRegistry,
+): string {
+  const markers = footnoteMarkers(
+    attempts.flatMap((attempt) =>
+      attempt.statements.failure === null
+        ? []
+        : [{ attemptName: names.attempt(attempt.identity), statement: attempt.statements.failure }],
+    ),
+    footnotes,
+  );
   const results = caseResultsOf(attempts);
   if (results.length === 0) {
-    return `- ${marker}`;
+    return appendMarkers('-', markers);
   }
 
-  const countsByKind = new Map<string, number>();
+  const countsByLabel = new Map<string, number>();
   for (const result of results) {
     if (result.failure !== null) {
-      const kind = result.failure.error.kind;
-      countsByKind.set(kind, (countsByKind.get(kind) ?? 0) + 1);
+      const label = failureLabel(result.failure.error.kind);
+      countsByLabel.set(label, (countsByLabel.get(label) ?? 0) + 1);
     }
   }
-  const kinds = [...countsByKind].sort(([a], [b]) => compareStrings(a, b));
-  let text = 'none';
-  if (kinds.length > 0) {
-    text = kinds
-      .map(([kind, count]) =>
-        attempts.length === 1
-          ? cell(kind)
-          : `${formatCount(count)}/${formatCount(attempts.length)} ${cell(kind)}`,
-      )
-      .join(', ');
-  }
-  return lacking.length === 0 ? text : `${text} ${marker}`;
+  const labels = [...countsByLabel].sort(([a], [b]) => compareStrings(a, b));
+  const text =
+    labels.length === 0
+      ? 'none'
+      : labels
+          .map(([label, count]) =>
+            attempts.length === 1
+              ? cell(label)
+              : `${formatCount(count)}/${formatCount(attempts.length)} ${cell(label)}`,
+          )
+          .join(', ');
+  return appendMarkers(text, markers);
 }
 
 type MeasurementItem =
-  | { kind: 'reported'; label: string; value: number }
-  | { kind: 'lacking'; label: string; reason: string };
+  { kind: 'reported'; value: number } | { kind: 'lacking'; footnote: Footnoted };
 
-/** Classifies one item's metric as reported or lacking; `undefined` means no case result. */
-function measurementItemOf(label: string, metric: MetricValue | undefined): MeasurementItem {
-  if (metric === undefined) {
-    return { kind: 'lacking', label, reason: NO_CASE_RESULT_REASON };
-  }
+type MeasuredValue = { kind: 'reported'; value: number } | { kind: 'unavailable'; reason: string };
+
+/** Classifies a metric as measured or unavailable; `value: null` reads as unavailable. */
+function measuredValueOf(metric: MetricValue): MeasuredValue {
   if (metric.availability.status === 'unavailable') {
-    return { kind: 'lacking', label, reason: metric.availability.reason };
+    return { kind: 'unavailable', reason: metric.availability.reason };
   }
   if (metric.value === null) {
-    return { kind: 'lacking', label, reason: 'no value recorded' };
+    return { kind: 'unavailable', reason: 'no value recorded' };
   }
-  return { kind: 'reported', label, value: metric.value };
+  return { kind: 'reported', value: metric.value };
+}
+
+/**
+ * Classifies one attempt's metric for a comparison row. An attempt with no
+ * case result contributes its `stop` statement; any other gap contributes a
+ * measurement gap.
+ */
+function rowMeasurementItem(
+  attempt: Attempt,
+  metric: keyof BenchmarkMetrics,
+  names: ReaderNames,
+): MeasurementItem {
+  const attemptName = names.attempt(attempt.identity);
+  if (attempt.result === undefined) {
+    return {
+      kind: 'lacking',
+      footnote: {
+        attemptName,
+        statement:
+          attempt.statements.stop ??
+          measurementGapStatement({ reason: 'no value recorded', count: 1, graderLine: false }),
+      },
+    };
+  }
+  const measured = measuredValueOf(attempt.result.metrics[metric]);
+  return measured.kind === 'reported'
+    ? measured
+    : {
+        kind: 'lacking',
+        footnote: {
+          attemptName,
+          statement: measurementGapStatement({
+            reason: measured.reason,
+            count: 1,
+            graderLine: false,
+          }),
+        },
+      };
 }
 
 /** The value at zero-based index floor((k - 1) / 2) of the ascending sort. */
@@ -708,88 +846,97 @@ function sum(values: number[]): number {
 
 /**
  * Renders one measurement cell: the aggregate when every item reports, the
- * aggregate with a `(k/n)` count and footnote marker when some do, and a dash
- * with a footnote marker when none do. An unavailable value never renders as a number.
+ * aggregate with a `(k/n)` count and footnote markers when some do, and a dash
+ * with footnote markers when none do. An unavailable value never renders as a number.
  */
 function renderMeasurementCell(
   items: readonly MeasurementItem[],
   aggregate: (values: number[]) => number,
   format: (value: number) => string,
-  noun: 'attempt' | 'case',
   footnotes: FootnoteRegistry,
 ): string {
-  const reported: number[] = [];
-  const lacking: { label: string; reason: string }[] = [];
-  for (const item of items) {
-    if (item.kind === 'reported') {
-      reported.push(item.value);
-    } else {
-      lacking.push({ label: item.label, reason: item.reason });
-    }
-  }
+  const reported = items.flatMap((item) => (item.kind === 'reported' ? [item.value] : []));
+  const lacking = items.flatMap((item) => (item.kind === 'lacking' ? [item.footnote] : []));
   if (lacking.length === 0) {
     return format(aggregate(reported));
   }
-  const marker = renderFootnoteMarker(
-    footnotes.numberFor(describeLackingItems(lacking, items.length, noun)),
-  );
+  const markers = footnoteMarkers(lacking, footnotes);
   if (reported.length === 0) {
-    return `- ${marker}`;
+    return `- ${markers}`;
   }
-  return `${format(aggregate(reported))} (${formatCount(reported.length)}/${formatCount(items.length)}) ${marker}`;
+  return `${format(aggregate(reported))} (${formatCount(reported.length)}/${formatCount(items.length)}) ${markers}`;
 }
 
-/**
- * Describes why items lack a value: the bare reason for a single item, and
- * otherwise the items grouped by identical reason in order of first appearance.
- */
-function describeLackingItems(
-  lacking: readonly { label: string; reason: string }[],
-  total: number,
-  noun: 'attempt' | 'case',
-): string {
-  const labelsByReason = new Map<string, string[]>();
-  for (const { label, reason } of lacking) {
-    const labels = labelsByReason.get(reason);
-    if (labels === undefined) {
-      labelsByReason.set(reason, [label]);
-    } else {
-      labels.push(label);
-    }
-  }
-  return [...labelsByReason]
-    .map(([reason, labels]) =>
-      total === 1
-        ? reason
-        : `${noun}${labels.length === 1 ? '' : 's'} ${labels.join(', ')}: ${reason}`,
-    )
-    .join('; ');
+/** The attempts whose grading the case sections of `taskId` render, in `model.gradings` order. */
+function gradedAttemptsOfTask(
+  context: ReportContext,
+  taskId: string,
+): { attempt: Attempt; grading: GradingArtifact }[] {
+  return context.model.gradings.flatMap((grading) => {
+    const attempt = context.attemptsByCaseId.get(grading.caseId);
+    return attempt?.result !== undefined && attempt.identity.taskId === taskId
+      ? [{ attempt, grading }]
+      : [];
+  });
 }
 
-/** The gradings that the case sections of `taskId` render, in `model.gradings` order. */
-function gradingsOfTask(model: NormalizedRunModel, taskId: string): GradingArtifact[] {
-  const caseIds = new Set(
-    model.cases
-      .filter((caseResult) => caseResult.identity.taskId === taskId)
-      .map((caseResult) => caseResult.identity.caseId),
+/** The statement that explains a grader call without a reply, counting the graded checks still waiting. */
+function gradingGapOf(attempt: Attempt, grading: GradingArtifact, runId: string): Statement | null {
+  const pendingGraded = (attempt.result?.checks ?? []).filter(
+    (check) =>
+      check.verdict === 'pending' &&
+      attempt.checks.find((candidate) => candidate.id === check.checkId)?.evaluator === 'grader',
   );
-  return model.gradings.filter((grading) => caseIds.has(grading.caseId));
+  const required = pendingGraded.filter(
+    (check) =>
+      attempt.checks.find((candidate) => candidate.id === check.checkId)?.required === true,
+  ).length;
+  return gradingGapStatement({
+    runId,
+    caseId: grading.caseId,
+    grading,
+    lifecycle: attempt.result?.lifecycle,
+    pendingGradedChecks: { required, optional: pendingGraded.length - required },
+  });
+}
+
+/** Classifies one grading's metric for the grader line or a case section. */
+function gradingMeasurementItem(
+  { attempt, grading }: { attempt: Attempt; grading: GradingArtifact },
+  metric: MetricValue,
+  context: ReportContext,
+): MeasurementItem {
+  const measured = measuredValueOf(metric);
+  if (measured.kind === 'reported') {
+    return measured;
+  }
+  return {
+    kind: 'lacking',
+    footnote: {
+      attemptName: context.names.attempt(attempt.identity),
+      statement:
+        gradingGapOf(attempt, grading, context.model.manifest.runId) ??
+        measurementGapStatement({ reason: measured.reason, count: 1, graderLine: true }),
+    },
+  };
 }
 
 /** Renders the grader's summed usage and cost, read from grading metrics only. */
 function renderGraderLine(
-  gradings: readonly GradingArtifact[],
+  graded: readonly { attempt: Attempt; grading: GradingArtifact }[],
+  context: ReportContext,
   footnotes: FootnoteRegistry,
 ): string {
   const totals = GRADER_TOTALS.map(({ label, metric, format }) => {
-    const items = gradings.map((grading) =>
-      measurementItemOf(grading.caseId, grading.metrics[metric]),
+    const items = graded.map((entry) =>
+      gradingMeasurementItem(entry, entry.grading.metrics[metric], context),
     );
-    return `${label} ${renderMeasurementCell(items, sum, format, 'case', footnotes)}`;
+    return `${label} ${renderMeasurementCell(items, sum, format, footnotes)}`;
   });
-  const count =
-    gradings.length === 1 ? '1 graded case' : `${formatCount(gradings.length)} graded cases`;
-  return `Grader total for this task, not added to any row: ${count}, ${totals.join(', ')}.`;
+  const withoutVerdict = graded.filter(({ grading }) => grading.call.status === 'no-reply').length;
+  const calls = `${formatCount(graded.length)} ${graded.length === 1 ? 'call' : 'calls'}`;
+  const gap = withoutVerdict > 0 ? `, ${formatCount(withoutVerdict)} without a verdict` : '';
+  return `Grading model total for this task, not added to any row: ${calls}${gap}, ${totals.join(', ')}.`;
 }
 
 /** Numbers footnote texts by first use; an identical text reuses its number. */
@@ -817,26 +964,24 @@ function createFootnoteRegistry(): FootnoteRegistry {
   };
 }
 
-/** Brackets are escaped so a link reference definition in a task description cannot turn a marker into a link. */
-function renderFootnoteMarker(number: number): string {
-  return `\\[${number}\\]`;
+/**
+ * Registers each statement as `<attempt name>: <statement>` in the order given
+ * and renders the distinct numbers ascending, one space apart. Brackets are
+ * escaped so a link reference definition in a task description cannot turn a
+ * marker into a link.
+ */
+function footnoteMarkers(entries: readonly Footnoted[], footnotes: FootnoteRegistry): string {
+  const numbers = entries.map(({ attemptName, statement }) =>
+    footnotes.numberFor(`${attemptName}: ${renderStatement(statement)}`),
+  );
+  return [...new Set(numbers)]
+    .sort((a, b) => a - b)
+    .map((number) => `\\[${number}\\]`)
+    .join(' ');
 }
 
-// Digit grouping is manual because locale-aware formatting would make regenerated reports differ between hosts.
-function formatCount(value: number): string {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    return String(value);
-  }
-  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-}
-
-function formatCost(value: number): string {
-  return `$${value.toFixed(4)}`;
-}
-
-function formatElapsed(milliseconds: number): string {
-  const seconds = (milliseconds / 1000).toFixed(1);
-  return Number(seconds) < 60 ? `${seconds} s` : `${(milliseconds / 60000).toFixed(1)} min`;
+function appendMarkers(text: string, markers: string): string {
+  return markers === '' ? text : `${text} ${markers}`;
 }
 
 /** Renders one version and isolation line per agent in use, in `compareStrings` order. */
@@ -861,35 +1006,39 @@ function effortCheckOf(efforts: RunManifest['efforts'], modelId: string): Effort
   return Object.hasOwn(efforts.models, modelId) ? efforts.models[modelId] : undefined;
 }
 
-/** Renders `: <reason>` for a check that carries one, otherwise nothing. */
-function renderEffortReason(check: EffortCheck | null | undefined): string {
-  return check === null || check === undefined || check.status === 'verified'
-    ? ''
-    : `: ${check.reason}`;
+/** Renders `. <statement>` for an effort that needs explaining, otherwise nothing. */
+function renderEffortExplanation(effort: string, check: EffortCheck | null | undefined): string {
+  const statement = effortStatement(effort, check);
+  return statement === null ? '' : `. ${renderStatement(statement)}`;
 }
 
-/** Renders one `- Model entry:` line per model entry with its effort check, in `models` order. */
+/** Renders one line per model entry with its effort check, in `models` order. */
 function renderModelEffortLines(
   models: readonly ModelRecord[],
   efforts: RunManifest['efforts'],
+  names: ReaderNames,
 ): string[] {
   return models.map((entry) => {
     const check = effortCheckOf(efforts, entry.id);
-    return `- Model entry ${entry.id}: ${entry.model}, effort ${entry.effort}, ${check?.status ?? 'not checked'}${renderEffortReason(check)}`;
+    return `- ${names.setting(entry.id)}: effort ${check?.status ?? 'not checked'}${renderEffortExplanation(entry.effort, check)}`;
   });
 }
 
 /** Renders one `- Grader:` line, and a shared-model-entry note when one applies, per distinct grader identity. */
-function renderGraderLines(graders: readonly GraderSummary[], check: EffortCheck | null): string[] {
+function renderGraderLines(
+  graders: readonly GraderSummary[],
+  check: EffortCheck | null,
+  names: ReaderNames,
+): string[] {
   const lines: string[] = [];
   for (const summary of graders) {
     const { grader, sharedModelEntryIds } = summary;
     lines.push(
-      `- Grader: ${grader.model} (effort ${effortLabel(grader.effort, check)}, agent ${grader.agent})${renderEffortReason(check)}`,
+      `- Grader: ${grader.model} (effort ${effortLabel(grader.effort, check)}, agent ${grader.agent})${renderEffortExplanation(grader.effort, check)}`,
     );
     if (sharedModelEntryIds.length > 0) {
       lines.push(
-        `- Grader model ${grader.model} is also benchmarked as model entry ${sharedModelEntryIds.join(', ')} (informational; tevu does not forbid it)`,
+        `- Grader model ${grader.model} is also benchmarked as ${sharedModelEntryIds.map((id) => names.setting(id)).join('; ')} (informational; tevu does not forbid it)`,
       );
     }
   }
@@ -906,6 +1055,7 @@ function renderGraderLines(graders: readonly GraderSummary[], check: EffortCheck
 function renderTaskCaseTimeoutLine(
   cases: readonly CaseIdentity[],
   defaultCaseTimeoutMs: number,
+  names: ReaderNames,
 ): string[] {
   const entries = new Map<string, { taskId: string; timeoutMs: number }>();
   for (const identity of cases) {
@@ -922,65 +1072,107 @@ function renderTaskCaseTimeoutLine(
   const sorted = [...entries.values()].sort(
     (a, b) => compareStrings(a.taskId, b.taskId) || a.timeoutMs - b.timeoutMs,
   );
-  const rendered = sorted.map((entry) => `${entry.taskId} ${entry.timeoutMs}ms`).join(', ');
+  const rendered = sorted
+    .map((entry) => `"${names.task(entry.taskId)}" ${entry.timeoutMs}ms`)
+    .join(', ');
   return [`- Tasks with their own case timeout: ${rendered}`];
 }
 
 /** Renders the `Pair summary:` block for one task's pairs, in `pairs` order. */
-function renderPairSummary(pairs: readonly PairSummary[]): string[] {
+function renderPairSummary(pairs: readonly PairSummary[], names: ReaderNames): string[] {
   const lines: string[] = ['Pair summary:', ''];
   lines.push(
-    '| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |',
+    '| Model setting | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |',
     '|---|---|---|---|---|---|---|---|',
   );
   for (const pair of pairs) {
     const outcomes = pair.outcomes;
     lines.push(
-      `| ${cell(pair.modelId)} | ${pair.planned} | ${outcomes.passed} | ${outcomes.failed} | ${outcomes.pending} | ${outcomes['not-evaluated']} | ${pair.passedOfPlanned} | ${pair.allPassed ? 'yes' : 'no'} |`,
+      `| ${cell(names.setting(pair.modelId))} | ${pair.planned} | ${outcomes.passed} | ${outcomes.failed} | ${outcomes.pending} | ${outcomes['not-evaluated']} | ${pair.passedOfPlanned} | ${pair.allPassed ? 'yes' : 'no'} |`,
     );
   }
   lines.push('');
   return lines;
 }
 
-function renderCase(
-  lines: string[],
+/** Renders one row of the task section's case table. */
+function renderCaseRow(
   caseResult: CaseResult,
   task: TaskRecord | undefined,
-  assessment: AssessmentArtifact | undefined,
-  grading: GradingArtifact | undefined,
-  efforts: RunManifest['efforts'],
-): void {
+  names: ReaderNames,
+): string {
   const identity = caseResult.identity;
-  const definitions = new Map((task?.checks ?? []).map((check) => [check.id, check]));
+  const elapsed = measuredValueOf(caseResult.metrics.elapsed);
+  const link = `[${cell(escapeLinkText(names.attempt(identity)))}](#case-${identity.caseId})`;
+  const runtimeFailure =
+    caseResult.failure === null ? 'none' : cell(failureLabel(caseResult.failure.error.kind));
+  const requiredChecks = formatRequiredChecks(
+    countRequiredChecks([{ result: caseResult }], task?.checks ?? []),
+  );
+  return `| ${link} | ${caseResult.outcome} | ${requiredChecks} | ${runtimeFailure} | ${elapsed.kind === 'reported' ? formatElapsed(elapsed.value) : '-'} |`;
+}
 
-  lines.push(
-    `### Case ${identity.caseId}`,
-    '',
-    `- Model entry: ${identity.modelId} (${identity.model}, effort ${effortLabel(identity.effort, effortCheckOf(efforts, identity.modelId))})`,
-    `- Lifecycle: ${caseResult.lifecycle}`,
-    `- Task outcome: ${caseResult.outcome}`,
+function describeProcess(process: CaseResult['process']): string {
+  if (process === null) {
+    return 'did not start';
+  }
+  const ending =
+    process.exitCode !== null
+      ? `exited with code ${process.exitCode}`
+      : `ended by signal ${process.signal ?? 'unknown'}`;
+  const stop =
+    process.terminationStage === 'graceful'
+      ? '; tevu asked it to stop'
+      : process.terminationStage === 'forced'
+        ? '; tevu forced it to stop'
+        : '';
+  return `${ending} after ${formatElapsed(process.durationMs)}${stop}`;
+}
+
+function describeCategory(category: CheckRecord['category']): string {
+  return category === 'acceptance' ? 'acceptance' : 'Definition of Done';
+}
+
+function renderCase(
+  lines: string[],
+  attempt: Attempt,
+  caseResult: CaseResult,
+  assessment: AssessmentArtifact | undefined,
+  context: ReportContext,
+): void {
+  const { names } = context;
+  const { identity } = caseResult;
+  const runId = context.model.manifest.runId;
+  const definitions = new Map(attempt.checks.map((check) => [check.id, check]));
+  const efforts = context.model.manifest.efforts;
+  const requiredChecks = formatRequiredChecks(
+    countRequiredChecks([{ result: caseResult }], attempt.checks),
   );
 
-  if (caseResult.process !== null) {
-    const process = caseResult.process;
-    const ending =
-      process.exitCode !== null
-        ? `exit code ${process.exitCode}`
-        : `signal ${process.signal ?? 'unknown'}`;
-    lines.push(
-      `- Process: ${ending}, ${process.durationMs}ms, termination stage ${process.terminationStage}`,
-    );
-  } else {
-    lines.push('- Process: not started');
+  lines.push(
+    `<a id="case-${identity.caseId}"></a>`,
+    '',
+    `### ${cell(names.attempt(identity))}`,
+    '',
+    `- Outcome: ${caseResult.outcome}; required checks ${requiredChecks}`,
+    `- Model: ${cell(identity.model)}, effort ${cell(effortLabel(identity.effort, effortCheckOf(efforts, identity.modelId)))}`,
+    `- Agent process: ${describeProcess(caseResult.process)}`,
+    '',
+  );
+
+  const paragraphs = statementsOf(attempt).map((statement) => cell(renderStatement(statement)));
+  for (const paragraph of paragraphs.filter((text, index) => paragraphs.indexOf(text) === index)) {
+    lines.push(paragraph, '');
   }
 
-  if (caseResult.failure !== null) {
-    lines.push(
-      `- Runtime failure (preserved independently of the task outcome): ${caseResult.failure.error.kind} at ${caseResult.failure.occurredAt}`,
-    );
+  const hasAssessableCheck = attempt.checks.some((check) => check.evaluator !== 'command');
+  if (
+    caseResult.lifecycle === 'completed' &&
+    hasAssessableCheck &&
+    attempt.statements.pending === null
+  ) {
+    lines.push(`Record or replace verdicts with \`tevu assess ${runId} ${identity.caseId}\`.`, '');
   }
-  lines.push('');
 
   if (caseResult.checks.length > 0) {
     lines.push(
@@ -989,41 +1181,25 @@ function renderCase(
     );
     for (const check of caseResult.checks) {
       const definition = definitions.get(check.checkId);
+      const required =
+        definition === undefined ? 'unknown' : definition.required ? 'required' : 'optional';
       lines.push(
-        `| ${check.verdict} | ${cell(check.checkId)} | ${check.category} | ${definition ? String(definition.required) : 'unknown'} | ${definition?.evaluator ?? 'unknown'} | ${check.durationMs === null ? '-' : `${check.durationMs}ms`} | ${evidenceLink(caseResult)} |`,
+        `| ${check.verdict} | ${cell(names.check(identity.taskId, check.checkId))} | ${describeCategory(check.category)} | ${required} | ${definition?.evaluator ?? 'unknown'} | ${check.durationMs === null ? '-' : `${check.durationMs}ms`} | ${artifactLink(caseResult.artifacts.checks)} |`,
       );
     }
     lines.push('');
-    const pendingChecks = caseResult.checks.filter((check) => check.verdict === 'pending');
-    const pendingManualIds = pendingChecks
-      .filter((check) => definitions.get(check.checkId)?.evaluator === 'manual')
-      .map((check) => check.checkId);
-    const pendingGradedIds = pendingChecks
-      .filter((check) => definitions.get(check.checkId)?.evaluator === 'grader')
-      .map((check) => check.checkId);
-    if (pendingManualIds.length > 0) {
-      lines.push(`Pending manual checks: ${pendingManualIds.join(', ')}.`);
-    }
-    if (pendingGradedIds.length > 0) {
-      lines.push(`Pending graded checks: ${pendingGradedIds.join(', ')}.`);
-    }
-    if (pendingManualIds.length > 0 || pendingGradedIds.length > 0) {
-      lines.push('');
-    }
   }
 
-  lines.push('Metrics:', '');
-  for (const [name, metric] of sortedMetricEntries(caseResult)) {
-    lines.push(`- ${name}: ${formatMetricValue(metric)}`);
-  }
-  lines.push('');
+  lines.push('Metrics:', '', ...renderMetricLines(caseResult.metrics), '');
 
+  const grading = attempt.grading;
   if (grading !== undefined) {
-    lines.push(...renderGradingBlock(grading, efforts.grader));
+    lines.push(...renderGradingBlock(attempt, grading, context));
   }
 
   lines.push('Artifacts:', '');
   const artifacts = caseResult.artifacts;
+  const setupLogs = caseResult.setup?.logs;
   lines.push(
     `- Solution patch: ${artifactLink(artifacts.solutionPatch)}`,
     `- Events: ${artifactLink(artifacts.events)}`,
@@ -1031,6 +1207,12 @@ function renderCase(
     `- Session export: ${artifactLink(artifacts.sessionExport)}`,
     `- Check evidence: ${artifactLink(artifacts.checks)}`,
     ...(artifacts.grading === null ? [] : [`- Grading: ${artifactLink(artifacts.grading)}`]),
+    ...(setupLogs?.beforeAgent
+      ? [`- Setup log before the agent: ${artifactLink(setupLogs.beforeAgent)}`]
+      : []),
+    ...(setupLogs?.beforeChecks
+      ? [`- Setup log before the checks: ${artifactLink(setupLogs.beforeChecks)}`]
+      : []),
     `- Result: ${artifactLink(artifacts.result)}`,
     '',
   );
@@ -1039,84 +1221,93 @@ function renderCase(
     lines.push(`Assessments (revision ${assessment.revision}):`, '');
     for (const record of assessment.current) {
       lines.push(
-        `- ${record.checkId}: ${record.verdict} by ${cell(record.assessor)} at ${record.assessedAt}${record.note.length > 0 ? ` — ${cell(record.note)}` : ''}`,
+        `- ${cell(names.check(identity.taskId, record.checkId))}: ${record.verdict} by ${cell(record.assessor)} at ${record.assessedAt}${record.note.length > 0 ? `; note: ${cell(record.note)}` : ''}`,
       );
     }
     lines.push('');
   }
 }
 
-function sortedMetricEntries(caseResult: CaseResult): Array<[string, MetricValue]> {
-  return (Object.entries(caseResult.metrics) as Array<[string, MetricValue]>).sort((a, b) =>
-    compareStrings(a[0], b[0]),
-  );
+/**
+ * Renders the available metrics in label order, then one `Not measured` line
+ * per distinct reason. Metrics the set does not carry are skipped.
+ */
+function renderMetricLines(metrics: Readonly<Partial<BenchmarkMetrics>>): string[] {
+  const measuredLines: string[] = [];
+  const labelsByReason = new Map<string, string[]>();
+  for (const { label, metric, format } of METRIC_LINES) {
+    const value = metrics[metric];
+    if (value === undefined) {
+      continue;
+    }
+    const measured = measuredValueOf(value);
+    if (measured.kind === 'reported') {
+      measuredLines.push(`- ${label}: ${format(measured.value)}`);
+    } else {
+      labelsByReason.set(measured.reason, [...(labelsByReason.get(measured.reason) ?? []), label]);
+    }
+  }
+  const gapLines = [...labelsByReason].map(([reason, labels]) => {
+    const gap = measurementGapStatement({ reason, count: labels.length, graderLine: false });
+    return `- Not measured: ${labels.join(', ')}. ${cell(renderStatement(gap))}`;
+  });
+  return [...measuredLines, ...gapLines];
 }
 
 /**
- * Renders one case's grading: the grader identity, a grade or reason per
- * check in `checkId` order, and the grader's own metrics, kept in a block
- * separate from the case's agent metrics above it and never added to them.
+ * Renders one case's grading: the grader identity, a grade or gap per check in
+ * `checkId` order, and the grader's own metrics, kept in a block separate from
+ * the case's agent metrics above it and never added to them.
  */
-function renderGradingBlock(grading: GradingArtifact, check: EffortCheck | null): string[] {
-  const lines: string[] = [
-    `Grades by ${grading.grader.model} (effort ${effortLabel(grading.grader.effort, check)}, agent ${grading.grader.agent}):`,
+function renderGradingBlock(
+  attempt: Attempt,
+  grading: GradingArtifact,
+  context: ReportContext,
+): string[] {
+  const { names } = context;
+  const check = context.model.manifest.efforts.grader;
+  const gap = gradingGapOf(attempt, grading, context.model.manifest.runId);
+  const gradeLines = grading.grades.map((grade) => {
+    const name = cell(names.check(attempt.identity.taskId, grade.checkId));
+    if (grade.status === 'graded') {
+      return `- ${name}: ${grade.verdict}. ${cell(grade.rationale)}`;
+    }
+    return grading.call.status === 'no-reply'
+      ? `- ${name}: no verdict.`
+      : `- ${name}: no usable verdict. Technical detail: ${cell(grade.reason)}`;
+  });
+  const lines = [
+    `Grades by ${cell(grading.grader.model)} (effort ${cell(effortLabel(grading.grader.effort, check))}, agent ${cell(grading.grader.agent)}):`,
+    '',
+    ...(gap === null ? [] : [`- ${cell(renderStatement(gap))}`]),
+    ...gradeLines,
     '',
   ];
-  if (grading.call.status === 'no-reply') {
-    lines.push(`- Grader call: no reply. ${cell(grading.call.reason)}`);
-  }
-  for (const grade of grading.grades) {
+  if (grading.call.status === 'replied') {
     lines.push(
-      grade.status === 'graded'
-        ? `- ${cell(grade.checkId)}: ${grade.verdict}. ${cell(grade.rationale)}`
-        : `- ${cell(grade.checkId)}: not graded. ${cell(grade.reason)}`,
+      'Grader metrics (separate from the agent metrics above; never added to them):',
+      '',
+      ...renderMetricLines(grading.metrics),
+      '',
     );
   }
-  lines.push(
-    '',
-    'Grader metrics (separate from the agent metrics above; never added to them):',
-    '',
-  );
-  for (const [name, metric] of sortedAgentMetricEntries(grading.metrics)) {
-    lines.push(`- ${name}: ${formatMetricValue(metric)}`);
-  }
-  lines.push('');
   return lines;
 }
 
-function sortedAgentMetricEntries(metrics: AgentMetrics): Array<[string, MetricValue]> {
-  return (Object.entries(metrics) as Array<[string, MetricValue]>).sort((a, b) =>
-    compareStrings(a[0], b[0]),
-  );
-}
-
-function formatMetricValue(metric: MetricValue): string {
-  if (metric.availability.status === 'unavailable') {
-    return `unavailable: ${metric.availability.reason}`;
-  }
-  if (metric.value === null) {
-    return 'unavailable: no value recorded';
-  }
-  return `${metric.value} ${metric.unit} (${metric.scope}, source: ${metric.availability.source})`;
-}
-
-function describeTaskSource(source: TaskRecord['source']): string {
+/** One line per imported task source; a hand-written task has none. */
+function describeTaskSource(source: TaskRecord['source']): string[] {
   switch (source.kind) {
     case 'manual':
-      return `manual — ${source.title}${source.reference ? ` (${source.reference})` : ''}`;
+      return [];
     case 'jira-cloud':
-      return `Jira snapshot — [${source.issueKey}](${source.issueUrl})`;
+      return [`- Source: imported from Jira issue [${source.issueKey}](${source.issueUrl})`];
     case 'github-issue':
-      return `GitHub issue snapshot — [${source.issueKey}](${source.issueUrl})`;
+      return [`- Source: imported from GitHub issue [${source.issueKey}](${source.issueUrl})`];
   }
-}
-
-function evidenceLink(caseResult: CaseResult): string {
-  return artifactLink(caseResult.artifacts.checks);
 }
 
 function artifactLink(path: string | null): string {
-  return path === null ? 'missing' : `[${cell(path)}](${path})`;
+  return path === null ? 'missing' : `[${cell(path.slice(path.lastIndexOf('/') + 1))}](${path})`;
 }
 
 /** Escapes table-breaking characters in one Markdown table cell or inline value. */

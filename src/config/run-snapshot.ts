@@ -78,10 +78,11 @@ export function decodeRunConfig(snapshot: unknown): TevuResult<RunConfigRecord, 
   const data = parsed.data;
   const tasks: TaskRecord[] = data.tasks.map((task) => ({
     id: task.id,
+    title: task.title,
     repositoryId: task.repo,
     startCommit: task.base_commit,
     description: task.description,
-    source: projectSource(task.title, task.source),
+    source: projectSource(task.source),
     checks: [
       ...task.checks.acceptance.map((check) => projectCheck(check, 'acceptance')),
       ...task.checks.done.map((check) => projectCheck(check, 'definition-of-done')),
@@ -105,11 +106,10 @@ export function decodeRunConfig(snapshot: unknown): TevuResult<RunConfigRecord, 
 }
 
 function projectSource(
-  title: string,
   source: z.infer<typeof projectionSourceSchema> | undefined,
 ): TaskRecord['source'] {
   if (source === undefined) {
-    return { kind: 'manual', reference: null, title };
+    return { kind: 'manual' };
   }
   return source.kind === 'jira'
     ? { kind: 'jira-cloud', issueKey: source.key, issueUrl: source.url }

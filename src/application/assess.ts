@@ -15,6 +15,7 @@ import { reduceRequiredOutcome } from '@/evaluation/checks';
 import { applyGrades } from '@/evaluation/grading';
 import { combineCaseMetrics } from '@/evaluation/metrics';
 import { buildReport } from '@/evaluation/report';
+import { buildReaderNames, gradeLines } from '@/evaluation/wording';
 
 import { reduceRunExitCode } from './run-benchmark';
 
@@ -37,26 +38,38 @@ import type {
   ReplacedGraderVerdict,
   ReplacedOperatorVerdict,
   ReportResult,
+  RunConfigRecord,
+  RunManifest,
   RunResult,
   TaskRecord,
   TevuError,
   TevuResult,
   ValidationFinding,
 } from '@/domain/types';
+import type { ReaderNames } from '@/evaluation/wording';
 
 /** One assessable check of the assessed case, in configuration order: manual, or graded with its saved grade. */
 export type AssessableCheckSummary = {
   checkId: string;
+  /** The plain check name shown to the operator in place of the check ID. */
+  name: string;
   category: 'acceptance' | 'definition-of-done';
-  description: string;
   required: boolean;
 } & (
   | { evaluator: 'manual' }
-  | { evaluator: 'grader'; grade: GradeRecord | null; grader: GraderIdentity | null }
+  | {
+      evaluator: 'grader';
+      grade: GradeRecord | null;
+      grader: GraderIdentity | null;
+      /** Lines the wizard logs before asking, in the report's wording. */
+      gradeLines: string[];
+    }
 );
 
 /** Pre-read display context for one case's assessment. */
 export type AssessmentCaseContext = {
+  /** The plain name of the attempt on its task, as the report names it. */
+  caseName: string;
   /** Every manual or graded check of the case's task, in configuration order. */
   checks: AssessableCheckSummary[];
   /** Current assessment records; replaced ones live in artifact history, not here. */
@@ -70,30 +83,45 @@ function isAssessableCheck(
   return check.evaluator === 'manual' || check.evaluator === 'grader';
 }
 
+/** Names the tasks, model settings, attempts, and checks of one run in configuration order. */
+function readerNamesOf(config: RunConfigRecord, manifest: RunManifest): ReaderNames {
+  return buildReaderNames({
+    tasks: config.tasks,
+    models: config.models,
+    repeat: manifest.execution.repeat.value,
+    cases: manifest.cases,
+  });
+}
+
 /** Projects assessable check definitions and a case's saved grading into display/decision summaries. */
 function buildAssessableChecks(
   definitions: readonly (CheckRecord & { evaluator: 'manual' | 'grader' })[],
+  names: ReaderNames,
+  taskId: string,
   grading: GradingArtifact | null,
 ): AssessableCheckSummary[] {
   const gradeByCheckId = new Map((grading?.grades ?? []).map((grade) => [grade.checkId, grade]));
   return definitions.map((check) => {
+    const name = names.check(taskId, check.id);
     if (check.evaluator === 'manual') {
       return {
         checkId: check.id,
+        name,
         category: check.category,
-        description: check.description,
         required: check.required,
         evaluator: 'manual',
       };
     }
+    const grade = gradeByCheckId.get(check.id) ?? null;
     return {
       checkId: check.id,
+      name,
       category: check.category,
-      description: check.description,
       required: check.required,
       evaluator: 'grader',
-      grade: gradeByCheckId.get(check.id) ?? null,
+      grade,
       grader: grading?.grader ?? null,
+      gradeLines: gradeLines(grade, grading),
     };
   });
 }
@@ -128,6 +156,13 @@ type AssessCaseErrorKind =
 /** Error kinds the report regeneration contract declares. */
 type RebuildReportErrorKind = 'AgentProtocolError' | 'ArtifactError';
 
+/** What one recorded assessment returns. */
+export type AssessedCase = {
+  result: CaseResult;
+  /** The assessed case's `ReportSummary.attempts[].lines` from the rebuilt report. */
+  summary: string[];
+};
+
 /** Derived records produced by one regeneration pass over a finalized run. */
 type RebuiltRun = {
   run: RunResult;
@@ -152,7 +187,7 @@ export async function assessCase(
   input: AssessmentInput,
   store: ArtifactStore,
   agents: AgentRegistry,
-): Promise<TevuResult<CaseResult, AssessCaseErrorKind>> {
+): Promise<TevuResult<AssessedCase, AssessCaseErrorKind>> {
   if (isAborted(input.cancellation)) {
     return cancellationFailure();
   }
@@ -219,7 +254,12 @@ export async function assessCase(
     }
     grading = read.value;
   }
-  const checks = buildAssessableChecks(assessableDefinitions, grading);
+  const checks = buildAssessableChecks(
+    assessableDefinitions,
+    readerNamesOf(decoded.value, manifest.value),
+    task.id,
+    grading,
+  );
 
   const lock = await store.acquireAssessmentLock(input.runId, input.caseId);
   if (!lock.ok) {
@@ -267,7 +307,16 @@ export async function assessCase(
       `assessment revision ${next.revision} for case "${input.caseId}" is committed, but the regenerated run record does not contain the case; run \`tevu report ${input.runId}\` to regenerate the derived results and report`,
     );
   }
-  return { ok: true, value: derived };
+  const summary = rebuilt.value.report.summary.attempts.find(
+    (entry) => entry.caseId === input.caseId,
+  );
+  if (summary === undefined) {
+    return artifactFailure(
+      'assess-case',
+      `assessment revision ${next.revision} for case "${input.caseId}" is committed, but the regenerated report does not contain the case; run \`tevu report ${input.runId}\` to regenerate the derived results and report`,
+    );
+  }
+  return { ok: true, value: { result: derived, summary: summary.lines } };
 }
 
 /**
@@ -326,12 +375,20 @@ export async function readAssessmentContext(
     }
     grading = read.value;
   }
-  const checks = buildAssessableChecks(assessableDefinitions, grading);
+  const names = readerNamesOf(decoded.value, manifest.value);
+  const checks = buildAssessableChecks(assessableDefinitions, names, task.id, grading);
   const assessment = await store.readAssessment(runId, caseId);
   if (!assessment.ok) {
     return assessment;
   }
-  return { ok: true, value: { checks, existing: assessment.value?.current ?? [] } };
+  return {
+    ok: true,
+    value: {
+      caseName: names.caseName(identity),
+      checks,
+      existing: assessment.value?.current ?? [],
+    },
+  };
 }
 
 /**

@@ -624,7 +624,8 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
     run.findings.push({
       severity: 'warning',
       caseId,
-      message: 'case was still queued when the run was cancelled and was not started',
+      message:
+        'The run was cancelled before this attempt started, so it has no result. Run the comparison again to get one.',
     });
     return;
   }
@@ -632,7 +633,8 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
     run.findings.push({
       severity: 'error',
       caseId,
-      message: 'case was not started because an artifact failure stopped scheduling',
+      message:
+        'tevu stopped starting attempts after it failed to save files for an earlier attempt, so this attempt has no result. Fix the failure reported for that attempt and run the comparison again.',
     });
     return;
   }
@@ -975,7 +977,7 @@ async function concludeCase(
         run.findings.push({
           severity: 'warning',
           caseId: active.identity.caseId,
-          message: `solution patch could not be captured after timeout: ${describeError(patch.failure)}`,
+          message: `tevu could not save the changes this attempt made before its time limit ended it, so its solution patch is missing. The attempt counts as not evaluated either way. Nothing more is needed for this run. Technical detail: ${describeError(patch.failure)}`,
         });
       }
       return finishCase(run, active, 'timed-out', error);
@@ -1130,7 +1132,7 @@ async function evaluateReadableCase(
       run.findings.push({
         severity: 'warning',
         caseId,
-        message: `grader call directory could not be removed; retained at "${outcome.retainedDirectory}"`,
+        message: `tevu could not delete the temporary directory of this attempt's grading call. The results are not affected. Delete \`${outcome.retainedDirectory}\` when no tevu command uses it.`,
       });
     }
     if (run.state.cancelled) {
@@ -1325,8 +1327,8 @@ async function persistAndCleanup(
       caseId,
       message:
         workspace === null
-          ? `case result could not be persisted: ${finalized.error.reason}`
-          : `case result could not be persisted (${finalized.error.reason}); workspace retained at "${workspace.worktreeDirectory}"`,
+          ? `tevu could not save the result of this attempt, so the report of this run cannot be built. Check free space and permissions of the output directory, then run the comparison again. Technical detail: ${finalized.error.reason}`
+          : `tevu could not save the result of this attempt, so the report of this run cannot be built; its workspace is kept at \`${workspace.worktreeDirectory}\`. Check free space and permissions of the output directory, run the comparison again, and delete the kept workspace when you no longer need it. Technical detail: ${finalized.error.reason}`,
     });
     return;
   }
@@ -1338,7 +1340,7 @@ async function persistAndCleanup(
     run.findings.push({
       severity: 'warning',
       caseId,
-      message: `case cleanup failed (${disposed.error.reason}); workspace retained at "${workspace.worktreeDirectory}"`,
+      message: `tevu could not delete the workspace of this attempt, which is kept at \`${workspace.worktreeDirectory}\`. The results are not affected. Delete it when you no longer need it. Technical detail: ${disposed.error.reason}`,
     });
   }
 }

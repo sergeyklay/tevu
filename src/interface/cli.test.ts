@@ -10,6 +10,7 @@ import { renderConfigDocument } from '@/config/document';
 import { parseConfigText } from '@/config/load';
 import { TevuConfigSchema } from '@/config/schema';
 import { CONFIG_TEMPLATE } from '@/config/template';
+import { gradeLines } from '@/evaluation/wording';
 
 import { createProgram, runProgram } from './program';
 import { createWaitInterrupt } from './wait-interrupt';
@@ -21,7 +22,11 @@ import type {
   ProgramOperations,
 } from './program';
 import type { GhRun } from '@/adapters/trackers/github-issues';
-import type { AssessableCheckSummary, AssessmentCaseContext } from '@/application/assess';
+import type {
+  AssessableCheckSummary,
+  AssessedCase,
+  AssessmentCaseContext,
+} from '@/application/assess';
 import type { TaskWizardInput } from '@/application/create-task';
 import type { CriteriaDraftFailure } from '@/application/draft-criteria';
 import type { ModelAccessOutcome } from '@/application/model-access';
@@ -38,6 +43,7 @@ import type {
   EffortChecks,
   GradeRecord,
   GraderIdentity,
+  GradingArtifact,
   IssueSnapshot,
   JiraTrackerSettings,
   ManagedCloneAdapter,
@@ -525,6 +531,10 @@ function buildCaseResult(overrides: Partial<CaseResult> = {}): CaseResult {
   };
 }
 
+function buildAssessedCase(overrides: Partial<AssessedCase> = {}): AssessedCase {
+  return { result: buildCaseResult(), summary: [], ...overrides };
+}
+
 function buildRunFinding(overrides: Partial<RunFinding> = {}): RunFinding {
   return {
     severity: 'warning',
@@ -568,6 +578,7 @@ function buildReportResult(overrides: Partial<ReportResult> = {}): ReportResult 
     runId: 'run-1',
     normalizedJson: '{}',
     markdown: '# Report\n',
+    summary: { attempts: [], findings: [] },
     ...overrides,
   };
 }
@@ -588,7 +599,7 @@ function buildManualCheckSummary(
   return {
     checkId: 'acc-1',
     category: 'acceptance',
-    description: 'Export produces a CSV',
+    name: 'Export produces a CSV',
     required: true,
     evaluator: 'manual',
     ...overrides,
@@ -605,13 +616,26 @@ function buildGradedCheckSummary(
   return {
     checkId: 'acc-1',
     category: 'acceptance',
-    description: 'The criterion holds.',
+    name: 'The criterion holds.',
     required: true,
     evaluator: 'grader',
     grade: null,
     grader: null,
+    gradeLines: [],
     ...overrides,
   } as AssessableCheckSummary;
+}
+
+/** A graded check whose wizard lines come from the same function `readAssessmentContext` uses. */
+function buildGradedCheckFromGrading(
+  grade: GradeRecord | null,
+  grading: Pick<GradingArtifact, 'grader' | 'call'> | null,
+): AssessableCheckSummary {
+  return buildGradedCheckSummary({
+    grade,
+    grader: grading?.grader ?? null,
+    gradeLines: gradeLines(grade, grading),
+  });
 }
 
 function buildAssessmentRecord(overrides: Partial<AssessmentRecord> = {}): AssessmentRecord {
@@ -629,6 +653,7 @@ function buildAssessmentContext(
   overrides: Partial<AssessmentCaseContext> = {},
 ): AssessmentCaseContext {
   return {
+    caseName: 'vendor/model-a, high on "Export the current view"',
     checks: [buildManualCheckSummary()],
     existing: [],
     ...overrides,
@@ -741,7 +766,7 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
       ok: true as const,
       value: buildAssessmentContext(),
     })),
-    applyAssessment: vi.fn(async () => ({ ok: true as const, value: buildCaseResult() })),
+    applyAssessment: vi.fn(async () => ({ ok: true as const, value: buildAssessedCase() })),
     ...overrides,
   };
 }
@@ -2508,7 +2533,7 @@ describe('tevu CLI', () => {
   });
 
   describe('run execution', () => {
-    it('prints deterministic run metadata in planned order and returns the run exit code', async () => {
+    it('prints the run header, the redacted summary of the rebuilt report, then the artifact and report paths, and returns the run exit code', async () => {
       let loadedConfig: TevuConfig | undefined;
       const operations = createOperations({
         loadConfig: vi.fn(async () => {
@@ -2518,27 +2543,50 @@ describe('tevu CLI', () => {
         }),
         executeBenchmark: vi.fn(async (_plan: BenchmarkPlan, hooks: BenchmarkExecutionHooks) => {
           hooks.onRunId?.('run-1');
-          return {
-            ok: true as const,
-            value: buildRunResult({
-              findings: [
-                buildRunFinding({ severity: 'warning', caseId: 'case-c1-task-1' }),
-                buildRunFinding({ severity: 'error', caseId: null, message: 'cleanup warning' }),
-              ],
-            }),
-          };
+          return { ok: true as const, value: buildRunResult() };
         }),
+        rebuildRunReport: vi.fn(async () => ({
+          ok: true as const,
+          value: buildReportResult({
+            summary: {
+              attempts: [
+                {
+                  caseId: 'case-c1-task-1',
+                  lines: [
+                    'vendor/model-a, high on "Fix the export": pending; required checks 1/2 passed, 1 pending.',
+                    "  1 required manual check waits for a person's verdict. Technical detail: case case-c1-task-1: TOKEN-VALUE",
+                  ],
+                },
+                {
+                  caseId: 'case-c2-task-1',
+                  lines: [
+                    'vendor/model-b, high on "Fix the export": passed; required checks 2/2 passed.',
+                  ],
+                },
+              ],
+              findings: [
+                'Warning for vendor/model-a, high on "Fix the export": diagnostics truncated',
+                'Error: cleanup failed for TOKEN-VALUE',
+              ],
+            },
+          }),
+        })),
       });
 
-      const { code, out, err } = await runCli(['run'], { operations });
+      const { code, out, err } = await runCli(['run'], {
+        operations,
+        redact: (text) => text.replaceAll('TOKEN-VALUE', '[redacted]'),
+      });
 
       expect(code).toBe(0);
       expect(out).toEqual([
         'Configuration: tevu.yaml',
         'Run run-1 started.',
-        'case-c1-task-1: lifecycle completed, outcome passed',
-        'warning [case-c1-task-1]: diagnostics truncated',
-        'error: cleanup warning',
+        'vendor/model-a, high on "Fix the export": pending; required checks 1/2 passed, 1 pending.',
+        "  1 required manual check waits for a person's verdict. Technical detail: case case-c1-task-1: [redacted]",
+        'vendor/model-b, high on "Fix the export": passed; required checks 2/2 passed.',
+        'Warning for vendor/model-a, high on "Fix the export": diagnostics truncated',
+        'Error: cleanup failed for [redacted]',
         'Artifacts: /tmp/artifacts/run-1',
         'Report: /tmp/artifacts/run-1/report.md',
       ]);
@@ -2605,7 +2653,7 @@ describe('tevu CLI', () => {
       expect(code).toBe(0);
       expect(out).toContain('[case-c1-task-1] running');
       expect(out).toContain('[case-c1-task-1] completed');
-      expect(out).toContain('case-c1-task-1: lifecycle completed, outcome passed');
+      expect(out.join('\n')).not.toContain('lifecycle completed');
     });
 
     it('preserves exit code 2 for a passed run with a recorded runtime failure', async () => {
@@ -2637,32 +2685,42 @@ describe('tevu CLI', () => {
       const { code, out } = await runCli(['run'], { operations });
 
       expect(code).toBe(2);
-      expect(out).toContain(
-        'case-c1-task-1: lifecycle process-failed, outcome passed, runtime failure AgentProcessError',
-      );
       expect(out).toContain('Report: /tmp/artifacts/run-1/report.md');
       expect(operations.rebuildRunReport).toHaveBeenCalledOnce();
     });
 
-    it('skips the report rebuild and names the recovery command for a cancelled run', async () => {
+    it('skips the report rebuild, prints no summary, and names the recovery command for a cancelled run', async () => {
       const operations = createOperations({
-        executeBenchmark: vi.fn(async () => ({
-          ok: true as const,
-          value: buildRunResult({ exitCode: 130 }),
-        })),
+        executeBenchmark: vi.fn(async (_plan: BenchmarkPlan, hooks: BenchmarkExecutionHooks) => {
+          hooks.onRunId?.('run-1');
+          return {
+            ok: true as const,
+            value: buildRunResult({
+              exitCode: 130,
+              findings: [buildRunFinding({ message: 'queued attempt never started' })],
+            }),
+          };
+        }),
       });
 
       const { code, out } = await runCli(['run'], { operations });
 
       expect(code).toBe(130);
-      expect(out).toContain(
+      expect(out).toEqual([
+        'Configuration: tevu.yaml',
+        'Run run-1 started.',
+        'Artifacts: /tmp/artifacts/run-1',
         'Run cancelled; partial artifacts were finalized. Regenerate the report with: tevu report run-1',
-      );
+      ]);
       expect(operations.rebuildRunReport).not.toHaveBeenCalled();
     });
 
     it('downgrades to exit 1 with the recovery hint when the rebuild fails', async () => {
       const operations = createOperations({
+        executeBenchmark: vi.fn(async (_plan: BenchmarkPlan, hooks: BenchmarkExecutionHooks) => {
+          hooks.onRunId?.('run-1');
+          return { ok: true as const, value: buildRunResult() };
+        }),
         rebuildRunReport: vi.fn(async () => ({
           ok: false as const,
           error: artifactError('rebuild-report', 'run directory vanished'),
@@ -2676,7 +2734,11 @@ describe('tevu CLI', () => {
         'error: artifact operation "rebuild-report" failed: run directory vanished',
         'The report could not be generated; recover with: tevu report run-1',
       ]);
-      expect(out.join('')).not.toContain('Report:');
+      expect(out).toEqual([
+        'Configuration: tevu.yaml',
+        'Run run-1 started.',
+        'Artifacts: /tmp/artifacts/run-1',
+      ]);
     });
 
     it.each(EXECUTE_FAILURE_CASES)(
@@ -8584,9 +8646,19 @@ describe('tevu CLI', () => {
               buildManualCheckSummary({ checkId: 'acc-1', category: 'acceptance', required: true }),
               buildManualCheckSummary({
                 checkId: 'dod-1',
+                name: 'Loader is documented',
                 category: 'definition-of-done',
                 required: false,
               }),
+            ],
+          }),
+        })),
+        applyAssessment: vi.fn(async () => ({
+          ok: true as const,
+          value: buildAssessedCase({
+            summary: [
+              'vendor/model-a, high on "Export the current view": passed; required checks 1/1 passed.',
+              '  Reviewed by TOKEN-VALUE.',
             ],
           }),
         })),
@@ -8596,13 +8668,21 @@ describe('tevu CLI', () => {
       const { code, out } = await runCli(['assess', 'run-1', 'case-1'], {
         operations,
         cancellation,
+        redact: (text) => text.replaceAll('TOKEN-VALUE', '[redacted]'),
       });
 
       expect(code).toBe(0);
       expect(out).toEqual([
         'Configuration: tevu.yaml',
-        'Assessment recorded for case case-1; derived task outcome: passed.',
+        'Assessment recorded.',
+        'vendor/model-a, high on "Export the current view": passed; required checks 1/1 passed.',
+        '  Reviewed by [redacted].',
         'Report: /tmp/artifacts/run-1/report.md',
+      ]);
+      expect(clack.state.logs).toEqual([
+        { kind: 'info', message: 'Assessing vendor/model-a, high on "Export the current view".' },
+        { kind: 'step', message: 'Export produces a CSV (acceptance, required, manual)' },
+        { kind: 'step', message: 'Loader is documented (Definition of Done, optional, manual)' },
       ]);
       expect(vi.mocked(operations.readAssessmentContext)).toHaveBeenCalledExactlyOnceWith(
         loadedConfig,
@@ -8647,13 +8727,18 @@ describe('tevu CLI', () => {
       expect(code).toBe(0);
       expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual(
         expect.arrayContaining([
-          'Replace the existing assessment for "acc-1"?',
-          'Confirm replacing "acc-1" (passed -> failed)?',
+          'Replace the existing assessment of this check?',
+          'Verdict',
+          'Confirm replacing the verdict of this check (passed -> failed)?',
         ]),
       );
       expect(clack.state.notes).toContainEqual({
         title: 'Existing assessments',
-        message: 'acc-1: passed by bob at 2026-09-22T09:00:00.000Z',
+        message: 'Export produces a CSV: passed by bob at 2026-09-22T09:00:00.000Z',
+      });
+      expect(clack.state.logs).toContainEqual({
+        kind: 'info',
+        message: 'Export produces a CSV: passed by bob at 2026-09-22T09:00:00.000Z',
       });
       expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([
         {
@@ -8681,7 +8766,7 @@ describe('tevu CLI', () => {
       expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
         'tevu assess run-1 case-1',
         'Assessor name',
-        'Replace the existing assessment for "acc-1"?',
+        'Replace the existing assessment of this check?',
       ]);
       expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([]);
     });
@@ -8700,7 +8785,7 @@ describe('tevu CLI', () => {
       expect(code).toBe(0);
       expect(clack.state.logs).toContainEqual({
         kind: 'info',
-        message: 'Kept the existing assessment for "acc-1".',
+        message: 'Kept the existing assessment.',
       });
       expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([]);
     });
@@ -8819,6 +8904,26 @@ describe('tevu CLI', () => {
     );
 
     describe('graded checks', () => {
+      const NO_VERDICT_TAIL =
+        'This check has no verdict until you record one. Choose a verdict below.';
+      const GRADER = buildGrader();
+
+      function contextWith(check: AssessableCheckSummary): Partial<ProgramOperations> {
+        return {
+          readAssessmentContext: vi.fn(async () => ({
+            ok: true as const,
+            value: buildAssessmentContext({ checks: [check] }),
+          })),
+        };
+      }
+
+      function visibleWizardMessages(): string[] {
+        return [
+          ...clack.state.logs.filter((log) => log.kind === 'step' || log.kind === 'info'),
+          ...clack.state.prompts.filter((prompt) => prompt.kind !== 'intro'),
+        ].map((entry) => entry.message.split('Technical detail:')[0] ?? '');
+      }
+
       it("shows the grader's verdict and records a replacement, kept as replaceExisting: true, when the operator confirms it", async () => {
         const grade: GradeRecord = {
           checkId: 'acc-1',
@@ -8827,28 +8932,33 @@ describe('tevu CLI', () => {
           verdict: 'passed',
           rationale: 'lines 1-4 add escaping',
         };
-        const operations = createOperations({
-          readAssessmentContext: vi.fn(async () => ({
-            ok: true as const,
-            value: buildAssessmentContext({
-              checks: [buildGradedCheckSummary({ grade, grader: buildGrader() })],
+        const operations = createOperations(
+          contextWith(
+            buildGradedCheckFromGrading(grade, {
+              grader: GRADER,
+              call: { status: 'replied', reply: '' },
             }),
-          })),
-        });
+          ),
+        );
         scriptAnswers('alice', true, 'failed', 'overridden after review', true);
 
         const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
 
         expect(code).toBe(0);
         expect(clack.state.logs).toContainEqual({
+          kind: 'step',
+          message: 'The criterion holds. (acceptance, required, graded)',
+        });
+        expect(clack.state.logs).toContainEqual({
           kind: 'info',
           message:
-            'Grader verdict for "acc-1": passed (openai/grader-model, effort high): lines 1-4 add escaping',
+            'Grader verdict: passed (openai/grader-model, effort high): lines 1-4 add escaping',
         });
         expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual(
           expect.arrayContaining([
-            'Replace the grader\'s verdict for "acc-1"?',
-            'Confirm replacing "acc-1" (grader passed -> failed)?',
+            "Replace the grader's verdict for this check?",
+            'Verdict',
+            "Confirm replacing the grader's verdict for this check (passed -> failed)?",
           ]),
         );
         expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([
@@ -8862,6 +8972,34 @@ describe('tevu CLI', () => {
         ]);
       });
 
+      it('keeps the grader verdict and says so when the replacement is not confirmed', async () => {
+        const grade: GradeRecord = {
+          checkId: 'acc-1',
+          category: 'acceptance',
+          status: 'graded',
+          verdict: 'failed',
+          rationale: 'the loader is missing',
+        };
+        const operations = createOperations(
+          contextWith(
+            buildGradedCheckFromGrading(grade, {
+              grader: GRADER,
+              call: { status: 'replied', reply: '' },
+            }),
+          ),
+        );
+        scriptAnswers('alice', true, 'passed', '', false);
+
+        const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'info',
+          message: "Kept the grader's verdict.",
+        });
+        expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([]);
+      });
+
       it('declining the replacement offer for a passed grade records no decision for that check', async () => {
         const grade: GradeRecord = {
           checkId: 'acc-1',
@@ -8870,14 +9008,14 @@ describe('tevu CLI', () => {
           verdict: 'passed',
           rationale: 'ok',
         };
-        const operations = createOperations({
-          readAssessmentContext: vi.fn(async () => ({
-            ok: true as const,
-            value: buildAssessmentContext({
-              checks: [buildGradedCheckSummary({ grade, grader: buildGrader() })],
+        const operations = createOperations(
+          contextWith(
+            buildGradedCheckFromGrading(grade, {
+              grader: GRADER,
+              call: { status: 'replied', reply: '' },
             }),
-          })),
-        });
+          ),
+        );
         scriptAnswers('alice', false);
 
         const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
@@ -8886,7 +9024,7 @@ describe('tevu CLI', () => {
         expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([]);
       });
 
-      it('asks directly for a verdict, with replaceExisting: false, when the grade is undetermined', async () => {
+      it('explains an undetermined grade and asks directly for a verdict, with replaceExisting: false', async () => {
         const grade: GradeRecord = {
           checkId: 'acc-1',
           category: 'acceptance',
@@ -8894,14 +9032,14 @@ describe('tevu CLI', () => {
           verdict: 'undetermined',
           rationale: 'the patch does not touch the relevant file',
         };
-        const operations = createOperations({
-          readAssessmentContext: vi.fn(async () => ({
-            ok: true as const,
-            value: buildAssessmentContext({
-              checks: [buildGradedCheckSummary({ grade, grader: buildGrader() })],
+        const operations = createOperations(
+          contextWith(
+            buildGradedCheckFromGrading(grade, {
+              grader: GRADER,
+              call: { status: 'replied', reply: '' },
             }),
-          })),
-        });
+          ),
+        );
         scriptAnswers('alice', 'failed', 'confirmed manually');
 
         const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
@@ -8910,10 +9048,14 @@ describe('tevu CLI', () => {
         expect(clack.state.logs).toContainEqual({
           kind: 'info',
           message:
-            'Grader verdict for "acc-1": undetermined (openai/grader-model, effort high): the patch does not touch the relevant file',
+            'Grader verdict: undetermined (openai/grader-model, effort high): the patch does not touch the relevant file',
+        });
+        expect(clack.state.logs).toContainEqual({
+          kind: 'info',
+          message: `The grading model could not decide this check from the task text and the solution's changes. ${NO_VERDICT_TAIL}`,
         });
         expect(clack.state.prompts.map((prompt) => prompt.message)).not.toContain(
-          'Replace the grader\'s verdict for "acc-1"?',
+          "Replace the grader's verdict for this check?",
         );
         expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([
           {
@@ -8926,22 +9068,21 @@ describe('tevu CLI', () => {
         ]);
       });
 
-      it('shows the pending reason and asks directly for a verdict, with replaceExisting: false, when the grade is pending', async () => {
+      it('explains an unusable grader reply with the grade reason as technical detail and asks directly for a verdict', async () => {
         const grade: GradeRecord = {
           checkId: 'acc-1',
           category: 'acceptance',
           status: 'pending',
-          reason:
-            'the grader call failed: ModelCallError (timed-out): run process did not finish within 30000ms',
+          reason: 'the reply named no verdict for this check',
         };
-        const operations = createOperations({
-          readAssessmentContext: vi.fn(async () => ({
-            ok: true as const,
-            value: buildAssessmentContext({
-              checks: [buildGradedCheckSummary({ grade, grader: buildGrader() })],
+        const operations = createOperations(
+          contextWith(
+            buildGradedCheckFromGrading(grade, {
+              grader: GRADER,
+              call: { status: 'replied', reply: '' },
             }),
-          })),
-        });
+          ),
+        );
         scriptAnswers('alice', 'passed', 'confirmed manually');
 
         const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
@@ -8949,8 +9090,7 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(clack.state.logs).toContainEqual({
           kind: 'info',
-          message:
-            '"acc-1" was not graded: the grader call failed: ModelCallError (timed-out): run process did not finish within 30000ms',
+          message: `The grading model's reply had no usable verdict for this check. ${NO_VERDICT_TAIL} Technical detail: the reply named no verdict for this check`,
         });
         expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([
           {
@@ -8963,15 +9103,36 @@ describe('tevu CLI', () => {
         ]);
       });
 
-      it('shows a no-grading-artifact reason and asks directly for a verdict, with replaceExisting: false, when the case has no grading artifact', async () => {
-        const operations = createOperations({
-          readAssessmentContext: vi.fn(async () => ({
-            ok: true as const,
-            value: buildAssessmentContext({
-              checks: [buildGradedCheckSummary({ grade: null, grader: null })],
+      it('logs exactly the plain sentence for a grader call without a reply, keeping the reason after the technical detail marker', async () => {
+        const reason =
+          'the grader call failed: ModelCallError (timed-out): run process did not finish within 30000ms';
+        const grade: GradeRecord = {
+          checkId: 'acc-1',
+          category: 'acceptance',
+          status: 'pending',
+          reason,
+        };
+        const operations = createOperations(
+          contextWith(
+            buildGradedCheckFromGrading(grade, {
+              grader: GRADER,
+              call: { status: 'no-reply', reason },
             }),
-          })),
+          ),
+        );
+        scriptAnswers('alice', 'passed', 'confirmed manually');
+
+        const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.logs).toContainEqual({
+          kind: 'info',
+          message: `The grading model returned no verdict for this solution. This check has no verdict until you record one. Choose a verdict below. Technical detail: ${reason}`,
         });
+      });
+
+      it('explains a missing grading artifact and asks directly for a verdict, with replaceExisting: false', async () => {
+        const operations = createOperations(contextWith(buildGradedCheckFromGrading(null, null)));
         scriptAnswers('alice', 'passed', '');
 
         const { code } = await runCli(['assess', 'run-1', 'case-1'], { operations });
@@ -8979,7 +9140,7 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(clack.state.logs).toContainEqual({
           kind: 'info',
-          message: '"acc-1" was not graded: no grading artifact was saved for this case',
+          message: `tevu has no grading for this solution. ${NO_VERDICT_TAIL} Technical detail: no grading artifact was saved for this case`,
         });
         expect(vi.mocked(operations.applyAssessment).mock.calls[0]?.[1]?.decisions).toEqual([
           {
@@ -8991,6 +9152,56 @@ describe('tevu CLI', () => {
           },
         ]);
       });
+
+      it.each([
+        {
+          label: 'a manual check with an existing assessment',
+          answers: ['alice', true, 'failed', 'regressed', true],
+          operations: () =>
+            createOperations({
+              readAssessmentContext: vi.fn(async () => ({
+                ok: true as const,
+                value: buildAssessmentContext({ existing: [buildAssessmentRecord()] }),
+              })),
+            }),
+        },
+        {
+          label: 'a graded check whose call returned no reply',
+          answers: ['alice', 'passed', ''],
+          operations: () =>
+            createOperations(
+              contextWith(
+                buildGradedCheckFromGrading(
+                  {
+                    checkId: 'acc-1',
+                    category: 'acceptance',
+                    status: 'pending',
+                    reason: 'acc-1 failed',
+                  },
+                  { grader: GRADER, call: { status: 'no-reply', reason: 'acc-1 failed' } },
+                ),
+              ),
+            ),
+        },
+        {
+          label: 'a graded check without a grading artifact',
+          answers: ['alice', 'passed', ''],
+          operations: () => createOperations(contextWith(buildGradedCheckFromGrading(null, null))),
+        },
+      ])(
+        'never shows a check ID before the technical detail for $label',
+        async ({ answers, operations }) => {
+          scriptAnswers(...answers);
+
+          await runCli(['assess', 'run-1', 'case-1'], { operations: operations() });
+
+          const messages = visibleWizardMessages();
+          expect(messages.length).toBeGreaterThan(2);
+          for (const message of messages) {
+            expect(message).not.toContain('acc-1');
+          }
+        },
+      );
     });
   });
 

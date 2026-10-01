@@ -994,7 +994,8 @@ describe('runBenchmark grading in the case flow', () => {
       run.findings.some(
         (finding) =>
           finding.caseId === 'graded-task--m1--2' &&
-          finding.message === 'case was not started because an artifact failure stopped scheduling',
+          finding.message ===
+            'tevu stopped starting attempts after it failed to save files for an earlier attempt, so this attempt has no result. Fix the failure reported for that attempt and run the comparison again.',
       ),
     ).toBe(true);
   });
@@ -1079,13 +1080,11 @@ describe('runBenchmark grading in the case flow', () => {
     const run = unwrapOk(result);
     const gradedCase = caseResultOf(run, 'graded-task--m1--1');
     expect(gradedCase.artifacts.grading).not.toBeNull();
-    expect(
-      run.findings.some(
-        (finding) =>
-          finding.severity === 'warning' &&
-          finding.caseId === 'graded-task--m1--1' &&
-          finding.message.startsWith('grader call directory could not be removed; retained at "'),
-      ),
-    ).toBe(true);
+    const retained = run.findings.filter((finding) => finding.caseId === 'graded-task--m1--1');
+    expect(retained).toHaveLength(1);
+    expect(retained[0]?.severity).toBe('warning');
+    expect(retained[0]?.message).toMatch(
+      /^tevu could not delete the temporary directory of this attempt's grading call\. The results are not affected\. Delete `\/[^`]+` when no tevu command uses it\.$/,
+    );
   });
 });

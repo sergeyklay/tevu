@@ -88,14 +88,24 @@ function expectDecoded<T>(outcome: { ok: true; value: T } | { ok: false; error: 
 }
 
 describe('decodeRunConfig', () => {
-  it('projects a manually sourced task into a manual source record with a null reference', () => {
+  it('projects a task without a source into exactly a manual source record', () => {
     const decoded = expectDecoded(decodeRunConfig(buildSnapshot()));
 
-    expect(decoded.tasks[0]?.source).toEqual({
-      kind: 'manual',
-      reference: null,
-      title: 'Fixture task',
-    });
+    expect(decoded.tasks[0]?.source).toStrictEqual({ kind: 'manual' });
+  });
+
+  it.each([
+    { label: 'manual', source: undefined },
+    {
+      label: 'imported',
+      source: { kind: 'jira', key: 'PROJ-1', url: 'https://jira.example.com/browse/PROJ-1' },
+    },
+  ] as const)('projects the snapshot title onto a $label task', ({ source }) => {
+    const task = buildSnapshotTask({ title: 'Fix the login redirect', ...(source && { source }) });
+
+    const decoded = expectDecoded(decodeRunConfig(buildSnapshot({ tasks: [task] })));
+
+    expect(decoded.tasks[0]?.title).toBe('Fix the login redirect');
   });
 
   it('projects a jira source into a jira-cloud source record', () => {
@@ -258,6 +268,7 @@ describe('decodeRunConfig', () => {
     if (!result.ok) return;
     expect(Object.keys(result.value.tasks[0] ?? {})).toEqual([
       'id',
+      'title',
       'repositoryId',
       'startCommit',
       'description',
