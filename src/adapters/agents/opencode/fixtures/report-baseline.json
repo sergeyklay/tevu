@@ -402,14 +402,14 @@
         "diagnostics": null,
         "events": null,
         "grading": null,
-        "result": "cases/task-2--alpha--1/result.json",
+        "result": "cases/task-2--gamma--1/result.json",
         "sessionExport": null,
         "solutionPatch": null
       },
       "checks": [],
       "failure": {
         "error": {
-          "caseId": "task-2--alpha--1",
+          "caseId": "task-2--gamma--1",
           "kind": "CaseTimeoutError",
           "timeoutMs": 60000
         },
@@ -418,7 +418,7 @@
       "identity": {
         "agent": "opencode",
         "attempt": 1,
-        "caseId": "task-2--alpha--1",
+        "caseId": "task-2--gamma--1",
         "effort": "effort-high",
         "model": "vendor/model-gamma-synth",
         "modelId": "gamma",
@@ -586,10 +586,10 @@
       {
         "agent": "opencode",
         "attempt": 1,
-        "caseId": "task-2--alpha--1",
+        "caseId": "task-2--gamma--1",
         "effort": "effort-high",
-        "model": "vendor/model-alpha-synth",
-        "modelId": "alpha",
+        "model": "vendor/model-gamma-synth",
+        "modelId": "gamma",
         "sourceCommit": "fedcba9876543210fedcba9876543210fedcba98",
         "taskId": "task-2",
         "timeoutMs": 60000
@@ -874,7 +874,7 @@
     },
     {
       "allPassed": false,
-      "modelId": "alpha",
+      "modelId": "gamma",
       "outcomes": {
         "failed": 0,
         "not-evaluated": 1,

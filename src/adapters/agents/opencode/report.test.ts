@@ -385,7 +385,7 @@ function buildSyntheticRecords(): SyntheticRecords {
   const manifest = buildManifest(runId, config, capabilities, [
     'task-1--alpha--1',
     'task-1--beta--1',
-    'task-2--alpha--1',
+    'task-2--gamma--1',
   ]);
 
   const parsedExport = structuredClone(readJsonFixture('session-valid.json')) as {
@@ -494,7 +494,7 @@ function buildSyntheticRecords(): SyntheticRecords {
 
   const gamma = buildCaseResult({
     identity: buildCaseIdentity({
-      caseId: 'task-2--alpha--1',
+      caseId: 'task-2--gamma--1',
       taskId: 'task-2',
       modelId: 'gamma',
       model: 'vendor/model-gamma-synth',
@@ -511,9 +511,9 @@ function buildSyntheticRecords(): SyntheticRecords {
     outcome: 'not-evaluated',
     checks: [],
     metrics: unavailableBenchmarkMetrics('case timed out; checks were not run'),
-    artifacts: buildArtifactIndex('task-2--alpha--1', new Set([])),
+    artifacts: buildArtifactIndex('task-2--gamma--1', new Set([])),
     failure: {
-      error: { kind: 'CaseTimeoutError', caseId: 'task-2--alpha--1', timeoutMs: 60000 },
+      error: { kind: 'CaseTimeoutError', caseId: 'task-2--gamma--1', timeoutMs: 60000 },
       occurredAt: '2026-09-23T00:00:42.100Z',
     },
   });
@@ -1045,7 +1045,10 @@ describe('OpenCode report regeneration matches the pinned baseline', () => {
 
 describe('OpenCode report regeneration of effort checks', () => {
   async function rebuildMarkdown(
-    edit?: (manifest: { efforts: { models: Record<string, unknown> } }) => void,
+    edit?: (manifest: {
+      cases: Array<{ modelId: string }>;
+      efforts: { models: Record<string, unknown> };
+    }) => void,
   ): Promise<string> {
     const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-efforts-'));
     try {
@@ -1053,7 +1056,10 @@ describe('OpenCode report regeneration of effort checks', () => {
       if (edit !== undefined) {
         const runJsonPath = join(root, 'artifacts', runId, 'run.json');
         const stored = JSON.parse(await readFile(runJsonPath, 'utf8')) as {
-          manifest: { efforts: { models: Record<string, unknown> } };
+          manifest: {
+            cases: Array<{ modelId: string }>;
+            efforts: { models: Record<string, unknown> };
+          };
         };
         edit(stored.manifest);
         await writeFile(runJsonPath, JSON.stringify(stored, null, 2), 'utf8');
@@ -1105,15 +1111,13 @@ describe('OpenCode report regeneration of effort checks', () => {
     );
   });
 
-  it('marks an effort as not checked where the run recorded no check for the model entry', async () => {
+  it('marks an effort as not checked for a model entry the run planned no case for', async () => {
     const markdown = await rebuildMarkdown((manifest) => {
+      manifest.cases = manifest.cases.filter((entry) => entry.modelId !== 'gamma');
       delete manifest.efforts.models['gamma'];
     });
 
     expect(markdown).toContain('\n- vendor/model-gamma-synth, effort-high: effort not checked\n');
-    expect(markdown).toContain(
-      '\n- Model: vendor/model-gamma-synth, effort effort-high, not checked\n',
-    );
   });
 });
 

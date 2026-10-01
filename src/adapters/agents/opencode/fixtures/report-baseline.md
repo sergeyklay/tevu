@@ -15,9 +15,10 @@
 
 | Model | Effort | Outcome | Required checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| vendor/model-alpha-synth | effort-high | not-evaluated \[1\] | 0/2 passed, 2 not run | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] |
+| [vendor/model-gamma-synth](#case-task-2--gamma--1) | effort-high, unsupported | not-evaluated \[1\] | 0/2 passed, 2 not run | 42.0 s | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | time limit reached \[1\] |
 
-1. vendor/model-alpha-synth, effort-high: tevu saved no result for this attempt. It has no outcome or measurements, so it counts as not evaluated. Run the comparison again to get a result for this attempt. Technical detail: case task-2--alpha--1: no case result was saved
+1. vendor/model-gamma-synth, effort-high: The model did not finish within its time limit of 1.0 min. The attempt did not complete its checks, so it counts as not evaluated. To give it more time, raise the task's time limit (`timeout`, or `run.timeout`) and run the comparison again. Technical detail: case task-2--gamma--1, lifecycle timed-out: CaseTimeoutError, limit 60000 ms
+2. vendor/model-gamma-synth, effort-high: tevu has no value for this measurement. It is unknown, not zero. This run's saved files cannot supply it; to measure it, fix the cause in the technical detail and run the comparison again. Technical detail: the preserved case artifacts contain no session export; root session could not be identified
 
 > **Sensitive data:** the tevu configuration file and this artifact directory can contain
 > sensitive private repository, task, Jira, model-output, and evaluator data. They rely on
@@ -155,13 +156,13 @@ Pair summary:
 
 | Model setting | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |
 |---|---|---|---|---|---|---|---|
-| vendor/model-alpha-synth, effort-high | 1 | 0 | 0 | 0 | 1 | 0/1 | no |
+| vendor/model-gamma-synth, effort-high | 1 | 0 | 0 | 0 | 1 | 0/1 | no |
 
 | Attempt | Outcome | Required checks | Runtime failure | Elapsed |
 |---|---|---|---|---|
-| [vendor/model-gamma-synth, effort-high](#case-task-2--alpha--1) | not-evaluated | 0/2 passed, 2 not run | time limit reached | 42.0 s |
+| [vendor/model-gamma-synth, effort-high](#case-task-2--gamma--1) | not-evaluated | 0/2 passed, 2 not run | time limit reached | 42.0 s |
 
-<a id="case-task-2--alpha--1"></a>
+<a id="case-task-2--gamma--1"></a>
 
 ### vendor/model-gamma-synth, effort-high
 
@@ -169,7 +170,7 @@ Pair summary:
 - Model: vendor/model-gamma-synth, effort effort-high, unsupported
 - Agent process: ended by signal SIGKILL after 42.0 s; tevu forced it to stop
 
-tevu saved no result for this attempt. It has no outcome or measurements, so it counts as not evaluated. Run the comparison again to get a result for this attempt. Technical detail: case task-2--alpha--1: no case result was saved
+The model did not finish within its time limit of 1.0 min. The attempt did not complete its checks, so it counts as not evaluated. To give it more time, raise the task's time limit (`timeout`, or `run.timeout`) and run the comparison again. Technical detail: case task-2--gamma--1, lifecycle timed-out: CaseTimeoutError, limit 60000 ms
 
 Metrics:
 
@@ -183,7 +184,7 @@ Artifacts:
 - Diagnostics: missing
 - Session export: missing
 - Check evidence: missing
-- Result: [result.json](cases/task-2--alpha--1/result.json)
+- Result: [result.json](cases/task-2--gamma--1/result.json)
 
 ---
 

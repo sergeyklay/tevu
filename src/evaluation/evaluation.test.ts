@@ -495,7 +495,7 @@ function buildSyntheticRecords(): SyntheticRecords {
   const manifest = buildManifest(runId, config, capabilities, [
     'task-1--alpha--1',
     'task-1--beta--1',
-    'task-2--alpha--1',
+    'task-2--gamma--1',
   ]);
 
   // Neutral record: no opencode event or export shape. The
@@ -597,7 +597,7 @@ function buildSyntheticRecords(): SyntheticRecords {
 
   const gamma = buildCaseResult({
     identity: buildCaseIdentity({
-      caseId: 'task-2--alpha--1',
+      caseId: 'task-2--gamma--1',
       taskId: 'task-2',
       modelId: 'gamma',
       model: 'vendor/model-gamma-synth',
@@ -614,9 +614,9 @@ function buildSyntheticRecords(): SyntheticRecords {
     outcome: 'not-evaluated',
     checks: [],
     metrics: unavailableBenchmarkMetrics('case timed out; checks were not run'),
-    artifacts: buildArtifactIndex('task-2--alpha--1', new Set([])),
+    artifacts: buildArtifactIndex('task-2--gamma--1', new Set([])),
     failure: {
-      error: { kind: 'CaseTimeoutError', caseId: 'task-2--alpha--1', timeoutMs: 60000 },
+      error: { kind: 'CaseTimeoutError', caseId: 'task-2--gamma--1', timeoutMs: 60000 },
       occurredAt: '2026-09-23T00:00:42.100Z',
     },
   });
@@ -1756,7 +1756,7 @@ describe('deterministic report regeneration', () => {
     expect(model.cases.map((entry) => entry.identity.caseId)).toEqual([
       'task-1--alpha--1',
       'task-1--beta--1',
-      'task-2--alpha--1',
+      'task-2--gamma--1',
     ]);
     expect(model.tasks.map((task) => task.id)).toEqual(['task-1', 'task-2']);
     expect(model.models.map((entry) => entry.id)).toEqual(['alpha', 'beta', 'gamma']);
@@ -2294,7 +2294,7 @@ describe('deterministic report regeneration', () => {
       expect(beta.value.outcome).toBe('failed');
       expect(beta.value.failure?.error.kind).toBe('AgentProcessError');
 
-      const gamma = await store.readCaseResult(runId, 'task-2--alpha--1');
+      const gamma = await store.readCaseResult(runId, 'task-2--gamma--1');
       expect(gamma.ok).toBe(true);
       if (!gamma.ok) return;
       expect(gamma.value.outcome).toBe('not-evaluated');
@@ -2383,7 +2383,7 @@ describe('deterministic report regeneration', () => {
         '| [vendor/model-alpha-synth, effort-low](#case-task-1--beta--1) | failed | 0/2 passed, 1 failed, 1 not run | agent process failed | 0.9 s |',
       );
       expect(markdown).toContain(
-        '| [vendor/model-gamma-synth, effort-high](#case-task-2--alpha--1) | not-evaluated | 0/2 passed, 2 not run | time limit reached | 42.0 s |',
+        '| [vendor/model-gamma-synth, effort-high](#case-task-2--gamma--1) | not-evaluated | 0/2 passed, 2 not run | time limit reached | 42.0 s |',
       );
 
       expect(markdown).toContain('\n- API errors: 1\n');
