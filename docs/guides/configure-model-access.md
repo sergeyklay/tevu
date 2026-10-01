@@ -41,7 +41,7 @@ So the price of every model you compare, and of the grader's model, has to be kn
 
 ### OpenCode
 
-OpenCode prices a model from its provider definition. For a provider tevu copies from your OpenCode global configuration, add a `cost` object to each model under the provider's `models` map; tevu copies the prices into every case with the rest of the definition. A provider tevu does not copy needs no change here: its zero stays a measured `0 USD`.
+OpenCode prices a model from its provider definition. For a provider tevu copies from your OpenCode global configuration, add a `cost` object to each model under the provider's `models` map; tevu copies the prices into every case with the rest of the definition. A provider tevu does not copy needs no change here: its zero stays a measured `$0.0000`.
 
 ```json
 {

@@ -712,6 +712,11 @@ describe('OpenCode report regeneration matches the pinned baseline', () => {
 
       expect(rebuilt.value.normalizedJson).toBe(readTextFixture('report-baseline.json'));
       expect(rebuilt.value.markdown).toBe(readTextFixture('report-baseline.md'));
+
+      const again = await rebuildReport(runId, store, AGENTS_REGISTRY);
+      expect(again.ok).toBe(true);
+      if (!again.ok) return;
+      expect(again.value).toEqual(rebuilt.value);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1069,9 +1074,9 @@ describe('OpenCode report regeneration of effort checks', () => {
     expect(markdown).toContain(
       [
         '- Repeat: 1 (source: config)',
-        '- Model entry alpha: vendor/model-alpha-synth, effort effort-high, verified',
-        `- Model entry beta: vendor/model-alpha-synth, effort effort-low, unverified: ${BETA_EFFORT_REASON}`,
-        `- Model entry gamma: vendor/model-gamma-synth, effort effort-high, unsupported: ${GAMMA_EFFORT_REASON}`,
+        '- vendor/model-alpha-synth, effort-high: effort verified',
+        `- vendor/model-alpha-synth, effort-low: effort unverified. tevu could not confirm that the agent offers effort "effort-low" for this model. The effort was passed as requested; if the agent does not offer it, the model ran with its default options. Before the next run, check the effort against the variants the agent lists for the model. Technical detail: ${BETA_EFFORT_REASON}`,
+        `- vendor/model-gamma-synth, effort-high: effort unsupported. The agent does not list effort "effort-high" for this model. Where no task repository defines it, the model ran with its default options. Choose an effort the agent lists for the model and run the comparison again. Technical detail: ${GAMMA_EFFORT_REASON}`,
         '- Run exit code: 2',
       ].join('\n'),
     );
@@ -1081,24 +1086,22 @@ describe('OpenCode report regeneration of effort checks', () => {
     const markdown = await rebuildMarkdown();
 
     expect(markdown).toContain(
-      '| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed |',
+      '| [vendor/model-alpha-synth](#case-task-1--alpha--1) | effort-high | passed',
     );
     expect(markdown).toContain(
-      '| failed | beta | 1 | vendor/model-alpha-synth | effort-low, unverified | completed |',
+      '| [vendor/model-alpha-synth](#case-task-1--beta--1) | effort-low, unverified | failed',
     );
   });
 
   it('labels the effort of a case with the check of its model entry', async () => {
     const markdown = await rebuildMarkdown();
 
+    expect(markdown).toContain('\n- Model: vendor/model-alpha-synth, effort effort-high\n');
     expect(markdown).toContain(
-      '- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)',
+      '\n- Model: vendor/model-alpha-synth, effort effort-low, unverified\n',
     );
     expect(markdown).toContain(
-      '- Model entry: beta (vendor/model-alpha-synth, effort effort-low, unverified)',
-    );
-    expect(markdown).toContain(
-      '- Model entry: gamma (vendor/model-gamma-synth, effort effort-high, unsupported)',
+      '\n- Model: vendor/model-gamma-synth, effort effort-high, unsupported\n',
     );
   });
 
@@ -1107,11 +1110,9 @@ describe('OpenCode report regeneration of effort checks', () => {
       delete manifest.efforts.models['gamma'];
     });
 
+    expect(markdown).toContain('\n- vendor/model-gamma-synth, effort-high: effort not checked\n');
     expect(markdown).toContain(
-      '- Model entry gamma: vendor/model-gamma-synth, effort effort-high, not checked\n',
-    );
-    expect(markdown).toContain(
-      '- Model entry: gamma (vendor/model-gamma-synth, effort effort-high, not checked)',
+      '\n- Model: vendor/model-gamma-synth, effort effort-high, not checked\n',
     );
   });
 });
@@ -1209,7 +1210,9 @@ describe('OpenCode report regeneration of copied providers', () => {
       expect(first.ok).toBe(true);
       expect(second.ok).toBe(true);
       if (!first.ok || !second.ok) return;
-      expect(first.value.markdown).toContain(`cost: unavailable: ${NO_PRICE_REASON}`);
+      expect(first.value.markdown).toContain(
+        `\n- Not measured: Cost. tevu has no value for this measurement. It is unknown, not zero. This run's saved files cannot supply it; to measure it, fix the cause in the technical detail and run the comparison again. Technical detail: ${NO_PRICE_REASON}\n`,
+      );
       expect(second.value.normalizedJson).toBe(first.value.normalizedJson);
       expect(second.value.markdown).toBe(first.value.markdown);
     } finally {

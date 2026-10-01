@@ -55,6 +55,11 @@ const COMMIT_A = 'a'.repeat(40);
 const COMMIT_B = 'b'.repeat(40);
 const RUN_ID = 'run-0001-synthetic';
 const CLOCK_BASE = '2026-01-01T00:00:00.000Z';
+const CANCELLED_BEFORE_START_MESSAGE =
+  'The run was cancelled before this attempt started, so it has no result. Run the comparison again to get one.';
+const SCHEDULING_STOPPED_MESSAGE =
+  'tevu stopped starting attempts after it failed to save files for an earlier attempt, so this attempt has no result. Fix the failure reported for that attempt and run the comparison again.';
+
 const AGENT_NAME = 'fake-agent';
 const CONFIG_PATH = '/synthetic/tevu.yaml';
 
@@ -460,6 +465,7 @@ function createHarness(config: TevuConfig) {
     unreadableCaseIds: new Set<string>(),
     disposeErrors: new Map<string, Extract<TevuError, { kind: 'ArtifactError' }>>(),
     validateSourceError: null as Extract<TevuError, { kind: 'SourceMaterializationError' }> | null,
+    capturePatchError: null as Extract<TevuError, { kind: 'SourceMaterializationError' }> | null,
     createIsolatedCaseError: null as Extract<
       TevuError,
       { kind: 'SourceMaterializationError' | 'IsolationError' }
@@ -515,6 +521,9 @@ function createHarness(config: TevuConfig) {
     },
     async capturePatch(workspace) {
       timeline.push(`patch:${workspace.caseId}`);
+      if (gitState.capturePatchError !== null) {
+        return { ok: false, error: gitState.capturePatchError };
+      }
       return {
         ok: true,
         value: {
@@ -2363,7 +2372,7 @@ describe('runBenchmark', () => {
       {
         severity: 'error',
         caseId: 'task-1--c2--1',
-        message: 'case was not started because an artifact failure stopped scheduling',
+        message: SCHEDULING_STOPPED_MESSAGE,
       },
     ]);
     for (const plannedCaseId of ['task-1--c1--1', 'task-1--c2--1']) {
@@ -2407,7 +2416,7 @@ describe('runBenchmark', () => {
       {
         severity: 'warning',
         caseId: 'task-1--c2--1',
-        message: 'case was still queued when the run was cancelled and was not started',
+        message: CANCELLED_BEFORE_START_MESSAGE,
       },
     ]);
     expect(run.exitCode).toBe(130);
@@ -2433,7 +2442,7 @@ describe('runBenchmark', () => {
       {
         severity: 'warning',
         caseId: 'task-1--c2--1',
-        message: 'case was still queued when the run was cancelled and was not started',
+        message: CANCELLED_BEFORE_START_MESSAGE,
       },
     ]);
     expect(run.exitCode).toBe(130);
@@ -2524,10 +2533,10 @@ describe('runBenchmark', () => {
       {
         severity: 'warning',
         caseId: 'task-1--c1--1',
-        message: expect.stringContaining('/synthetic/workspaces/task-1--c1--1/worktree'),
+        message:
+          'tevu could not delete the workspace of this attempt, which is kept at `/synthetic/workspaces/task-1--c1--1/worktree`. The results are not affected. Delete it when you no longer need it. Technical detail: synthetic disposal failure',
       },
     ]);
-    expect(run.findings[0]?.message).toContain('cleanup failed');
     expect(run.exitCode).toBe(0);
   });
 
@@ -2557,15 +2566,74 @@ describe('runBenchmark', () => {
       {
         severity: 'error',
         caseId: 'task-1--c1--1',
-        message: expect.stringContaining('/synthetic/workspaces/task-1--c1--1/worktree'),
+        message:
+          'tevu could not save the result of this attempt, so the report of this run cannot be built; its workspace is kept at `/synthetic/workspaces/task-1--c1--1/worktree`. Check free space and permissions of the output directory, run the comparison again, and delete the kept workspace when you no longer need it. Technical detail: synthetic persistence failure',
       },
       {
         severity: 'error',
         caseId: 'task-1--c2--1',
-        message: 'case was not started because an artifact failure stopped scheduling',
+        message: SCHEDULING_STOPPED_MESSAGE,
       },
     ]);
     expect(run.exitCode).toBe(1);
+  });
+
+  it('reports a failed save without a workspace when preparation fails and its result cannot be persisted', async () => {
+    const config = buildTevuConfig({
+      run: buildRunSettings({ concurrency: 1 }),
+      tasks: [buildTask()],
+    });
+    const harness = createHarness(config);
+    harness.git.createIsolatedCaseError = {
+      kind: 'IsolationError',
+      caseId: 'task-1--c1--1',
+      reason: 'synthetic isolation failure',
+    };
+    harness.artifacts.failOnce.set('finalizeCase:task-1--c1--1', {
+      kind: 'ArtifactError',
+      operation: 'finalize-case',
+      reason: 'synthetic persistence failure',
+    });
+
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
+
+    const run = unwrapOk(result);
+    expect(run.findings).toContainEqual({
+      severity: 'error',
+      caseId: 'task-1--c1--1',
+      message:
+        'tevu could not save the result of this attempt, so the report of this run cannot be built. Check free space and permissions of the output directory, then run the comparison again. Technical detail: synthetic persistence failure',
+    });
+  });
+
+  it('warns that the solution patch is missing when it cannot be captured after a timeout', async () => {
+    const config = buildTevuConfig({ tasks: [buildTask()] });
+    const harness = createHarness(config);
+    harness.agent.scripts.set('task-1--c1--1', timedOutRunScript());
+    harness.git.capturePatchError = {
+      kind: 'SourceMaterializationError',
+      taskId: 'task-1',
+      reason: 'synthetic patch failure',
+    };
+
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    );
+
+    const run = unwrapOk(result);
+    expect(caseResultOf(run, 'task-1--c1--1').lifecycle).toBe('timed-out');
+    expect(run.findings).toEqual([
+      {
+        severity: 'warning',
+        caseId: 'task-1--c1--1',
+        message:
+          'tevu could not save the changes this attempt made before its time limit ended it, so its solution patch is missing. The attempt counts as not evaluated either way. Nothing more is needed for this run. Technical detail: source materialization failed: synthetic patch failure',
+      },
+    ]);
   });
 
   it.each([

@@ -512,13 +512,17 @@ export async function runAssessmentWizard(
   const io = dependencies.io;
   const redact = dependencies.redact;
   intro(`tevu assess ${request.runId} ${request.caseId}`, promptOptions(io));
+  log.info(redact(`Assessing ${context.value.caseName}.`), promptOptions(io));
   try {
     const currentByCheck = new Map(
       context.value.existing.map((record) => [record.checkId, record]),
     );
+    const namesByCheck = new Map(context.value.checks.map((check) => [check.checkId, check.name]));
+    const renderRecord = (record: AssessmentRecord): string =>
+      renderAssessmentRecord(record, namesByCheck.get(record.checkId) ?? record.checkId);
     if (context.value.existing.length > 0) {
       note(
-        redact(context.value.existing.map(renderAssessmentRecord).join('\n')),
+        redact(context.value.existing.map(renderRecord).join('\n')),
         'Existing assessments',
         promptOptions(io),
       );
@@ -532,22 +536,22 @@ export async function runAssessmentWizard(
       log.step(redact(renderAssessableCheck(check)), promptOptions(io));
       const existingRecord = currentByCheck.get(check.checkId);
       if (existingRecord !== undefined) {
-        log.info(redact(renderAssessmentRecord(existingRecord)), promptOptions(io));
+        log.info(redact(renderRecord(existingRecord)), promptOptions(io));
         const wantsReplacement = await askConfirm(io, {
-          message: `Replace the existing assessment for "${check.checkId}"?`,
+          message: 'Replace the existing assessment of this check?',
           initialValue: false,
         });
         if (!wantsReplacement) {
           continue;
         }
-        const verdict = await askVerdict(io, check.checkId);
+        const verdict = await askVerdict(io);
         const noteText = await askNote(io, verdict);
         const confirmed = await askConfirm(io, {
-          message: `Confirm replacing "${check.checkId}" (${existingRecord.verdict} -> ${verdict})?`,
+          message: `Confirm replacing the verdict of this check (${existingRecord.verdict} -> ${verdict})?`,
           initialValue: false,
         });
         if (!confirmed) {
-          log.info(`Kept the existing assessment for "${check.checkId}".`, promptOptions(io));
+          log.info('Kept the existing assessment.', promptOptions(io));
           continue;
         }
         decisions.push({
@@ -561,7 +565,7 @@ export async function runAssessmentWizard(
       }
 
       if (check.evaluator === 'manual') {
-        const verdict = await askVerdict(io, check.checkId);
+        const verdict = await askVerdict(io);
         const noteText = await askNote(io, verdict);
         decisions.push({
           checkId: check.checkId,
@@ -573,13 +577,12 @@ export async function runAssessmentWizard(
         continue;
       }
 
+      for (const line of check.gradeLines) {
+        log.info(redact(line), promptOptions(io));
+      }
       const grade = check.grade;
       if (grade === null) {
-        log.info(
-          redact(`"${check.checkId}" was not graded: no grading artifact was saved for this case`),
-          promptOptions(io),
-        );
-        const verdict = await askVerdict(io, check.checkId);
+        const verdict = await askVerdict(io);
         const noteText = await askNote(io, verdict);
         decisions.push({
           checkId: check.checkId,
@@ -591,8 +594,7 @@ export async function runAssessmentWizard(
         continue;
       }
       if (grade.status === 'pending') {
-        log.info(redact(`"${check.checkId}" was not graded: ${grade.reason}`), promptOptions(io));
-        const verdict = await askVerdict(io, check.checkId);
+        const verdict = await askVerdict(io);
         const noteText = await askNote(io, verdict);
         decisions.push({
           checkId: check.checkId,
@@ -603,18 +605,8 @@ export async function runAssessmentWizard(
         });
         continue;
       }
-      const grader = check.grader;
-      if (grader === null) {
-        throw new Error('unreachable: a saved grade always carries a grader identity');
-      }
-      log.info(
-        redact(
-          `Grader verdict for "${check.checkId}": ${grade.verdict} (${grader.model}, effort ${grader.effort}): ${grade.rationale}`,
-        ),
-        promptOptions(io),
-      );
       if (grade.verdict === 'undetermined') {
-        const verdict = await askVerdict(io, check.checkId);
+        const verdict = await askVerdict(io);
         const noteText = await askNote(io, verdict);
         decisions.push({
           checkId: check.checkId,
@@ -626,20 +618,20 @@ export async function runAssessmentWizard(
         continue;
       }
       const wantsReplacement = await askConfirm(io, {
-        message: `Replace the grader's verdict for "${check.checkId}"?`,
+        message: "Replace the grader's verdict for this check?",
         initialValue: false,
       });
       if (!wantsReplacement) {
         continue;
       }
-      const verdict = await askVerdict(io, check.checkId);
+      const verdict = await askVerdict(io);
       const noteText = await askNote(io, verdict);
       const confirmed = await askConfirm(io, {
-        message: `Confirm replacing "${check.checkId}" (grader ${grade.verdict} -> ${verdict})?`,
+        message: `Confirm replacing the grader's verdict for this check (${grade.verdict} -> ${verdict})?`,
         initialValue: false,
       });
       if (!confirmed) {
-        log.info(`Kept the grader's verdict for "${check.checkId}".`, promptOptions(io));
+        log.info("Kept the grader's verdict.", promptOptions(io));
         continue;
       }
       decisions.push({
@@ -2816,14 +2808,15 @@ function renderCheck(check: CheckInput): string {
 }
 
 function renderAssessableCheck(check: AssessableCheckSummary): string {
+  const category = check.category === 'acceptance' ? 'acceptance' : 'Definition of Done';
   const requirement = check.required ? 'required' : 'optional';
-  const kind = check.evaluator === 'grader' ? ', graded' : '';
-  return `${check.checkId} (${check.category}, ${requirement}${kind}): ${check.description}`;
+  const kind = check.evaluator === 'grader' ? 'graded' : 'manual';
+  return `${check.name} (${category}, ${requirement}, ${kind})`;
 }
 
-function renderAssessmentRecord(record: AssessmentRecord): string {
-  const noteSuffix = record.note.length === 0 ? '' : ` - ${record.note}`;
-  return `${record.checkId}: ${record.verdict} by ${record.assessor} at ${record.assessedAt}${noteSuffix}`;
+function renderAssessmentRecord(record: AssessmentRecord, checkName: string): string {
+  const noteSuffix = record.note.length === 0 ? '' : `; note: ${record.note}`;
+  return `${checkName}: ${record.verdict} by ${record.assessor} at ${record.assessedAt}${noteSuffix}`;
 }
 
 /** Fails with `PrerequisiteError` unless both wizard streams are TTYs. */
@@ -3004,9 +2997,9 @@ async function askInteger(
   return Number.parseInt(value.trim(), 10);
 }
 
-async function askVerdict(io: WizardIo, checkId: string): Promise<'passed' | 'failed'> {
+async function askVerdict(io: WizardIo): Promise<'passed' | 'failed'> {
   return askSelect<'passed' | 'failed'>(io, {
-    message: `Verdict for "${checkId}"`,
+    message: 'Verdict',
     options: [
       { value: 'passed', label: 'passed' },
       { value: 'failed', label: 'failed' },

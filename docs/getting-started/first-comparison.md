@@ -128,19 +128,23 @@ This step starts the models and can incur provider charges.
 tevu run
 ```
 
-In a terminal, each line of progress starts with the case it belongs to. Keep the terminal open until tevu prints `Report: <directory>/report.md`.
+In a terminal, each line of progress starts with the case it belongs to. Keep the terminal open until tevu prints `Report: <directory>/report.md`. Before that line, tevu prints a summary of every attempt: its name, outcome, and required checks, and an indented explanation of anything that needs your attention.
 
 Exit code `2` means a case timed out, had a runtime failure, or has a failed or pending required check. It is not a crash. See the [exit codes](../reference/cli.md#exit-codes).
 
 ## 7. Read the report
 
-Open the `report.md` path tevu printed. It opens with one comparison table per task, with one row per model setting in the order of your configuration. Read across a row for the task outcome, the checks passed, time, cost, tokens, tool calls, and any runtime failure. A `-` means tevu could not measure the value, and a value followed by `[n]` means some attempts could not. The numbered footnote under the table gives the reason. The Model cell links to that setting's case details. See [Comparison table](../reference/results.md#comparison-table) for every column.
+Open the `report.md` path tevu printed. It opens with one comparison table per task, headed by the task's title, with one row per model setting in the order of your configuration. Read across a row for the task outcome, the required checks, time, cost, tokens, tool calls, and any runtime failure. The Model cell links to that setting's case details. See [Comparison table](../reference/results.md#comparison-table) for every column.
+
+Required checks reads as `<passed>/<total> passed`, followed by the checks that failed, still wait for a verdict, or did not run, each counted apart. `1/6 passed, 5 pending` means one required check passed and five wait for a verdict, so nothing failed. A pending check is not a failed one.
+
+A `[n]` after a value marks a footnote under the table. Each footnote names the attempt it describes and says what happened, what it means for the result, and what to do next, for example the `tevu assess` command that records a verdict. The raw reason follows after `Technical detail:`. A `-` means tevu could not take the value. Its footnote says the value is unknown, not zero, and the attempt's section lists it under `Not measured`.
 
 Below the tables, each case has its own section. For each model setting it shows:
 
-- the task outcome, and every check with its verdict;
+- the task outcome and its required checks, and every check with its verdict;
 - for each graded check, the grading model's verdict and its rationale;
-- time, tool calls, tokens, and cost, each marked unavailable, with a reason, when tevu could not measure it;
+- time, tool calls, tokens, and cost, with the ones tevu could not measure listed on a `Not measured` line with the reason;
 - a runtime failure, if any, kept separate from the task outcome.
 
 tevu computes no score and names no winner. Compare the outcomes first, then the time and cost of the settings that passed.

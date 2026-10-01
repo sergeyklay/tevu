@@ -1,12 +1,44 @@
 # Results reference
 
-How a run's cases are identified, the outcome values, and the metrics tevu records. The files that hold them are described in [Artifacts](artifacts.md).
+How a run's cases are identified and named, the outcome values, how the report words every failure and gap, and the metrics tevu records. The files that hold them are described in [Artifacts](artifacts.md).
 
 ## Cases
 
 A run holds n cases for each task and model entry pair, where n is the effective repeat: `run.repeat`, or `--repeat` for that run. A case ID is `<task-id>--<model-id>--<attempt>`. Attempts are numbered from 1 even when n is 1. The report compares cases per task, opening with a [comparison table](#comparison-table) for each task, and summarizes each pair's attempts. It selects no winner and calculates no combined score.
 
 A case's effort is the configured string, whether or not the model has a variant of that name. When the effort is `unverified` or `unsupported`, the case may have run the model with its default options, and `report.md` marks the effort of every model entry, the grader, and each case with its status. See [Effort check](agents-and-models.md#effort-check).
+
+### Names
+
+`report.md`, the `tevu run` summary, and `tevu assess` name tasks, model settings, attempts, and checks in plain words. A reader needs no configuration file to follow them.
+
+| Name | Rule | Example |
+| --- | --- | --- |
+| Task name | The task `title`, each run of whitespace collapsed to one space | `Fix the login redirect` |
+| Setting name | `<model>, <effort>` of the model entry, both as configured | `openai/model-a, high` |
+| Attempt name | The setting name. When the effective repeat is above 1, `, attempt <n>` follows | `openai/model-a, high, attempt 2` |
+| Case name | `<attempt name> on "<task name>"` | `openai/model-a, high on "Fix the login redirect"` |
+| Check name | The check `description`, collapsed like a title. When nothing is left, `Acceptance check <n>` or `Definition of Done check <n>`, n being its position in that list | `Definition of Done check 2` |
+
+Names that would be identical are told apart:
+
+- Tasks that share a task name, and checks of one task that share a check name, each get ` (<k>)` appended, k being the position among them in configuration order.
+- Model entries that share both a model and an effort each get `, <agent>` after the effort, for example `openai/model-a, high, opencode`. Entries that still share a setting name, because they also share an agent, each get ` (<k>)` appended after that, k being the position among them in configuration order.
+- The Model column of the comparison table carries the same addition after the model: `openai/model-a, opencode`.
+- An attempt name and a case name carry the setting name with its addition.
+
+A configuration ID or case ID appears in the report only in an inline code span, after `Technical detail:`, in a link destination or an HTML anchor, or inside text you wrote or a model wrote, such as a task title or description, a check description, a model or effort string, a grade rationale, an assessor, or a note. tevu never strips IDs from that text.
+
+### Case sections
+
+Each case that has a saved result has a section in `report.md`, preceded by an HTML anchor line that the Model and Attempt links point to and headed by its attempt name. The section holds, in order:
+
+- the outcome with its required checks, the model with its effort, and how the agent process ended;
+- one paragraph per statement that explains the attempt, as described in [Messages](#messages), and, when the attempt completed, has manual or graded checks, and none of them waits for a verdict, the `tevu assess <run-id> <case-id>` command to record or replace verdicts;
+- a table of every check with its verdict, name, category (`acceptance` or `Definition of Done`), whether it is `required` or `optional`, its evaluator (`command`, `manual`, or `graded`), duration, and a link to the check evidence;
+- the metrics tevu measured, then one `Not measured` line per reason for the metrics it could not measure;
+- for a graded case, the grades by the grading model, one line per check, and the grading model's own metrics, apart from the attempt's;
+- links to the case's artifacts, including the setup logs when a setup command ran, and the current assessments.
 
 ## Outcomes
 
@@ -25,7 +57,7 @@ A case's effort is the configured string, whether or not the model has a variant
 
 ## Pair summary
 
-The report attaches one summary to every task and model entry pair.
+The report attaches one summary to every task and model entry pair. The fields below are those of `result.json`; the task section of `report.md` names each row by its setting name.
 
 | Field | Contents |
 | --- | --- |
@@ -35,26 +67,26 @@ The report attaches one summary to every task and model entry pair.
 | `passedOfPlanned` | `<passed>/<planned>`, for example `1/3` |
 | `allPassed` | Whether every attempt passed |
 
-An attempt with no case result, such as one still queued when the run was cancelled, counts as `not-evaluated`, so the four counts always sum to `planned`. No percentage is computed. Each task section of `report.md` renders its pairs' summaries as a table, one row per model entry.
+An attempt with no case result, such as one still queued when the run was cancelled, counts as `not-evaluated`, so the four counts always sum to `planned`. No percentage is computed. Each task section of `report.md` renders its pairs' summaries as a table, one row per model setting, headed `Model setting`.
 
 ## Comparison table
 
-`report.md` opens with one comparison block per task, directly under the title and ahead of the run parameters and every task section. The blocks follow the task ID order of the task sections. Each block has a `## Comparison: <task-id>` heading, a table, an optional grader line, and an optional list of numbered footnotes. The task sections, pair summaries, case tables, and case sections follow unchanged, as the detail to open when a row raises a question.
+`report.md` opens with one comparison block per task, directly under the title and ahead of the run parameters and every task section. The blocks follow the task ID order of the task sections. Each block has a `## Comparison: <task name>` heading, with the task's plain name from [Names](#names), a table, an optional grader line, and an optional list of numbered footnotes. The task sections, pair summaries, case tables, and case sections follow unchanged, as the detail to open when a row raises a question.
 
 The table has one row per model entry, in the order of the `models` list in the configuration. The order is not a ranking: no row is sorted by an outcome, check, or metric, and tevu computes no composite score and names no winner.
 
 | Column | Contents |
 | --- | --- |
-| Model | The model of the entry's first attempt, linked to its first case section when a case result exists |
+| Model | The model of the entry, with the addition of [Names](#names) when entries share a model and an effort, linked to the case section of its first attempt that has a case result |
 | Effort | The configured effort with its status, as in the case table, for example `high, unverified` |
-| Outcome | The pair's outcome, or the count of attempts per outcome when n is above 1 |
-| Checks | Passed required checks over required checks, counted across all attempts |
+| Outcome | The pair's outcome, or the count of attempts per outcome when n is above 1, followed by footnote markers for an attempt that did not finish its checks or whose checks wait for a verdict |
+| Required checks | Passed required checks over required checks, counted across all attempts, with failed, pending, and not-run checks counted apart, for example `1/6 passed, 5 pending` |
 | Elapsed | Agent-process execution time of the case |
 | Cost | Agent-reported cost in USD |
 | Turns, Tool calls | Activity counts |
 | Input, Cache read, Cache write, Output, Reasoning | Token counts |
 | API errors | Errors the model API returned |
-| Runtime failure | The error kind of the runtime failure, or `none` |
+| Runtime failure | The [label](#runtime-failure-labels) of the runtime failure, or `none`, followed by footnote markers |
 
 Values use fixed formats, so the same artifacts always render the same text.
 
@@ -64,20 +96,85 @@ Values use fixed formats, so the same artifacts always render the same text.
 | Cost | `$` and four decimal places. A measured cost below $0.00005, zero included, reads `$0.0000` | `$0.0125`, `$0.0000` |
 | Elapsed | Seconds with one decimal place below 60 seconds, minutes with one decimal place from there | `0.9 s`, `1.0 min`, `8.7 min` |
 
-An unavailable value appears as `-` followed by a footnote marker such as `[1]`, and the numbered footnote under the table gives the reason. A measured zero appears as `0`, or `$0.0000` for cost, and is never confused with an unavailable value. Footnotes are numbered from 1 in each block in the order the cells use them, and cells with the same reason share one footnote.
+An unavailable value appears as `-` followed by a footnote marker such as `[1]`, and the numbered footnote under the table explains it in the three parts of [Messages](#messages). A measured zero appears as `0`, or `$0.0000` for cost, and is never confused with an unavailable value.
 
-An attempt with no case result, such as one still queued when the run was cancelled, has no values. Its metrics and runtime failure are unavailable with the reason `no case result was saved`, and the pair counts it as `not-evaluated`. A row with no case result at all shows its model as plain text, because no case section exists to link to.
+Each footnote names one attempt: it reads `<attempt name>: <statement>`. Footnotes are numbered from 1 in each block in the order the cells use them, row by row and from left to right, then the grader line. Within one cell, statements follow the order of the attempts. Footnotes with the same text share one number. A cell lists its distinct markers in ascending order, one space apart, for example `1/3 passed, 2 pending [1] [2]`.
+
+An attempt with no case result, such as one still queued when the run was cancelled, has no values. Every cell that would hold one carries the no-result footnote, and the pair counts the attempt as `not-evaluated`. A row with no case result at all shows its model as plain text, because no case section exists to link to.
 
 With n above 1, a row aggregates the pair's attempts:
 
 - Outcome lists the count of attempts per outcome, for example `2/3 passed, 1/3 failed`, in the order `passed`, `failed`, `pending`, `not-evaluated`.
-- Checks counts required check verdicts across attempts, for example `17/18` for three attempts of a task with six required checks. Optional checks are not counted.
-- A measurement is the lower median of the values from the attempts that reported it: the value at position (k - 1) / 2, rounded down, of the sorted values. The median is always a value one attempt reported, so nothing is averaged or rounded before formatting. When only k of the n attempts reported the value, the cell adds `(k/n)` and a footnote marker, and the footnote names the attempts that lack it and why. When none reported it, the cell is `-` with a marker.
-- Runtime failure counts attempts per error kind, for example `1/3 AgentProcessError`, and reads `none` when no attempt had a failure. When some attempts have no case result, the cell ends with a footnote marker for them.
+- Required checks counts every pair of an attempt and a required check of the task in exactly one class, so the classes always sum to the number of required checks times the number of attempts. Optional checks are not counted.
 
-When two rows of one table share a model and an effort, each of those rows shows its model entry ID in parentheses after the model, for example `vendor/model (alpha)`. Without such a twin, a row shows the model alone.
+  | Class | Pair |
+  | --- | --- |
+  | passed | The attempt's result for the check is `passed` |
+  | failed | The result is `failed` |
+  | pending | The result is `pending`, so the check waits for a verdict |
+  | not run | The attempt has no case result, no result for the check, or the verdict `not-run` |
 
-When a task has gradings, a line under the table totals the grader's usage and cost for the task: the number of graded cases, then input, cache read, cache write, output, and reasoning tokens, and cost. Each total sums the grading metrics and follows the same unavailable rules as a cell. Grader usage never enters a row; rows read only the case's own metrics.
+  The phrase is `<passed>/<total> passed`, then `, <n> failed`, `, <n> pending`, and `, <n> not run`, each only when n is above 0. Examples: `1/6 passed, 5 pending`, `4/6 passed, 1 failed, 1 pending`, `0/6 passed, 6 not run`, and `17/18 passed, 1 failed` for three attempts of a task with six required checks.
+- A measurement is the lower median of the values from the attempts that reported it: the value at position (k - 1) / 2, rounded down, of the sorted values. The median is always a value one attempt reported, so nothing is averaged or rounded before formatting. When only k of the n attempts reported the value, the cell adds `(k/n)` and the footnote markers of the attempts that lack it, one footnote per attempt. When none reported it, the cell is `-` with the markers.
+- Runtime failure counts attempts per label, for example `1/3 agent process failed`, in alphabetical order of the labels, and reads `none` when no attempt had a failure. The markers of the attempts' failure statements follow, and so does the marker of an attempt with no case result.
+
+When a task has gradings, a line under the table totals the grader's usage and cost for the task: `Grading model total for this task, not added to any row: <c> calls`, then `, <m> without a verdict` when m of the calls returned no usable reply, then input, cache read, cache write, output, and reasoning tokens, and cost. Each total sums the grading metrics and follows the same unavailable rules as a cell. A grading that returned no reply contributes its footnote to every total it lacks. Grader usage never enters a row; rows read only the case's own metrics.
+
+## Messages
+
+Every failure, footnote, and pending state in `report.md`, in the `tevu run` summary, and in `tevu assess` is stated in three parts: what happened, what it means for the result, and what to do next. Internal text follows as `Technical detail:`: an error kind, a raw reason, a lifecycle, or a case ID. Everything before that marker is plain language.
+
+One module words each state, so the report, the `tevu run` summary, and `tevu assess` describe it identically. A footnote in `report.md` reads `<attempt name>: <statement>`. The `tevu run` summary prints the same statement under the attempt's case name with two leading spaces, and `tevu assess` words the state of a graded check in the same three parts. A statement is one line. Newlines in technical detail become spaces.
+
+### Runtime failure labels
+
+The Runtime failure column and the case table show a label, and the statement explains it.
+
+| Label | Error kind | What to do |
+| --- | --- | --- |
+| `time limit reached` | `CaseTimeoutError` | Raise the task's `timeout`, or `run.timeout`, and run the comparison again |
+| `cancelled` | `CancellationError` | Run the comparison again |
+| `agent process failed` | `AgentProcessError` | Read the attempt's diagnostics log |
+| `agent reported an error` | `AgentSessionError` | Read the agent's message in the technical detail and the attempt's event log |
+| `agent records unreadable` | `AgentProtocolError` | Find the record the technical detail names in the event log or session export |
+| `setup command failed` | `SetupError` | Fix the command, using its setup log, and run the comparison again |
+| `check files not prepared` | `CheckStateError` | Fix the cause the technical detail names, such as a read-only directory the agent left, and run again |
+| `files not saved` | `ArtifactError` | Check free space and permissions of the output directory, then run again |
+| `workspace not prepared` | `IsolationError`, `SourceMaterializationError` | Run `tevu validate`, fix what it reports, and run again |
+| `tevu error` | Every other kind | Run again; if the error repeats, report it with the technical detail |
+
+What an attempt's failure means for its result depends on how far the attempt got. After a completed lifecycle, the solution was still checked and the outcome comes from its checks. After a failure that stopped the attempt, such as a timeout, a cancellation, or a preparation failure, the attempt did not complete its checks and counts as `not-evaluated`. When tevu could not read the workspace afterwards (`process-failed`), its checks did not run.
+
+### No result
+
+An attempt with no case result, which includes one still queued at a cancellation, has the statement `tevu saved no result for this attempt.` It has no outcome or measurements, counts as `not-evaluated`, and is fixed by running the comparison again.
+
+### Pending checks
+
+An attempt that completed with a check that has no verdict gets a statement that names the cause. When several causes apply, their sentences follow each other in this order:
+
+| Cause | The check |
+| --- | --- |
+| Manual | Is manual and waits for your verdict |
+| No reply | Is graded, and the grading model returned no reply |
+| Unusable reply | Is graded, and the reply had no usable verdict for it |
+| Undetermined | Is graded, and the grading model could not decide it |
+| Not graded | Is graded, and tevu has no grading for the attempt |
+| No verdict | Has no definition, or is a command check without a verdict |
+
+The statement counts the checks as required and optional, says whether the outcome stays pending, is already failed, or stays passed, and gives the `tevu assess <run-id> <case-id>` command that records the verdicts. When the outcome is already failed, the statement names the failed required checks by their descriptions, for example `Failed: Type checking and the test suite pass.`, and says the verdicts no longer change the outcome but can still be recorded for completeness. The case ID, the grading model's reason, and any unusable-reply reason follow as technical detail.
+
+### Measurement gaps
+
+A metric that tevu has no value for, as an unavailable metric or as a missing value, gets a statement that the value is unknown, not zero, and that the saved files cannot supply it. The reason follows as technical detail. When the grading call returned no reply, the footnote says that the usage and cost of that call are unknown, that the grader total leaves the call out, and whether checks still wait for a verdict.
+
+### Effort statements
+
+An effort with the status `unverified` or `unsupported` gets a statement in the Run section of `report.md`, after the line of the model entry or the grader. `unverified` says that tevu could not confirm the effort, that it was passed as requested, and that the model ran with its default options if the agent does not offer it. `unsupported` says that the agent does not list the effort and that, where no task repository defines it, the model ran with its default options. The check's reason follows as technical detail. See [Effort check](agents-and-models.md#effort-check).
+
+### Run findings
+
+Each line under `## Run findings` reads `<Warning or Error> for <case name>: <message>`, without `for <case name>` when the finding names no planned case. The messages are written in the same three parts. `tevu run` prints the same lines.
 
 ## Metrics
 
@@ -101,7 +198,7 @@ Derivation:
 - Cost is the sum of the `cost` of the root session's assistant records. When the agent block copies at least one provider, a reported zero counts as measured only when the record's provider is not one the agent block copies, when the copied definition defines a price for the record's model (`models.<model>.cost` with numeric `input` and `output`), or when another assistant record of the same provider and model reports a non-zero cost. Otherwise `cost` is unavailable with the reason `the copied definition of provider "<provider>" defines no price for model "<model>"`. A zero-cost record without a usable `providerID`, or without a usable `modelID` for a copied provider, also makes `cost` unavailable, with a reason naming the field. Grader cost follows the same rule. Grader API errors are still counted from the export alone.
 - An error recorded in both counts once. When each source records an error the other lacks, the count is the larger of the two rather than their total, so it can be lower than the number of distinct errors.
 - A free model of a copied provider reads unavailable until its OpenCode provider definition sets `models.<model>.cost` with `input` `0` and `output` `0`, which makes its zero a measured one. Only the copied definition is evidence: a price set in a task repository's tracked `opencode.json` is not consulted.
-- A zero from a provider the agent block does not copy, an OpenCode built-in provider or one defined only in a task repository's tracked `opencode.json`, stays a measured `0 USD` even when nothing prices the model. A model of a provider defined only in a task repository's tracked `opencode.json` that sets no price still reads as `0 USD`.
+- A zero from a provider the agent block does not copy, an OpenCode built-in provider or one defined only in a task repository's tracked `opencode.json`, stays a measured `$0.0000` even when nothing prices the model. A model of a provider defined only in a task repository's tracked `opencode.json` that sets no price still reads as `$0.0000`.
 - A malformed export or event file makes every metric except a measured elapsed time unavailable and preserves an `AgentProtocolError`.
 
 Scope:

@@ -922,11 +922,10 @@
       "id": "task-1",
       "repositoryId": "repo-1",
       "source": {
-        "kind": "manual",
-        "reference": null,
-        "title": "Synthetic welcome-route task"
+        "kind": "manual"
       },
-      "startCommit": "0123456789abcdef0123456789abcdef01234567"
+      "startCommit": "0123456789abcdef0123456789abcdef01234567",
+      "title": "Synthetic welcome-route task"
     },
     {
       "checks": [
@@ -960,7 +959,8 @@
         "issueUrl": "https://jira.example.com/browse/TEVU-999",
         "kind": "jira-cloud"
       },
-      "startCommit": "fedcba9876543210fedcba9876543210fedcba98"
+      "startCommit": "fedcba9876543210fedcba9876543210fedcba98",
+      "title": "Synthetic welcome-route task"
     }
   ]
 }

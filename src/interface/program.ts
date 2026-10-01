@@ -19,7 +19,7 @@ import { createStatusLine } from './status-line';
 import { runAssessmentWizard, runTaskWizard } from './task-wizard';
 
 import type { WaitInterrupt } from './wait-interrupt';
-import type { AssessmentCaseContext } from '@/application/assess';
+import type { AssessedCase, AssessmentCaseContext } from '@/application/assess';
 import type { CreateTaskErrorKind, TaskWizardInput } from '@/application/create-task';
 import type { CriteriaDraftOutcome, CriteriaDraftRequest } from '@/application/draft-criteria';
 import type {
@@ -43,7 +43,6 @@ import type {
   AssessmentInput,
   BenchmarkPlan,
   CaseLifecycle,
-  CaseResult,
   EffortChecks,
   IssueSnapshot,
   JiraTrackerSettings,
@@ -216,7 +215,7 @@ export type ProgramOperations = {
     input: AssessmentInput,
   ): Promise<
     TevuResult<
-      CaseResult,
+      AssessedCase,
       'ConfigValidationError' | 'AssessmentConflictError' | 'ArtifactError' | 'CancellationError'
     >
   >;
@@ -710,20 +709,8 @@ async function runBenchmarkCommand(
   const run = executed.value;
   const runId = run.manifest.runId;
   const runDirectory = `${plan.artifactsDirectory}/${runId}`;
-  for (const caseResult of run.cases) {
-    const failureSuffix =
-      caseResult.failure === null ? '' : `, runtime failure ${caseResult.failure.error.kind}`;
-    out(
-      `${caseResult.identity.caseId}: lifecycle ${caseResult.lifecycle}, outcome ${caseResult.outcome}${failureSuffix}`,
-    );
-  }
-  for (const finding of run.findings) {
-    out(
-      `${finding.severity}${finding.caseId === null ? '' : ` [${finding.caseId}]`}: ${finding.message}`,
-    );
-  }
-  out(`Artifacts: ${runDirectory}`);
   if (run.exitCode === EXIT_CANCELLED) {
+    out(`Artifacts: ${runDirectory}`);
     out(
       `Run cancelled; partial artifacts were finalized. Regenerate the report with: tevu report ${runId}`,
     );
@@ -731,12 +718,20 @@ async function runBenchmarkCommand(
   }
   const rebuilt = await operations.rebuildRunReport(loaded.value.config, runId);
   if (!rebuilt.ok) {
+    out(`Artifacts: ${runDirectory}`);
     for (const line of renderTevuError(rebuilt.error, dependencies.redact)) {
       err(line);
     }
     err(`The report could not be generated; recover with: tevu report ${runId}`);
     return EXIT_FAILURE;
   }
+  for (const line of [
+    ...rebuilt.value.summary.attempts.flatMap((attempt) => attempt.lines),
+    ...rebuilt.value.summary.findings,
+  ]) {
+    out(line);
+  }
+  out(`Artifacts: ${runDirectory}`);
   out(`Report: ${runDirectory}/report.md`);
   return run.exitCode;
 }
@@ -777,7 +772,10 @@ async function runAssess(
   if (!applied.ok) {
     return reportFailure(err, applied.error, dependencies.redact);
   }
-  out(`Assessment recorded for case ${caseId}; derived task outcome: ${applied.value.outcome}.`);
+  out('Assessment recorded.');
+  for (const line of applied.value.summary) {
+    out(line);
+  }
   out(`Report: ${config.run.output_dir}/${runId}/report.md`);
   return EXIT_COMPLETED;
 }

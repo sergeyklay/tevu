@@ -1,21 +1,23 @@
 # tevu run 20260923t000000z-synthetic
 
-## Comparison: task-1
+## Comparison: Synthetic welcome-route task (1)
 
-| Model | Effort | Outcome | Checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |
+| Model | Effort | Outcome | Required checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| [vendor/model-alpha-synth](#case-task-1--alpha--1) | effort-high | passed | 2/2 | 1.5 s | $0.0125 | 1 | 2 | 130 | 30 | 10 | 45 | 16 | 2 | none |
-| [vendor/model-alpha-synth](#case-task-1--beta--1) | effort-low, unverified | failed | 0/2 | 0.9 s | - \[1\] | - \[1\] | 1 | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | 1 | AgentProcessError |
+| [vendor/model-alpha-synth](#case-task-1--alpha--1) | effort-high | passed \[1\] | 2/2 passed | 1.5 s | $0.0125 | 1 | 2 | 130 | 30 | 10 | 45 | 16 | 2 | none |
+| [vendor/model-alpha-synth](#case-task-1--beta--1) | effort-low, unverified | failed | 0/2 passed, 1 failed, 1 not run | 0.9 s | - \[2\] | - \[2\] | 1 | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | 1 | agent process failed \[3\] |
 
-1. the preserved case artifacts contain no session export
+1. vendor/model-alpha-synth, effort-high: 1 optional manual check waits for a person's verdict. Optional checks do not change the outcome, which stays passed. Record the verdict with `tevu assess 20260923t000000z-synthetic task-1--alpha--1`. Technical detail: case task-1--alpha--1
+2. vendor/model-alpha-synth, effort-low: tevu has no value for this measurement. It is unknown, not zero. This run's saved files cannot supply it; to measure it, fix the cause in the technical detail and run the comparison again. Technical detail: the preserved case artifacts contain no session export
+3. vendor/model-alpha-synth, effort-low: The agent process stopped with an error. Its solution was still checked, so the outcome comes from its checks. Read the attempt's diagnostics log to find out why. Technical detail: case task-1--beta--1: AgentProcessError, exit code 1, signal none
 
-## Comparison: task-2
+## Comparison: Synthetic welcome-route task (2)
 
-| Model | Effort | Outcome | Checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |
+| Model | Effort | Outcome | Required checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| vendor/model-alpha-synth | effort-high | not-evaluated | 0/2 | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] |
+| vendor/model-alpha-synth | effort-high | not-evaluated \[1\] | 0/2 passed, 2 not run | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] | - \[1\] |
 
-1. no case result was saved
+1. vendor/model-alpha-synth, effort-high: tevu saved no result for this attempt. It has no outcome or measurements, so it counts as not evaluated. Run the comparison again to get a result for this attempt. Technical detail: case task-2--alpha--1: no case result was saved
 
 > **Sensitive data:** the tevu configuration file and this artifact directory can contain
 > sensitive private repository, task, Jira, model-output, and evaluator data. They rely on
@@ -36,154 +38,143 @@
 - Concurrency: 2
 - Case timeout: 60000ms
 - Repeat: 1 (source: config)
-- Model entry alpha: vendor/model-alpha-synth, effort effort-high, verified
-- Model entry beta: vendor/model-alpha-synth, effort effort-low, unverified: "effort-low" is not among the variants "opencode models --verbose" reports for "vendor/model-alpha-synth" (effort-high), and the repository of each task may define it: task-1 (opencode.json)
-- Model entry gamma: vendor/model-gamma-synth, effort effort-high, unsupported: "effort-high" is not among the variants "opencode models --verbose" reports for "vendor/model-gamma-synth" (max), and these tasks have no agent configuration at the root of their base commit: task-2; their cases would run "vendor/model-gamma-synth" with its default options
+- vendor/model-alpha-synth, effort-high: effort verified
+- vendor/model-alpha-synth, effort-low: effort unverified. tevu could not confirm that the agent offers effort "effort-low" for this model. The effort was passed as requested; if the agent does not offer it, the model ran with its default options. Before the next run, check the effort against the variants the agent lists for the model. Technical detail: "effort-low" is not among the variants "opencode models --verbose" reports for "vendor/model-alpha-synth" (effort-high), and the repository of each task may define it: task-1 (opencode.json)
+- vendor/model-gamma-synth, effort-high: effort unsupported. The agent does not list effort "effort-high" for this model. Where no task repository defines it, the model ran with its default options. Choose an effort the agent lists for the model and run the comparison again. Technical detail: "effort-high" is not among the variants "opencode models --verbose" reports for "vendor/model-gamma-synth" (max), and these tasks have no agent configuration at the root of their base commit: task-2; their cases would run "vendor/model-gamma-synth" with its default options
 - Run exit code: 2
 
 ## Run findings
 
-- warning: cleanup warning: retained synthetic path
+- Warning: cleanup warning: retained synthetic path
 
-## Task task-1
+## Task: Synthetic welcome-route task (1)
 
 synthetic task description for the welcome route
 
-- Repository: repo-1 (`/tevu-synthetic/repo-1`)
+- Repository: `/tevu-synthetic/repo-1`
 - Source commit: `0123456789abcdef0123456789abcdef01234567`
-- Source: manual — Synthetic welcome-route task
 
 Pair summary:
 
-| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |
+| Model setting | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |
 |---|---|---|---|---|---|---|---|
-| alpha | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |
-| beta | 1 | 0 | 1 | 0 | 0 | 0/1 | no |
+| vendor/model-alpha-synth, effort-high | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |
+| vendor/model-alpha-synth, effort-low | 1 | 0 | 1 | 0 | 0 | 0/1 | no |
 
-| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |
-|---|---|---|---|---|---|---|---|
-| passed | alpha | 1 | vendor/model-alpha-synth | effort-high | completed | none | 1500 millisecond (case, source: process) |
-| failed | beta | 1 | vendor/model-alpha-synth | effort-low, unverified | completed | AgentProcessError | 900 millisecond (case, source: process) |
+| Attempt | Outcome | Required checks | Runtime failure | Elapsed |
+|---|---|---|---|---|
+| [vendor/model-alpha-synth, effort-high](#case-task-1--alpha--1) | passed | 2/2 passed | none | 1.5 s |
+| [vendor/model-alpha-synth, effort-low](#case-task-1--beta--1) | failed | 0/2 passed, 1 failed, 1 not run | agent process failed | 0.9 s |
 
-### Case task-1--alpha--1
+<a id="case-task-1--alpha--1"></a>
 
-- Model entry: alpha (vendor/model-alpha-synth, effort effort-high)
-- Lifecycle: completed
-- Task outcome: passed
-- Process: exit code 0, 1500ms, termination stage none
+### vendor/model-alpha-synth, effort-high
+
+- Outcome: passed; required checks 2/2 passed
+- Model: vendor/model-alpha-synth, effort effort-high
+- Agent process: exited with code 0 after 1.5 s
+
+1 optional manual check waits for a person's verdict. Optional checks do not change the outcome, which stays passed. Record the verdict with `tevu assess 20260923t000000z-synthetic task-1--alpha--1`. Technical detail: case task-1--alpha--1
 
 | Verdict | Check | Category | Required | Evaluator | Duration | Evidence |
 |---|---|---|---|---|---|---|
-| passed | acc-acceptance-command | acceptance | true | command | 12ms | [cases/task-1--alpha--1/checks.json](cases/task-1--alpha--1/checks.json) |
-| passed | dod-manual-review | definition-of-done | true | manual | - | [cases/task-1--alpha--1/checks.json](cases/task-1--alpha--1/checks.json) |
-| pending | man-optional-polish | definition-of-done | false | manual | - | [cases/task-1--alpha--1/checks.json](cases/task-1--alpha--1/checks.json) |
-
-Pending manual checks: man-optional-polish.
+| passed | acceptance command exits zero | acceptance | required | command | 12ms | [checks.json](cases/task-1--alpha--1/checks.json) |
+| passed | manual Definition of Done review | Definition of Done | required | manual | - | [checks.json](cases/task-1--alpha--1/checks.json) |
+| pending | optional manual polish review | Definition of Done | optional | manual | - | [checks.json](cases/task-1--alpha--1/checks.json) |
 
 Metrics:
 
-- apiCalls: 2 count (root-session, source: root-session export)
-- apiErrors: 2 count (root-session, source: root-session export and run events)
-- cacheReadTokens: 30 token (root-session, source: root-session export)
-- cacheWriteTokens: 10 token (root-session, source: root-session export)
-- cost: 0.0125 USD (root-session, source: root-session export)
-- elapsed: 1500 millisecond (case, source: process)
-- inputTokens: 130 token (root-session, source: root-session export)
-- outputTokens: 45 token (root-session, source: root-session export)
-- reasoningTokens: 16 token (root-session, source: root-session export)
-- skillCalls: 1 count (root-session, source: root-session export)
-- toolCalls: 2 count (root-session, source: root-session export)
-- turns: 1 count (root-session, source: root-session export)
+- Elapsed: 1.5 s
+- Cost: $0.0125
+- Turns: 1
+- API calls: 2
+- Tool calls: 2
+- Skill calls: 1
+- Input tokens: 130
+- Cache read tokens: 30
+- Cache write tokens: 10
+- Output tokens: 45
+- Reasoning tokens: 16
+- API errors: 2
 
 Artifacts:
 
-- Solution patch: [cases/task-1--alpha--1/solution.patch](cases/task-1--alpha--1/solution.patch)
-- Events: [cases/task-1--alpha--1/events.jsonl](cases/task-1--alpha--1/events.jsonl)
-- Diagnostics: [cases/task-1--alpha--1/stderr.log](cases/task-1--alpha--1/stderr.log)
-- Session export: [cases/task-1--alpha--1/session.json](cases/task-1--alpha--1/session.json)
-- Check evidence: [cases/task-1--alpha--1/checks.json](cases/task-1--alpha--1/checks.json)
-- Result: [cases/task-1--alpha--1/result.json](cases/task-1--alpha--1/result.json)
+- Solution patch: [solution.patch](cases/task-1--alpha--1/solution.patch)
+- Events: [events.jsonl](cases/task-1--alpha--1/events.jsonl)
+- Diagnostics: [stderr.log](cases/task-1--alpha--1/stderr.log)
+- Session export: [session.json](cases/task-1--alpha--1/session.json)
+- Check evidence: [checks.json](cases/task-1--alpha--1/checks.json)
+- Result: [result.json](cases/task-1--alpha--1/result.json)
 
 Assessments (revision 2):
 
-- dod-manual-review: passed by curator at 2026-09-23T01:00:00.000Z — confirmed by reviewer
+- manual Definition of Done review: passed by curator at 2026-09-23T01:00:00.000Z; note: confirmed by reviewer
 
-### Case task-1--beta--1
+<a id="case-task-1--beta--1"></a>
 
-- Model entry: beta (vendor/model-alpha-synth, effort effort-low, unverified)
-- Lifecycle: completed
-- Task outcome: failed
-- Process: exit code 1, 900ms, termination stage none
-- Runtime failure (preserved independently of the task outcome): AgentProcessError at 2026-09-23T00:00:00.950Z
+### vendor/model-alpha-synth, effort-low
+
+- Outcome: failed; required checks 0/2 passed, 1 failed, 1 not run
+- Model: vendor/model-alpha-synth, effort effort-low, unverified
+- Agent process: exited with code 1 after 0.9 s
+
+The agent process stopped with an error. Its solution was still checked, so the outcome comes from its checks. Read the attempt's diagnostics log to find out why. Technical detail: case task-1--beta--1: AgentProcessError, exit code 1, signal none
+
+Record or replace verdicts with `tevu assess 20260923t000000z-synthetic task-1--beta--1`.
 
 | Verdict | Check | Category | Required | Evaluator | Duration | Evidence |
 |---|---|---|---|---|---|---|
-| failed | acc-acceptance-command | acceptance | true | command | 12ms | [cases/task-1--beta--1/checks.json](cases/task-1--beta--1/checks.json) |
+| failed | acceptance command exits zero | acceptance | required | command | 12ms | [checks.json](cases/task-1--beta--1/checks.json) |
 
 Metrics:
 
-- apiCalls: unavailable: the preserved case artifacts contain no session export
-- apiErrors: 1 count (root-session, source: run events)
-- cacheReadTokens: unavailable: the preserved case artifacts contain no session export
-- cacheWriteTokens: unavailable: the preserved case artifacts contain no session export
-- cost: unavailable: the preserved case artifacts contain no session export
-- elapsed: 900 millisecond (case, source: process)
-- inputTokens: unavailable: the preserved case artifacts contain no session export
-- outputTokens: unavailable: the preserved case artifacts contain no session export
-- reasoningTokens: unavailable: the preserved case artifacts contain no session export
-- skillCalls: 0 count (root-session, source: run events)
-- toolCalls: 1 count (root-session, source: run events)
-- turns: unavailable: the preserved case artifacts contain no session export
+- Elapsed: 0.9 s
+- Tool calls: 1
+- Skill calls: 0
+- API errors: 1
+- Not measured: Cost, Turns, API calls, Input tokens, Cache read tokens, Cache write tokens, Output tokens, Reasoning tokens. tevu has no value for these measurements. They are unknown, not zero. This run's saved files cannot supply them; to measure them, fix the cause in the technical detail and run the comparison again. Technical detail: the preserved case artifacts contain no session export
 
 Artifacts:
 
 - Solution patch: missing
-- Events: [cases/task-1--beta--1/events.jsonl](cases/task-1--beta--1/events.jsonl)
-- Diagnostics: [cases/task-1--beta--1/stderr.log](cases/task-1--beta--1/stderr.log)
+- Events: [events.jsonl](cases/task-1--beta--1/events.jsonl)
+- Diagnostics: [stderr.log](cases/task-1--beta--1/stderr.log)
 - Session export: missing
-- Check evidence: [cases/task-1--beta--1/checks.json](cases/task-1--beta--1/checks.json)
-- Result: [cases/task-1--beta--1/result.json](cases/task-1--beta--1/result.json)
+- Check evidence: [checks.json](cases/task-1--beta--1/checks.json)
+- Result: [result.json](cases/task-1--beta--1/result.json)
 
-## Task task-2
+## Task: Synthetic welcome-route task (2)
 
 synthetic task description for the welcome route
 
-- Repository: repo-1 (`/tevu-synthetic/repo-1`)
+- Repository: `/tevu-synthetic/repo-1`
 - Source commit: `fedcba9876543210fedcba9876543210fedcba98`
-- Source: Jira snapshot — [TEVU-999](https://jira.example.com/browse/TEVU-999)
+- Source: imported from Jira issue [TEVU-999](https://jira.example.com/browse/TEVU-999)
 
 Pair summary:
 
-| Model entry | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |
+| Model setting | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |
 |---|---|---|---|---|---|---|---|
-| alpha | 1 | 0 | 0 | 0 | 1 | 0/1 | no |
+| vendor/model-alpha-synth, effort-high | 1 | 0 | 0 | 0 | 1 | 0/1 | no |
 
-| Outcome | Model entry | Attempt | Model | Effort | Lifecycle | Runtime failure | Elapsed |
-|---|---|---|---|---|---|---|---|
-| not-evaluated | gamma | 1 | vendor/model-gamma-synth | effort-high, unsupported | timed-out | CaseTimeoutError | 42000 millisecond (case, source: process) |
+| Attempt | Outcome | Required checks | Runtime failure | Elapsed |
+|---|---|---|---|---|
+| [vendor/model-gamma-synth, effort-high](#case-task-2--alpha--1) | not-evaluated | 0/2 passed, 2 not run | time limit reached | 42.0 s |
 
-### Case task-2--alpha--1
+<a id="case-task-2--alpha--1"></a>
 
-- Model entry: gamma (vendor/model-gamma-synth, effort effort-high, unsupported)
-- Lifecycle: timed-out
-- Task outcome: not-evaluated
-- Process: signal SIGKILL, 42000ms, termination stage forced
-- Runtime failure (preserved independently of the task outcome): CaseTimeoutError at 2026-09-23T00:00:42.100Z
+### vendor/model-gamma-synth, effort-high
+
+- Outcome: not-evaluated; required checks 0/2 passed, 2 not run
+- Model: vendor/model-gamma-synth, effort effort-high, unsupported
+- Agent process: ended by signal SIGKILL after 42.0 s; tevu forced it to stop
+
+tevu saved no result for this attempt. It has no outcome or measurements, so it counts as not evaluated. Run the comparison again to get a result for this attempt. Technical detail: case task-2--alpha--1: no case result was saved
 
 Metrics:
 
-- apiCalls: unavailable: the preserved case artifacts contain no session export; root session could not be identified
-- apiErrors: unavailable: the preserved case artifacts contain no session export; root session could not be identified
-- cacheReadTokens: unavailable: the preserved case artifacts contain no session export; root session could not be identified
-- cacheWriteTokens: unavailable: the preserved case artifacts contain no session export; root session could not be identified
-- cost: unavailable: the preserved case artifacts contain no session export; root session could not be identified
-- elapsed: 42000 millisecond (case, source: process)
-- inputTokens: unavailable: the preserved case artifacts contain no session export; root session could not be identified
-- outputTokens: unavailable: the preserved case artifacts contain no session export; root session could not be identified
-- reasoningTokens: unavailable: the preserved case artifacts contain no session export; root session could not be identified
-- skillCalls: unavailable: the preserved case artifacts contain no session export; root session could not be identified
-- toolCalls: unavailable: the preserved case artifacts contain no session export; root session could not be identified
-- turns: unavailable: the preserved case artifacts contain no session export; root session could not be identified
+- Elapsed: 42.0 s
+- Not measured: Cost, Turns, API calls, Tool calls, Skill calls, Input tokens, Cache read tokens, Cache write tokens, Output tokens, Reasoning tokens, API errors. tevu has no value for these measurements. They are unknown, not zero. This run's saved files cannot supply them; to measure them, fix the cause in the technical detail and run the comparison again. Technical detail: the preserved case artifacts contain no session export; root session could not be identified
 
 Artifacts:
 
@@ -192,7 +183,7 @@ Artifacts:
 - Diagnostics: missing
 - Session export: missing
 - Check evidence: missing
-- Result: [cases/task-2--alpha--1/result.json](cases/task-2--alpha--1/result.json)
+- Result: [result.json](cases/task-2--alpha--1/result.json)
 
 ---
 

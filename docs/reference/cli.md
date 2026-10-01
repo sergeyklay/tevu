@@ -52,18 +52,23 @@ It prints findings, then `Configuration is valid.` or `Configuration is invalid.
 - Before validation, `run` clones or fetches every GitHub repository entry a task names and fetches the Git LFS objects each distinct base commit lacks. Progress and warnings print before the validation output.
 - After each case's checks run, `run` grades that case's graded checks through `roles.grader`, which it requires declared before any case starts.
 - `--dry-run` prints the plan without creating run artifacts or workspaces, contacting Jira, or starting a model session. The plan lists each planned case with its task, model entry, commit, and timeout, marking an effort that is not verified, then the number of planned cases and manual assessments and the output directory. It still clones and fetches, so a missing clone, commit, or Git LFS object is ready for the next `run`.
-- A run prints `Run <id> started.`, one summary line per case starting with the case ID, `Artifacts: <dir>`, and `Report: <dir>/report.md`. When output is a terminal, progress lines start with the case ID.
+- A run prints `Run <id> started.` first. When output is a terminal, progress lines start with the case ID.
+- After the run, tevu builds the report and prints a summary from it: one block per attempt, then the run findings, `Artifacts: <dir>`, and `Report: <dir>/report.md`. A block opens with `<case name>: <outcome>; required checks <phrase>.`, using the [names](results.md#names) and the [Required checks](results.md#comparison-table) phrase of the report. An indented line follows for each state that needs explaining, in the three parts and with the technical detail of [Messages](results.md#messages). When a check waits for a verdict, that line gives the `tevu assess <run-id> <case-id>` command. A finding reads `<Warning or Error> for <case name>: <message>`.
+- A cancelled run prints `Artifacts: <dir>` and the cancellation line, which names `tevu report <run-id>`, and no summary. When the report cannot be built, `run` prints `Artifacts: <dir>`, then the error and the recovery line that names `tevu report <run-id>`, and no summary.
 
 ## Assessment
 
 `tevu assess` needs a terminal for input and output and a case with lifecycle `completed` and at least one manual or graded check.
 
 - It processes pending required and optional manual and graded checks in configured order.
-- For a graded check it shows the saved grade or the reason it has none before asking. A `passed` or `failed` grade is kept unless the operator chooses to replace it. An `undetermined` or pending grade needs a decision.
+- It opens with `Assessing <case name>.` and names each check by its [check name](results.md#names), with its category, whether it is required or optional, and whether it is manual or graded.
+- For a graded check it shows the saved grade or the reason it has none before asking, in the wording of the [report](results.md#messages), with the raw reason as technical detail. A `passed` or `failed` grade is kept unless the operator chooses to replace it. An `undetermined` or pending grade needs a decision.
+- The prompts name no check, because the line above them does.
 - An assessor name is required. A failed verdict also requires a note.
 - Replacing an existing verdict, an operator's or a grader's, requires confirmation. The prior verdict stays in history.
 - A per-case lock directory prevents concurrent changes. An existing lock is never removed automatically.
 - A verdict committed before a later report-write failure stays saved. The error names `tevu report <run-id>`, which regenerates the derived files.
+- After recording, the command prints `Assessment recorded.`, the case's summary block from the rebuilt report, and `Report: <dir>/<run-id>/report.md`.
 
 The [assessment guide](../guides/assess-results.md) covers the workflow.
 
