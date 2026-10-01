@@ -591,11 +591,16 @@ function renderModelCell(
   attempts: readonly Attempt[],
   showsEntryId: boolean,
 ): string {
-  const text = showsEntryId
-    ? `${cell(identity.model)} (${cell(pair.modelId)})`
-    : cell(identity.model);
+  const text = showsEntryId ? `${identity.model} (${pair.modelId})` : identity.model;
   const linked = caseResultsOf(attempts)[0];
-  return linked === undefined ? text : `[${text}](#case-${linked.identity.caseId})`;
+  return linked === undefined
+    ? cell(text)
+    : `[${cell(escapeLinkText(text))}](#case-${linked.identity.caseId})`;
+}
+
+/** A model identifier may hold unbalanced brackets, which would end or reshape the link text. */
+function escapeLinkText(text: string): string {
+  return text.replace(/[\\[\]]/g, '\\$&');
 }
 
 function renderEffortCell(

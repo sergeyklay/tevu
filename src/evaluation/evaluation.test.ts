@@ -2827,6 +2827,16 @@ describe('comparison table in the report', () => {
       expect(comparisonRow(markdown)['Model']).toBe('[vendor/odd\\|model](#case-task-1--alpha--1)');
       expect(footnotesOf(markdown, 'task-1')).toEqual(['1. upstream said a\\|b']);
     });
+
+    it('escapes brackets and backslashes in linked model text so the link stays intact', () => {
+      const models = [buildModelRecord({ model: 'vendor/odd]model[\\x' })];
+
+      const markdown = reportOf({ models });
+
+      expect(comparisonRow(markdown)['Model']).toBe(
+        '[vendor/odd\\]model\\[\\\\x](#case-task-1--alpha--1)',
+      );
+    });
   });
 
   describe('Model cell', () => {
