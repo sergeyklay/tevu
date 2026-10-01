@@ -38,7 +38,7 @@ A check's environment is this table plus the names in its `env`. A setup command
 
 An agent process receives the same fixed variable names with its own per-case home, state, and temporary directories, plus the variables named in `agents.opencode.secrets` and `agents.opencode.env`. Host agent sessions, global configuration, caches, and login stores are not copied, except the provider definitions `agents.opencode.providers` names; see [Agents and models](agents-and-models.md#providers).
 
-A model call's agent process gets the same treatment, with an empty Git repository as its working directory. See [Model calls](agents-and-models.md#model-calls).
+A model call's agent process gets the same treatment, with an empty Git repository as its working directory. It also receives `OPENCODE_PERMISSION`, set by tevu to deny every tool and overriding any value from the agent block's `env`. See [Model calls](agents-and-models.md#model-calls).
 
 ## Case executables
 

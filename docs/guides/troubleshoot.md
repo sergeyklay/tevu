@@ -52,6 +52,17 @@ The report shows a model's cost, or the grader's cost, as unavailable, while tok
 
 With OpenCode, the reason appears after `Technical detail:` in the footnote as `the copied definition of provider "<provider>" defines no price for model "<model>"`: the provider definition in your OpenCode global configuration has no `cost` for that model.
 
+## Grading model asked to use a tool
+
+`report.md` or `tevu assess` says `the grading model asked to use a tool, which grading does not allow`, and every graded check of the case is pending. tevu starts every model call with every tool denied, so the call's session holds a tool call only when configuration outside tevu allowed a tool again.
+
+Check the sources that can do that:
+
+- an `agent.<name>.permission` block, or a top-level `permission` block that lists `*` before the tool, in the configuration an agent block passes through `OPENCODE_CONFIG_CONTENT`, `OPENCODE_CONFIG`, or `OPENCODE_CONFIG_DIR`;
+- a system-wide OpenCode configuration, such as `/etc/opencode` on Linux.
+
+Remove the rule or narrow it so that it no longer allows a tool, then record the verdicts with `tevu assess <run-id> <case-id>` or run the task again. The tool may already have run when tevu noticed it, so look at the saved session in the case's `grading.json` before you trust the host's files. tevu does not call the grader again after a tool call.
+
 ## Model or provider errors
 
 See [Make a model reachable](configure-model-access.md#fix-a-failure).
