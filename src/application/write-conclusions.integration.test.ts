@@ -873,6 +873,70 @@ describe('tevu report after the run', () => {
   });
 
   it.each([
+    { name: 'no settings', mutate: (facts: Record<string, unknown>) => delete facts['settings'] },
+    {
+      name: 'a setting without outcomes',
+      mutate: (facts: Record<string, unknown>) =>
+        delete asRecord(firstOf(facts['settings']))['outcomes'],
+    },
+    {
+      name: 'a cost comparison of an unknown kind',
+      mutate: (facts: Record<string, unknown>) => {
+        facts['cost'] = { kind: 'maybe' };
+      },
+    },
+    {
+      name: 'a measure of an unknown status',
+      mutate: (facts: Record<string, unknown>) => {
+        asRecord(firstOf(facts['settings']))['cost'] = { status: 'maybe' };
+      },
+    },
+  ])('refuses facts with $name when it reads conclusions.json', async ({ mutate }) => {
+    const { store, directory, runId } = await copyOf(mainRun);
+    const executable = await writeFakeOpenCode({ run: 'ok' });
+    unwrapOk(
+      await rebuildReport(
+        runId,
+        store,
+        RUN_AGENTS,
+        buildWriter({ config: mainRun.config, executable }),
+      ),
+    );
+    const path = join(directory, runId, 'conclusions.json');
+    const saved = asRecord(JSON.parse(await readFile(path, 'utf8')));
+    mutate(asRecord(asRecord(firstOf(saved['tasks']))['facts']));
+    await writeFile(path, JSON.stringify(saved));
+
+    const result = await store.readConclusions(runId);
+
+    expect(unwrapFailure(result)).toMatchObject({
+      kind: 'ArtifactError',
+      operation: 'read-conclusions',
+    });
+  });
+
+  it('renders summary.md from the redacted conclusions, so tevu report reproduces it byte-identically', async () => {
+    const redact: Redactor = (text) => text.replaceAll('welcome', '[redacted]');
+    const { store, directory, runId } = await copyOf(mainRun, redact);
+    const executable = await writeFakeOpenCode({ run: 'ok' });
+    unwrapOk(
+      await rebuildReport(
+        runId,
+        store,
+        RUN_AGENTS,
+        buildWriter({ config: mainRun.config, executable, redact }),
+      ),
+    );
+    const summaryPath = join(directory, runId, 'summary.md');
+    const written = await readFile(summaryPath, 'utf8');
+
+    unwrapOk(await rebuildReport(runId, store, RUN_AGENTS));
+
+    expect(written).toContain('\\[redacted\\]');
+    expect(await readFile(summaryPath, 'utf8')).toBe(written);
+  });
+
+  it.each([
     {
       name: 'a call without a model effort',
       mutate: (call: Record<string, unknown>) => {
@@ -929,6 +993,10 @@ describe('tevu report after the run', () => {
     });
   });
 });
+
+function firstOf(value: unknown): unknown {
+  return (value as unknown[])[0];
+}
 
 describe('tevu assess after the run', () => {
   it('commits the verdict into report.md and leaves conclusions.json and summary.md byte-identical with no call', async () => {
