@@ -44,7 +44,7 @@ PATH="/path/to/real/bin:$PATH" tevu validate
 
 ## Missing agent capability
 
-Check that `agents.opencode.command` points to the intended executable and that it supports the `run`, `export`, and `models` commands and the options tevu uses. See [Agents](../reference/agents-and-models.md#agents).
+Check that `agents.opencode.command` points to the intended executable and that it supports the `run`, `export`, and `models` commands and the options tevu uses. See [Agents](../reference/agents-and-models.md#agents). For `capability "model call tool denial"`, see [Model call tool denial missing](#model-call-tool-denial-missing).
 
 ## Cost unavailable because the agent has no price for a model
 
@@ -54,14 +54,24 @@ With OpenCode, the reason appears after `Technical detail:` in the footnote as `
 
 ## Grading model asked to use a tool
 
-`report.md` or `tevu assess` says `the grading model asked to use a tool, which grading does not allow`, and every graded check of the case is pending. tevu starts every model call with every tool denied, so the call's session holds a tool call only when configuration outside tevu allowed a tool again.
-
-Check the sources that can do that:
-
-- an `agent.<name>.permission` block, or a top-level `permission` block that lists `*` before the tool, in the configuration an agent block passes through `OPENCODE_CONFIG_CONTENT`, `OPENCODE_CONFIG`, or `OPENCODE_CONFIG_DIR`;
-- a system-wide OpenCode configuration, such as `/etc/opencode` on Linux.
+`report.md` or `tevu assess` says `the grading model asked to use a tool, which grading does not allow`, and every graded check of the case is pending. tevu starts every model call with every tool denied and checks before the call that OpenCode reports the denial, so the call's session holds a tool call only when something the check could not see allowed a tool again, such as an executable that reports the denial and does not apply it. See [Model call tool denial missing](#model-call-tool-denial-missing) for the sources of a tool grant.
 
 Remove the rule or narrow it so that it no longer allows a tool, then record the verdicts with `tevu assess <run-id> <case-id>` or run the task again. The tool may already have run when tevu noticed it, so look at the saved session in the case's `grading.json` before you trust the host's files. tevu does not call the grader again after a tool call.
+
+## Model call tool denial missing
+
+`tevu validate` reports `capability "model call tool denial" is missing: ...`, or a drafting, grading, or summary call fails with the same text. OpenCode's `debug config` did not show every tool denied, so tevu refuses the call before it starts. The finding is an error when `roles.grader` names the agent and a task declares a graded check, and a warning otherwise. A warning still refuses the calls it names.
+
+The reason quotes the first key or field that failed, for example `lists "bash" after "*" in "permission" with a value other than "deny"`. Search the configuration OpenCode reads for that key. These sources can allow a tool:
+
+- an `agent.<name>.permission` block, or a top-level `permission` block that lists `*` before the tool, in the configuration an agent block passes through `OPENCODE_CONFIG_CONTENT`, `OPENCODE_CONFIG`, or `OPENCODE_CONFIG_DIR`;
+- a system-wide OpenCode configuration, such as `/etc/opencode` on Linux;
+- a plugin whose `config` hook adds a permission;
+- an executable that ignores `OPENCODE_PERMISSION`, which shows no `permission` at all.
+
+Remove the rule or narrow it so that it no longer allows a tool, or point `agents.opencode.command` at an executable that applies the variable. A masked value, a `build` agent that is disabled or hidden with no `default_agent`, and an object value after `*` fail too, even when you meant them to deny; the rule is in [Tool denial check](../reference/agents-and-models.md#tool-denial-check).
+
+When the text says `could not be checked: ...`, `debug config` itself failed, and the reason names how: it could not start, exited with a nonzero code, or did not finish within 120 seconds. A plugin install that cannot reach the registry is a common cause, because the install runs before the command prints and can pass the limit. Fix what the reason names, then validate again. Every call repeats the check, so a configuration that passes validation is checked again before each call.
 
 ## Model or provider errors
 

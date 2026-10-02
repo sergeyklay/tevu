@@ -55,7 +55,7 @@ Execution rules:
 
 - **Input.** The task's `prompt` and `description`, the `id` and `description` of every graded check, and the whole solution patch with no size limit. The grader never receives a reference solution, a case ID, a run ID, or the identity of the model entry that produced the solution.
 - **Tools.** None. The grader's calls run with every tool denied, so a grading cannot read or change files.
-- **Time limit.** `run.timeout` for each call, even when the task sets its own `timeout`. There is no separate grader setting.
+- **Time limit.** `run.timeout` bounds each call's model session, even when the task sets its own `timeout`. The [tool denial check](agents-and-models.md#tool-denial-check) before the session has its own 120 second limit that does not count against `run.timeout`. There is no separate grader setting.
 - **Cases graded.** A case is graded only when it reached check evaluation. A timed-out, cancelled, or unreadable case is not.
 - **Verdicts.** `passed`, `failed`, or `undetermined`, each with a rationale. The grader is asked to name the patch files and line ranges it relies on; the parser requires only a non-empty rationale.
 - **Failures.** A call whose model stopped before finishing its reply is made again, up to three calls in total. A call whose session holds a tool call is not made again, and neither is a call that times out or fails any other way. A failure leaves every graded check of the case pending, and `grading.json` records its cause and every call. The usage and cost of each call enter the grading's totals only when every call has the value; otherwise the total is unavailable. A reply tevu cannot parse also leaves every graded check pending, but keeps the call's real usage and cost.
