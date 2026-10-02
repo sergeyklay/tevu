@@ -1662,7 +1662,124 @@ function isSummaryCallOutcome(outcome: Record<string, unknown>): boolean {
   }
 }
 
-/** Holds for a decoded `TaskConclusions`: a task ID, an object of facts, three sentences, and a call or `null`. */
+function isCount(value: unknown): boolean {
+  return Number.isInteger(value) && (value as number) >= 0;
+}
+
+function isStringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+function isSummaryMeasure(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    value['status'] === 'unknown' ||
+    (value['status'] === 'known' &&
+      typeof value['value'] === 'number' &&
+      typeof value['text'] === 'string' &&
+      isCount(value['reportedAttempts']))
+  );
+}
+
+function isSummaryDropout(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isCount(value['timedOut']) &&
+    isCount(value['failedToRun']) &&
+    isStringArray(value['failedToRunLabels']) &&
+    isCount(value['waiting'])
+  );
+}
+
+function isSummarySetting(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const { outcomes, requiredChecks } = value;
+  return (
+    typeof value['name'] === 'string' &&
+    typeof value['model'] === 'string' &&
+    typeof value['effort'] === 'string' &&
+    isCount(value['planned']) &&
+    isRecord(outcomes) &&
+    ['passed', 'failed', 'pending', 'notEvaluated'].every((key) => isCount(outcomes[key])) &&
+    isRecord(requiredChecks) &&
+    ['passed', 'failed', 'pending', 'notRun', 'total'].every((key) =>
+      isCount(requiredChecks[key]),
+    ) &&
+    typeof value['didTask'] === 'boolean' &&
+    isSummaryMeasure(value['cost']) &&
+    isSummaryMeasure(value['elapsed']) &&
+    (value['dropout'] === null || isSummaryDropout(value['dropout']))
+  );
+}
+
+function isSummaryComparison(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  switch (value['kind']) {
+    case 'none-did-the-task':
+      return true;
+    case 'only-setting':
+      return typeof value['leader'] === 'string';
+    case 'not-enough-data':
+      return isStringArray(value['unknown']);
+    case 'leader':
+    case 'tie':
+      return (
+        isStringArray(value['leaders']) &&
+        typeof value['value'] === 'string' &&
+        (value['next'] === null || isSummaryNext(value['next'])) &&
+        isStringArray(value['unknown']) &&
+        Array.isArray(value['partial']) &&
+        value['partial'].every(
+          (entry) =>
+            isRecord(entry) &&
+            typeof entry['name'] === 'string' &&
+            isCount(entry['reportedAttempts']),
+        )
+      );
+    default:
+      return false;
+  }
+}
+
+function isSummaryNext(value: unknown): boolean {
+  if (!isRecord(value) || typeof value['value'] !== 'string') {
+    return false;
+  }
+  const { margin } = value;
+  return (
+    margin === null ||
+    (isRecord(margin) &&
+      (margin['kind'] === 'times' || margin['kind'] === 'percent') &&
+      typeof margin['value'] === 'string')
+  );
+}
+
+/** Holds for decoded `SummaryFacts`: every field the report renders, so a rendering never throws on a saved artifact. */
+function isSummaryFacts(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value['task'] === 'string' &&
+    typeof value['repository'] === 'string' &&
+    typeof value['when'] === 'string' &&
+    isCount(value['repeat']) &&
+    isCount(value['requiredChecksPerAttempt']) &&
+    Array.isArray(value['settings']) &&
+    value['settings'].every(isSummarySetting) &&
+    (value['separation'] === null ||
+      value['separation'] === 'passed' ||
+      value['separation'] === 'failed') &&
+    isSummaryComparison(value['cost']) &&
+    isSummaryComparison(value['speed'])
+  );
+}
+
+/** Holds for a decoded `TaskConclusions`: a task ID, complete facts, three sentences, and a call or `null`. */
 function isTaskConclusions(value: unknown): boolean {
   if (!isRecord(value)) {
     return false;
@@ -1670,7 +1787,7 @@ function isTaskConclusions(value: unknown): boolean {
   const conclusions = value['conclusions'];
   return (
     isNonEmptyString(value['taskId']) &&
-    isRecord(value['facts']) &&
+    isSummaryFacts(value['facts']) &&
     isRecord(conclusions) &&
     typeof conclusions['correctness'] === 'string' &&
     typeof conclusions['cost'] === 'string' &&
