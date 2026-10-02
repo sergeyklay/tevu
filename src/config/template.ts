@@ -79,6 +79,10 @@ roles:
     model: openai/your-grader-model
     effort: medium                # a variant the agent provides without a repository
     # agent: opencode             # needed only when more than one agent is configured
+  summary:                        # writes the conclusions of summary.md at the end of tevu run
+    model: openai/your-summary-model
+    effort: medium                # a variant the agent provides without a repository
+    # agent: opencode             # needed only when more than one agent is configured
 
 # --- Tasks ------------------------------------------------------------------
 tasks:

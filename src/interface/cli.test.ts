@@ -580,6 +580,7 @@ function buildReportResult(overrides: Partial<ReportResult> = {}): ReportResult 
     normalizedJson: '{}',
     markdown: '# Report\n',
     summary: { attempts: [], findings: [] },
+    summaryMarkdown: '# Model comparison summary\n',
     ...overrides,
   };
 }
@@ -787,7 +788,10 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
     validateConfig: vi.fn(async () => ({ ok: true as const, value: buildValidationReport() })),
     planBenchmark: vi.fn(() => buildBenchmarkPlan(config)),
     executeBenchmark: vi.fn(async () => ({ ok: true as const, value: buildRunResult() })),
-    rebuildRunReport: vi.fn(async () => ({ ok: true as const, value: buildReportResult() })),
+    rebuildRunReport: vi.fn(async () => ({
+      ok: true as const,
+      value: { report: buildReportResult(), retainedDirectories: [] },
+    })),
     readAssessmentContext: vi.fn(async () => ({
       ok: true as const,
       value: buildAssessmentContext(),
@@ -2573,29 +2577,32 @@ describe('tevu CLI', () => {
         }),
         rebuildRunReport: vi.fn(async () => ({
           ok: true as const,
-          value: buildReportResult({
-            summary: {
-              attempts: [
-                {
-                  caseId: 'case-c1-task-1',
-                  lines: [
-                    'vendor/model-a, high on "Fix the export": pending; required checks 1/2 passed, 1 pending.',
-                    "  1 required manual check waits for a person's verdict. Technical detail: case case-c1-task-1: TOKEN-VALUE",
-                  ],
-                },
-                {
-                  caseId: 'case-c2-task-1',
-                  lines: [
-                    'vendor/model-b, high on "Fix the export": passed; required checks 2/2 passed.',
-                  ],
-                },
-              ],
-              findings: [
-                'Warning for vendor/model-a, high on "Fix the export": diagnostics truncated',
-                'Error: cleanup failed for TOKEN-VALUE',
-              ],
-            },
-          }),
+          value: {
+            retainedDirectories: [],
+            report: buildReportResult({
+              summary: {
+                attempts: [
+                  {
+                    caseId: 'case-c1-task-1',
+                    lines: [
+                      'vendor/model-a, high on "Fix the export": pending; required checks 1/2 passed, 1 pending.',
+                      "  1 required manual check waits for a person's verdict. Technical detail: case case-c1-task-1: TOKEN-VALUE",
+                    ],
+                  },
+                  {
+                    caseId: 'case-c2-task-1',
+                    lines: [
+                      'vendor/model-b, high on "Fix the export": passed; required checks 2/2 passed.',
+                    ],
+                  },
+                ],
+                findings: [
+                  'Warning for vendor/model-a, high on "Fix the export": diagnostics truncated',
+                  'Error: cleanup failed for TOKEN-VALUE',
+                ],
+              },
+            }),
+          },
         })),
       });
 
@@ -2614,15 +2621,88 @@ describe('tevu CLI', () => {
         'Warning for vendor/model-a, high on "Fix the export": diagnostics truncated',
         'Error: cleanup failed for [redacted]',
         'Artifacts: /tmp/artifacts/run-1',
+        'Summary: /tmp/artifacts/run-1/summary.md',
         'Report: /tmp/artifacts/run-1/report.md',
       ]);
       expect(err).toEqual([]);
       expect(vi.mocked(operations.rebuildRunReport)).toHaveBeenCalledExactlyOnceWith(
         loadedConfig,
         'run-1',
+        'write',
       );
       expect(operations.importJiraIssue).not.toHaveBeenCalled();
       expect(operations.importGitHubIssue).not.toHaveBeenCalled();
+    });
+
+    describe('summary-call directories that could not be deleted', () => {
+      function retainedWarning(directory: string): string {
+        return `Warning: tevu could not delete the temporary directory of a summary call. The results are not affected. Delete ${directory} when no tevu command uses it.`;
+      }
+
+      function operationsRetaining(directories: string[], exitCode: RunResult['exitCode'] = 0) {
+        return createOperations({
+          executeBenchmark: vi.fn(async (_plan: BenchmarkPlan, hooks: BenchmarkExecutionHooks) => {
+            hooks.onRunId?.('run-1');
+            return { ok: true as const, value: buildRunResult({ exitCode }) };
+          }),
+          rebuildRunReport: vi.fn(async () => ({
+            ok: true as const,
+            value: {
+              retainedDirectories: directories,
+              report: buildReportResult({
+                summary: { attempts: [], findings: ['Warning: diagnostics truncated'] },
+              }),
+            },
+          })),
+        });
+      }
+
+      it('prints one warning line per directory after the run findings and before the artifact paths', async () => {
+        const operations = operationsRetaining(['/tmp/tevu-call-aaa', '/tmp/tevu-call-bbb']);
+
+        const { code, out, err } = await runCli(['run'], { operations });
+
+        expect(code).toBe(0);
+        expect(out).toEqual([
+          'Configuration: tevu.yaml',
+          'Run run-1 started.',
+          'Warning: diagnostics truncated',
+          retainedWarning('/tmp/tevu-call-aaa'),
+          retainedWarning('/tmp/tevu-call-bbb'),
+          'Artifacts: /tmp/artifacts/run-1',
+          'Summary: /tmp/artifacts/run-1/summary.md',
+          'Report: /tmp/artifacts/run-1/report.md',
+        ]);
+        expect(err).toEqual([]);
+      });
+
+      it('prints no warning when no directory was retained', async () => {
+        const operations = operationsRetaining([]);
+
+        const { out } = await runCli(['run'], { operations });
+
+        expect(out.filter((line) => line.includes('summary call'))).toEqual([]);
+      });
+
+      it('redacts a secret inside a retained directory path', async () => {
+        const operations = operationsRetaining(['/tmp/tevu-call-TOKEN-VALUE']);
+
+        const { out } = await runCli(['run'], {
+          operations,
+          redact: (text) => text.replaceAll('TOKEN-VALUE', '[redacted]'),
+        });
+
+        expect(out).toContain(retainedWarning('/tmp/tevu-call-[redacted]'));
+        expect(out.join('\n')).not.toContain('TOKEN-VALUE');
+      });
+
+      it('keeps the exit code of the run', async () => {
+        const operations = operationsRetaining(['/tmp/tevu-call-aaa'], 2);
+
+        const { code } = await runCli(['run'], { operations });
+
+        expect(code).toBe(2);
+      });
     });
 
     it('passes the same absolute path to planBenchmark that it prints in the Configuration line (AC-3)', async () => {
@@ -9251,12 +9331,14 @@ describe('tevu CLI', () => {
       expect(code).toBe(0);
       expect(out).toEqual([
         'Configuration: tevu.yaml',
+        'Summary regenerated: /tmp/artifacts/run-1/summary.md',
         'Report regenerated: /tmp/artifacts/run-1/report.md',
       ]);
       expect(err).toEqual([]);
       expect(vi.mocked(operations.rebuildRunReport)).toHaveBeenCalledExactlyOnceWith(
         loadedConfig,
         'run-1',
+        'saved',
       );
       expect(operations.validateConfig).not.toHaveBeenCalled();
       expect(operations.planBenchmark).not.toHaveBeenCalled();
@@ -9391,6 +9473,7 @@ describe('tevu CLI', () => {
 
       expect(out).toEqual([
         'Configuration: tevu.yaml',
+        'Summary regenerated: /tmp/[redacted]/run-1/summary.md',
         'Report regenerated: /tmp/[redacted]/run-1/report.md',
       ]);
       expect(out.join('')).not.toContain('hunter2');

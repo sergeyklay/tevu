@@ -17,6 +17,8 @@ import type {
   GradeRecord,
   GradingSummary,
   ModelRecord,
+  SummaryCall,
+  SummarySetting,
   TaskRecord,
   TevuError,
 } from '@/domain/types';
@@ -74,6 +76,16 @@ const NO_RESULT: Omit<Statement, 'detail'> = {
   next: 'Run the comparison again to get a result for this attempt.',
 };
 
+/** Escapes table-breaking characters in one Markdown table cell or inline value. */
+export function cell(text: string): string {
+  return text.replaceAll('|', '\\|').replaceAll('\n', ' ');
+}
+
+/** Escapes brackets and backslashes, which would end or reshape the text of a Markdown link. */
+export function escapeLinkText(text: string): string {
+  return text.replace(/[\\[\]]/g, '\\$&');
+}
+
 // Digit grouping is manual because locale-aware formatting would make regenerated reports differ between hosts.
 /** Formats a count with comma digit grouping, independent of the host locale. */
 export function formatCount(value: number): string {
@@ -119,9 +131,11 @@ function duplicateSuffixes(entries: readonly { id: string; name: string }[]): Ma
 /**
  * Builds the names of one run from its records in configuration order.
  *
- * Tasks and checks that share a name each get ` (<k>)`. Model entries that
- * share model and effort each get `, <agent>` after the effort; entries that
- * still share a name after that get ` (<k>)`. An ID missing from the records
+ * Tasks and checks that share a name each get ` (<k>)`. A setting is named by
+ * its display model, which drops the provider prefix unless that would make two
+ * different models read alike, and its effort. Model entries that share model
+ * and effort each get `, <agent>` after the effort; entries that still share a
+ * name after that get ` (<k>)`. An ID missing from the records
  * names itself. `cases` supplies each model entry's agent, which the model
  * records do not carry.
  */
@@ -163,6 +177,31 @@ function nameTasks(tasks: readonly TaskRecord[]): Map<string, string> {
   return new Map(named.map(({ id, name }) => [id, `${name}${suffixes.get(id) ?? ''}`]));
 }
 
+/** The text after the last `/` of a model string. */
+function shortModelName(model: string): string {
+  return model.slice(model.lastIndexOf('/') + 1);
+}
+
+/**
+ * The display model of every model entry, by ID: the model without its
+ * provider prefix, or the full model string when the entry has no short name
+ * or when an entry with a different model string shares it.
+ */
+export function displayModelsOf(models: readonly ModelRecord[]): ReadonlyMap<string, string> {
+  const modelsByShortName = new Map<string, Set<string>>();
+  for (const { model } of models) {
+    const short = shortModelName(model);
+    modelsByShortName.set(short, (modelsByShortName.get(short) ?? new Set()).add(model));
+  }
+  return new Map(
+    models.map(({ id, model }) => {
+      const short = shortModelName(model);
+      const isAmbiguous = (modelsByShortName.get(short)?.size ?? 0) > 1;
+      return [id, short === '' || isAmbiguous ? model : short];
+    }),
+  );
+}
+
 function nameSettings(
   models: readonly ModelRecord[],
   cases: readonly Pick<CaseIdentity, 'modelId' | 'agent'>[],
@@ -179,11 +218,17 @@ function nameSettings(
     sharedModelAndEffort.set(key, (sharedModelAndEffort.get(key) ?? 0) + 1);
   }
 
+  const displayModels = displayModelsOf(models);
   const named = models.map(({ id, model, effort }) => {
     const isShared = (sharedModelAndEffort.get(`${model}\u0000${effort}`) ?? 0) > 1;
     const agent = isShared ? agents.get(id) : undefined;
     const agentPart = agent === undefined ? '' : `, ${agent}`;
-    return { id, name: `${model}, ${effort}${agentPart}`, model: `${model}${agentPart}` };
+    const displayModel = displayModels.get(id) ?? model;
+    return {
+      id,
+      name: `${displayModel}, ${effort}${agentPart}`,
+      model: `${displayModel}${agentPart}`,
+    };
   });
   const suffixes = duplicateSuffixes(named);
   return new Map(
@@ -713,6 +758,28 @@ export function nonSeparatingOutcomesStatement(facts: {
   };
 }
 
+/** Explains a summary call whose sentences are not in `summary.md`. */
+export function summaryCallStatement(
+  outcome: Exclude<SummaryCall['outcome'], { status: 'accepted' }>,
+): Statement {
+  const means =
+    'The summary states each conclusion in a template sentence built from the facts of the run.';
+  return outcome.status === 'rejected'
+    ? {
+        happened:
+          "tevu rejected the summary model's sentences because they did not match the facts.",
+        means,
+        next: 'Nothing more is needed for this summary.',
+        detail: outcome.reason,
+      }
+    : {
+        happened: 'The summary model returned no sentences.',
+        means,
+        next: 'Before the next run, fix the cause in the technical detail.',
+        detail: outcome.reason,
+      };
+}
+
 /**
  * Counts every pair of attempt and required check of one task into exactly one
  * class. An attempt without a case result, a check without a result, and the
@@ -755,6 +822,39 @@ export function formatRequiredChecks(counts: RequiredCheckCounts): string {
     ...(counts.pending > 0 ? [`${formatCount(counts.pending)} pending`] : []),
     ...(counts.notRun > 0 ? [`${formatCount(counts.notRun)} not run`] : []),
   ].join(', ');
+}
+
+const OUTCOME_ORDER: readonly CaseResult['outcome'][] = [
+  'passed',
+  'failed',
+  'pending',
+  'not-evaluated',
+];
+
+/**
+ * Formats the outcomes of one setting's planned attempts: the outcome words
+ * alone for one attempt, else `<k>/<planned> <outcome>` per outcome that
+ * occurs, in the order passed, failed, pending, not-evaluated.
+ */
+export function formatOutcomeWords(
+  outcomes: SummarySetting['outcomes'] | Record<CaseResult['outcome'], number>,
+  planned: number,
+): string {
+  const counts: Record<CaseResult['outcome'], number> =
+    'notEvaluated' in outcomes
+      ? {
+          passed: outcomes.passed,
+          failed: outcomes.failed,
+          pending: outcomes.pending,
+          'not-evaluated': outcomes.notEvaluated,
+        }
+      : outcomes;
+  const present = OUTCOME_ORDER.filter((outcome) => counts[outcome] > 0);
+  return planned === 1
+    ? present.join(', ')
+    : present
+        .map((outcome) => `${formatCount(counts[outcome])}/${formatCount(planned)} ${outcome}`)
+        .join(', ');
 }
 
 function gradeStatement(happened: string, detail: string | null): string {

@@ -42,7 +42,11 @@ function entryConfig(effort: string): TevuConfig {
   return buildEffortConfig({ models: [{ id: 'known', model: MODEL, effort }] });
 }
 
-function roleConfig(role: 'criteria' | 'grader', effort: string, graded = false): TevuConfig {
+function roleConfig(
+  role: 'criteria' | 'grader' | 'summary',
+  effort: string,
+  graded = false,
+): TevuConfig {
   return buildEffortConfig({
     roles: { [role]: { model: MODEL, effort } },
     tasks: [buildEffortTask('task-a', { graded }), buildEffortTask('task-b')],
@@ -55,7 +59,7 @@ function listedEvidence(variants: readonly string[] | null): ModelVariantEvidenc
 
 function checkRole(
   evidence: ModelVariantEvidence,
-  overrides: { role?: 'criteria' | 'grader'; effort?: string; command?: string } = {},
+  overrides: { role?: 'criteria' | 'grader' | 'summary'; effort?: string; command?: string } = {},
 ): EffortCheck {
   return checkRoleEffort({
     role: overrides.role ?? 'criteria',
@@ -329,6 +333,15 @@ describe('checkRoleEffort', () => {
     });
   });
 
+  it('names a summary call when the summary effort is outside the reported variants (R5)', () => {
+    const result = checkRole(listedEvidence(['high', 'low']), { role: 'summary' });
+
+    expect(result).toEqual({
+      status: 'unsupported',
+      reason: `"hihg" is not among the variants ${VARIANTS_CLAUSE}, so a summary call would run "${MODEL}" with its default options`,
+    });
+  });
+
   it('words the unsupported reason for a model without variants in the present tense (R5)', () => {
     const result = checkRole(listedEvidence([]), { role: 'criteria' });
 
@@ -416,6 +429,48 @@ describe('checkEfforts for a role', () => {
     expect(findings).toEqual([]);
   });
 
+  it('only warns for a summary effort outside the reported variants, even when a task has a graded check', () => {
+    const { checks, findings } = checkRoles(roleConfig('summary', 'hihg', true));
+
+    expect(checks.roles.summary?.status).toBe('unsupported');
+    expect(findings).toEqual([
+      {
+        severity: 'warning',
+        identifier: 'roles.summary.effort',
+        message: `"hihg" is not among the variants ${VARIANTS_CLAUSE}, so a summary call would run "${MODEL}" with its default options`,
+      },
+    ]);
+  });
+
+  it('warns for a summary effort on a model without variant data (R3)', () => {
+    const { findings } = checkRoles(roleConfig('summary', 'high'), {
+      listings: new Map([['opencode', buildListedModels([MODEL])]]),
+    });
+
+    expect(findings).toEqual([
+      expect.objectContaining({ severity: 'warning', identifier: 'roles.summary.effort' }),
+    ]);
+  });
+
+  it('raises no summary finding when the listing failed or lacks the model (R1, R2)', () => {
+    const unlisted = checkRoles(roleConfig('summary', 'high'), {
+      listings: new Map([['opencode', buildListedModels(['prov/other'])]]),
+    });
+    const failed = checkRoles(roleConfig('summary', 'high'), { listings: new Map() });
+
+    expect(unlisted.findings).toEqual([]);
+    expect(failed.findings).toEqual([]);
+    expect(unlisted.checks.roles.summary?.status).toBe('unverified');
+    expect(failed.checks.roles.summary?.status).toBe('unverified');
+  });
+
+  it('verifies a summary effort among the reported variants (R4)', () => {
+    const { checks, findings } = checkRoles(roleConfig('summary', 'low'));
+
+    expect(checks.roles).toEqual({ summary: { status: 'verified' } });
+    expect(findings).toEqual([]);
+  });
+
   it('checks only the declared roles', () => {
     const { checks } = check(roleConfig('criteria', 'high'));
 
@@ -444,6 +499,24 @@ describe('checkEfforts findings order', () => {
       'models.alpha.effort',
       'roles.criteria.effort',
       'roles.grader.effort',
+    ]);
+  });
+
+  it('lists the summary finding after the criteria and grader findings whatever the configuration order', () => {
+    const config = buildEffortConfig({
+      roles: {
+        summary: { model: MODEL, effort: 'hihg' },
+        grader: { model: MODEL, effort: 'hihg' },
+        criteria: { model: MODEL, effort: 'hihg' },
+      },
+    });
+
+    const { findings } = checkRoles(config);
+
+    expect(findings.map((finding) => finding.identifier)).toEqual([
+      'roles.criteria.effort',
+      'roles.grader.effort',
+      'roles.summary.effort',
     ]);
   });
 });

@@ -1,21 +1,29 @@
+import { parseGitHubRepository } from '@/domain/github-reference';
 import { effortLabel } from '@/domain/types';
 
+import { renderSummaryMarkdown, summarizeTask, templateConclusions } from './summary';
 import {
   buildReaderNames,
+  cell,
   countRequiredChecks,
   describeAttempt,
+  displayModelsOf,
   effortStatement,
+  escapeLinkText,
   failureLabel,
   formatCost,
   formatCount,
   formatElapsed,
+  formatOutcomeWords,
   formatRequiredChecks,
   gradingGapStatement,
   measurementGapStatement,
   nonSeparatingOutcomesStatement,
   renderStatement,
+  summaryCallStatement,
 } from './wording';
 
+import type { SummaryEvidence, SummaryRationale, SummaryTaskView } from './summary';
 import type { AttemptFacts, AttemptStatements, ReaderNames, Statement } from './wording';
 import type {
   AgentCapabilityReport,
@@ -25,6 +33,7 @@ import type {
   CaseIdentity,
   CaseResult,
   CheckRecord,
+  ConclusionsArtifact,
   EffortCheck,
   GraderIdentity,
   GradingArtifact,
@@ -37,6 +46,9 @@ import type {
   RunFinding,
   RunManifest,
   RunResult,
+  SummaryCall,
+  SummaryFacts,
+  SummaryMeasure,
   TaskRecord,
 } from '@/domain/types';
 
@@ -56,6 +68,8 @@ export type ReportInput = {
   repositories: readonly RepositoryRecord[];
   assessments: readonly AssessmentArtifact[];
   gradings: readonly GradingArtifact[];
+  /** The saved summary conclusions; `null` when the run has none, so the summary uses template sentences. */
+  conclusions: ConclusionsArtifact | null;
 };
 
 /** One distinct grader identity across a run's gradings, with its shared model entries. */
@@ -128,7 +142,7 @@ function compareCaseIdentities(a: CaseIdentity, b: CaseIdentity): number {
 }
 
 /** Builds the sorted, sensitive-content-free report model from preserved records. */
-export function buildNormalizedRun(input: ReportInput): NormalizedRunModel {
+export function buildNormalizedRun(input: Omit<ReportInput, 'conclusions'>): NormalizedRunModel {
   const identities = new Map(
     input.run.manifest.cases.map((identity) => [identity.caseId, identity]),
   );
@@ -298,14 +312,100 @@ type ReportContext = {
   tasksById: ReadonlyMap<string, TaskRecord>;
   /** Every planned attempt, keyed by case ID. */
   attemptsByCaseId: ReadonlyMap<string, Attempt>;
+  /** The saved summary call of each task that has one, keyed by task ID. */
+  summaryCallsByTask: ReadonlyMap<string, SummaryCall>;
 };
 
 /**
- * Builds the normalized JSON, the Markdown report, and the terminal summary
- * for one run. Pure and deterministic: no I/O, no generation timestamps, no
- * composite score, and no winner selection.
+ * Builds the normalized JSON, the Markdown report, the terminal summary, and
+ * the text of `summary.md` for one run. Pure and deterministic: no I/O, no
+ * generation timestamps, no composite score, and no overall winner.
+ *
+ * A task renders its summary from its entry in `input.conclusions`; a task
+ * without an entry renders the facts derived from the run with template
+ * sentences, and an entry for a task the run lacks is ignored.
  */
 export function buildReport(input: ReportInput): ReportResult {
+  const savedByTask = new Map(input.conclusions?.tasks.map((entry) => [entry.taskId, entry]));
+  const context = createContextOf(
+    input,
+    new Map(
+      [...savedByTask].flatMap(([taskId, entry]) =>
+        entry.call === null ? [] : [[taskId, entry.call] as const],
+      ),
+    ),
+  );
+  const summaryTasks = deriveTaskFacts(context).map(({ taskId, facts }) => {
+    const saved = savedByTask.get(taskId);
+    return {
+      facts: saved?.facts ?? facts,
+      conclusions: saved?.conclusions ?? templateConclusions(facts),
+    };
+  });
+  return {
+    runId: context.model.manifest.runId,
+    normalizedJson: serializeNormalizedRun(context.model),
+    markdown: renderMarkdownReport(context),
+    summary: buildSummary(context),
+    summaryMarkdown: renderSummaryMarkdown(summaryTasks),
+  };
+}
+
+/**
+ * Builds what the summary call and its acceptance check read for every task of
+ * one run, in task ID order, from the same context the report renders. Pure
+ * and deterministic.
+ */
+export function buildSummaryEvidence(input: Omit<ReportInput, 'conclusions'>): SummaryEvidence[] {
+  const context = createContextOf(input, new Map());
+  const displayModels = [...new Set(displayModelsOf(input.models).values())];
+  const identifiers = [
+    ...new Set([
+      ...input.run.manifest.cases.map((identity) => identity.caseId),
+      ...input.tasks.flatMap((task) => [task.id, ...task.checks.map((check) => check.id)]),
+      ...input.models.map((entry) => entry.id),
+      ...input.repositories.map((repository) => repository.id),
+    ]),
+  ].sort(compareStrings);
+  return deriveTaskFacts(context).map(({ taskId, facts }) => ({
+    taskId,
+    facts,
+    rationales: rationalesOfTask(context, taskId),
+    displayModels,
+    identifiers,
+  }));
+}
+
+/** The graded rationales of one task in row, attempt, and check order. */
+function rationalesOfTask(context: ReportContext, taskId: string): SummaryRationale[] {
+  const repeat = context.model.manifest.execution.repeat.value;
+  const pairs = orderPairsForRows(
+    context.model.pairs.filter((pair) => pair.taskId === taskId),
+    context.configurationModelIds,
+  );
+  return pairs.flatMap((pair) =>
+    attemptsOfPair(context, pair).flatMap((attempt) =>
+      (attempt.grading?.grades ?? []).flatMap((grade): SummaryRationale[] =>
+        grade.status === 'graded'
+          ? [
+              {
+                setting: context.names.setting(pair.modelId),
+                attempt: repeat > 1 ? attempt.identity.attempt : null,
+                check: context.names.check(taskId, grade.checkId),
+                verdict: grade.verdict,
+                rationale: grade.rationale,
+              },
+            ]
+          : [],
+      ),
+    ),
+  );
+}
+
+function createContextOf(
+  input: Omit<ReportInput, 'conclusions'>,
+  summaryCallsByTask: ReadonlyMap<string, SummaryCall>,
+): ReportContext {
   const model = buildNormalizedRun(input);
   // Names come from the input order: `buildNormalizedRun` sorts tasks and their checks by ID.
   const names = buildReaderNames({
@@ -314,23 +414,19 @@ export function buildReport(input: ReportInput): ReportResult {
     repeat: input.run.manifest.execution.repeat.value,
     cases: input.run.manifest.cases,
   });
-  const context = createReportContext(
+  return createReportContext(
     model,
     names,
     input.models.map((entry) => entry.id),
+    summaryCallsByTask,
   );
-  return {
-    runId: model.manifest.runId,
-    normalizedJson: serializeNormalizedRun(model),
-    markdown: renderMarkdownReport(context),
-    summary: buildSummary(context),
-  };
 }
 
 function createReportContext(
   model: NormalizedRunModel,
   names: ReaderNames,
   configurationModelIds: readonly string[],
+  summaryCallsByTask: ReadonlyMap<string, SummaryCall>,
 ): ReportContext {
   const tasksById = new Map(model.tasks.map((task) => [task.id, task]));
   const gradingsByCase = new Map(model.gradings.map((grading) => [grading.caseId, grading]));
@@ -356,6 +452,7 @@ function createReportContext(
     configurationModelIds,
     tasksById,
     attemptsByCaseId: new Map(attempts),
+    summaryCallsByTask,
   };
 }
 
@@ -464,7 +561,7 @@ function renderMarkdownReport(context: ReportContext): string {
     '',
     'Task outcome, runtime failure, and run exit status are reported independently.',
     'Command check output is configured acceptance evidence, not an additional model-quality metric.',
-    'No composite score or winner is computed.',
+    'No composite score or overall winner is computed.',
     '',
   );
 
@@ -525,13 +622,6 @@ function statementsOf(attempt: Attempt): Statement[] {
 const COMPARISON_HEADER_ROW =
   '| Model | Effort | Outcome | Required checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |';
 const COMPARISON_SEPARATOR_ROW = '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|';
-
-const OUTCOME_ORDER: readonly CaseResult['outcome'][] = [
-  'passed',
-  'failed',
-  'pending',
-  'not-evaluated',
-];
 
 type MeasurementColumn = {
   metric: keyof BenchmarkMetrics;
@@ -629,12 +719,120 @@ function renderComparisonBlocks(context: ReportContext): string[] {
       lines.push(renderGraderLine(graded, context, footnotes), '');
     }
 
+    const summaryCall = context.summaryCallsByTask.get(taskId);
+    if (summaryCall !== undefined) {
+      lines.push(renderSummaryModelLine(summaryCall, footnotes), '');
+    }
+
     const footnoteLines = footnotes.lines();
     if (footnoteLines.length > 0) {
       lines.push(...footnoteLines, '');
     }
   }
   return lines;
+}
+
+function deriveTaskFacts(context: ReportContext): Array<{ taskId: string; facts: SummaryFacts }> {
+  return sortedTaskIds(context.model).map((taskId) => {
+    const pairs = orderPairsForRows(
+      context.model.pairs.filter((pair) => pair.taskId === taskId),
+      context.configurationModelIds,
+    );
+    const checks = context.tasksById.get(taskId)?.checks ?? [];
+    const view: SummaryTaskView = {
+      task: context.names.task(taskId),
+      repository: repositoryNameOf(context, taskId),
+      when: formatStartedAt(context.model.manifest.startedAt),
+      repeat: context.model.manifest.execution.repeat.value,
+      requiredChecksPerAttempt: checks.filter((check) => check.required).length,
+      separation: nonSeparatingOutcomeOf(pairs, context),
+      rows: pairs.flatMap((pair) => {
+        const attempts = attemptsOfPair(context, pair);
+        const [lowest] = attempts;
+        if (lowest === undefined) {
+          return [];
+        }
+        return [
+          {
+            name: context.names.setting(pair.modelId),
+            model: context.names.settingModel(pair.modelId),
+            effort: lowest.identity.effort,
+            attempts: attempts.map(summaryAttemptOf),
+            requiredChecks: countRequiredChecks(attempts, checks),
+            cost: summaryMeasureOf(attempts, 'cost', formatCost),
+            elapsed: summaryMeasureOf(attempts, 'elapsed', formatElapsed),
+          },
+        ];
+      }),
+    };
+    return { taskId, facts: summarizeTask(view) };
+  });
+}
+
+/** The repository name of the context line: `<owner>/<repo>`, the value as written, or the last path segment. */
+function repositoryNameOf(context: ReportContext, taskId: string): string {
+  const task = context.tasksById.get(taskId);
+  const repository = context.model.repositories.find((entry) => entry.id === task?.repositoryId);
+  if (repository === undefined) {
+    return '';
+  }
+  if (repository.github !== undefined) {
+    const parsed = parseGitHubRepository(repository.github);
+    return parsed === null ? repository.github : `${parsed.owner}/${parsed.repo}`;
+  }
+  return (
+    repository.path
+      .replace(/[\\/]+$/, '')
+      .split(/[\\/]/)
+      .pop() ?? ''
+  );
+}
+
+/** `<date> at <hh:mm> UTC` of an ISO timestamp; reads the saved text only, never a clock. */
+function formatStartedAt(startedAt: string): string {
+  return `${startedAt.slice(0, 10)} at ${startedAt.slice(11, 16)} UTC`;
+}
+
+function summaryAttemptOf(attempt: Attempt): SummaryTaskView['rows'][number]['attempts'][number] {
+  const { result } = attempt;
+  const outcome = result?.outcome ?? 'not-evaluated';
+  if (result === undefined) {
+    return { outcome, dropout: 'failed-to-run', label: 'no result was saved' };
+  }
+  if (result.lifecycle === 'timed-out') {
+    return { outcome, dropout: 'timed-out', label: null };
+  }
+  if (
+    result.lifecycle === 'process-failed' ||
+    result.lifecycle === 'infrastructure-failed' ||
+    result.lifecycle === 'cancelled'
+  ) {
+    const label =
+      result.failure !== null
+        ? failureLabel(result.failure.error.kind)
+        : result.lifecycle === 'cancelled'
+          ? 'cancelled'
+          : 'tevu error';
+    return { outcome, dropout: 'failed-to-run', label };
+  }
+  return { outcome, dropout: outcome === 'pending' ? 'waiting' : null, label: null };
+}
+
+/** The lower median of the attempts that reported `metric`; unknown when none did. */
+function summaryMeasureOf(
+  attempts: readonly Attempt[],
+  metric: 'cost' | 'elapsed',
+  format: (value: number) => string,
+): SummaryMeasure {
+  const values = attempts.flatMap(({ result }) => {
+    const measured = result === undefined ? undefined : measuredValueOf(result.metrics[metric]);
+    return measured?.kind === 'reported' ? [measured.value] : [];
+  });
+  if (values.length === 0) {
+    return { status: 'unknown' };
+  }
+  const value = lowerMedian(values);
+  return { status: 'known', value, text: format(value), reportedAttempts: values.length };
 }
 
 /**
@@ -678,7 +876,7 @@ function renderComparisonRow(
     return [];
   }
   const cells = [
-    renderModelCell(lowest.identity, attempts, context.names),
+    renderModelCell(lowest.identity, context.names),
     renderEffortCell(lowest.identity, pair, context.model.manifest.efforts),
     renderOutcomeCell(pair, attempts, context.names, footnotes),
     formatRequiredChecks(
@@ -724,21 +922,8 @@ function caseResultsOf(attempts: readonly Attempt[]): CaseResult[] {
   return attempts.flatMap((attempt) => (attempt.result === undefined ? [] : [attempt.result]));
 }
 
-function renderModelCell(
-  identity: CaseIdentity,
-  attempts: readonly Attempt[],
-  names: ReaderNames,
-): string {
-  const text = names.settingModel(identity.modelId);
-  const linked = caseResultsOf(attempts)[0];
-  return linked === undefined
-    ? cell(text)
-    : `[${cell(escapeLinkText(text))}](#case-${linked.identity.caseId})`;
-}
-
-/** A model identifier may hold unbalanced brackets, which would end or reshape the link text. */
-function escapeLinkText(text: string): string {
-  return text.replace(/[\\[\]]/g, '\\$&');
+function renderModelCell(identity: CaseIdentity, names: ReaderNames): string {
+  return cell(names.settingModel(identity.modelId));
 }
 
 function renderEffortCell(
@@ -755,16 +940,7 @@ function renderOutcomeCell(
   names: ReaderNames,
   footnotes: FootnoteRegistry,
 ): string {
-  const present = OUTCOME_ORDER.filter((outcome) => pair.outcomes[outcome] > 0);
-  const text =
-    pair.planned === 1
-      ? present.join(', ')
-      : present
-          .map(
-            (outcome) =>
-              `${formatCount(pair.outcomes[outcome])}/${formatCount(pair.planned)} ${outcome}`,
-          )
-          .join(', ');
+  const text = formatOutcomeWords(pair.outcomes, pair.planned);
   const markers = footnoteMarkers(
     attempts.flatMap((attempt) =>
       [attempt.statements.stop, attempt.statements.pending].flatMap((statement) =>
@@ -976,6 +1152,45 @@ function renderGraderLine(
   const callCount = `${formatCount(calls.length)} ${calls.length === 1 ? 'call' : 'calls'}`;
   const gap = withoutVerdict > 0 ? `, ${formatCount(withoutVerdict)} without a verdict` : '';
   return `Grading model total for this task, not added to any row: ${callCount}${gap}, ${totals.join(', ')}.`;
+}
+
+/**
+ * Renders the usage and cost of the summary call of one task, read from the
+ * call's own metrics only. Its markers number after the grader line's: the
+ * status first, then the values from left to right.
+ */
+function renderSummaryModelLine(call: SummaryCall, footnotes: FootnoteRegistry): string {
+  const attemptName = 'Summary model';
+  const status =
+    call.outcome.status === 'accepted'
+      ? 'its sentences are in the summary'
+      : appendMarkers(
+          'its sentences are not in the summary',
+          footnoteMarkers(
+            [{ attemptName, statement: summaryCallStatement(call.outcome) }],
+            footnotes,
+          ),
+        );
+  const totals = GRADER_TOTALS.map(({ label, metric, format }) => {
+    const measured = measuredValueOf(call.metrics[metric]);
+    const item: MeasurementItem =
+      measured.kind === 'reported'
+        ? measured
+        : {
+            kind: 'lacking',
+            footnote: {
+              attemptName,
+              statement: measurementGapStatement({
+                reason: measured.reason,
+                count: 1,
+                graderLine: false,
+              }),
+            },
+          };
+    return `${label} ${renderMeasurementCell([item], sum, format, footnotes)}`;
+  });
+  const { model } = call;
+  return `Summary model for this task, not added to any row: ${cell(model.model)} (effort ${cell(model.effort)}, agent ${cell(model.agent)}), ${status}, ${totals.join(', ')}.`;
 }
 
 /** Numbers footnote texts by first use; an identical text reuses its number. */
@@ -1343,11 +1558,6 @@ function describeTaskSource(source: TaskRecord['source']): string[] {
 
 function artifactLink(path: string | null): string {
   return path === null ? 'missing' : `[${cell(path.slice(path.lastIndexOf('/') + 1))}](${path})`;
-}
-
-/** Escapes table-breaking characters in one Markdown table cell or inline value. */
-function cell(text: string): string {
-  return text.replaceAll('|', '\\|').replaceAll('\n', ' ');
 }
 
 function sortById<T extends { id: string }>(entries: readonly T[]): T[] {

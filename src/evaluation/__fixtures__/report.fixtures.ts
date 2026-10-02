@@ -10,9 +10,14 @@ import type {
   GradingArtifact,
   MetricValue,
   ModelRecord,
+  SummaryCall,
+  SummaryFacts,
+  SummaryMeasure,
+  SummarySetting,
   TaskRecord,
   TevuError,
 } from '@/domain/types';
+import type { SummaryEvidence, SummaryTaskView } from '@/evaluation/summary';
 
 export const FIXTURE_RUN_ID = 'run-1';
 
@@ -207,6 +212,212 @@ export function buildPendingGrade(
     category: 'acceptance',
     status: 'pending',
     reason: 'the reply named no verdict for this check',
+    ...overrides,
+  };
+}
+
+type ViewRow = SummaryTaskView['rows'][number];
+type ViewAttempt = ViewRow['attempts'][number];
+
+export const UNKNOWN_MEASURE: SummaryMeasure = { status: 'unknown' };
+
+export function knownMeasure(value: number, text: string, reportedAttempts = 1): SummaryMeasure {
+  return { status: 'known', value, text, reportedAttempts };
+}
+
+export function buildViewAttempt(overrides: Partial<ViewAttempt> = {}): ViewAttempt {
+  return { outcome: 'passed', dropout: null, label: null, ...overrides };
+}
+
+/** One passed attempt of `gpt-5.6-luna` at high effort that cost $0.0800 and took 6.3 min. */
+export function buildViewRow(overrides: Partial<ViewRow> = {}): ViewRow {
+  return {
+    name: 'gpt-5.6-luna, high',
+    model: 'gpt-5.6-luna',
+    effort: 'high',
+    attempts: [buildViewAttempt()],
+    requiredChecks: { passed: 6, failed: 0, pending: 0, notRun: 0, total: 6 },
+    cost: knownMeasure(0.08, '$0.0800'),
+    elapsed: knownMeasure(378_000, '6.3 min'),
+    ...overrides,
+  };
+}
+
+function buildLowEffortRow(overrides: Partial<ViewRow> = {}): ViewRow {
+  return buildViewRow({
+    name: 'gpt-5.6-luna, low',
+    effort: 'low',
+    cost: knownMeasure(0.02, '$0.0200'),
+    elapsed: knownMeasure(126_000, '2.1 min'),
+    ...overrides,
+  });
+}
+
+/** Two settings of one model, one attempt each, both passed: the high setting is slower and dearer. */
+export function buildSummaryView(overrides: Partial<SummaryTaskView> = {}): SummaryTaskView {
+  return {
+    task: 'Fix the login redirect',
+    repository: 'acme/app',
+    when: '2026-10-02 at 14:05 UTC',
+    repeat: 1,
+    requiredChecksPerAttempt: 6,
+    separation: null,
+    rows: [buildViewRow(), buildLowEffortRow()],
+    ...overrides,
+  };
+}
+
+const TIMED_OUT_CHECKS = { passed: 2, failed: 0, pending: 0, notRun: 4, total: 6 };
+
+/** The low setting timed out, so only the high setting did the task. */
+export function buildTimedOutView(): SummaryTaskView {
+  return buildSummaryView({
+    rows: [
+      buildViewRow(),
+      buildLowEffortRow({
+        attempts: [buildViewAttempt({ outcome: 'failed', dropout: 'timed-out' })],
+        requiredChecks: TIMED_OUT_CHECKS,
+      }),
+    ],
+  });
+}
+
+/** The low setting has required checks still waiting for a verdict. */
+export function buildPendingView(): SummaryTaskView {
+  return buildSummaryView({
+    rows: [
+      buildViewRow(),
+      buildLowEffortRow({
+        attempts: [buildViewAttempt({ outcome: 'pending', dropout: 'waiting' })],
+        requiredChecks: { passed: 5, failed: 0, pending: 1, notRun: 0, total: 6 },
+      }),
+    ],
+  });
+}
+
+/** Both settings passed at the same displayed cost. */
+export function buildCostTieView(): SummaryTaskView {
+  return buildSummaryView({
+    rows: [
+      buildViewRow({ cost: knownMeasure(0.05004, '$0.0500') }),
+      buildLowEffortRow({ cost: knownMeasure(0.05, '$0.0500') }),
+    ],
+  });
+}
+
+/** Both settings passed, but the low setting reported no cost. */
+export function buildUnavailableCostView(): SummaryTaskView {
+  return buildSummaryView({
+    rows: [buildViewRow(), buildLowEffortRow({ cost: UNKNOWN_MEASURE })],
+  });
+}
+
+/** Three attempts per setting; the low setting reported its cost for two of them. */
+export function buildRepeatView(): SummaryTaskView {
+  const attempts = [buildViewAttempt(), buildViewAttempt(), buildViewAttempt()];
+  const checks = { passed: 18, failed: 0, pending: 0, notRun: 0, total: 18 };
+  return buildSummaryView({
+    repeat: 3,
+    rows: [
+      buildViewRow({
+        attempts,
+        requiredChecks: checks,
+        cost: knownMeasure(0.08, '$0.0800', 3),
+        elapsed: knownMeasure(378_000, '6.3 min', 3),
+      }),
+      buildLowEffortRow({
+        attempts,
+        requiredChecks: checks,
+        cost: knownMeasure(0.02, '$0.0200', 2),
+        elapsed: knownMeasure(126_000, '2.1 min', 3),
+      }),
+    ],
+  });
+}
+
+export function buildSummarySetting(overrides: Partial<SummarySetting> = {}): SummarySetting {
+  return {
+    name: 'gpt-5.6-luna, high',
+    model: 'gpt-5.6-luna',
+    effort: 'high',
+    planned: 1,
+    outcomes: { passed: 1, failed: 0, pending: 0, notEvaluated: 0 },
+    requiredChecks: { passed: 6, failed: 0, pending: 0, notRun: 0, total: 6 },
+    didTask: true,
+    cost: knownMeasure(0.08, '$0.0800'),
+    elapsed: knownMeasure(378_000, '6.3 min'),
+    dropout: null,
+    ...overrides,
+  };
+}
+
+/** The facts of the worked example: both settings passed, and the low setting was cheapest and fastest. */
+export function buildSummaryFacts(overrides: Partial<SummaryFacts> = {}): SummaryFacts {
+  return {
+    task: 'Fix the login redirect',
+    repository: 'acme/app',
+    when: '2026-10-02 at 14:05 UTC',
+    repeat: 1,
+    requiredChecksPerAttempt: 6,
+    settings: [
+      buildSummarySetting(),
+      buildSummarySetting({
+        name: 'gpt-5.6-luna, low',
+        effort: 'low',
+        cost: knownMeasure(0.02, '$0.0200'),
+        elapsed: knownMeasure(126_000, '2.1 min'),
+      }),
+    ],
+    separation: 'passed',
+    cost: {
+      kind: 'leader',
+      leaders: ['gpt-5.6-luna, low'],
+      value: '$0.0200',
+      next: { value: '$0.0800', margin: { kind: 'times', value: '4' } },
+      unknown: [],
+      partial: [],
+    },
+    speed: {
+      kind: 'leader',
+      leaders: ['gpt-5.6-luna, low'],
+      value: '2.1 min',
+      next: { value: '6.3 min', margin: { kind: 'times', value: '3' } },
+      unknown: [],
+      partial: [],
+    },
+    ...overrides,
+  };
+}
+
+/** Evidence for `facts`, with identifiers a reply must not repeat and no grader rationale. */
+export function buildSummaryEvidenceRecord(
+  facts: SummaryFacts = buildSummaryFacts(),
+  overrides: Partial<SummaryEvidence> = {},
+): SummaryEvidence {
+  return {
+    taskId: 'fix-login',
+    facts,
+    rationales: [],
+    displayModels: [...new Set(facts.settings.map((setting) => setting.model))],
+    identifiers: [
+      'fix-login--m-high--1',
+      'fix-login--m-low--1',
+      'fix-login',
+      'm-high',
+      'm-low',
+      'repo-main',
+      'redirect-check',
+    ],
+    ...overrides,
+  };
+}
+
+/** A summary call whose reply was accepted, with every metric reported. */
+export function buildSummaryCall(overrides: Partial<SummaryCall> = {}): SummaryCall {
+  return {
+    model: { model: 'openai/summary-model', effort: 'medium', agent: 'opencode' },
+    outcome: { status: 'accepted', reply: '{}' },
+    metrics: buildAgentMetrics(),
     ...overrides,
   };
 }

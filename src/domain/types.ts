@@ -303,7 +303,7 @@ export interface ModelDefinition {
 }
 
 /** A model role a configuration may declare under `roles`. */
-export type ModelRoleName = 'criteria' | 'grader';
+export type ModelRoleName = 'criteria' | 'grader' | 'summary';
 
 /** One resolved model role: a model entry without `id`, with `agent` materialized. */
 export type ModelRole = Omit<ModelDefinition, 'id'>;
@@ -496,8 +496,8 @@ export type CheckRecord = {
 /** One preserved model entry: id, provider model string, and reasoning effort. */
 export type ModelRecord = { id: string; model: string; effort: string };
 
-/** One preserved repository: id and its resolved path. */
-export type RepositoryRecord = { id: string; path: string };
+/** One preserved repository: id and its resolved path; `github` is present exactly for a GitHub entry, as written. */
+export type RepositoryRecord = { id: string; path: string; github?: string };
 
 /** Decoded projection of a run's stored configuration, in snapshot order. */
 export type RunConfigRecord = {
@@ -1338,6 +1338,100 @@ export interface AssessmentLock {
   release(): Promise<TevuResult<void, 'ArtifactError'>>;
 }
 
+/** One measurement of a setting: the lower median of the attempts that reported it. */
+export type SummaryMeasure =
+  | { status: 'unknown' }
+  | { status: 'known'; value: number; text: string; reportedAttempts: number };
+
+/** Attempts of one setting that left the comparison, by class. */
+export type SummaryDropout = {
+  timedOut: number;
+  failedToRun: number;
+  /** Distinct labels of the failed-to-run attempts, ascending by UTF-16 code unit. */
+  failedToRunLabels: string[];
+  waiting: number;
+};
+
+/** One model setting of one task, in comparison-table row order. */
+export type SummarySetting = {
+  name: string;
+  model: string;
+  effort: string;
+  planned: number;
+  outcomes: { passed: number; failed: number; pending: number; notEvaluated: number };
+  requiredChecks: {
+    passed: number;
+    failed: number;
+    pending: number;
+    notRun: number;
+    total: number;
+  };
+  /** Whether every planned attempt of the setting passed. */
+  didTask: boolean;
+  cost: SummaryMeasure;
+  elapsed: SummaryMeasure;
+  /** `null` when no attempt dropped out. */
+  dropout: SummaryDropout | null;
+};
+
+/** How much lower the leader's value is than the next setting's. */
+export type SummaryMargin = { kind: 'times' | 'percent'; value: string };
+
+/** The cost or speed comparison among the settings that did the task. */
+export type SummaryComparison =
+  | { kind: 'none-did-the-task' }
+  | { kind: 'only-setting'; leader: string }
+  | { kind: 'not-enough-data'; unknown: string[] }
+  | {
+      kind: 'leader' | 'tie';
+      leaders: string[];
+      value: string;
+      next: { value: string; margin: SummaryMargin | null } | null;
+      unknown: string[];
+      partial: Array<{ name: string; reportedAttempts: number }>;
+    };
+
+/** Every fact the summary states about one task. */
+export type SummaryFacts = {
+  task: string;
+  repository: string;
+  when: string;
+  repeat: number;
+  requiredChecksPerAttempt: number;
+  settings: SummarySetting[];
+  separation: 'passed' | 'failed' | null;
+  cost: SummaryComparison;
+  speed: SummaryComparison;
+};
+
+/** The aspects a summary concludes on. */
+export type SummaryAspect = 'correctness' | 'cost' | 'speed';
+
+/** The three conclusions of one task's summary. */
+export type ConclusionTexts = Record<SummaryAspect, string>;
+
+/** One summary call; its metrics never enter a setting. */
+export type SummaryCall = {
+  model: ModelRole;
+  outcome:
+    | { status: 'accepted'; reply: string }
+    | { status: 'rejected'; reply: string; reason: string }
+    | { status: 'no-reply'; reason: string };
+  metrics: AgentMetrics;
+};
+
+/** One task's saved conclusions: the model's when `call.outcome.status` is `accepted`, else the template's. */
+export type TaskConclusions = {
+  taskId: string;
+  facts: SummaryFacts;
+  conclusions: ConclusionTexts;
+  /** `null` when no summary call was made: no `roles.summary` was declared, or a cancellation skipped the call. */
+  call: SummaryCall | null;
+};
+
+/** `conclusions.json` at the run root. */
+export type ConclusionsArtifact = { schemaVersion: 1; runId: string; tasks: TaskConclusions[] };
+
 /** Terminal lines rendered from the same report model as the Markdown, so both describe a state in the same words. */
 export type ReportSummary = {
   /** One entry per planned attempt, in comparison order. */
@@ -1353,6 +1447,8 @@ export type ReportResult = {
   markdown: string;
   /** Not persisted: `ArtifactStore.writeReport` writes `normalizedJson` and `markdown` only. */
   summary: ReportSummary;
+  /** The text of `summary.md`, written by `ArtifactStore.writeSummary`; never part of `normalizedJson`. */
+  summaryMarkdown: string;
 };
 
 /** Run-level finding for cases without a final result, cleanup warnings, and cancellations. */
@@ -1403,6 +1499,12 @@ export interface ArtifactStore {
   replaceCaseResult(runId: string, result: CaseResult): Promise<TevuResult<void, 'ArtifactError'>>;
   finalizeRun(result: RunResult): Promise<TevuResult<void, 'ArtifactError'>>;
   writeReport(runId: string, report: ReportResult): Promise<TevuResult<void, 'ArtifactError'>>;
+  /** `null` when `conclusions.json` does not exist; a malformed file is an `ArtifactError`. */
+  readConclusions(runId: string): Promise<TevuResult<ConclusionsArtifact | null, 'ArtifactError'>>;
+  /** Atomically replaces `conclusions.json` of an existing run through the redacting JSON sink. */
+  writeConclusions(artifact: ConclusionsArtifact): Promise<TevuResult<void, 'ArtifactError'>>;
+  /** Atomically replaces `summary.md` of an existing run through the redacting text sink; `writeReport` stays unchanged. */
+  writeSummary(runId: string, markdown: string): Promise<TevuResult<void, 'ArtifactError'>>;
   readRunManifest(runId: string): Promise<TevuResult<RunManifest, 'ArtifactError'>>;
   readRunResult(runId: string): Promise<TevuResult<RunResult, 'ArtifactError'>>;
   readCaseResult(runId: string, caseId: string): Promise<TevuResult<CaseResult, 'ArtifactError'>>;

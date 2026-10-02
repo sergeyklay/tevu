@@ -44,6 +44,7 @@ import { checkModelAccess, inspectModelProvider, probeAgent } from '@/applicatio
 import { resolveReferenceSolution } from '@/application/reference-solution';
 import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
 import { validateConfig } from '@/application/validate';
+import { writeTaskConclusions } from '@/application/write-conclusions';
 import { canonicalConfigSerialization, checkRepositoryPlacement, loadConfig } from '@/config/load';
 import { locateConfig, managedCloneRoot as resolveManagedCloneRoot } from '@/config/locate';
 import { referencedVariableName } from '@/config/schema';
@@ -54,6 +55,7 @@ import { createWaitInterrupt } from '@/interface/wait-interrupt';
 import type { JiraCloudSettings } from '@/adapters/trackers/jira-cloud';
 import type { ManagedLfsDependencies } from '@/application/managed-clone';
 import type { ModelAccessDependencies } from '@/application/model-access';
+import type { ConclusionWriter } from '@/application/write-conclusions';
 import type {
   AgentRegistry,
   ArtifactStore,
@@ -320,7 +322,20 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
         clearCancellationExit();
       }
     },
-    rebuildRunReport: (config, runId) => rebuildReport(runId, storeFor(config), agentsFor(config)),
+    rebuildRunReport: (config, runId, conclusions) => {
+      const agents = agentsFor(config);
+      const writer: ConclusionWriter | undefined =
+        conclusions === 'write'
+          ? {
+              write: (evidence) =>
+                writeTaskConclusions(
+                  { config, evidence, redact: registry.redact, cancellation },
+                  { agents, environments, git: createGit() },
+                ),
+            }
+          : undefined;
+      return rebuildReport(runId, storeFor(config), agents, writer);
+    },
     readAssessmentContext: (config, runId, caseId) =>
       readAssessmentContext(runId, caseId, storeFor(config)),
     applyAssessment: (config, input) => assessCase(input, storeFor(config), agentsFor(config)),

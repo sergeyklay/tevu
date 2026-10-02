@@ -19,6 +19,7 @@ import {
   buildReaderNames,
   countRequiredChecks,
   describeAttempt,
+  displayModelsOf,
   effortStatement,
   failureLabel,
   formatCount,
@@ -28,6 +29,7 @@ import {
   measurementGapStatement,
   nonSeparatingOutcomesStatement,
   renderStatement,
+  summaryCallStatement,
 } from './wording';
 
 import type { AttemptFacts } from './wording';
@@ -179,10 +181,10 @@ describe('buildReaderNames', () => {
         names.attempt(identity),
         names.caseName(identity),
       ]).toEqual([
-        'vendor/model-a, high',
-        'vendor/model-a',
-        'vendor/model-a, high',
-        'vendor/model-a, high on "Fix the login redirect"',
+        'model-a, high',
+        'model-a',
+        'model-a, high',
+        'model-a, high on "Fix the login redirect"',
       ]);
     });
 
@@ -191,8 +193,8 @@ describe('buildReaderNames', () => {
       const identity = { taskId: 'task-1', modelId: 'm1', attempt: 2 };
 
       expect([names.attempt(identity), names.caseName(identity)]).toEqual([
-        'vendor/model-a, high, attempt 2',
-        'vendor/model-a, high, attempt 2 on "Fix the login redirect"',
+        'model-a, high, attempt 2',
+        'model-a, high, attempt 2 on "Fix the login redirect"',
       ]);
     });
 
@@ -217,9 +219,9 @@ describe('buildReaderNames', () => {
       });
 
       expect(['m1', 'm2', 'm3'].map((id) => names.setting(id))).toEqual([
-        'vendor/model-a, high',
-        'vendor/model-a, low',
-        'vendor/model-b, high',
+        'model-a, high',
+        'model-a, low',
+        'model-b, high',
       ]);
     });
 
@@ -240,12 +242,7 @@ describe('buildReaderNames', () => {
           names.setting('m2'),
           names.settingModel('m1'),
           names.settingModel('m2'),
-        ]).toEqual([
-          'vendor/model-a, high, a',
-          'vendor/model-a, high, b',
-          'vendor/model-a, a',
-          'vendor/model-a, b',
-        ]);
+        ]).toEqual(['model-a, high, a', 'model-a, high, b', 'model-a, a', 'model-a, b']);
       });
 
       it('carries the agent into attempt and case names', () => {
@@ -260,8 +257,8 @@ describe('buildReaderNames', () => {
         const identity = { taskId: 'task-1', modelId: 'm2', attempt: 2 };
 
         expect([names.attempt(identity), names.caseName(identity)]).toEqual([
-          'vendor/model-a, high, b, attempt 2',
-          'vendor/model-a, high, b, attempt 2 on "Fix the login redirect"',
+          'model-a, high, b, attempt 2',
+          'model-a, high, b, attempt 2 on "Fix the login redirect"',
         ]);
       });
 
@@ -280,10 +277,10 @@ describe('buildReaderNames', () => {
           names.settingModel('m1'),
           names.settingModel('m2'),
         ]).toEqual([
-          'vendor/model-a, high, a (1)',
-          'vendor/model-a, high, a (2)',
-          'vendor/model-a, a (1)',
-          'vendor/model-a, a (2)',
+          'model-a, high, a (1)',
+          'model-a, high, a (2)',
+          'model-a, a (1)',
+          'model-a, a (2)',
         ]);
       });
 
@@ -291,9 +288,9 @@ describe('buildReaderNames', () => {
         const names = buildNames({ models, cases: [{ modelId: 'm1', agent: 'a' }] });
 
         expect([names.setting('m1'), names.setting('m2'), names.settingModel('m2')]).toEqual([
-          'vendor/model-a, high, a',
-          'vendor/model-a, high',
-          'vendor/model-a',
+          'model-a, high, a',
+          'model-a, high',
+          'model-a',
         ]);
       });
 
@@ -301,11 +298,198 @@ describe('buildReaderNames', () => {
         const names = buildNames({ models, cases: [] });
 
         expect([names.setting('m1'), names.setting('m2')]).toEqual([
-          'vendor/model-a, high (1)',
-          'vendor/model-a, high (2)',
+          'model-a, high (1)',
+          'model-a, high (2)',
         ]);
       });
     });
+  });
+});
+
+describe('display models', () => {
+  type Entry = { id: string; model: string; effort?: string };
+
+  function modelsOf(entries: readonly Entry[]) {
+    return entries.map((entry) => buildModelRecord(entry));
+  }
+
+  function settingNamesOf(entries: readonly Entry[]): string[] {
+    const models = modelsOf(entries);
+    const names = buildNames({ models, cases: [] });
+    return models.map((model) => names.setting(model.id));
+  }
+
+  function settingModelsOf(entries: readonly Entry[]): string[] {
+    const models = modelsOf(entries);
+    const names = buildNames({ models, cases: [] });
+    return models.map((model) => names.settingModel(model.id));
+  }
+
+  it.each([
+    {
+      name: 'drops every provider prefix of models with different short names',
+      entries: [
+        { id: 'm1', model: 'litellm/openai/gpt-5.6-luna' },
+        { id: 'm2', model: 'anthropic/claude-x' },
+      ],
+      expected: ['gpt-5.6-luna', 'claude-x'],
+    },
+    {
+      name: 'shortens one model at two efforts, which is no collision',
+      entries: [
+        { id: 'm1', model: 'openai/gpt-5', effort: 'low' },
+        { id: 'm2', model: 'openai/gpt-5', effort: 'high' },
+      ],
+      expected: ['gpt-5', 'gpt-5'],
+    },
+    {
+      name: 'keeps the full model when another provider offers the same short name',
+      entries: [
+        { id: 'm1', model: 'openai/gpt-5' },
+        { id: 'm2', model: 'azure/gpt-5' },
+      ],
+      expected: ['openai/gpt-5', 'azure/gpt-5'],
+    },
+    {
+      name: 'keeps the full model of both entries when only the prefix depth differs',
+      entries: [
+        { id: 'm1', model: 'litellm/openai/gpt-5' },
+        { id: 'm2', model: 'openai/gpt-5' },
+      ],
+      expected: ['litellm/openai/gpt-5', 'openai/gpt-5'],
+    },
+    {
+      name: 'keeps the full model when its last segment is empty',
+      entries: [
+        { id: 'm1', model: 'openai/' },
+        { id: 'm2', model: 'anthropic/claude-x' },
+      ],
+      expected: ['openai/', 'claude-x'],
+    },
+    {
+      name: 'shortens a model that holds no slash to itself',
+      entries: [
+        { id: 'm1', model: 'plain-model' },
+        { id: 'm2', model: 'anthropic/claude-x' },
+      ],
+      expected: ['plain-model', 'claude-x'],
+    },
+  ])('$name', ({ entries, expected }) => {
+    expect([...displayModelsOf(modelsOf(entries)).values()]).toEqual(expected);
+  });
+
+  it('keys the display models by entry ID', () => {
+    const displayModels = displayModelsOf(
+      modelsOf([
+        { id: 'first', model: 'openai/gpt-5' },
+        { id: 'second', model: 'azure/gpt-5' },
+        { id: 'third', model: 'anthropic/claude-x' },
+      ]),
+    );
+
+    expect(Object.fromEntries(displayModels)).toEqual({
+      first: 'openai/gpt-5',
+      second: 'azure/gpt-5',
+      third: 'claude-x',
+    });
+  });
+
+  it('builds the setting name and the Model cell text from the display model', () => {
+    const entries = [
+      { id: 'm1', model: 'litellm/openai/gpt-5.6-luna', effort: 'high' },
+      { id: 'm2', model: 'anthropic/claude-x', effort: 'low' },
+    ];
+
+    expect(settingNamesOf(entries)).toEqual(['gpt-5.6-luna, high', 'claude-x, low']);
+    expect(settingModelsOf(entries)).toEqual(['gpt-5.6-luna', 'claude-x']);
+  });
+
+  it('names the full models when the short names collide', () => {
+    const entries = [
+      { id: 'm1', model: 'openai/gpt-5', effort: 'high' },
+      { id: 'm2', model: 'azure/gpt-5', effort: 'high' },
+    ];
+
+    expect(settingNamesOf(entries)).toEqual(['openai/gpt-5, high', 'azure/gpt-5, high']);
+    expect(settingModelsOf(entries)).toEqual(['openai/gpt-5', 'azure/gpt-5']);
+  });
+
+  it('still tells two settings that display the same name apart by agent', () => {
+    const models = modelsOf([
+      { id: 'm1', model: 'openai/gpt-5' },
+      { id: 'm2', model: 'openai/gpt-5' },
+    ]);
+
+    const names = buildNames({
+      models,
+      cases: [
+        { modelId: 'm1', agent: 'a' },
+        { modelId: 'm2', agent: 'b' },
+      ],
+    });
+
+    expect([names.setting('m1'), names.setting('m2')]).toEqual([
+      'gpt-5, high, a',
+      'gpt-5, high, b',
+    ]);
+  });
+
+  it('still tells two settings that display the same name apart by position', () => {
+    const models = modelsOf([
+      { id: 'm1', model: 'openai/gpt-5' },
+      { id: 'm2', model: 'openai/gpt-5' },
+    ]);
+
+    const names = buildNames({ models, cases: [] });
+
+    expect([names.setting('m1'), names.setting('m2')]).toEqual([
+      'gpt-5, high (1)',
+      'gpt-5, high (2)',
+    ]);
+  });
+});
+
+describe('summaryCallStatement', () => {
+  const MEANS =
+    'The summary states each conclusion in a template sentence built from the facts of the run.';
+
+  it('explains a rejected reply with the rejection reason as its technical detail', () => {
+    const statement = summaryCallStatement({
+      status: 'rejected',
+      reply: '{}',
+      reason: 'the cost text names a number that is not in the facts: 5',
+    });
+
+    expect(statement).toEqual({
+      happened: "tevu rejected the summary model's sentences because they did not match the facts.",
+      means: MEANS,
+      next: 'Nothing more is needed for this summary.',
+      detail: 'the cost text names a number that is not in the facts: 5',
+    });
+  });
+
+  it('explains a call with no reply with its reason as the technical detail', () => {
+    const statement = summaryCallStatement({
+      status: 'no-reply',
+      reason: 'the summary call failed: ModelCallError (timeout): no reply in 30s',
+    });
+
+    expect(statement).toEqual({
+      happened: 'The summary model returned no sentences.',
+      means: MEANS,
+      next: 'Before the next run, fix the cause in the technical detail.',
+      detail: 'the summary call failed: ModelCallError (timeout): no reply in 30s',
+    });
+  });
+
+  it('renders the statement with its technical detail last', () => {
+    const text = renderStatement(
+      summaryCallStatement({ status: 'no-reply', reason: 'the summary call failed: x' }),
+    );
+
+    expect(text).toBe(
+      `The summary model returned no sentences. ${MEANS} Before the next run, fix the cause in the technical detail. Technical detail: the summary call failed: x`,
+    );
   });
 });
 

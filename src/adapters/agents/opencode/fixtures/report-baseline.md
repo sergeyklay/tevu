@@ -4,21 +4,21 @@
 
 | Model | Effort | Outcome | Required checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| [vendor/model-alpha-synth](#case-task-1--alpha--1) | effort-high | passed \[1\] | 2/2 passed | 1.5 s | $0.0125 | 1 | 2 | 130 | 30 | 10 | 45 | 16 | 2 | none |
-| [vendor/model-alpha-synth](#case-task-1--beta--1) | effort-low, unverified | failed | 0/2 passed, 1 failed, 1 not run | 0.9 s | - \[2\] | - \[2\] | 1 | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | 1 | agent process failed \[3\] |
+| model-alpha-synth | effort-high | passed \[1\] | 2/2 passed | 1.5 s | $0.0125 | 1 | 2 | 130 | 30 | 10 | 45 | 16 | 2 | none |
+| model-alpha-synth | effort-low, unverified | failed | 0/2 passed, 1 failed, 1 not run | 0.9 s | - \[2\] | - \[2\] | 1 | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | 1 | agent process failed \[3\] |
 
-1. vendor/model-alpha-synth, effort-high: 1 optional manual check waits for a person's verdict. Optional checks do not change the outcome, which stays passed. Record the verdict with `tevu assess 20260923t000000z-synthetic task-1--alpha--1`. Technical detail: case task-1--alpha--1
-2. vendor/model-alpha-synth, effort-low: tevu has no value for this measurement. It is unknown, not zero. This run's saved files cannot supply it; to measure it, fix the cause in the technical detail and run the comparison again. Technical detail: the preserved case artifacts contain no session export
-3. vendor/model-alpha-synth, effort-low: The agent process stopped with an error. Its solution was still checked, so the outcome comes from its checks. Read the attempt's diagnostics log to find out why. Technical detail: case task-1--beta--1: AgentProcessError, exit code 1, signal none
+1. model-alpha-synth, effort-high: 1 optional manual check waits for a person's verdict. Optional checks do not change the outcome, which stays passed. Record the verdict with `tevu assess 20260923t000000z-synthetic task-1--alpha--1`. Technical detail: case task-1--alpha--1
+2. model-alpha-synth, effort-low: tevu has no value for this measurement. It is unknown, not zero. This run's saved files cannot supply it; to measure it, fix the cause in the technical detail and run the comparison again. Technical detail: the preserved case artifacts contain no session export
+3. model-alpha-synth, effort-low: The agent process stopped with an error. Its solution was still checked, so the outcome comes from its checks. Read the attempt's diagnostics log to find out why. Technical detail: case task-1--beta--1: AgentProcessError, exit code 1, signal none
 
 ## Comparison: Synthetic welcome-route task (2)
 
 | Model | Effort | Outcome | Required checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| [vendor/model-gamma-synth](#case-task-2--gamma--1) | effort-high, unsupported | not-evaluated \[1\] | 0/2 passed, 2 not run | 42.0 s | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | time limit reached \[1\] |
+| model-gamma-synth | effort-high, unsupported | not-evaluated \[1\] | 0/2 passed, 2 not run | 42.0 s | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | - \[2\] | time limit reached \[1\] |
 
-1. vendor/model-gamma-synth, effort-high: The model did not finish within its time limit of 1.0 min. The attempt did not complete its checks, so it counts as not evaluated. To give it more time, raise the task's time limit (`timeout`, or `run.timeout`) and run the comparison again. Technical detail: case task-2--gamma--1, lifecycle timed-out: CaseTimeoutError, limit 60000 ms
-2. vendor/model-gamma-synth, effort-high: tevu has no value for this measurement. It is unknown, not zero. This run's saved files cannot supply it; to measure it, fix the cause in the technical detail and run the comparison again. Technical detail: the preserved case artifacts contain no session export; root session could not be identified
+1. model-gamma-synth, effort-high: The model did not finish within its time limit of 1.0 min. The attempt did not complete its checks, so it counts as not evaluated. To give it more time, raise the task's time limit (`timeout`, or `run.timeout`) and run the comparison again. Technical detail: case task-2--gamma--1, lifecycle timed-out: CaseTimeoutError, limit 60000 ms
+2. model-gamma-synth, effort-high: tevu has no value for this measurement. It is unknown, not zero. This run's saved files cannot supply it; to measure it, fix the cause in the technical detail and run the comparison again. Technical detail: the preserved case artifacts contain no session export; root session could not be identified
 
 > **Sensitive data:** the tevu configuration file and this artifact directory can contain
 > sensitive private repository, task, Jira, model-output, and evaluator data. They rely on
@@ -39,9 +39,9 @@
 - Concurrency: 2
 - Case timeout: 60000ms
 - Repeat: 1 (source: config)
-- vendor/model-alpha-synth, effort-high: effort verified
-- vendor/model-alpha-synth, effort-low: effort unverified. tevu could not confirm that the agent offers effort "effort-low" for this model. The effort was passed as requested; if the agent does not offer it, the model ran with its default options. Before the next run, check the effort against the variants the agent lists for the model. Technical detail: "effort-low" is not among the variants "opencode models --verbose" reports for "vendor/model-alpha-synth" (effort-high), and the repository of each task may define it: task-1 (opencode.json)
-- vendor/model-gamma-synth, effort-high: effort unsupported. The agent does not list effort "effort-high" for this model. Where no task repository defines it, the model ran with its default options. Choose an effort the agent lists for the model and run the comparison again. Technical detail: "effort-high" is not among the variants "opencode models --verbose" reports for "vendor/model-gamma-synth" (max), and these tasks have no agent configuration at the root of their base commit: task-2; their cases would run "vendor/model-gamma-synth" with its default options
+- model-alpha-synth, effort-high: effort verified
+- model-alpha-synth, effort-low: effort unverified. tevu could not confirm that the agent offers effort "effort-low" for this model. The effort was passed as requested; if the agent does not offer it, the model ran with its default options. Before the next run, check the effort against the variants the agent lists for the model. Technical detail: "effort-low" is not among the variants "opencode models --verbose" reports for "vendor/model-alpha-synth" (effort-high), and the repository of each task may define it: task-1 (opencode.json)
+- model-gamma-synth, effort-high: effort unsupported. The agent does not list effort "effort-high" for this model. Where no task repository defines it, the model ran with its default options. Choose an effort the agent lists for the model and run the comparison again. Technical detail: "effort-high" is not among the variants "opencode models --verbose" reports for "vendor/model-gamma-synth" (max), and these tasks have no agent configuration at the root of their base commit: task-2; their cases would run "vendor/model-gamma-synth" with its default options
 - Run exit code: 2
 
 ## Run findings
@@ -59,17 +59,17 @@ Pair summary:
 
 | Model setting | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |
 |---|---|---|---|---|---|---|---|
-| vendor/model-alpha-synth, effort-high | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |
-| vendor/model-alpha-synth, effort-low | 1 | 0 | 1 | 0 | 0 | 0/1 | no |
+| model-alpha-synth, effort-high | 1 | 1 | 0 | 0 | 0 | 1/1 | yes |
+| model-alpha-synth, effort-low | 1 | 0 | 1 | 0 | 0 | 0/1 | no |
 
 | Attempt | Outcome | Required checks | Runtime failure | Elapsed |
 |---|---|---|---|---|
-| [vendor/model-alpha-synth, effort-high](#case-task-1--alpha--1) | passed | 2/2 passed | none | 1.5 s |
-| [vendor/model-alpha-synth, effort-low](#case-task-1--beta--1) | failed | 0/2 passed, 1 failed, 1 not run | agent process failed | 0.9 s |
+| [model-alpha-synth, effort-high](#case-task-1--alpha--1) | passed | 2/2 passed | none | 1.5 s |
+| [model-alpha-synth, effort-low](#case-task-1--beta--1) | failed | 0/2 passed, 1 failed, 1 not run | agent process failed | 0.9 s |
 
 <a id="case-task-1--alpha--1"></a>
 
-### vendor/model-alpha-synth, effort-high
+### model-alpha-synth, effort-high
 
 - Outcome: passed; required checks 2/2 passed
 - Model: vendor/model-alpha-synth, effort effort-high
@@ -113,7 +113,7 @@ Assessments (revision 2):
 
 <a id="case-task-1--beta--1"></a>
 
-### vendor/model-alpha-synth, effort-low
+### model-alpha-synth, effort-low
 
 - Outcome: failed; required checks 0/2 passed, 1 failed, 1 not run
 - Model: vendor/model-alpha-synth, effort effort-low, unverified
@@ -156,15 +156,15 @@ Pair summary:
 
 | Model setting | Planned | passed | failed | pending | not-evaluated | Passed of planned | All passed |
 |---|---|---|---|---|---|---|---|
-| vendor/model-gamma-synth, effort-high | 1 | 0 | 0 | 0 | 1 | 0/1 | no |
+| model-gamma-synth, effort-high | 1 | 0 | 0 | 0 | 1 | 0/1 | no |
 
 | Attempt | Outcome | Required checks | Runtime failure | Elapsed |
 |---|---|---|---|---|
-| [vendor/model-gamma-synth, effort-high](#case-task-2--gamma--1) | not-evaluated | 0/2 passed, 2 not run | time limit reached | 42.0 s |
+| [model-gamma-synth, effort-high](#case-task-2--gamma--1) | not-evaluated | 0/2 passed, 2 not run | time limit reached | 42.0 s |
 
 <a id="case-task-2--gamma--1"></a>
 
-### vendor/model-gamma-synth, effort-high
+### model-gamma-synth, effort-high
 
 - Outcome: not-evaluated; required checks 0/2 passed, 2 not run
 - Model: vendor/model-gamma-synth, effort effort-high, unsupported
@@ -190,4 +190,4 @@ Artifacts:
 
 Task outcome, runtime failure, and run exit status are reported independently.
 Command check output is configured acceptance evidence, not an additional model-quality metric.
-No composite score or winner is computed.
+No composite score or overall winner is computed.

@@ -348,6 +348,15 @@ function createRecordingArtifactStore(): {
     async writeReport() {
       return { ok: true, value: undefined };
     },
+    async readConclusions() {
+      return { ok: true, value: null };
+    },
+    async writeConclusions() {
+      return { ok: true, value: undefined };
+    },
+    async writeSummary() {
+      return { ok: true, value: undefined };
+    },
     async readRunManifest() {
       throw new Error('not used in this test');
     },

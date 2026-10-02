@@ -14,11 +14,13 @@ import { decodeRunConfig } from '@/config/run-snapshot';
 import { reduceRequiredOutcome } from '@/evaluation/checks';
 import { applyGrades } from '@/evaluation/grading';
 import { combineCaseMetrics } from '@/evaluation/metrics';
-import { buildReport } from '@/evaluation/report';
+import { buildReport, buildSummaryEvidence } from '@/evaluation/report';
+import { templateConclusions } from '@/evaluation/summary';
 import { buildReaderNames, gradeLines } from '@/evaluation/wording';
 
 import { reduceRunExitCode } from './run-benchmark';
 
+import type { ConclusionWriter } from './write-conclusions';
 import type {
   AgentEventRecord,
   AgentRegistry,
@@ -31,6 +33,7 @@ import type {
   CaseResult,
   CheckRecord,
   CheckResult,
+  ConclusionsArtifact,
   CopiedProvider,
   GradeRecord,
   GraderIdentity,
@@ -41,11 +44,13 @@ import type {
   RunConfigRecord,
   RunManifest,
   RunResult,
+  TaskConclusions,
   TaskRecord,
   TevuError,
   TevuResult,
   ValidationFinding,
 } from '@/domain/types';
+import type { SummaryEvidence } from '@/evaluation/summary';
 import type { ReaderNames } from '@/evaluation/wording';
 
 /** One assessable check of the assessed case, in configuration order: manual, or graded with its saved grade. */
@@ -163,11 +168,24 @@ export type AssessedCase = {
   summary: string[];
 };
 
+/**
+ * What a regeneration pass does with the summary: `write` saves the
+ * conclusions of every task in `conclusions.json` and writes `summary.md`
+ * (`tevu run`), `render` renders both from the saved conclusions (`tevu
+ * report`), and `keep` renders only `report.md` and leaves `conclusions.json`
+ * and `summary.md` as they are (`tevu assess`).
+ */
+type ConclusionsMode = { kind: 'write'; writer: ConclusionWriter } | { kind: 'render' | 'keep' };
+
 /** Derived records produced by one regeneration pass over a finalized run. */
 type RebuiltRun = {
   run: RunResult;
   report: ReportResult;
+  retainedDirectories: string[];
 };
+
+/** What `rebuildReport` returns: the report and the summary-call directories tevu could not delete. */
+export type RebuiltReport = { report: ReportResult; retainedDirectories: string[] };
 
 const EXPORT_ABSENT_REASON = 'the preserved case artifacts contain no session export';
 const ELAPSED_ABSENT_REASON = 'the preserved case result contains no process timing evidence';
@@ -288,7 +306,7 @@ export async function assessCase(
   }
 
   // Commit point passed: the revision must survive every later failure.
-  const rebuilt = await rebuildRunDerived(input.runId, store, agents);
+  const rebuilt = await rebuildRunDerived(input.runId, store, agents, { kind: 'keep' });
   if (!rebuilt.ok) {
     await lock.value.release();
     return artifactFailure(
@@ -399,17 +417,33 @@ export async function readAssessmentContext(
  * outcomes and the run exit code through the shared reducers. Source
  * artifacts are never mutated; only the derived case results, run aggregate,
  * and report are replaced.
+ *
+ * With a `writer`, which is `tevu run`, the rebuild first writes the
+ * conclusions of every task, one at a time in task ID order, and saves them in
+ * `conclusions.json` before it renders. A cancellation during the writes saves
+ * template sentences for the tasks not yet written and makes no further call.
+ * Without one, which is `tevu report`, it renders `summary.md` from the saved
+ * conclusions.
  */
 export async function rebuildReport(
   runId: string,
   store: ArtifactStore,
   agents: AgentRegistry,
-): Promise<TevuResult<ReportResult, RebuildReportErrorKind>> {
-  const rebuilt = await rebuildRunDerived(runId, store, agents);
+  writer?: ConclusionWriter,
+): Promise<TevuResult<RebuiltReport, RebuildReportErrorKind>> {
+  const rebuilt = await rebuildRunDerived(
+    runId,
+    store,
+    agents,
+    writer === undefined ? { kind: 'render' } : { kind: 'write', writer },
+  );
   if (!rebuilt.ok) {
     return rebuilt;
   }
-  return { ok: true, value: rebuilt.value.report };
+  return {
+    ok: true,
+    value: { report: rebuilt.value.report, retainedDirectories: rebuilt.value.retainedDirectories },
+  };
 }
 
 /** Regenerates and persists every derived record of one finalized run. */
@@ -417,6 +451,7 @@ async function rebuildRunDerived(
   runId: string,
   store: ArtifactStore,
   agents: AgentRegistry,
+  mode: ConclusionsMode,
 ): Promise<TevuResult<RebuiltRun, RebuildReportErrorKind>> {
   const stored = await store.readRunResult(runId);
   if (!stored.ok) {
@@ -476,7 +511,7 @@ async function rebuildRunDerived(
   if (!finalized.ok) {
     return finalized;
   }
-  const report = buildReport({
+  const input = {
     run,
     capabilities: context.capabilities,
     tasks: decoded.value.tasks,
@@ -484,12 +519,68 @@ async function rebuildRunDerived(
     repositories: decoded.value.repositories,
     assessments,
     gradings,
-  });
+  };
+  const retainedDirectories: string[] = [];
+  let saved: ConclusionsArtifact | null;
+  if (mode.kind === 'write') {
+    const tasks = await writeTaskConclusionsInOrder(buildSummaryEvidence(input), mode.writer);
+    retainedDirectories.push(...tasks.retainedDirectories);
+    saved = { schemaVersion: 1, runId, tasks: tasks.conclusions };
+    const savedConclusions = await store.writeConclusions(saved);
+    if (!savedConclusions.ok) {
+      return savedConclusions;
+    }
+  } else {
+    const read = await store.readConclusions(runId);
+    if (!read.ok) {
+      return read;
+    }
+    saved = read.value;
+  }
+  const report = buildReport({ ...input, conclusions: saved });
   const written = await store.writeReport(runId, report);
   if (!written.ok) {
     return written;
   }
-  return { ok: true, value: { run, report } };
+  if (mode.kind !== 'keep') {
+    const summarized = await store.writeSummary(runId, report.summaryMarkdown);
+    if (!summarized.ok) {
+      return summarized;
+    }
+  }
+  return { ok: true, value: { run, report, retainedDirectories } };
+}
+
+/**
+ * Writes the conclusions of every task in order. After a cancellation, each
+ * remaining task saves its template sentences with no call, so the summary is
+ * complete without the model.
+ */
+async function writeTaskConclusionsInOrder(
+  evidence: readonly SummaryEvidence[],
+  writer: ConclusionWriter,
+): Promise<{ conclusions: TaskConclusions[]; retainedDirectories: string[] }> {
+  const conclusions: TaskConclusions[] = [];
+  const retainedDirectories: string[] = [];
+  let isCancelled = false;
+  for (const entry of evidence) {
+    const outcome = isCancelled ? { status: 'cancelled' as const } : await writer.write(entry);
+    if (outcome.status === 'cancelled') {
+      isCancelled = true;
+      conclusions.push({
+        taskId: entry.taskId,
+        facts: entry.facts,
+        conclusions: templateConclusions(entry.facts),
+        call: null,
+      });
+      continue;
+    }
+    conclusions.push(outcome.conclusions);
+    if (outcome.retainedDirectory !== null) {
+      retainedDirectories.push(outcome.retainedDirectory);
+    }
+  }
+  return { conclusions, retainedDirectories };
 }
 
 /** Rebuilds one derived case result from its preserved source artifacts. */
