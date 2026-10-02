@@ -629,9 +629,12 @@ function longestFirst(names: readonly string[]): string[] {
     .sort((a, b) => b.length - a.length || compareStrings(a, b));
 }
 
-/** The text with every occurrence of each name replaced by one U+0000, longest name first. */
+/** The text with every delimited occurrence of each name replaced by one U+0000, longest name first. */
 function maskNames(text: string, names: readonly string[]): string {
-  return longestFirst(names).reduce((masked, name) => masked.split(name).join(MASK), text);
+  return longestFirst(names).reduce(
+    (masked, name) => masked.replace(wholeWordPattern([name], 'g'), MASK),
+    text,
+  );
 }
 
 /** The names in order of their first occurrence, a name inside a longer name that matched first not counting. */
@@ -639,10 +642,11 @@ function mentionsIn(text: string, names: readonly string[]): string[] {
   let working = text;
   const found: Array<{ index: number; name: string }> = [];
   for (const name of longestFirst(names)) {
-    const index = working.indexOf(name);
+    const pattern = wholeWordPattern([name], 'g');
+    const index = pattern.exec(working)?.index ?? -1;
     if (index !== -1) {
       found.push({ index, name });
-      working = working.split(name).join(MASK.repeat(name.length));
+      working = working.replace(pattern, MASK.repeat(name.length));
     }
   }
   return found.sort((a, b) => a.index - b.index).map(({ name }) => name);

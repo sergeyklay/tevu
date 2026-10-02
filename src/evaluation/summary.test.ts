@@ -1294,6 +1294,27 @@ describe('acceptConclusions', () => {
     });
   });
 
+  describe('a one-letter task title', () => {
+    const shortFacts = buildSummaryFacts({
+      task: 'a',
+      settings: [
+        buildSummarySetting({ name: 'luna, high', model: 'luna' }),
+        buildSummarySetting({ name: 'luna, low', model: 'luna' }),
+      ],
+      cost: { kind: 'only-setting', leader: 'luna, low' },
+      speed: { kind: 'only-setting', leader: 'luna, low' },
+    });
+    const shortEvidence = buildSummaryEvidenceRecord(shortFacts);
+
+    it('does not hide a number word inside another word from the checks', () => {
+      const reply = templateReply(shortFacts, {
+        cost: { text: 'luna, low was cheapest at half the price.' },
+      });
+
+      expect(rejectionOf(reply, shortEvidence)).toMatch(/number/);
+    });
+  });
+
   describe('rule 8: models outside a setting name', () => {
     const lunaFacts = buildSummaryFacts({
       settings: [
