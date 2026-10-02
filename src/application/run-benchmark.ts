@@ -1119,6 +1119,7 @@ async function evaluateReadableCase(
       },
     );
     for (const directory of outcome.retainedDirectories) {
+      run.dependencies.onRetainedGradingDirectory?.(directory);
       run.findings.push({
         severity: 'warning',
         caseId,

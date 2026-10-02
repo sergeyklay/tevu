@@ -1156,10 +1156,16 @@ describe('runBenchmark grading in the case flow', () => {
       return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
     });
     const { environments, roots } = buildRetainingEnvironments();
-    const dependencies = buildGradingDependencies(config, agent, testDirectory, {
-      environments,
-      cancellation: cancelController.signal,
-    });
+    const reported: string[] = [];
+    const dependencies = {
+      ...buildGradingDependencies(config, agent, testDirectory, {
+        environments,
+        cancellation: cancelController.signal,
+      }),
+      onRetainedGradingDirectory: (directory: string) => {
+        reported.push(directory);
+      },
+    };
 
     const result = await runBenchmark(
       planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
@@ -1169,6 +1175,7 @@ describe('runBenchmark grading in the case flow', () => {
     const run = unwrapOk(result);
     expect(caseResultOf(run, 'graded-task--m1--1').lifecycle).toBe('cancelled');
     expect(roots).toHaveLength(1);
+    expect(reported).toEqual(roots);
     expect(run.findings.filter((finding) => finding.caseId === 'graded-task--m1--1')).toEqual([
       expect.objectContaining({
         severity: 'warning',

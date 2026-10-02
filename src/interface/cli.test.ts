@@ -2832,6 +2832,29 @@ describe('tevu CLI', () => {
       expect(operations.rebuildRunReport).not.toHaveBeenCalled();
     });
 
+    it('prints the retained grading call directories of a cancelled run before its artifacts', async () => {
+      const operations = createOperations({
+        executeBenchmark: vi.fn(async (_plan: BenchmarkPlan, hooks: BenchmarkExecutionHooks) => {
+          hooks.onRunId?.('run-1');
+          hooks.onRetainedGradingDirectory?.('/tmp/tevu-call-a');
+          hooks.onRetainedGradingDirectory?.('/tmp/tevu-call-b');
+          return { ok: true as const, value: buildRunResult({ exitCode: 130 }) };
+        }),
+      });
+
+      const { code, out } = await runCli(['run'], { operations });
+
+      expect(code).toBe(130);
+      expect(out).toEqual([
+        'Configuration: tevu.yaml',
+        'Run run-1 started.',
+        'Warning: tevu could not delete the temporary directory of a grading call. The results are not affected. Delete /tmp/tevu-call-a when no tevu command uses it.',
+        'Warning: tevu could not delete the temporary directory of a grading call. The results are not affected. Delete /tmp/tevu-call-b when no tevu command uses it.',
+        'Artifacts: /tmp/artifacts/run-1',
+        'Run cancelled; partial artifacts were finalized. Regenerate the report with: tevu report run-1',
+      ]);
+    });
+
     it('downgrades to exit 1 with the recovery hint when the rebuild fails', async () => {
       const operations = createOperations({
         executeBenchmark: vi.fn(async (_plan: BenchmarkPlan, hooks: BenchmarkExecutionHooks) => {

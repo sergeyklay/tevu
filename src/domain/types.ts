@@ -1663,6 +1663,7 @@ export type RunDependencies = {
   redact: (text: string) => string;
   cancellation: AbortSignal;
   onLifecycle?: (caseId: string, lifecycle: CaseLifecycle) => void;
+  onRetainedGradingDirectory?: (directory: string) => void;
 };
 
 /** The configuration fields one model-role call reads; a `TevuConfig` satisfies it. */
