@@ -2598,6 +2598,38 @@ describe('comparison table in the report', () => {
     return `tevu saved no result for this attempt. It has no outcome or measurements, so it counts as not evaluated. Run the comparison again to get a result for this attempt. Technical detail: case ${caseId}: ${NO_CASE_RESULT}`;
   }
 
+  const SEPARATION_NOTE_START = 'Every model setting ';
+
+  /** The separation note of spec 3.2 for one task, as it renders in the block. */
+  function separationNote(
+    outcome: 'passed' | 'failed',
+    options: { task?: string; settings?: string; repeat?: number } = {},
+  ): string {
+    const {
+      task = taskTitleOf('task-1'),
+      settings = 'vendor/model-alpha-synth, effort-high; vendor/model-beta-synth, effort-high',
+      repeat = 1,
+    } = options;
+    const attempts = repeat > 1 ? ' in every attempt' : '';
+    const cannotTellApart =
+      'The outcomes cannot tell the settings apart on this task, and a difference in time or cost does not show which setting produces the better solution';
+    const moreAttempts =
+      'To tell the settings apart, run more attempts with `run.repeat` or `--repeat`,';
+    return outcome === 'passed'
+      ? `Every model setting passed every required check of "${task}"${attempts}: ${settings}. ${cannotTellApart}. ${moreAttempts} compare them on a harder task, or add checks that capture more of what a good solution does.`
+      : `Every model setting failed at least one required check of "${task}"${attempts}: ${settings}. ${cannotTellApart}; the Required checks column still shows how many required checks each setting passed. ${moreAttempts} compare them on an easier task, or confirm in the attempt sections below that a correct solution can pass the failed checks.`;
+  }
+
+  function separationNotesOf(
+    markdown: string,
+    taskId: string,
+    title = taskTitleOf(taskId),
+  ): string[] {
+    return comparisonBlock(markdown, taskId, title).filter((line) =>
+      line.startsWith(SEPARATION_NOTE_START),
+    );
+  }
+
   function markers(...numbers: number[]): string {
     return numbers.map((number) => `\\[${number}\\]`).join(' ');
   }
@@ -3066,6 +3098,7 @@ describe('comparison table in the report', () => {
       const markdown = reportOf({
         models,
         results: ({ modelId }) => ({
+          outcome: modelId === 'gamma' ? 'failed' : 'passed',
           metrics:
             modelId === 'alpha'
               ? { apiErrors: reported(0, 'count') }
@@ -3450,6 +3483,302 @@ describe('comparison table in the report', () => {
       expect(footnotesOf(markdown, 'task-1')).toEqual([
         `1. ${SETTING}: ${noResultText('task-1--alpha--1')}`,
       ]);
+    });
+  });
+
+  describe('separation note', () => {
+    const REQUIRED_CHECK = 'acc-acceptance-command';
+    const MANUAL_CHECK = 'dod-manual-review';
+    const OPTIONAL_CHECK = 'man-optional-polish';
+    const models = buildDistinctModels(['alpha', 'beta']);
+
+    function verdictsOf(
+      acceptance: CheckResult['verdict'],
+      manual: CheckResult['verdict'],
+      optional: CheckResult['verdict'],
+    ): CheckResult[] {
+      return [
+        buildCheckResult({ checkId: REQUIRED_CHECK, verdict: acceptance }),
+        buildCheckResult({
+          checkId: MANUAL_CHECK,
+          category: 'definition-of-done',
+          verdict: manual,
+        }),
+        buildCheckResult({
+          checkId: OPTIONAL_CHECK,
+          category: 'definition-of-done',
+          verdict: optional,
+        }),
+      ];
+    }
+
+    describe('when the outcomes do not separate the settings', () => {
+      it.each([
+        { outcome: 'passed', repeat: 1 },
+        { outcome: 'passed', repeat: 2 },
+        { outcome: 'failed', repeat: 1 },
+        { outcome: 'failed', repeat: 2 },
+      ] as const)(
+        'puts one $outcome note at repeat $repeat on the line after the table and its empty line',
+        ({ outcome, repeat }) => {
+          const markdown = reportOf({ models, repeat, results: () => ({ outcome }) });
+
+          const block = comparisonBlock(markdown, 'task-1');
+
+          expect(block).toHaveLength(9);
+          expect(block.slice(2, 4)).toEqual([HEADER_ROW, SEPARATOR_ROW]);
+          expect(block.slice(4, 6).every((line) => line.startsWith('| '))).toBe(true);
+          expect(block.slice(6)).toEqual(['', separationNote(outcome, { repeat }), '']);
+          expect(separationNotesOf(markdown, 'task-1')).toHaveLength(1);
+        },
+      );
+
+      it('lists the settings in the row order of the configuration', () => {
+        const reversed = buildDistinctModels(['beta', 'alpha']);
+
+        const markdown = reportOf({ models: reversed });
+
+        expect(separationNotesOf(markdown, 'task-1')).toEqual([
+          separationNote('passed', {
+            settings: 'vendor/model-beta-synth, effort-high; vendor/model-alpha-synth, effort-high',
+          }),
+        ]);
+      });
+
+      it('gives each task of a run its own note with its own name', () => {
+        const markdown = reportOf({
+          models,
+          taskIds: ['task-1', 'task-2'],
+          results: ({ taskId }) => ({ outcome: taskId === 'task-1' ? 'passed' : 'failed' }),
+        });
+
+        expect(separationNotesOf(markdown, 'task-1')).toEqual([separationNote('passed')]);
+        expect(separationNotesOf(markdown, 'task-2')).toEqual([
+          separationNote('failed', { task: taskTitleOf('task-2') }),
+        ]);
+      });
+
+      it('keeps the note outside the footnotes, numbers the footnotes from 1 without gaps, and refers to no footnote from the note', () => {
+        const markdown = reportOf({
+          models,
+          results: ({ modelId }) => ({
+            metrics:
+              modelId === 'alpha'
+                ? { cost: unavailableMetric('USD', 'cost reason') }
+                : { elapsed: unavailableMetric('millisecond', 'elapsed reason') },
+          }),
+        });
+
+        const block = comparisonBlock(markdown, 'task-1');
+
+        const note = separationNote('passed');
+        const rows = comparisonRows(markdown);
+        expect(rows.map((row) => row['Cost'])).toEqual([`- ${markers(1)}`, '$0.0125']);
+        expect(rows.map((row) => row['Elapsed'])).toEqual(['1.5 s', `- ${markers(2)}`]);
+        expect(footnotesOf(markdown, 'task-1')).toEqual([
+          `1. vendor/model-alpha-synth, effort-high: ${gapText('cost reason')}`,
+          `2. vendor/model-beta-synth, effort-high: ${gapText('elapsed reason')}`,
+        ]);
+        expect(block.filter((line) => line === note)).toHaveLength(1);
+        expect(note).not.toMatch(/\\\[\d+\\\]/);
+        expect(block.indexOf(note)).toBeLessThan(
+          block.indexOf(footnotesOf(markdown, 'task-1')[0]!),
+        );
+      });
+
+      it('still shows the note when an optional check failed, because optional checks take no part', () => {
+        const markdown = reportOf({
+          models,
+          results: () => ({ outcome: 'passed', checks: verdictsOf('passed', 'passed', 'failed') }),
+        });
+
+        expect(separationNotesOf(markdown, 'task-1')).toEqual([separationNote('passed')]);
+      });
+    });
+
+    describe('when the outcomes separate the settings or are not all evaluated', () => {
+      it.each([
+        {
+          label: 'rows with different outcomes',
+          repeat: 1,
+          results: ({ modelId }: CaseIdentity): ResultOverrides => ({
+            outcome: modelId === 'alpha' ? 'passed' : 'failed',
+          }),
+        },
+        {
+          label: 'attempts of one row with different outcomes',
+          repeat: 2,
+          results: ({ modelId, attempt }: CaseIdentity): ResultOverrides => ({
+            outcome: modelId === 'alpha' && attempt === 2 ? 'failed' : 'passed',
+          }),
+        },
+        {
+          label: 'one not-evaluated attempt among passed ones',
+          repeat: 2,
+          results: ({ modelId, attempt }: CaseIdentity): ResultOverrides => ({
+            outcome: modelId === 'beta' && attempt === 2 ? 'not-evaluated' : 'passed',
+          }),
+        },
+        {
+          label: 'every attempt pending',
+          repeat: 1,
+          results: (): ResultOverrides => ({ outcome: 'pending' }),
+        },
+        {
+          label: 'every attempt not-evaluated',
+          repeat: 1,
+          results: (): ResultOverrides => ({ outcome: 'not-evaluated' }),
+        },
+        {
+          label: 'a planned attempt without a case result among passed ones',
+          repeat: 1,
+          results: ({ modelId }: CaseIdentity): ResultOverrides | null =>
+            modelId === 'beta' ? null : { outcome: 'passed' },
+        },
+        {
+          label: 'a planned attempt without a case result among failed ones',
+          repeat: 1,
+          results: ({ modelId }: CaseIdentity): ResultOverrides | null =>
+            modelId === 'beta' ? null : { outcome: 'failed' },
+        },
+        {
+          label: 'no case result at all',
+          repeat: 1,
+          results: (): null => null,
+        },
+      ])('puts no note under $label', ({ repeat, results }) => {
+        const markdown = reportOf({ models, repeat, results });
+
+        expect(separationNotesOf(markdown, 'task-1')).toEqual([]);
+        expect(markdown).not.toContain('cannot tell the settings apart');
+      });
+
+      it('puts no note under a task with one row, even when every attempt passed', () => {
+        const markdown = reportOf({ repeat: 2 });
+
+        expect(separationNotesOf(markdown, 'task-1')).toEqual([]);
+      });
+    });
+
+    describe('pending verdicts', () => {
+      it.each([
+        {
+          label: 'a required check when every outcome is pending',
+          results: (): ResultOverrides => ({
+            outcome: 'pending',
+            checks: verdictsOf('passed', 'pending', 'passed'),
+          }),
+        },
+        {
+          label: 'a required check when every outcome is failed',
+          results: (): ResultOverrides => ({
+            outcome: 'failed',
+            checks: verdictsOf('failed', 'pending', 'passed'),
+          }),
+        },
+        {
+          label: 'an optional check when every outcome is passed',
+          results: (): ResultOverrides => ({
+            outcome: 'passed',
+            checks: verdictsOf('passed', 'passed', 'pending'),
+          }),
+        },
+        {
+          label: 'an optional check when every outcome is failed',
+          results: (): ResultOverrides => ({
+            outcome: 'failed',
+            checks: verdictsOf('failed', 'passed', 'pending'),
+          }),
+        },
+        {
+          label: 'an optional check in one attempt of one row only',
+          results: ({ modelId, attempt }: CaseIdentity): ResultOverrides => ({
+            outcome: 'passed',
+            checks:
+              modelId === 'beta' && attempt === 2
+                ? verdictsOf('passed', 'passed', 'pending')
+                : verdictsOf('passed', 'passed', 'passed'),
+          }),
+        },
+      ])('puts no note while $label has a pending verdict', ({ results }) => {
+        const markdown = reportOf({ models, repeat: 2, results });
+
+        expect(separationNotesOf(markdown, 'task-1')).toEqual([]);
+      });
+
+      it.each([
+        {
+          outcome: 'passed',
+          checks: verdictsOf('passed', 'passed', 'passed'),
+        },
+        {
+          outcome: 'failed',
+          checks: verdictsOf('failed', 'passed', 'passed'),
+        },
+      ] as const)(
+        'puts the $outcome note once every verdict is recorded',
+        ({ outcome, checks }) => {
+          const markdown = reportOf({ models, repeat: 2, results: () => ({ outcome, checks }) });
+
+          expect(separationNotesOf(markdown, 'task-1')).toEqual([
+            separationNote(outcome, { repeat: 2 }),
+          ]);
+        },
+      );
+    });
+
+    describe('derived output', () => {
+      const results = (): ResultOverrides => ({ outcome: 'passed' });
+
+      it('keeps the note out of the normalized JSON and the summary and adds no field', () => {
+        const input = buildComparisonInput({ models, repeat: 2, results });
+
+        const { markdown, normalizedJson, summary } = buildReport(input);
+
+        const parsed = JSON.parse(normalizedJson) as { pairs: object[] };
+        expect(separationNotesOf(markdown, 'task-1')).toHaveLength(1);
+        expect(normalizedJson).not.toContain('cannot tell the settings apart');
+        expect(summary.attempts.flatMap((attempt) => attempt.lines).join('\n')).not.toContain(
+          'cannot tell the settings apart',
+        );
+        expect(Object.keys(parsed).sort()).toEqual([
+          'assessments',
+          'capabilities',
+          'cases',
+          'exitCode',
+          'findings',
+          'graders',
+          'gradings',
+          'manifest',
+          'models',
+          'pairs',
+          'repositories',
+          'schemaVersion',
+          'tasks',
+        ]);
+        expect(Object.keys(parsed.pairs[0] ?? {}).sort()).toEqual([
+          'allPassed',
+          'modelId',
+          'outcomes',
+          'passedOfPlanned',
+          'planned',
+          'taskId',
+        ]);
+      });
+
+      it('returns identical markdown for equal inputs and for case results in another order', () => {
+        const input = buildComparisonInput({ models, repeat: 2, results });
+        const reordered: ReportInput = {
+          ...input,
+          run: { ...input.run, cases: [...input.run.cases].reverse() },
+        };
+
+        const first = buildReport(input).markdown;
+
+        expect(buildReport(structuredClone(input)).markdown).toBe(first);
+        expect(buildReport(reordered).markdown).toBe(first);
+        expect(separationNotesOf(first, 'task-1')).toHaveLength(1);
+      });
     });
   });
 
@@ -4006,6 +4335,47 @@ describe('comparison table in the report', () => {
         }
         expect(visible).toContain(`## Task: ${TITLE}`);
       });
+
+      it('names the task and settings in the separation note instead of their IDs when every row passed', () => {
+        const input = buildComparisonInput({
+          models: [
+            buildModelRecord({ id: OPAQUE_IDS.m1, model: 'vendor/model-a', effort: 'high' }),
+            buildModelRecord({ id: OPAQUE_IDS.m2, model: 'vendor/model-b', effort: 'high' }),
+          ],
+          taskIds: [OPAQUE_IDS.task],
+          tasks: [
+            buildTaskRecord({
+              id: OPAQUE_IDS.task,
+              title: TITLE,
+              repositoryId: OPAQUE_IDS.repository,
+              checks: [
+                buildCheckRecord({
+                  id: OPAQUE_IDS.acceptance,
+                  description: 'Redirect lands on the dashboard',
+                }),
+              ],
+            }),
+          ],
+        });
+
+        const { markdown, summary } = buildReport(input);
+
+        const visible = [
+          withoutAllowedIdText(markdown),
+          ...summary.attempts.flatMap((attempt) => attempt.lines.map(withoutAllowedIdText)),
+        ].join('\n');
+        expect(visible).toContain(
+          withoutAllowedIdText(
+            separationNote('passed', {
+              task: TITLE,
+              settings: 'vendor/model-a, high; vendor/model-b, high',
+            }),
+          ),
+        );
+        for (const id of Object.values(OPAQUE_IDS)) {
+          expect(visible).not.toContain(id);
+        }
+      });
     });
 
     describe('a grader call that returned no reply', () => {
@@ -4353,7 +4723,23 @@ describe('comparison table in the report', () => {
   });
 
   describe('regeneration from saved artifacts', () => {
-    async function createRunWithPendingManualCheck(root: string): Promise<{
+    function pendingManualChecks(): CheckResult[] {
+      return [
+        buildCheckResult({ checkId: 'acc-acceptance-command' }),
+        buildCheckResult({
+          checkId: 'dod-manual-review',
+          category: 'definition-of-done',
+          verdict: 'pending',
+          evidence: 'awaiting manual assessment',
+          durationMs: null,
+        }),
+      ];
+    }
+
+    async function createRunWithPendingManualCheck(
+      root: string,
+      checksOf: () => CheckResult[] = pendingManualChecks,
+    ): Promise<{
       runId: string;
       store: ReturnType<typeof createArtifactStore>;
     }> {
@@ -4377,16 +4763,7 @@ describe('comparison table in the report', () => {
         buildCaseResult({
           identity,
           outcome: 'pending',
-          checks: [
-            buildCheckResult({ checkId: 'acc-acceptance-command' }),
-            buildCheckResult({
-              checkId: 'dod-manual-review',
-              category: 'definition-of-done',
-              verdict: 'pending',
-              evidence: 'awaiting manual assessment',
-              durationMs: null,
-            }),
-          ],
+          checks: checksOf(),
           artifacts: buildArtifactIndex(identity.caseId, new Set(['result', 'checks'])),
         }),
       );
@@ -4489,6 +4866,198 @@ describe('comparison table in the report', () => {
       } finally {
         await rm(root, { recursive: true, force: true });
       }
+    });
+
+    describe('separation note', () => {
+      const ROW_SETTINGS =
+        'vendor/model-alpha-synth, effort-low; vendor/model-alpha-synth, effort-high';
+      const PASSED_NOTE = separationNote('passed', {
+        task: SYNTHETIC_TASK_TITLE,
+        settings: ROW_SETTINGS,
+      });
+      const FAILED_NOTE = separationNote('failed', {
+        task: SYNTHETIC_TASK_TITLE,
+        settings: ROW_SETTINGS,
+      });
+
+      function allChecks(
+        manual: CheckResult['verdict'],
+        optional: CheckResult['verdict'],
+      ): () => CheckResult[] {
+        return () => [
+          buildCheckResult({ checkId: 'acc-acceptance-command' }),
+          buildCheckResult({
+            checkId: 'dod-manual-review',
+            category: 'definition-of-done',
+            verdict: manual,
+          }),
+          buildCheckResult({
+            checkId: 'man-optional-polish',
+            category: 'definition-of-done',
+            verdict: optional,
+          }),
+        ];
+      }
+
+      function decide(
+        checkId: string,
+        verdict: 'passed' | 'failed',
+        replaceExisting = false,
+      ): AssessmentDecision {
+        return {
+          checkId,
+          verdict,
+          assessor: 'curator',
+          note: `${verdict} by curator`,
+          replaceExisting,
+        };
+      }
+
+      function decideBoth(verdict: 'passed' | 'failed'): AssessmentDecision[] {
+        return [decide('dod-manual-review', verdict), decide('man-optional-polish', 'passed')];
+      }
+
+      async function recordVerdicts(
+        root: string,
+        runId: string,
+        store: ReturnType<typeof createArtifactStore>,
+        attempt: 'alpha' | 'beta',
+        decisions: AssessmentDecision[],
+      ): Promise<string[]> {
+        const assessed = await assessCase(
+          {
+            runId,
+            caseId: `task-1--${attempt}--1`,
+            decisions,
+            assessedAt: '2026-09-23T02:00:00.000Z',
+          },
+          store,
+          AGENTS_REGISTRY,
+        );
+        expect(assessed.ok).toBe(true);
+        const report = await readFile(join(root, 'artifacts', runId, 'report.md'), 'utf8');
+        return separationNotesOf(report, 'task-1', SYNTHETIC_TASK_TITLE);
+      }
+
+      it('adds the note once the last waiting required verdict is recorded', async () => {
+        const root = await mkdtemp(join(tmpdir(), 'tevu-eval-note-required-'));
+        try {
+          const { runId, store } = await createRunWithPendingManualCheck(root);
+          const before = await rebuildReport(runId, store, AGENTS_REGISTRY);
+          expect(before.ok).toBe(true);
+          if (!before.ok) return;
+
+          const afterFirst = await recordVerdicts(
+            root,
+            runId,
+            store,
+            'alpha',
+            decideBoth('passed'),
+          );
+          const afterSecond = await recordVerdicts(
+            root,
+            runId,
+            store,
+            'beta',
+            decideBoth('passed'),
+          );
+
+          expect(separationNotesOf(before.value.markdown, 'task-1', SYNTHETIC_TASK_TITLE)).toEqual(
+            [],
+          );
+          expect(afterFirst).toEqual([]);
+          expect(afterSecond).toEqual([PASSED_NOTE]);
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+
+      it('waits for an optional verdict in a block whose attempts all passed until it is recorded', async () => {
+        const root = await mkdtemp(join(tmpdir(), 'tevu-eval-note-optional-'));
+        try {
+          const { runId, store } = await createRunWithPendingManualCheck(
+            root,
+            allChecks('passed', 'pending'),
+          );
+          const before = await rebuildReport(runId, store, AGENTS_REGISTRY);
+          expect(before.ok).toBe(true);
+          if (!before.ok) return;
+
+          const afterFirst = await recordVerdicts(
+            root,
+            runId,
+            store,
+            'alpha',
+            decideBoth('passed'),
+          );
+          const afterSecond = await recordVerdicts(
+            root,
+            runId,
+            store,
+            'beta',
+            decideBoth('passed'),
+          );
+
+          expect(
+            comparisonRows(before.value.markdown, 'task-1', SYNTHETIC_TASK_TITLE).map(
+              (row) => row['Outcome'],
+            ),
+          ).toEqual([`passed ${markers(1)}`, `passed ${markers(3)}`]);
+          expect(separationNotesOf(before.value.markdown, 'task-1', SYNTHETIC_TASK_TITLE)).toEqual(
+            [],
+          );
+          expect(afterFirst).toEqual([]);
+          expect(afterSecond).toEqual([PASSED_NOTE]);
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+
+      it('drops the note when a replaced verdict makes the outcomes differ and swaps it when every outcome fails', async () => {
+        const root = await mkdtemp(join(tmpdir(), 'tevu-eval-note-drop-'));
+        try {
+          const { runId, store } = await createRunWithPendingManualCheck(root);
+          await recordVerdicts(root, runId, store, 'alpha', decideBoth('passed'));
+          const withNote = await recordVerdicts(root, runId, store, 'beta', decideBoth('passed'));
+
+          const outcomesDiffer = await recordVerdicts(root, runId, store, 'beta', [
+            decide('dod-manual-review', 'failed', true),
+          ]);
+          const everyOutcomeFailed = await recordVerdicts(root, runId, store, 'alpha', [
+            decide('dod-manual-review', 'failed', true),
+          ]);
+
+          expect(withNote).toEqual([PASSED_NOTE]);
+          expect(outcomesDiffer).toEqual([]);
+          expect(everyOutcomeFailed).toEqual([FAILED_NOTE]);
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+
+      it('rebuilds a byte-identical report.md that holds the note from unchanged artifacts', async () => {
+        const root = await mkdtemp(join(tmpdir(), 'tevu-eval-note-regen-'));
+        try {
+          const { runId, store } = await createRunWithPendingManualCheck(
+            root,
+            allChecks('passed', 'passed'),
+          );
+          const reportPath = join(root, 'artifacts', runId, 'report.md');
+
+          const first = await rebuildReport(runId, store, AGENTS_REGISTRY);
+          const firstBytes = await readFile(reportPath, 'utf8');
+          const second = await rebuildReport(runId, store, AGENTS_REGISTRY);
+          const secondBytes = await readFile(reportPath, 'utf8');
+
+          expect(first.ok && second.ok).toBe(true);
+          expect(secondBytes).toBe(firstBytes);
+          expect(separationNotesOf(firstBytes, 'task-1', SYNTHETIC_TASK_TITLE)).toEqual([
+            PASSED_NOTE,
+          ]);
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
     });
   });
 });
