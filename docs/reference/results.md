@@ -244,7 +244,7 @@ The call's usage and cost are saved in `conclusions.json` and shown only in the 
 
 ### Saving and regenerating
 
-`tevu run` saves the facts and the three conclusions of every task, with the summary call when there was one, in `conclusions.json` once, before it writes `result.json`, `report.md`, and `summary.md`, and writes `summary.md` from them. The summary is final: `tevu assess` neither writes `conclusions.json` nor changes `summary.md`, so a verdict recorded later shows in `report.md` and not in the summary. `tevu report` renders `summary.md` from the saved entries, offline and without a model call, and unchanged artifacts give the same bytes. A task with no saved entry, such as one of a run cancelled during its cases, renders the facts derived from the saved artifacts with the template sentences. A malformed `conclusions.json` is refused; deleting it makes `tevu report` use template sentences.
+`tevu run` saves the facts and the three conclusions of every task, with the summary call when there was one, in `conclusions.json` once, before it writes `report.md` and `summary.md`, and writes `summary.md` from them. The summary is final: `tevu assess` neither writes `conclusions.json` nor changes `summary.md`, so a verdict recorded later shows in `report.md` and not in the summary. `tevu report` renders `summary.md` from the saved entries, offline and without a model call, and unchanged artifacts give the same bytes. A task with no saved entry, such as one of a run cancelled during its cases, renders the facts derived from the saved artifacts with the template sentences. A malformed `conclusions.json` is refused; deleting it makes `tevu report` use template sentences.
 
 ## Messages
 
