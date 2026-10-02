@@ -25,7 +25,7 @@ The command opens with `Assessing <case name>.` and names each check in plain wo
 
 The command asks for a decision on every pending check, including optional ones. Optional checks stay visible in the report but do not change an otherwise passed outcome.
 
-The command then regenerates the report and prints `Assessment recorded.`, the attempt's summary with its new outcome and required checks, and the path of `report.md`. To cancel, press Escape or Ctrl-C twice within 800 ms (the same key both times); nothing is recorded and the command exits `130`.
+The command then regenerates the report and prints `Assessment recorded.`, the attempt's summary with its new outcome and required checks, and the path of `report.md`. `summary.md` stays as `tevu run` wrote it, so a verdict recorded now shows in `report.md` and not in the summary. To cancel, press Escape or Ctrl-C twice within 800 ms (the same key both times); nothing is recorded and the command exits `130`.
 
 ## Rebuild the report
 
@@ -33,7 +33,7 @@ The command then regenerates the report and prints `Assessment recorded.`, the a
 tevu report 20260923t120000z-a1b2c3d4e5f6
 ```
 
-This rebuilds the results and `report.md` from saved artifacts without calling a model or contacting Git or a tracker. Use it after a report-write failure: a verdict committed before the failure stays saved, and the error names this command.
+This rebuilds the results, `report.md`, and `summary.md` from saved artifacts without calling a model or contacting Git or a tracker. The summary is rendered from the saved `conclusions.json`. Use it after a report-write failure: a verdict committed before the failure stays saved, and the error names this command.
 
 Confirm that every required manual and graded check now has a verdict.
 

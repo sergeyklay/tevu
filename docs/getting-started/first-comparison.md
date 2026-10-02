@@ -128,13 +128,13 @@ This step starts the models and can incur provider charges.
 tevu run
 ```
 
-In a terminal, each line of progress starts with the case it belongs to. Keep the terminal open until tevu prints `Report: <directory>/report.md`. Before that line, tevu prints a summary of every attempt: its name, outcome, and required checks, and an indented explanation of anything that needs your attention.
+In a terminal, each line of progress starts with the case it belongs to. Keep the terminal open until tevu prints `Report: <directory>/report.md`. Before the `Artifacts:`, `Summary:`, and `Report:` lines, tevu prints a summary of every attempt: its name, outcome, and required checks, and an indented explanation of anything that needs your attention.
 
 Exit code `2` means a case timed out, had a runtime failure, or has a failed or pending required check. It is not a crash. See the [exit codes](../reference/cli.md#exit-codes).
 
-## 7. Read the report
+## 7. Read the summary and the report
 
-Open the `report.md` path tevu printed. It opens with one comparison table per task, headed by the task's title, with one row per model setting in the order of your configuration. Read across a row for the task outcome, the required checks, time, cost, tokens, tool calls, and any runtime failure. The Model cell links to that setting's case details. See [Comparison table](../reference/results.md#comparison-table) for every column.
+Open the `summary.md` path tevu printed first. It is a short comparison of every task for a reader who has not seen your configuration: a table, one conclusion each for correctness, cost, and speed, and one sentence for every setting that dropped out. It links once, to `report.md`, which holds the detail. Then open `report.md`. The conclusions in `summary.md` are sentences built from the facts of the run. To have a model reword them, add `roles.summary` to the configuration by hand: the interview does not ask for it, and `tevu config example` shows its fields. tevu keeps the model's sentences only when they match the facts, and uses its own otherwise. `report.md` opens with one comparison table per task, headed by the task's title, with one row per model setting in the order of your configuration. Read across a row for the task outcome, the required checks, time, cost, tokens, tool calls, and any runtime failure. Model cells are plain names without the provider prefix, except where two settings would read alike ([Names](../reference/results.md#names)). See [Comparison table](../reference/results.md#comparison-table) for every column.
 
 Required checks reads as `<passed>/<total> passed`, followed by the checks that failed, still wait for a verdict, or did not run, each counted apart. `1/6 passed, 5 pending` means one required check passed and five wait for a verdict, so nothing failed. A pending check is not a failed one.
 
@@ -149,7 +149,7 @@ Below the tables, each case has its own section. For each model setting it shows
 - time, tool calls, tokens, and cost, with the ones tevu could not measure listed on a `Not measured` line with the reason;
 - a runtime failure, if any, kept separate from the task outcome.
 
-tevu computes no score and names no winner. Compare the outcomes first, then the time and cost of the settings that passed.
+tevu computes no score and names no overall winner. Compare the outcomes first, then the time and cost of the settings that passed.
 
 ## Next
 

@@ -22,7 +22,7 @@ The [CLI reference](cli.md#configuration-file-search) lists the search order tha
 | `trackers.jira` | Optional Jira Cloud connection | [Trackers](trackers.md#jira-cloud) |
 | `repositories` | At least one entry, `{id, path}` or `{id, github}`, optionally with `setup` | [Repositories](repositories.md) |
 | `models` | At least two `{id, model, effort, agent}` entries | [Agents and models](agents-and-models.md#model-entries) |
-| `roles` | Optional `criteria` and `grader` model roles | [Agents and models](agents-and-models.md#model-roles) |
+| `roles` | Optional `criteria`, `grader`, and `summary` model roles | [Agents and models](agents-and-models.md#model-roles) |
 | `tasks` | At least one task | [Tasks](tasks.md) |
 
 ## Run settings

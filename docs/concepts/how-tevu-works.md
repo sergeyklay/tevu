@@ -12,7 +12,7 @@ A benchmark compares models on the same work. tevu therefore separates three thi
 
 Nothing is shared between cases. A model cannot see a sibling's output, and one case's leftover files cannot help the next. That independence is the property that lets a difference in results be attributed to the model rather than to an accident of ordering or contamination. [Isolation](isolation.md) explains the boundaries that enforce it.
 
-Repeats exist because one attempt is a sample. A model that passes once and fails twice tells you something a single pass hides. tevu reports the attempts of a pair together. Outcomes and check verdicts are counted, measurements are summarized by the median of the attempts that reported them, and nothing is combined into a score or a winner. Whether one pass in three is acceptable is a decision about your team's work that tevu cannot make for you.
+Repeats exist because one attempt is a sample. A model that passes once and fails twice tells you something a single pass hides. tevu reports the attempts of a pair together. Outcomes and check verdicts are counted, measurements are summarized by the median of the attempts that reported them, and nothing is combined into a score or an overall winner. Whether one pass in three is acceptable is a decision about your team's work that tevu cannot make for you.
 
 ## The life of a case
 

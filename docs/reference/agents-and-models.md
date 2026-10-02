@@ -32,12 +32,13 @@ Which identifiers and efforts work depends on the provider. `tevu validate` chec
 
 ## Model roles
 
-`roles` declares models tevu uses for its own work rather than benchmarking. Both roles are optional and independent, and a configuration declaring neither is valid. `roles` accepts only the keys `criteria` and `grader`; `{}` declares neither.
+`roles` declares models tevu uses for its own work rather than benchmarking. Every role is optional and independent, and a configuration declaring none is valid. `roles` accepts only the keys `criteria`, `grader`, and `summary`; `{}` declares none.
 
 | Field | Contract |
 | --- | --- |
 | `roles.criteria` | Model that drafts acceptance criteria and a Definition of Done in `tevu task add` |
 | `roles.grader` | Model that grades graded checks after each case's checks run. See [Graded checks](checks.md#graded-checks) |
+| `roles.summary` | Model that rewords the three conclusions of `summary.md` at the end of `tevu run`. See [The summary model](results.md#the-summary-model) |
 | `roles.<role>.model` | `provider/model`, the same grammar as `models[].model` |
 | `roles.<role>.effort` | Non-empty string passed verbatim as `--variant`. `tevu validate` checks it; see [Effort check](#effort-check) |
 | `roles.<role>.agent` | Optional key of `agents`, default the first configured key |
@@ -50,9 +51,12 @@ roles:
   grader:
     model: openai/your-grader-model
     effort: medium
+  summary:
+    model: openai/your-summary-model
+    effort: medium
 ```
 
-- Each role is read only by the command that uses it. `tevu run` reads `grader` for every graded case, in up to three calls per case. `tevu task add` reads `criteria`, and only for a task with a reference solution. No command requires `criteria`; without it the interview asks for criteria by hand. A retry of a criteria draft is another model call.
+- Each role is read only by the command that uses it. `tevu run` reads `grader` for every graded case, in up to three calls per case. `tevu task add` reads `criteria`, and only for a task with a reference solution. No command requires `criteria`; without it the interview asks for criteria by hand. A retry of a criteria draft is another model call. Only `tevu run` reads `summary`, once per task at its end and without a retry; `tevu assess` and `tevu report` never do, and no command requires it.
 - A role's provider credential belongs in its agent block's `secrets`. Every case agent of that block receives the same credential, so a role on a provider no model entry uses still exposes its credential to every benchmarked case agent.
 - The same model may serve a role and a model entry. The report prints an informational note when the grader model is also a benchmarked model entry.
 - Neither the loader nor `tevu validate` checks a role's credential value. A missing credential fails the call at run time.
@@ -66,6 +70,7 @@ roles:
 | Model entry | Always an error |
 | `roles.grader` | An error when a configured task declares a graded check, otherwise a warning |
 | `roles.criteria` | Always a warning |
+| `roles.summary` | Always a warning |
 
 `tevu run` and `tevu run --dry-run` run this check through their own validation. The setup interview of `tevu task add` runs the same listing for each model it asks and refuses a model the agent does not list.
 
@@ -93,6 +98,7 @@ The findings, at `models.<id>.effort` and `roles.<role>.effort`:
 | `roles.grader` | The model reports variants, and a configured task declares a graded check | Error |
 | `roles.grader` | The model reports variants and no configured task declares a graded check, or it reports none | Warning |
 | `roles.criteria` | Always | Warning |
+| `roles.summary` | Always | Warning |
 
 A model that reports no variants accepts no effort value, yet `effort` is required, so an effort on such a model is a warning and never blocks. A model whose listing has no variant data is a warning and `unverified`. When the listing failed or lacks the model, the model finding is already an error and the effort gets no finding of its own.
 
@@ -112,7 +118,7 @@ A verified effort covers the listing environment only. A task repository's confi
 
 ### Where the check is recorded
 
-`tevu run --dry-run` marks each model entry's effort that is not verified. `run.json` records the check of every model entry and of the grader under `efforts`, and `report.md` shows each effort with its status and reason. See [Artifacts](artifacts.md#run-manifest) and [Results](results.md#cases). Identities keep the configured `effort` string.
+`tevu run --dry-run` marks each model entry's effort that is not verified. `run.json` records the check of every model entry and of the grader under `efforts`, and none for `roles.summary`, and `report.md` shows each effort with its status and reason. See [Artifacts](artifacts.md#run-manifest) and [Results](results.md#cases). Identities keep the configured `effort` string.
 
 ## Providers
 
@@ -138,7 +144,7 @@ agents:
 
 tevu reads `$XDG_CONFIG_HOME/opencode` when `XDG_CONFIG_HOME` is set, non-empty, and absolute, otherwise `$HOME/.config/opencode`. In it, `config.json`, `opencode.json`, and `opencode.jsonc` load in that order. Later files win: objects merge, and arrays and scalars replace. Every file is fully parsed, so an unparseable file or a non-object `provider` map is an error even when the named provider is fine. Only the named providers' definitions are kept. Instructions, MCP servers, permissions, plugins, agents, commands, skills, and the login store are never copied.
 
-tevu reads the providers once per `tevu validate` invocation, once per run before the run directory exists (shared by every case and grader call of that run), and once per model call outside a run. A later edit to your configuration reaches nothing already using a reading.
+tevu reads the providers once per `tevu validate` invocation, once per run before the run directory exists (shared by every case and grader call of that run), once per model call outside a run, and once per summary call. A later edit to your configuration reaches nothing already using a reading.
 
 ### What a case receives
 
@@ -164,13 +170,14 @@ For each model it asks, `tevu task add` takes the provider from the text before 
 
 ## Model calls
 
-A model call is a one-shot use of the agent that runs no case: criteria drafting, grading, and the model listing.
+A model call is a one-shot use of the agent that runs no case: criteria drafting, grading, summary writing, and the model listing.
 
 - It uses the agent's own home, state, and temporary directories, the variables of its agent block's `secrets` and `env`, and the copied providers. It gets no evaluator environment.
 - Its working directory is an empty Git repository. No configured repository or commit reaches it. The directory is removed when the call ends.
-- Its `run` process, for drafting and grading alike, receives `OPENCODE_PERMISSION` set to `{"*":"deny"}`, so the model is offered no tool. The value replaces any `OPENCODE_PERMISSION` the agent block's `env` passes. Case agents and the model listing keep the environment described above.
+- Its `run` process, for drafting, grading, and summary calls alike, receives `OPENCODE_PERMISSION` set to `{"*":"deny"}`, so the model is offered no tool. The value replaces any `OPENCODE_PERMISSION` the agent block's `env` passes. Case agents and the model listing keep the environment described above.
 - A call fails with the cause `tool-call` when its saved session holds a tool call, and with the cause `unfinished` when the model's last message ended without the finish reason `stop`, for example because it hit a length limit. The criteria wizard prints the call's own reason for both. A grader call that fails with `unfinished` is made again; see [Graded checks](checks.md#graded-checks).
 - **Grader prompt**, on stdin: the task's `prompt` and `description`, the `id` and `description` of each graded check, and the solution patch. It never carries a reference solution, a case ID, a run ID, or the model entry that produced the solution.
+- **Summary prompt**: the exact names of the task's model settings, the facts of the comparison as JSON, the template sentences, and the grader's saved rationales for the task, fenced as data. It carries no task `prompt` or `description`, check ID, case ID, run ID, repository, path, date, or configuration. See [The summary model](results.md#the-summary-model).
 - **Criteria prompt**: the task's `prompt` and `description` and the reference solution's changes. tevu adds no pull request title or description, commit hash, pull request key or URL, case ID, or run ID. The changes come from GitHub's diff media type for a pull request and from the local repository for a commit.
 
 See [Model access](../concepts/model-access.md) for why calls are shaped this way.
