@@ -303,6 +303,50 @@ function captureModelCallRoots(real: EnvironmentAdapter): {
   return { environments, roots };
 }
 
+/**
+ * Wraps a real `EnvironmentAdapter` so every removal deletes the call
+ * directory and then reports a failure, recording each root it created and
+ * each root it was asked to dispose.
+ */
+function failRemovals(real: EnvironmentAdapter): {
+  environments: EnvironmentAdapter;
+  roots: string[];
+  disposals: string[];
+} {
+  const roots: string[] = [];
+  const disposals: string[] = [];
+  const environments: EnvironmentAdapter = {
+    ...real,
+    async createModelCallEnvironment(snapshot, agentVariables, configurationFiles) {
+      const created = await real.createModelCallEnvironment(
+        snapshot,
+        agentVariables,
+        configurationFiles,
+      );
+      if (!created.ok) {
+        return created;
+      }
+      const { rootDirectory } = created.value;
+      roots.push(rootDirectory);
+      return {
+        ok: true,
+        value: {
+          ...created.value,
+          dispose: async () => {
+            disposals.push(rootDirectory);
+            await created.value.dispose();
+            return {
+              ok: false,
+              error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
+            };
+          },
+        },
+      };
+    },
+  };
+  return { environments, roots, disposals };
+}
+
 /** Wraps a `ManagedProcessRunner`, recording every request it receives. */
 function spyOnRunProcess(): { runProcess: ManagedProcessRunner; calls: ManagedProcessRequest[] } {
   const calls: ManagedProcessRequest[] = [];
@@ -326,6 +370,8 @@ type CallOptions = {
   role?: ModelRoleName;
   config?: TevuConfig;
   onEvidence?: ModelRoleCallRequest['onEvidence'];
+  wrapAdapter?: (adapter: AgentAdapter) => AgentAdapter;
+  agents?: ModelCallDependencies['agents'];
 };
 
 async function callWithFakeAgent(options: CallOptions) {
@@ -342,7 +388,7 @@ async function callWithFakeAgent(options: CallOptions) {
     dependencies,
   );
   const modelCallDependencies: ModelCallDependencies = {
-    agents: new Map([['opencode', adapter]]),
+    agents: options.agents ?? new Map([['opencode', options.wrapAdapter?.(adapter) ?? adapter]]),
     environments: options.environments ?? createEnvironmentAdapter(),
     git:
       options.git ??
@@ -367,7 +413,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
       const value = expectOk(result);
       expect(value.text).toBe('Hello [REDACTED] world');
       expect(value.text).not.toContain(SECRET_VALUE);
-      expect(value.retainedDirectory).toBeNull();
+      expect(result.retainedDirectory).toBeNull();
       expect(value.metrics.inputTokens).toEqual({
         value: 10,
         unit: 'token',
@@ -473,6 +519,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
       });
 
       expect(result.ok).toBe(true);
+      expect(result.retainedDirectory).toBeNull();
       expect(roots).toHaveLength(1);
       expect(existsSync(roots[0]!)).toBe(false);
     });
@@ -488,6 +535,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
       });
 
       expect(result.ok).toBe(false);
+      expect(result.retainedDirectory).toBeNull();
       expect(roots).toHaveLength(1);
       expect(existsSync(roots[0]!)).toBe(false);
     });
@@ -519,8 +567,128 @@ describe('callModelRole against a fake OpenCode executable', () => {
       expect(calls.some((call) => call.argv[1] === 'run' && call.argv[2] === '--format')).toBe(
         false,
       );
+      expect(result.retainedDirectory).toBeNull();
       expect(roots).toHaveLength(1);
       expect(existsSync(roots[0]!)).toBe(false);
+    });
+  });
+
+  describe('retained call directory', () => {
+    const failingGit: Pick<GitWorkspaceAdapter, 'initializeEmptyRepository'> = {
+      initializeEmptyRepository: async () => ({
+        ok: false,
+        error: {
+          kind: 'ArtifactError',
+          operation: 'initialize-repository',
+          reason: 'git init exited with code 1',
+        },
+      }),
+    };
+
+    it.each([
+      {
+        name: 'a run that exits nonzero',
+        options: { run: 'error-exit-1' as const, export: 'none' as const },
+        kind: 'ModelCallError' as const,
+      },
+      {
+        name: 'a run that times out',
+        options: { run: 'sleep' as const, export: 'none' as const, timeoutMs: 700 },
+        kind: 'ModelCallError' as const,
+      },
+      {
+        name: 'a reply that cannot be redacted',
+        options: {
+          run: 'ok' as const,
+          export: 'reply-with-secret' as const,
+          secrets: buildReplyRedactionThrowingSecretRedactor([SECRET_VALUE]),
+        },
+        kind: 'AgentProtocolError' as const,
+      },
+    ])(
+      'reports the root beside the agent error of $name when the removal fails',
+      async ({ options, kind }) => {
+        const { environments, roots, disposals } = failRemovals(createEnvironmentAdapter());
+
+        const result = await callWithFakeAgent({ ...options, environments });
+
+        expectFailure(result, kind);
+        expect(roots).toHaveLength(1);
+        expect(result.retainedDirectory).toBe(roots[0]);
+        expect(disposals).toEqual(roots);
+        expect(existsSync(roots[0]!)).toBe(false);
+      },
+    );
+
+    it('reports the root beside the cancellation when the signal aborts while the agent runs', async () => {
+      const { environments, roots, disposals } = failRemovals(createEnvironmentAdapter());
+      const controller = new AbortController();
+      const runProcess: ManagedProcessRunner = async (request) => {
+        if (request.argv[1] === 'run' && request.argv[2] === '--format') {
+          controller.abort();
+        }
+        return runManagedProcess(request);
+      };
+
+      const result = await callWithFakeAgent({
+        run: 'sleep',
+        export: 'none',
+        environments,
+        runProcess,
+        cancellation: controller.signal,
+      });
+
+      expectFailure(result, 'CancellationError');
+      expect(roots).toHaveLength(1);
+      expect(result.retainedDirectory).toBe(roots[0]);
+      expect(disposals).toEqual(roots);
+      expect(existsSync(roots[0]!)).toBe(false);
+    });
+
+    it('reports the root beside the reply when the removal fails after a call that replied', async () => {
+      const { environments, roots } = failRemovals(createEnvironmentAdapter());
+
+      const result = await callWithFakeAgent({
+        run: 'ok',
+        export: 'reply-with-secret',
+        environments,
+      });
+
+      const value = expectOk(result);
+      expect(value.text).toBe('Hello [REDACTED] world');
+      expect(result.retainedDirectory).toBe(roots[0]);
+    });
+
+    it('keeps the initialization error and reports the root when the removal fails', async () => {
+      const { environments, roots, disposals } = failRemovals(createEnvironmentAdapter());
+
+      const result = await callWithFakeAgent({
+        run: 'ok',
+        export: 'none',
+        environments,
+        git: failingGit,
+      });
+
+      const error = expectFailure(result, 'ArtifactError');
+      expect(error.operation).toBe('initialize-repository');
+      expect(roots).toHaveLength(1);
+      expect(result.retainedDirectory).toBe(roots[0]);
+      expect(disposals).toEqual(roots);
+    });
+
+    it('reports no directory when the removal succeeds after an initialization failure', async () => {
+      const { environments, roots } = captureModelCallRoots(createEnvironmentAdapter());
+
+      const result = await callWithFakeAgent({
+        run: 'ok',
+        export: 'none',
+        environments,
+        git: failingGit,
+      });
+
+      expectFailure(result, 'ArtifactError');
+      expect(roots).toHaveLength(1);
+      expect(result.retainedDirectory).toBeNull();
     });
   });
 
@@ -567,6 +735,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
       expect(error.findings).toEqual([
         { severity: 'error', identifier: 'roles.grader', message: 'model role is not configured' },
       ]);
+      expect(result.retainedDirectory).toBeNull();
       expect(calls).toHaveLength(0);
       expect(roots).toHaveLength(0);
     });
@@ -587,8 +756,88 @@ describe('callModelRole against a fake OpenCode executable', () => {
 
       const error = expectFailure(result, 'CancellationError');
       expect(error.activeCaseIds).toEqual([]);
+      expect(result.retainedDirectory).toBeNull();
       expect(calls).toHaveLength(0);
       expect(roots).toHaveLength(0);
+    });
+
+    it.each([
+      {
+        name: 'no adapter is registered',
+        kind: 'PrerequisiteError' as const,
+        options: { agents: new Map<string, AgentAdapter>() },
+      },
+      {
+        name: 'the parent environment cannot be snapshotted',
+        kind: 'PrerequisiteError' as const,
+        options: {
+          environments: {
+            ...createEnvironmentAdapter(),
+            snapshotParent: () => ({
+              ok: false as const,
+              error: {
+                kind: 'PrerequisiteError' as const,
+                tool: 'environment',
+                expected: 'non-empty parent PATH',
+                actual: 'empty',
+              },
+            }),
+          },
+        },
+      },
+      {
+        name: 'the probe fails',
+        kind: 'PrerequisiteError' as const,
+        options: {
+          wrapAdapter: (adapter: AgentAdapter): AgentAdapter => ({
+            ...adapter,
+            probe: async () => ({
+              ok: false,
+              error: {
+                kind: 'PrerequisiteError',
+                tool: 'opencode',
+                expected: 'a working executable',
+                actual: 'none',
+              },
+            }),
+          }),
+        },
+      },
+      {
+        name: 'the providers cannot be read',
+        kind: 'ConfigValidationError' as const,
+        options: {
+          wrapAdapter: (adapter: AgentAdapter): AgentAdapter => ({
+            ...adapter,
+            readProviders: async () => ({
+              ok: false,
+              error: { kind: 'ConfigValidationError', findings: [] },
+            }),
+          }),
+        },
+      },
+      {
+        name: 'the call directory cannot be created',
+        kind: 'ArtifactError' as const,
+        options: {
+          environments: {
+            ...createEnvironmentAdapter(),
+            createModelCallEnvironment: async () => ({
+              ok: false as const,
+              error: {
+                kind: 'ArtifactError' as const,
+                operation: 'create-model-call-directory',
+                reason: 'disk full',
+              },
+            }),
+          },
+        },
+      },
+    ])('reports no directory when $name', async ({ options, kind }) => {
+      const result = await callWithFakeAgent({ run: 'ok', export: 'none', ...options });
+
+      expectFailure(result, kind);
+      expect(result.retainedDirectory).toBeNull();
     });
   });
 

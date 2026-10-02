@@ -4,7 +4,8 @@
  * template sentences otherwise. Never writes an artifact itself and never
  * returns an error result: a missing role, a redaction failure, a call error,
  * and a rejected reply each become a typed outcome, and a cancellation becomes
- * `{ status: 'cancelled' }`.
+ * `{ status: 'cancelled' }`, which still carries the call directory tevu could
+ * not remove.
  *
  * Entry point: {@link writeTaskConclusions}.
  */
@@ -25,10 +26,14 @@ import type {
 } from '@/domain/types';
 import type { SummaryEvidence } from '@/evaluation/summary';
 
-/** What the summary call of one task produced; a cancellation has nothing to save. */
+/**
+ * What the summary call of one task produced; a cancellation has nothing to
+ * save. `retainedDirectory` is present on every status: the call directory
+ * whose removal failed, null when it was removed or no call was made.
+ */
 export type TaskConclusionsOutcome =
   | { status: 'written'; conclusions: TaskConclusions; retainedDirectory: string | null }
-  | { status: 'cancelled' };
+  | { status: 'cancelled'; retainedDirectory: string | null };
 
 /** Writes the conclusions of one task at the end of `tevu run`. */
 export type ConclusionWriter = {
@@ -104,17 +109,19 @@ export async function writeTaskConclusions(
 
   if (!result.ok) {
     if (result.error.kind === 'CancellationError') {
-      return { status: 'cancelled' };
+      return { status: 'cancelled', retainedDirectory: result.retainedDirectory };
     }
     const reason = `the summary call failed: ${describeModelCallFailure(result.error)}`;
     return written(
       evidence,
       template,
       noReply(reason, delivered?.session?.metrics ?? unavailableAgentMetrics(reason)),
+      result.retainedDirectory,
     );
   }
 
-  const { text, metrics, retainedDirectory } = result.value;
+  const { text, metrics } = result.value;
+  const { retainedDirectory } = result;
   const check = acceptConclusions(text, evidence);
   return check.accepted
     ? written(

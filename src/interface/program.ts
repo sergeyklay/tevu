@@ -71,6 +71,7 @@ export type BenchmarkExecutionHooks = {
   cancellation: AbortSignal;
   onRunId?: (runId: string) => void;
   onLifecycle?: (caseId: string, lifecycle: CaseLifecycle) => void;
+  onRetainedGradingDirectory?: (directory: string) => void;
 };
 
 /**
@@ -692,6 +693,7 @@ async function runBenchmarkCommand(
   // Concurrent per-case progress is shown only on a TTY; non-TTY output stays
   // deterministic metadata: run ID, final case summary, findings, and paths.
   const showProgress = dependencies.io.stdout.isTTY === true;
+  const retainedGradingDirectories: string[] = [];
   const executed = await operations.executeBenchmark(plan, {
     cancellation: dependencies.cancellation,
     onRunId: (runId) => {
@@ -702,6 +704,9 @@ async function runBenchmarkCommand(
           out(`[${caseId}] ${lifecycle}`);
         }
       : undefined,
+    onRetainedGradingDirectory: (directory) => {
+      retainedGradingDirectories.push(directory);
+    },
   });
   if (!executed.ok) {
     return reportFailure(err, executed.error, dependencies.redact);
@@ -710,6 +715,12 @@ async function runBenchmarkCommand(
   const runId = run.manifest.runId;
   const runDirectory = `${plan.artifactsDirectory}/${runId}`;
   if (run.exitCode === EXIT_CANCELLED) {
+    // A cancelled run builds no report, so the report's findings cannot carry these warnings.
+    for (const directory of retainedGradingDirectories) {
+      out(
+        `Warning: tevu could not delete the temporary directory of a grading call. The results are not affected. Delete ${directory} when no tevu command uses it.`,
+      );
+    }
     out(`Artifacts: ${runDirectory}`);
     out(
       `Run cancelled; partial artifacts were finalized. Regenerate the report with: tevu report ${runId}`,

@@ -4,9 +4,9 @@
  * empty Git repository as its working directory, calls the agent once, and
  * disposes the environment unconditionally.
  *
- * Entry point: {@link callModelRole}. Its two production callers are
- * `draftCriteria` and `gradeCase`, which both describe a call failure through
- * {@link describeModelCallFailure}.
+ * Entry point: {@link callModelRole}. Its three production callers are
+ * `draftCriteria`, `gradeCase`, and `writeTaskConclusions`, which describe a
+ * call failure through {@link describeModelCallFailure}.
  */
 
 import { durationMs } from '@/config/schema';
@@ -18,13 +18,13 @@ import type {
   EnvironmentVariableNames,
   GitWorkspaceAdapter,
   ModelCallDependencies,
+  ModelCallEnvironment,
   ModelListing,
+  ModelRoleCallOutcome,
   ModelRoleCallRequest,
-  ModelRoleCallResult,
   ParentEnvironmentSnapshot,
   ProviderSnapshot,
   TevuError,
-  TevuResult,
 } from '@/domain/types';
 
 /** Identifier-only text for a model-role call failure; never includes a secret value. */
@@ -68,27 +68,21 @@ export function describeModelCallFailure(
  * `request.cancellation` is checked before the configuration lookup and again
  * before the call environment is created; a signal raised during the agent
  * process reaches the underlying processes through `adapter.callModel`. The
- * call environment is disposed whatever the call's outcome; a disposal
- * failure after a successful call is reported as `retainedDirectory` rather
- * than as an error, and a disposal failure after a failed call is dropped in
- * favor of the call's own error.
+ * call environment is disposed whatever the call's outcome; a failed removal
+ * on any path after the call directory exists is reported as
+ * `retainedDirectory` beside the call's own result, never as an error that
+ * replaces it.
  */
 export async function callModelRole(
   request: ModelRoleCallRequest,
   dependencies: ModelCallDependencies,
-): Promise<
-  TevuResult<
-    ModelRoleCallResult,
-    | 'ConfigValidationError'
-    | 'PrerequisiteError'
-    | 'AgentProtocolError'
-    | 'ArtifactError'
-    | 'ModelCallError'
-    | 'CancellationError'
-  >
-> {
+): Promise<ModelRoleCallOutcome> {
   if (request.cancellation.aborted) {
-    return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
+    return {
+      ok: false,
+      error: { kind: 'CancellationError', activeCaseIds: [] },
+      retainedDirectory: null,
+    };
   }
 
   const role = request.config.roles?.[request.role];
@@ -105,6 +99,7 @@ export async function callModelRole(
           },
         ],
       },
+      retainedDirectory: null,
     };
   }
 
@@ -118,6 +113,7 @@ export async function callModelRole(
         expected: 'a registered agent adapter',
         actual: 'none',
       },
+      retainedDirectory: null,
     };
   }
 
@@ -129,12 +125,12 @@ export async function callModelRole(
   };
   const snapshot = dependencies.environments.snapshotParent(names);
   if (!snapshot.ok) {
-    return snapshot;
+    return { ...snapshot, retainedDirectory: null };
   }
 
   const probe = await adapter.probe();
   if (!probe.ok) {
-    return probe;
+    return { ...probe, retainedDirectory: null };
   }
 
   let providers: ProviderSnapshot;
@@ -143,13 +139,17 @@ export async function callModelRole(
   } else {
     const read = await adapter.readProviders();
     if (!read.ok) {
-      return read;
+      return { ...read, retainedDirectory: null };
     }
     providers = read.value;
   }
 
   if (request.cancellation.aborted) {
-    return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
+    return {
+      ok: false,
+      error: { kind: 'CancellationError', activeCaseIds: [] },
+      retainedDirectory: null,
+    };
   }
 
   const environmentResult = await dependencies.environments.createModelCallEnvironment(
@@ -158,7 +158,7 @@ export async function callModelRole(
     providers.configurationFiles,
   );
   if (!environmentResult.ok) {
-    return environmentResult;
+    return { ...environmentResult, retainedDirectory: null };
   }
   const environment = environmentResult.value;
 
@@ -166,8 +166,7 @@ export async function callModelRole(
     environment.workingDirectory,
   );
   if (!initialized.ok) {
-    await environment.dispose();
-    return initialized;
+    return { ...initialized, retainedDirectory: await removalOf(environment) };
   }
 
   const outcome = await adapter.callModel({
@@ -182,18 +181,11 @@ export async function callModelRole(
     copiedProviders: providers.copiedProviders,
     onEvidence: request.onEvidence,
   });
-  const removal = await environment.dispose();
+  return { ...outcome, retainedDirectory: await removalOf(environment) };
+}
 
-  if (!outcome.ok) {
-    return outcome;
-  }
-  return {
-    ok: true,
-    value: {
-      ...outcome.value,
-      retainedDirectory: removal.ok ? null : environment.rootDirectory,
-    },
-  };
+async function removalOf(environment: ModelCallEnvironment): Promise<string | null> {
+  return (await environment.dispose()).ok ? null : environment.rootDirectory;
 }
 
 /**

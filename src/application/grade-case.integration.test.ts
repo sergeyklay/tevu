@@ -273,6 +273,40 @@ function buildConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
   };
 }
 
+/** Wraps the environment adapter so every removal deletes the call directory and then fails, recording each root in call order. */
+function buildRetainingEnvironments(): { environments: EnvironmentAdapter; roots: string[] } {
+  const real = createEnvironmentAdapter();
+  const roots: string[] = [];
+  const environments: EnvironmentAdapter = {
+    ...real,
+    createModelCallEnvironment: async (snapshot, agentVariables, configurationFiles) => {
+      const created = await real.createModelCallEnvironment(
+        snapshot,
+        agentVariables,
+        configurationFiles,
+      );
+      if (!created.ok) {
+        return created;
+      }
+      roots.push(created.value.rootDirectory);
+      return {
+        ok: true,
+        value: {
+          ...created.value,
+          dispose: async () => {
+            await created.value.dispose();
+            return {
+              ok: false,
+              error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
+            };
+          },
+        },
+      };
+    },
+  };
+  return { environments, roots };
+}
+
 type CallOptions = {
   run: RunBehavior;
   executable?: string;
@@ -286,6 +320,7 @@ type CallOptions = {
   agents?: ModelCallDependencies['agents'];
   cancellation?: AbortSignal;
   recordPath?: string;
+  environments?: EnvironmentAdapter;
 };
 
 async function gradeWithFakeExecutable(options: CallOptions) {
@@ -310,7 +345,7 @@ async function gradeWithFakeExecutable(options: CallOptions) {
   );
   const dependencies: ModelCallDependencies = {
     agents: options.agents ?? new Map([['opencode', adapter]]),
-    environments: createEnvironmentAdapter(),
+    environments: options.environments ?? createEnvironmentAdapter(),
     git: createGitWorkspaceAdapter({ workspacesDirectory: join(tempRoot, 'workspaces') }),
   };
   const outcome = await gradeCase(
@@ -326,6 +361,35 @@ async function gradeWithFakeExecutable(options: CallOptions) {
     dependencies,
   );
   return outcome;
+}
+
+/** Wraps the real adapter so the signal aborts as the second model call starts. */
+function buildAgentAbortingOnSecondCall(
+  executable: string,
+  controller: AbortController,
+): { agent: AgentAdapter; started: () => number } {
+  const realAdapter = createOpenCodeAdapter(
+    { agent: 'opencode', executable, providers: [], declaredVariables: { secrets: [], env: [] } },
+    {
+      runProcess: runManagedProcess,
+      secrets: createSecretRedactor(() => [SECRET_VALUE], createRedactor([SECRET_VALUE])),
+      probeEnvironment: { PATH: process.env['PATH'] ?? '' },
+      probeDirectory: process.cwd(),
+      operatorDirectories: { home: undefined, xdgConfigHome: undefined },
+    },
+  );
+  let started = 0;
+  const agent: AgentAdapter = {
+    ...realAdapter,
+    async callModel(input) {
+      started += 1;
+      if (started === 2) {
+        controller.abort();
+      }
+      return realAdapter.callModel(input);
+    },
+  };
+  return { agent, started: () => started };
 }
 
 describe('gradeCase against a fake OpenCode executable', () => {
@@ -480,7 +544,7 @@ describe('gradeCase against a fake OpenCode executable', () => {
 
     const outcome = await gradeWithFakeExecutable({ run: 'ok', cancellation: controller.signal });
 
-    expect(outcome).toEqual({ status: 'cancelled' });
+    expect(outcome).toEqual({ status: 'cancelled', retainedDirectories: [] });
   });
 
   it('records a PrerequisiteError call failure as no-reply when the grader agent has no registered adapter', async () => {
@@ -512,7 +576,7 @@ describe('gradeCase call loop against a scripted fake OpenCode executable', () =
     if (outcome.status !== 'graded') {
       throw new Error(`expected a graded outcome, got ${JSON.stringify(outcome)}`);
     }
-    return { grading: outcome.grading, retainedDirectory: outcome.retainedDirectory, logPath };
+    return { grading: outcome.grading, retainedDirectories: outcome.retainedDirectories, logPath };
   }
 
   it('starts the run once and leaves every check pending when the session holds a tool call', async () => {
@@ -534,7 +598,7 @@ describe('gradeCase call loop against a scripted fake OpenCode executable', () =
   });
 
   it('calls again after an unfinished call, takes the grades from the reply, and sums both exports', async () => {
-    const { grading, logPath, retainedDirectory } = await gradeWithScripts([
+    const { grading, logPath, retainedDirectories } = await gradeWithScripts([
       { run: 'ok', export: { kind: 'unfinished', cost: 0.25, tokens: FIRST_TOKENS } },
       {
         run: 'ok',
@@ -561,7 +625,7 @@ describe('gradeCase call loop against a scripted fake OpenCode executable', () =
     expect(grading.metrics.cacheReadTokens.value).toBe(44);
     expect(grading.metrics.cacheWriteTokens.value).toBe(55);
     expect(grading.metrics.cost.value).toBe(0.75);
-    expect(retainedDirectory).toBeNull();
+    expect(retainedDirectories).toEqual([]);
   });
 
   it('stops after three unfinished calls and opens the pending wording with the call count', async () => {
@@ -625,27 +689,7 @@ describe('gradeCase call loop against a scripted fake OpenCode executable', () =
       [{ run: 'ok', export: { kind: 'unfinished' } }],
       logPath,
     );
-    const realAdapter = createOpenCodeAdapter(
-      { agent: 'opencode', executable, providers: [], declaredVariables: { secrets: [], env: [] } },
-      {
-        runProcess: runManagedProcess,
-        secrets: createSecretRedactor(() => [SECRET_VALUE], createRedactor([SECRET_VALUE])),
-        probeEnvironment: { PATH: process.env['PATH'] ?? '' },
-        probeDirectory: process.cwd(),
-        operatorDirectories: { home: undefined, xdgConfigHome: undefined },
-      },
-    );
-    let started = 0;
-    const agent: AgentAdapter = {
-      ...realAdapter,
-      async callModel(input) {
-        started += 1;
-        if (started === 2) {
-          controller.abort();
-        }
-        return realAdapter.callModel(input);
-      },
-    };
+    const { agent, started } = buildAgentAbortingOnSecondCall(executable, controller);
 
     const outcome = await gradeWithFakeExecutable({
       run: 'ok',
@@ -654,9 +698,55 @@ describe('gradeCase call loop against a scripted fake OpenCode executable', () =
       cancellation: controller.signal,
     });
 
-    expect(outcome).toEqual({ status: 'cancelled' });
-    expect(started).toBe(2);
+    expect(outcome).toEqual({ status: 'cancelled', retainedDirectories: [] });
+    expect(started()).toBe(2);
     expect(countRunStarts(logPath)).toBe(1);
+  });
+
+  it('lists the directory of each of three unfinished calls in call order when every removal fails', async () => {
+    const { environments, roots } = buildRetainingEnvironments();
+
+    const { retainedDirectories } = await gradeWithScripts(
+      [{ run: 'ok', export: { kind: 'unfinished' } }],
+      { environments },
+    );
+
+    expect(roots).toHaveLength(3);
+    expect(retainedDirectories).toEqual(roots);
+  });
+
+  it('lists the directory of a failed call when its removal fails', async () => {
+    const { environments, roots } = buildRetainingEnvironments();
+
+    const { grading, retainedDirectories } = await gradeWithScripts([{ run: 'error-exit-1' }], {
+      environments,
+    });
+
+    expect(grading.call).toMatchObject({ status: 'no-reply', cause: 'other' });
+    expect(roots).toHaveLength(1);
+    expect(retainedDirectories).toEqual(roots);
+  });
+
+  it('lists the directories of an unfinished call and the call cancelled after it when every removal fails', async () => {
+    const controller = new AbortController();
+    const { environments, roots } = buildRetainingEnvironments();
+    const logPath = nextRecordPath();
+    const executable = await writeScriptedGraderExecutable(
+      [{ run: 'ok', export: { kind: 'unfinished' } }],
+      logPath,
+    );
+    const { agent } = buildAgentAbortingOnSecondCall(executable, controller);
+
+    const outcome = await gradeWithFakeExecutable({
+      run: 'ok',
+      executable,
+      environments,
+      agents: new Map([['opencode', agent]]),
+      cancellation: controller.signal,
+    });
+
+    expect(roots).toHaveLength(2);
+    expect(outcome).toEqual({ status: 'cancelled', retainedDirectories: roots });
   });
 
   it('keeps a configured secret out of every field of the grading and records its replacement', async () => {

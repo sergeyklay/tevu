@@ -40,7 +40,12 @@ export type AgentDraft = {
 /** The provider a model identifier names and what the operator's configuration defines for it. */
 export type ModelProviderInspection = { provider: string; definition: OperatorProvider };
 
-/** What checking one model found: listed or not, why no answer exists, or a cancellation. */
+/**
+ * What checking one model found: listed or not, why no answer exists, or a
+ * cancellation. Every status except `provider-rejected` carries
+ * `retainedDirectory`, the listing's call directory whose removal failed;
+ * `provider-rejected` is returned before that directory exists.
+ */
 export type ModelAccessOutcome =
   | {
       status: 'listed';
@@ -52,8 +57,8 @@ export type ModelAccessOutcome =
     }
   | { status: 'not-listed'; unsetVariables: readonly string[]; retainedDirectory: string | null }
   | { status: 'provider-rejected'; findings: readonly ValidationFinding[] }
-  | { status: 'listing-failed'; detail: string }
-  | { status: 'cancelled' };
+  | { status: 'listing-failed'; detail: string; retainedDirectory: string | null }
+  | { status: 'cancelled'; retainedDirectory: string | null };
 
 /** Effects injected into the model access checks. */
 export type ModelAccessDependencies = {
@@ -127,7 +132,11 @@ export async function checkModelAccess(
 ): Promise<ModelAccessOutcome> {
   const adapter = buildAdapter(request.configPath, request.agent, dependencies);
   if (adapter === undefined) {
-    return { status: 'listing-failed', detail: 'no adapter is registered for the agent' };
+    return {
+      status: 'listing-failed',
+      detail: 'no adapter is registered for the agent',
+      retainedDirectory: null,
+    };
   }
   const copied = await adapter.readProviders();
   if (!copied.ok) {
@@ -149,6 +158,7 @@ export async function checkModelAccess(
     return {
       status: 'listing-failed',
       detail: `prerequisite "${tool}" is not satisfied; expected ${expected}${actual === undefined ? '' : `, actual ${actual}`}`,
+      retainedDirectory: null,
     };
   }
 
@@ -163,23 +173,29 @@ export async function checkModelAccess(
     dependencies,
   );
   if (!result.prepared) {
-    return { status: 'listing-failed', detail: result.reason };
+    return {
+      status: 'listing-failed',
+      detail: result.reason,
+      retainedDirectory: result.retainedDirectory,
+    };
   }
 
   const command = resolveCommand(request.configPath, request.agent.command);
   const { listing } = result;
   switch (listing.outcome) {
     case 'cancelled':
-      return { status: 'cancelled' };
+      return { status: 'cancelled', retainedDirectory: result.retainedDirectory };
     case 'timed-out':
       return {
         status: 'listing-failed',
         detail: `"${command} models --verbose" did not finish within ${listing.limitMs / 1000}s`,
+        retainedDirectory: result.retainedDirectory,
       };
     case 'failed':
       return {
         status: 'listing-failed',
         detail: `"${command} models --verbose" ${listing.reason}`,
+        retainedDirectory: result.retainedDirectory,
       };
     case 'listed':
       return listing.models.includes(request.model)

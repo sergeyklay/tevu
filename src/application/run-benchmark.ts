@@ -1118,6 +1118,14 @@ async function evaluateReadableCase(
         git: run.dependencies.git,
       },
     );
+    for (const directory of outcome.retainedDirectories) {
+      run.dependencies.onRetainedGradingDirectory?.(directory);
+      run.findings.push({
+        severity: 'warning',
+        caseId,
+        message: `tevu could not delete the temporary directory of this attempt's grading call. The results are not affected. Delete \`${directory}\` when no tevu command uses it.`,
+      });
+    }
     if (outcome.status === 'cancelled') {
       return finishCase(run, active, 'cancelled', preservedFailure);
     }
@@ -1128,13 +1136,6 @@ async function evaluateReadableCase(
     }
     active.grading = outcome.grading;
     active.gradingWritten = true;
-    if (outcome.retainedDirectory !== null) {
-      run.findings.push({
-        severity: 'warning',
-        caseId,
-        message: `tevu could not delete the temporary directory of this attempt's grading call. The results are not affected. Delete \`${outcome.retainedDirectory}\` when no tevu command uses it.`,
-      });
-    }
     if (run.state.cancelled) {
       return finishCase(run, active, 'cancelled', preservedFailure);
     }

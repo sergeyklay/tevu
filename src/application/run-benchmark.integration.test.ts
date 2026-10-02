@@ -798,6 +798,48 @@ describe('runBenchmark grading in the case flow', () => {
     };
   }
 
+  /** Wraps the real environment adapter so every removal deletes the call directory and then fails, recording each root. */
+  function buildRetainingEnvironments(): { environments: EnvironmentAdapter; roots: string[] } {
+    const real = createEnvironmentAdapter();
+    const roots: string[] = [];
+    const environments: EnvironmentAdapter = {
+      ...real,
+      async createModelCallEnvironment(snapshot, agentVariables, configurationFiles) {
+        const created = await real.createModelCallEnvironment(
+          snapshot,
+          agentVariables,
+          configurationFiles,
+        );
+        if (!created.ok) {
+          return created;
+        }
+        roots.push(created.value.rootDirectory);
+        return {
+          ok: true,
+          value: {
+            ...created.value,
+            dispose: async () => {
+              await created.value.dispose();
+              return {
+                ok: false,
+                error: {
+                  kind: 'ArtifactError',
+                  operation: 'dispose-model-call-environment',
+                  reason: 'synthetic dispose failure',
+                },
+              };
+            },
+          },
+        };
+      },
+    };
+    return { environments, roots };
+  }
+
+  function retainedGraderMessage(root: string): string {
+    return `tevu could not delete the temporary directory of this attempt's grading call. The results are not affected. Delete \`${root}\` when no tevu command uses it.`;
+  }
+
   function repliedGrade(text: string): ModelCallResult {
     return {
       text,
@@ -1046,37 +1088,8 @@ describe('runBenchmark grading in the case flow', () => {
         '{"grades":[{"check":"csv-content","verdict":"passed","rationale":"ok"}]}',
       ),
     }));
-    const realEnvironments = createEnvironmentAdapter();
-    const environmentsWithFailingDispose: EnvironmentAdapter = {
-      ...realEnvironments,
-      async createModelCallEnvironment(snapshot, agentVariables, configurationFiles) {
-        const created = await realEnvironments.createModelCallEnvironment(
-          snapshot,
-          agentVariables,
-          configurationFiles,
-        );
-        if (!created.ok) {
-          return created;
-        }
-        return {
-          ok: true,
-          value: {
-            ...created.value,
-            dispose: async () => ({
-              ok: false,
-              error: {
-                kind: 'ArtifactError',
-                operation: 'dispose-model-call-environment',
-                reason: 'synthetic dispose failure',
-              },
-            }),
-          },
-        };
-      },
-    };
-    const dependencies = buildGradingDependencies(config, agent, testDirectory, {
-      environments: environmentsWithFailingDispose,
-    });
+    const { environments, roots } = buildRetainingEnvironments();
+    const dependencies = buildGradingDependencies(config, agent, testDirectory, { environments });
 
     const result = await runBenchmark(
       planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
@@ -1089,9 +1102,133 @@ describe('runBenchmark grading in the case flow', () => {
     const retained = run.findings.filter((finding) => finding.caseId === 'graded-task--m1--1');
     expect(retained).toHaveLength(1);
     expect(retained[0]?.severity).toBe('warning');
-    expect(retained[0]?.message).toMatch(
-      /^tevu could not delete the temporary directory of this attempt's grading call\. The results are not affected\. Delete `\/[^`]+` when no tevu command uses it\.$/,
+    expect(retained[0]?.message).toBe(retainedGraderMessage(roots[0]!));
+  });
+
+  it('records one warning finding per case for a failed grader call whose removal fails', async () => {
+    const repository = await createSyntheticRepository(testDirectory);
+    const config = buildGradedConfig({
+      repositoryPath: repository.path,
+      commit: repository.commit,
+      outputDirectory: join(testDirectory, 'artifacts'),
+    });
+    const agent = buildGradingFakeAgentAdapter([], async () => ({
+      ok: false,
+      error: {
+        kind: 'ModelCallError',
+        role: 'grader',
+        agent: FAKE_AGENT_NAME,
+        cause: 'failed',
+        reason: 'synthetic grader failure',
+      },
+    }));
+    const { environments, roots } = buildRetainingEnvironments();
+    const dependencies = buildGradingDependencies(config, agent, testDirectory, { environments });
+
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      dependencies,
     );
+
+    const run = unwrapOk(result);
+    expect(roots).toHaveLength(2);
+    expect(caseResultOf(run, 'graded-task--m1--1').outcome).toBe('pending');
+    for (const caseId of ['graded-task--m1--1', 'graded-task--m2--1']) {
+      const findings = run.findings.filter((finding) => finding.caseId === caseId);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]?.severity).toBe('warning');
+    }
+    expect(run.findings.map((finding) => finding.message).sort()).toEqual(
+      roots.map(retainedGraderMessage).sort(),
+    );
+  });
+
+  it('records the warning finding in the cancelled run when the call cancelled during grading cannot be removed', async () => {
+    const repository = await createSyntheticRepository(testDirectory);
+    const config = buildGradedConfig({
+      repositoryPath: repository.path,
+      commit: repository.commit,
+      outputDirectory: join(testDirectory, 'artifacts'),
+    });
+    const cancelController = new AbortController();
+    const agent = buildGradingFakeAgentAdapter([], async () => {
+      cancelController.abort();
+      return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
+    });
+    const { environments, roots } = buildRetainingEnvironments();
+    const reported: string[] = [];
+    const dependencies = {
+      ...buildGradingDependencies(config, agent, testDirectory, {
+        environments,
+        cancellation: cancelController.signal,
+      }),
+      onRetainedGradingDirectory: (directory: string) => {
+        reported.push(directory);
+      },
+    };
+
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      dependencies,
+    );
+
+    const run = unwrapOk(result);
+    expect(caseResultOf(run, 'graded-task--m1--1').lifecycle).toBe('cancelled');
+    expect(roots).toHaveLength(1);
+    expect(reported).toEqual(roots);
+    expect(run.findings.filter((finding) => finding.caseId === 'graded-task--m1--1')).toEqual([
+      expect.objectContaining({
+        severity: 'warning',
+        message: retainedGraderMessage(roots[0]!),
+      }),
+    ]);
+  });
+
+  it('keeps the warning finding of a grader call that replied when grading.json cannot be written', async () => {
+    const repository = await createSyntheticRepository(testDirectory);
+    const config = buildGradedConfig({
+      repositoryPath: repository.path,
+      commit: repository.commit,
+      outputDirectory: join(testDirectory, 'artifacts'),
+    });
+    const agent = buildGradingFakeAgentAdapter([], async () => ({
+      ok: true,
+      value: repliedGrade(
+        '{"grades":[{"check":"csv-content","verdict":"passed","rationale":"ok"}]}',
+      ),
+    }));
+    const baseDependencies = buildDependencies(config, agent, testDirectory);
+    const failingArtifacts: ArtifactStore = new Proxy(baseDependencies.artifacts, {
+      get(target, property) {
+        if (property === 'writeGrading') {
+          return async () => ({
+            ok: false,
+            error: {
+              kind: 'ArtifactError',
+              operation: 'write-grading',
+              reason: 'synthetic write failure',
+            },
+          });
+        }
+        return Reflect.get(target, property) as unknown;
+      },
+    });
+    const { environments, roots } = buildRetainingEnvironments();
+    const dependencies = buildGradingDependencies(config, agent, testDirectory, {
+      environments,
+      artifacts: failingArtifacts,
+    });
+
+    const result = await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      dependencies,
+    );
+
+    const run = unwrapOk(result);
+    expect(caseResultOf(run, 'graded-task--m1--1').lifecycle).toBe('infrastructure-failed');
+    expect(
+      run.findings.filter((finding) => finding.message === retainedGraderMessage(roots[0]!)),
+    ).toEqual([expect.objectContaining({ caseId: 'graded-task--m1--1', severity: 'warning' })]);
   });
 
   describe('saved grader calls', () => {

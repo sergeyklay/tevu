@@ -912,6 +912,17 @@ function expectNoWrites(operations: ProgramOperations): void {
   expect(operations.applyAssessment).not.toHaveBeenCalled();
 }
 
+/** The events after the wait `label` ends, without the stdin discarder's stop. */
+function eventsAfterWait(label: string): string[] {
+  return clack.state.timeline
+    .slice(clack.state.timeline.lastIndexOf(`spinner:stop:${label}`) + 1)
+    .filter((event) => event !== 'discarder:stop');
+}
+
+function removalWarnings(): { kind: string; message: string }[] {
+  return clack.state.logs.filter((log) => log.message.startsWith("Couldn't remove"));
+}
+
 function requireCreateTaskCall(operations: ProgramOperations): TaskWizardInput {
   const call = vi.mocked(operations.createTask).mock.calls[0]?.[0];
   if (call === undefined) {
@@ -2819,6 +2830,29 @@ describe('tevu CLI', () => {
         'Run cancelled; partial artifacts were finalized. Regenerate the report with: tevu report run-1',
       ]);
       expect(operations.rebuildRunReport).not.toHaveBeenCalled();
+    });
+
+    it('prints the retained grading call directories of a cancelled run before its artifacts', async () => {
+      const operations = createOperations({
+        executeBenchmark: vi.fn(async (_plan: BenchmarkPlan, hooks: BenchmarkExecutionHooks) => {
+          hooks.onRunId?.('run-1');
+          hooks.onRetainedGradingDirectory?.('/tmp/tevu-call-a');
+          hooks.onRetainedGradingDirectory?.('/tmp/tevu-call-b');
+          return { ok: true as const, value: buildRunResult({ exitCode: 130 }) };
+        }),
+      });
+
+      const { code, out } = await runCli(['run'], { operations });
+
+      expect(code).toBe(130);
+      expect(out).toEqual([
+        'Configuration: tevu.yaml',
+        'Run run-1 started.',
+        'Warning: tevu could not delete the temporary directory of a grading call. The results are not affected. Delete /tmp/tevu-call-a when no tevu command uses it.',
+        'Warning: tevu could not delete the temporary directory of a grading call. The results are not affected. Delete /tmp/tevu-call-b when no tevu command uses it.',
+        'Artifacts: /tmp/artifacts/run-1',
+        'Run cancelled; partial artifacts were finalized. Regenerate the report with: tevu report run-1',
+      ]);
     });
 
     it('downgrades to exit 1 with the recovery hint when the rebuild fails', async () => {
@@ -6506,7 +6540,11 @@ describe('tevu CLI', () => {
               checkModelAccess: recordOperation('checkModelAccess', async () => {
                 applyOutcome(outcome, controller);
                 return outcome === 'returns an error'
-                  ? { status: 'listing-failed' as const, detail: 'exits with code 3' }
+                  ? {
+                      status: 'listing-failed' as const,
+                      detail: 'exits with code 3',
+                      retainedDirectory: null,
+                    }
                   : accessOutcome('listed');
               }),
             }),
@@ -6832,6 +6870,7 @@ describe('tevu CLI', () => {
               checkModelAccess: vi.fn<ProgramOperations['checkModelAccess']>(async () => ({
                 status: 'listing-failed',
                 detail: '"opencode models" exits with code 3',
+                retainedDirectory: null,
               })),
             }),
             answers: setupAnswers({ firstModel: ['acme/model-a', clack.CANCEL, true] }),
@@ -7385,6 +7424,100 @@ describe('tevu CLI', () => {
         });
       });
 
+      describe('the retained directory of a model check', () => {
+        const DIRECTORY = '/tmp/tevu-call-xyz';
+        const REMOVAL_WARNING = {
+          kind: 'warn',
+          message: `Couldn't remove a temporary directory.\n${DIRECTORY}`,
+        };
+
+        it('prints one warning before the listing failure when the listing failed', async () => {
+          const operations = operationsWithModelCheck({
+            checkModelAccess: vi.fn<ProgramOperations['checkModelAccess']>(async () => ({
+              status: 'listing-failed',
+              detail: '"opencode models" exits with code 3',
+              retainedDirectory: DIRECTORY,
+            })),
+          });
+          scriptAnswers(...setupAnswers({ firstModel: ['acme/model-a', clack.CANCEL, true] }));
+
+          await runCli(['task', 'add'], { operations });
+
+          const warnings = clack.state.logs.filter((log) => log.kind === 'warn');
+          expect(warnings.map((warning) => warning.message.split('\n')[0])).toEqual([
+            "Couldn't remove a temporary directory.",
+            "Can't list OpenCode models.",
+          ]);
+          expect(removalWarnings()).toEqual([REMOVAL_WARNING]);
+        });
+
+        it('prints one warning before the cancel line when the check is cancelled', async () => {
+          const operations = operationsWithModelCheck({
+            checkModelAccess: vi.fn<ProgramOperations['checkModelAccess']>(async () => ({
+              status: 'cancelled',
+              retainedDirectory: DIRECTORY,
+            })),
+          });
+          scriptAnswers(...fullSetupAnswers());
+
+          const { code, err } = await runCli(['task', 'add'], { operations });
+
+          expect(code).toBe(130);
+          expect(err).toEqual([]);
+          expect(removalWarnings()).toEqual([REMOVAL_WARNING]);
+          expect(eventsAfterWait('Checking model')).toEqual(['log:warn', 'cancel']);
+          expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+          expectNoWrites(operations);
+        });
+
+        it('prints one warning before the cancel line when the signal aborts during the wait', async () => {
+          const controller = new AbortController();
+          const operations = operationsWithModelCheck({
+            checkModelAccess: vi.fn<ProgramOperations['checkModelAccess']>(async () => {
+              controller.abort();
+              return accessOutcome('listed', { retainedDirectory: DIRECTORY });
+            }),
+          });
+          scriptAnswers(...fullSetupAnswers());
+
+          const { code, err } = await runCli(['task', 'add'], {
+            operations,
+            cancellation: controller.signal,
+          });
+
+          expect(code).toBe(130);
+          expect(err).toEqual([]);
+          expect(removalWarnings()).toEqual([REMOVAL_WARNING]);
+          expect(eventsAfterWait('Checking model')).toEqual(['log:warn', 'cancel']);
+          expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+          expectNoWrites(operations);
+        });
+
+        it('prints one warning after the exit question and before the cancel line when it is answered Yes', async () => {
+          const waitInterrupt = createWaitInterrupt();
+          const operations = operationsWithModelCheck({
+            checkModelAccess: vi.fn<ProgramOperations['checkModelAccess']>(async () => {
+              waitInterrupt.take();
+              return accessOutcome('listed', { retainedDirectory: DIRECTORY });
+            }),
+          });
+          scriptAnswers(...setupAnswers({ firstModel: ['provider/model-a', true] }));
+
+          const { code, err } = await runCli(['task', 'add'], { operations, waitInterrupt });
+
+          expect(code).toBe(130);
+          expect(err).toEqual([]);
+          expect(removalWarnings()).toEqual([REMOVAL_WARNING]);
+          expect(eventsAfterWait('Checking model')).toEqual([
+            `prompt:${EXIT_QUESTION_NEW_FILE}`,
+            'log:warn',
+            'cancel',
+          ]);
+          expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+          expectNoWrites(operations);
+        });
+      });
+
       it.each(['first', 'second'] as const)(
         'ends with exit 130, one cancel line, and no write when the check is cancelled on the %s model',
         async (position) => {
@@ -7392,11 +7525,14 @@ describe('tevu CLI', () => {
             .fn<ProgramOperations['checkModelAccess']>()
             .mockResolvedValue(accessOutcome('listed'));
           if (position === 'first') {
-            checkModelAccess.mockResolvedValueOnce({ status: 'cancelled' });
+            checkModelAccess.mockResolvedValueOnce({
+              status: 'cancelled',
+              retainedDirectory: null,
+            });
           } else {
             checkModelAccess
               .mockResolvedValueOnce(accessOutcome('listed'))
-              .mockResolvedValueOnce({ status: 'cancelled' });
+              .mockResolvedValueOnce({ status: 'cancelled', retainedDirectory: null });
           }
           const operations = operationsWithModelCheck({ checkModelAccess });
           scriptAnswers(...fullSetupAnswers());
@@ -7451,6 +7587,7 @@ describe('tevu CLI', () => {
               .mockResolvedValueOnce({
                 status: 'listing-failed',
                 detail: '"opencode models" exits with code 3',
+                retainedDirectory: null,
               })
               .mockResolvedValue(accessOutcome('listed')),
           }),
@@ -7961,6 +8098,90 @@ describe('tevu CLI', () => {
             "Couldn't remove a temporary directory.",
             "Couldn't draft criteria.",
           ]);
+        });
+      });
+
+      describe('the retained directories of a draft that ends the wizard', () => {
+        const DIRECTORIES = ['/tmp/listing-dir', '/tmp/call-dir'];
+        const REMOVAL_WARNINGS = DIRECTORIES.map((directory) => ({
+          kind: 'warn',
+          message: `Couldn't remove a temporary directory.\n${directory}`,
+        }));
+
+        function draftedWith(retainedDirectories: string[]) {
+          return {
+            status: 'drafted' as const,
+            effort: { status: 'verified' as const },
+            draft: { acceptance: ['a'], done: ['d'] },
+            retainedDirectories,
+          };
+        }
+
+        it('prints one warning per directory, in order, before the cancel line when the draft is cancelled', async () => {
+          const operations = criteriaOperations({
+            draftCriteria: vi.fn(async () => ({
+              status: 'cancelled' as const,
+              retainedDirectories: DIRECTORIES,
+            })),
+          });
+          scriptAnswers(...READY_ANSWERS);
+
+          const { code, err } = await runCli(['task', 'add'], { operations });
+
+          expect(code).toBe(130);
+          expect(err).toEqual([]);
+          expect(removalWarnings()).toEqual(REMOVAL_WARNINGS);
+          expect(eventsAfterWait('Drafting criteria')).toEqual(['log:warn', 'log:warn', 'cancel']);
+          expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+          expectNoWrites(operations);
+        });
+
+        it('prints one warning per directory, in order, before the cancel line when the signal aborts during the wait', async () => {
+          const controller = new AbortController();
+          const operations = criteriaOperations({
+            draftCriteria: vi.fn(async () => {
+              controller.abort();
+              return draftedWith(DIRECTORIES);
+            }),
+          });
+          scriptAnswers(...READY_ANSWERS);
+
+          const { code, err } = await runCli(['task', 'add'], {
+            operations,
+            cancellation: controller.signal,
+          });
+
+          expect(code).toBe(130);
+          expect(err).toEqual([]);
+          expect(removalWarnings()).toEqual(REMOVAL_WARNINGS);
+          expect(eventsAfterWait('Drafting criteria')).toEqual(['log:warn', 'log:warn', 'cancel']);
+          expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+          expectNoWrites(operations);
+        });
+
+        it('prints one warning per directory, in order, after the exit question and before the cancel line when it is answered Yes', async () => {
+          const waitInterrupt = createWaitInterrupt();
+          const operations = criteriaOperations({
+            draftCriteria: vi.fn(async () => {
+              waitInterrupt.take();
+              return draftedWith(DIRECTORIES);
+            }),
+          });
+          scriptAnswers(...READY_ANSWERS, true);
+
+          const { code, err } = await runCli(['task', 'add'], { operations, waitInterrupt });
+
+          expect(code).toBe(130);
+          expect(err).toEqual([]);
+          expect(removalWarnings()).toEqual(REMOVAL_WARNINGS);
+          expect(eventsAfterWait('Drafting criteria')).toEqual([
+            `prompt:${EXIT_QUESTION_WITH_DRAFT}`,
+            'log:warn',
+            'log:warn',
+            'cancel',
+          ]);
+          expect(clack.state.cancels).toEqual(['Cancelled. Nothing was saved.']);
+          expectNoWrites(operations);
         });
       });
 

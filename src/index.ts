@@ -317,6 +317,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
           redact: registry.redact,
           cancellation: hooks.cancellation,
           onLifecycle: hooks.onLifecycle,
+          onRetainedGradingDirectory: hooks.onRetainedGradingDirectory,
         });
       } finally {
         clearCancellationExit();
