@@ -4250,9 +4250,9 @@ describe('OpenCode adapter probeToolDenial over an injected fake process', () =>
 
     expect(probe).toEqual({
       outcome: 'not-shown',
-      reason:
-        '"fake-opencode debug config" does not show every tool denied, and the detail could not be redacted',
+      reason: 'the debug config result could not be redacted',
     });
     expect(JSON.stringify(probe)).not.toContain(SECRET);
+    expect(JSON.stringify(probe)).not.toContain('fake-opencode');
   });
 });

@@ -1047,7 +1047,7 @@ async function runToolDenialProbe(
     } catch {
       return {
         outcome: kind,
-        reason: `${command} does not show every tool denied, and the detail could not be redacted`,
+        reason: 'the debug config result could not be redacted',
       };
     }
   };
