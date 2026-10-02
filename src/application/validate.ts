@@ -14,7 +14,12 @@ import { gradedChecksOf } from '@/evaluation/grading';
 
 import { checkEfforts } from './effort-check';
 import { buildEnvironmentVariableNames } from './environment-variable-names';
-import { listModelsInCallEnvironment } from './model-call';
+import {
+  describeMissingToolDenial,
+  describeUncheckedToolDenial,
+  listModelsInCallEnvironment,
+  probeToolDenialInCallEnvironment,
+} from './model-call';
 import {
   describePullRequestInPrompt,
   describeReferenceCommitInPrompt,
@@ -29,6 +34,7 @@ import type {
   CaseExecutableAdapter,
   CaseExecutableVerdict,
   ModelListing,
+  ModelRoleName,
   ParentEnvironmentSnapshot,
   RepositoryDefinition,
   SourceValidation,
@@ -175,8 +181,10 @@ export async function validateConfig(
  * for an agent whose capability probe and environment snapshot both
  * succeeded, lists its models in an environment built like a case agent's
  * and reports every configured model entry and role whose model the agent
- * does not list. Returns the listings that settled as `listed`, keyed by
- * agent name. Never starts the agent's `run` command.
+ * does not list. For each such agent a declared role names, also runs one
+ * session-free `debug config` check of the tool denial. Returns the listings
+ * that settled as `listed`, keyed by agent name. Never starts the agent's
+ * `run` command.
  */
 async function collectModelResolutionFindings(
   config: TevuConfig,
@@ -226,6 +234,17 @@ async function collectModelResolutionFindings(
     if (listed.listing !== undefined) {
       listings.set(name, listed.listing);
     }
+    findings.push(
+      ...(await collectAgentToolDenialFindings(
+        config,
+        dependencies,
+        name,
+        adapter,
+        { secrets: agentSettings.secrets, env: agentSettings.env },
+        snapshot,
+        providers.value.configurationFiles,
+      )),
+    );
   }
   return { findings, listings };
 }
@@ -270,6 +289,86 @@ async function collectAgentModelListingFindings(
   const listing =
     result.prepared && result.listing.outcome === 'listed' ? result.listing : undefined;
   return { findings, listing };
+}
+
+/**
+ * Checks, in a model-call environment, that the agent `name` is offered no
+ * tool, and reports a missing denial against the roles that name the agent.
+ * Starts no process for an agent no role names.
+ */
+async function collectAgentToolDenialFindings(
+  config: TevuConfig,
+  dependencies: ValidationDependencies,
+  name: string,
+  adapter: AgentAdapter,
+  agentVariables: { secrets: readonly string[]; env: readonly string[] },
+  snapshot: ParentEnvironmentSnapshot,
+  configurationFiles: readonly AgentConfigurationFile[],
+): Promise<ValidationFinding[]> {
+  const roles = rolesNamingAgent(config, name);
+  if (roles.length === 0) {
+    return [];
+  }
+  const severity: ValidationFinding['severity'] =
+    roles.includes('grader') && hasGradedCheck(config) ? 'error' : 'warning';
+  const roleList = joinRoleNames(roles.map((role) => `roles.${role}`));
+  const finding = (message: string): ValidationFinding => ({
+    severity,
+    identifier: `agents.${name}`,
+    message,
+  });
+  const unchecked = (reason: string): ValidationFinding =>
+    finding(
+      `${describeUncheckedToolDenial(reason)}; every call of ${roleList} repeats the check and is refused unless the check shows the denial`,
+    );
+
+  const result = await probeToolDenialInCallEnvironment(
+    adapter,
+    { snapshot, agentVariables, configurationFiles },
+    dependencies,
+  );
+  const findings: ValidationFinding[] = [];
+  if (!result.prepared) {
+    findings.push(unchecked(`a model call environment could not be prepared: ${result.reason}`));
+  } else if (result.probe.outcome === 'not-shown') {
+    findings.push(
+      finding(
+        `${describeMissingToolDenial(result.probe.reason)}; every call of ${roleList} is refused before it starts`,
+      ),
+    );
+  } else if (result.probe.outcome === 'failed') {
+    findings.push(unchecked(result.probe.reason));
+  } else if (result.probe.outcome === 'cancelled') {
+    const command = config.agents[name]?.command ?? name;
+    findings.push(unchecked(`"${command} debug config" is cancelled`));
+  }
+  if (result.retainedDirectory !== null) {
+    findings.push({
+      severity: 'warning',
+      identifier: `agents.${name}`,
+      message: `tool denial check directory could not be removed; retained at "${result.retainedDirectory}"`,
+    });
+  }
+  return findings;
+}
+
+/** The declared roles that name agent `name`, in the order criteria, grader, summary. */
+function rolesNamingAgent(config: TevuConfig, name: string): ModelRoleName[] {
+  return (['criteria', 'grader', 'summary'] as const).filter(
+    (role) => config.roles?.[role]?.agent === name,
+  );
+}
+
+/** Joins as `A`, `A and B`, or `A, B, and C`. */
+function joinRoleNames(names: readonly string[]): string {
+  if (names.length <= 2) {
+    return names.join(' and ');
+  }
+  return `${names.slice(0, -1).join(', ')}, and ${names.at(-1)}`;
+}
+
+function hasGradedCheck(config: TevuConfig): boolean {
+  return config.tasks.some((task) => gradedChecksOf(task).length > 0);
 }
 
 function modelAgentFinding(name: string, message: string): ValidationFinding {
@@ -319,14 +418,14 @@ function checkModelsListed(
       );
     }
   }
-  const hasGradedCheck = config.tasks.some((task) => gradedChecksOf(task).length > 0);
+  const gradedCheckDeclared = hasGradedCheck(config);
   for (const roleName of ['criteria', 'grader', 'summary'] as const) {
     const role = config.roles?.[roleName];
     if (role === undefined || role.agent !== name || listed.has(role.model)) {
       continue;
     }
     const severity: ValidationFinding['severity'] =
-      roleName === 'grader' && hasGradedCheck ? 'error' : 'warning';
+      roleName === 'grader' && gradedCheckDeclared ? 'error' : 'warning';
     findings.push(
       unlistedModelFinding(severity, `roles.${roleName}.model`, role.model, name, command),
     );

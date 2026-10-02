@@ -357,6 +357,7 @@ function buildFakeAgentAdapter(overrides: Partial<AgentAdapter> = {}): AgentAdap
       models: FIXTURE_MODELS,
       variants: new Map(FIXTURE_MODELS.map((model) => [model, ['high', 'max', 'medium']])),
     })),
+    probeToolDenial: vi.fn(async () => ({ outcome: 'denied' as const })),
     repositoryConfigurationEntries: vi.fn(() => []),
     run: vi.fn(async () => ({
       ok: false as const,

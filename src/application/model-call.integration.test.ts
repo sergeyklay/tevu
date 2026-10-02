@@ -15,7 +15,11 @@ import {
   runManagedProcess,
 } from '@/adapters/process';
 
-import { callModelRole, listModelsInCallEnvironment } from './model-call';
+import {
+  callModelRole,
+  listModelsInCallEnvironment,
+  probeToolDenialInCallEnvironment,
+} from './model-call';
 
 import type { OpenCodeAdapterDependencies } from '@/adapters/agents/opencode/opencode';
 import type {
@@ -36,6 +40,7 @@ import type {
   SecretRedactor,
   TevuConfig,
   TevuError,
+  ToolDenialProbe,
 } from '@/domain/types';
 
 const SECRET_VARIABLE_NAME = 'TEVU_MODEL_CALL_SECRET';
@@ -104,8 +109,20 @@ function buildReplyRedactionThrowingSecretRedactor(
 }
 
 type RunBehavior = 'ok' | 'error-exit-1' | 'error-exit-0' | 'sleep';
+/** What `debug config` prints: the received permission by default, a fixed document, an exit code, or nothing until killed. */
+type DebugConfigBehavior =
+  | { kind: 'follow-permission' }
+  | { kind: 'print'; stdout: string }
+  | { kind: 'exit'; code: number }
+  | { kind: 'hang' };
 type ExportBehavior =
-  'reply-with-secret' | 'no-cost' | 'secret-split' | 'assistant-error' | 'finish-length' | 'none';
+  | 'reply-with-secret'
+  | 'no-cost'
+  | 'secret-split'
+  | 'assistant-error'
+  | 'finish-length'
+  | 'tool-part'
+  | 'none';
 
 /** Handlers answering `--help`, `--version`, `run --help`, and `export --help`, common to every scenario. */
 const PROBE_PREAMBLE = `
@@ -126,13 +143,59 @@ if (args[0] === "models" && args[1] === "--help") {
 }
 `;
 
+/** Where the fake appends one JSON line per `debug config` invocation, beside the record of its `run`. */
+function debugConfigRecordPathOf(recordPath: string): string {
+  return `${recordPath}.debug-config`;
+}
+
+function renderDebugConfigSection(
+  behavior: DebugConfigBehavior,
+  recordPath: string | undefined,
+): string {
+  const recordSnippet =
+    recordPath === undefined
+      ? ''
+      : `
+  var recordPath = ${JSON.stringify(debugConfigRecordPathOf(recordPath))};
+  var previousRuns = existsSync(recordPath) ? readFileSync(recordPath, "utf8").split("\\n").filter(Boolean).length : 0;
+  appendFileSync(recordPath, JSON.stringify({ ordinal: previousRuns + 1, argv: args, cwd: process.cwd(), env: process.env }) + "\\n");`;
+  let response: string;
+  switch (behavior.kind) {
+    case 'follow-permission':
+      response = `
+  var permission = process.env["OPENCODE_PERMISSION"];
+  console.log(JSON.stringify(permission === undefined ? {} : { permission: JSON.parse(permission) }));
+  process.exit(0);`;
+      break;
+    case 'print':
+      response = `
+  console.log(${JSON.stringify(behavior.stdout)});
+  process.exit(0);`;
+      break;
+    case 'exit':
+      response = `
+  process.exit(${behavior.code});`;
+      break;
+    case 'hang':
+      response = `
+  setInterval(function () {}, 1000);`;
+      break;
+  }
+  return `
+if (args[0] === "debug" && args[1] === "config") {${recordSnippet}${response}
+}
+`;
+}
+
 function renderRunSection(behavior: RunBehavior, recordPath: string | undefined): string {
   const recordSnippet =
     recordPath === undefined
       ? ''
       : `
   var stdin = readFileSync(0, "utf8");
-  writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({ argv: args, cwd: process.cwd(), dirEntries: readdirSync(process.cwd()), env: process.env, stdin: stdin }));`;
+  var debugConfigRecordPath = ${JSON.stringify(debugConfigRecordPathOf(recordPath))};
+  var debugConfigRuns = existsSync(debugConfigRecordPath) ? readFileSync(debugConfigRecordPath, "utf8").split("\\n").filter(Boolean).length : 0;
+  writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({ argv: args, cwd: process.cwd(), dirEntries: readdirSync(process.cwd()), env: process.env, stdin: stdin, debugConfigRuns: debugConfigRuns }));`;
 
   if (behavior === 'sleep') {
     return `
@@ -167,6 +230,15 @@ function renderExportSection(behavior: ExportBehavior): string {
 if (args[0] === "export") {
   var requested = args[1] || "";
   console.log(JSON.stringify({ info: { id: requested }, messages: [{ info: { id: "msg-mc-1", sessionID: requested, role: "assistant", parentID: "msg-mc-0", error: { data: { message: "Synthetic failure" } } }, parts: [] }] }));
+  process.exit(0);
+}
+`;
+  }
+  if (behavior === 'tool-part') {
+    return `
+if (args[0] === "export") {
+  var requested = args[1] || "";
+  console.log(JSON.stringify({ info: { id: requested }, messages: [{ info: { id: "msg-mc-1", sessionID: requested, role: "assistant", parentID: "msg-mc-0", finish: "tool-calls" }, parts: [{ id: "prt-mc-1", sessionID: requested, messageID: "msg-mc-1", type: "tool", callID: "call-1", tool: "read", state: { status: "error" } }] }] }));
   process.exit(0);
 }
 `;
@@ -230,11 +302,13 @@ async function writeFakeExecutable(
   run: RunBehavior,
   exportBehavior: ExportBehavior,
   recordPath?: string,
+  debugConfig: DebugConfigBehavior = { kind: 'follow-permission' },
 ): Promise<string> {
   const body =
     '#!/usr/bin/env node\n' +
-    'import { readFileSync, readdirSync, writeFileSync } from "node:fs";\n' +
+    'import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";\n' +
     PROBE_PREAMBLE +
+    renderDebugConfigSection(debugConfig, recordPath) +
     renderRunSection(run, recordPath) +
     renderExportSection(exportBehavior) +
     '\nif (args[0] !== "run" && args[0] !== "export") { process.exit(3); }\n';
@@ -366,6 +440,7 @@ type CallOptions = {
   git?: Pick<GitWorkspaceAdapter, 'initializeEmptyRepository'>;
   runProcess?: ManagedProcessRunner;
   recordPath?: string;
+  debugConfig?: DebugConfigBehavior;
   cancellation?: AbortSignal;
   role?: ModelRoleName;
   config?: TevuConfig;
@@ -375,7 +450,12 @@ type CallOptions = {
 };
 
 async function callWithFakeAgent(options: CallOptions) {
-  const executable = await writeFakeExecutable(options.run, options.export, options.recordPath);
+  const executable = await writeFakeExecutable(
+    options.run,
+    options.export,
+    options.recordPath,
+    options.debugConfig,
+  );
   const dependencies: OpenCodeAdapterDependencies = {
     runProcess: options.runProcess ?? runManagedProcess,
     secrets: options.secrets ?? buildSecretRedactor([SECRET_VALUE]),
@@ -987,6 +1067,202 @@ describe('callModelRole tool denial and evidence against a fake OpenCode executa
   });
 });
 
+describe('callModelRole tool denial check against a fake OpenCode executable', () => {
+  const OPERATOR_PERMISSION = '{"*":"allow"}';
+  const BASH_GRANTED = '{"permission":{"*":"deny","bash":"allow"}}';
+
+  function isDebugConfigRequest(request: ManagedProcessRequest): boolean {
+    return request.argv[1] === 'debug' && request.argv[2] === 'config';
+  }
+
+  function readRecords(recordPath: string): {
+    run: {
+      cwd: string;
+      env: Record<string, string>;
+      debugConfigRuns: number;
+    };
+    debugConfig: Array<{ ordinal: number; cwd: string; env: Record<string, string> }>;
+  } {
+    const lines = readFileSync(`${recordPath}.debug-config`, 'utf8').split('\n').filter(Boolean);
+    return {
+      run: JSON.parse(readFileSync(recordPath, 'utf8')) as ReturnType<typeof readRecords>['run'],
+      debugConfig: lines.map(
+        (line) => JSON.parse(line) as { ordinal: number; cwd: string; env: Record<string, string> },
+      ),
+    };
+  }
+
+  function expectRefusedBeforeAnyRun(calls: readonly ManagedProcessRequest[]): void {
+    const sessionCalls = calls.filter(
+      (request) =>
+        (request.argv[1] === 'run' || request.argv[1] === 'export') && request.argv[2] !== '--help',
+    );
+    expect(sessionCalls).toEqual([]);
+  }
+
+  it('runs one debug config process before the one run process, in the same directory and with the same variables', async () => {
+    const recordPath = nextRecordPath();
+
+    const result = await callWithFakeAgent({
+      run: 'ok',
+      export: 'reply-with-secret',
+      recordPath,
+    });
+
+    expect(expectOk(result).text).toBe('Hello [REDACTED] world');
+    const records = readRecords(recordPath);
+    expect(records.debugConfig).toHaveLength(1);
+    expect(records.run.debugConfigRuns).toBe(1);
+    expect(records.debugConfig[0]?.ordinal).toBe(1);
+    expect(records.debugConfig[0]?.cwd).toBe(records.run.cwd);
+    expect(records.debugConfig[0]?.env).toEqual(records.run.env);
+  });
+
+  it('returns the outcome of the agent call unchanged when the denial is shown', async () => {
+    const shown = await callWithFakeAgent({ run: 'ok', export: 'reply-with-secret' });
+    const failing = await callWithFakeAgent({ run: 'error-exit-1', export: 'none' });
+
+    expect(expectOk(shown).text).toBe('Hello [REDACTED] world');
+    expectFailure(failing, 'ModelCallError');
+  });
+
+  it('sends the denial in the check request even when the agent block and the process environment name a permission', async () => {
+    const { runProcess, calls } = spyOnRunProcess();
+    const base = buildConfig();
+    process.env['OPENCODE_PERMISSION'] = OPERATOR_PERMISSION;
+    try {
+      const result = await callWithFakeAgent({
+        run: 'ok',
+        export: 'reply-with-secret',
+        runProcess,
+        config: buildConfig({
+          agents: { opencode: { ...base.agents['opencode']!, env: ['OPENCODE_PERMISSION'] } },
+        }),
+      });
+
+      expect(result.ok).toBe(true);
+    } finally {
+      delete process.env['OPENCODE_PERMISSION'];
+    }
+    const checks = calls.filter(isDebugConfigRequest);
+    expect(checks).toHaveLength(1);
+    expect(checks[0]?.environment['OPENCODE_PERMISSION']).toBe(DENY_EVERY_TOOL);
+  });
+
+  it('refuses the call, starts no run or export process, and removes the call directory when a tool is granted after the wildcard', async () => {
+    const { runProcess, calls } = spyOnRunProcess();
+    const { environments, roots } = captureModelCallRoots(createEnvironmentAdapter());
+    const delivered: ModelCallEvidence[] = [];
+
+    const result = await callWithFakeAgent({
+      run: 'ok',
+      export: 'reply-with-secret',
+      debugConfig: { kind: 'print', stdout: BASH_GRANTED },
+      runProcess,
+      environments,
+      onEvidence: (evidence) => delivered.push(evidence),
+    });
+
+    const error = expectFailure(result, 'AgentProtocolError');
+    expect(error.agent).toBe('opencode');
+    expect(error.context).toEqual({ phase: 'probe' });
+    expect(error.reason.startsWith('capability "model call tool denial" is missing: "')).toBe(true);
+    expect(error.reason).toContain('lists "bash" after "*"');
+    expect(result.retainedDirectory).toBeNull();
+    expect(roots).toHaveLength(1);
+    expect(existsSync(roots[0]!)).toBe(false);
+    expectRefusedBeforeAnyRun(calls);
+    expect(delivered).toEqual([]);
+  });
+
+  it('refuses the call as unchecked when debug config exits with a nonzero code', async () => {
+    const { runProcess, calls } = spyOnRunProcess();
+
+    const result = await callWithFakeAgent({
+      run: 'ok',
+      export: 'reply-with-secret',
+      debugConfig: { kind: 'exit', code: 1 },
+      runProcess,
+    });
+
+    const error = expectFailure(result, 'AgentProtocolError');
+    expect(error.context).toEqual({ phase: 'probe' });
+    expect(error.reason).toContain('could not be checked: "');
+    expect(error.reason).toContain('exits with code 1');
+    expectRefusedBeforeAnyRun(calls);
+  });
+
+  it('returns the cancellation when the signal aborts during the check', async () => {
+    const controller = new AbortController();
+    const { environments, roots } = captureModelCallRoots(createEnvironmentAdapter());
+    const { calls } = spyOnRunProcess();
+    const runProcess: ManagedProcessRunner = async (request) => {
+      calls.push(request);
+      if (isDebugConfigRequest(request)) {
+        controller.abort();
+      }
+      return runManagedProcess(request);
+    };
+
+    const result = await callWithFakeAgent({
+      run: 'ok',
+      export: 'reply-with-secret',
+      debugConfig: { kind: 'hang' },
+      runProcess,
+      environments,
+      cancellation: controller.signal,
+    });
+
+    expectFailure(result, 'CancellationError');
+    expect(result.retainedDirectory).toBeNull();
+    expect(existsSync(roots[0]!)).toBe(false);
+    expectRefusedBeforeAnyRun(calls);
+  });
+
+  it('keeps a declared secret that debug config prints out of the refusal', async () => {
+    const stdout = JSON.stringify({
+      provider: { acme: { options: { organization: SECRET_VALUE } } },
+      permission: { '*': 'deny', [SECRET_VALUE]: 'allow' },
+    });
+
+    const result = await callWithFakeAgent({
+      run: 'ok',
+      export: 'reply-with-secret',
+      debugConfig: { kind: 'print', stdout },
+    });
+
+    const error = expectFailure(result, 'AgentProtocolError');
+    expect(error.reason).toContain('lists "[REDACTED]" after "*"');
+    expect(JSON.stringify(error)).not.toContain(SECRET_VALUE);
+  });
+
+  it('still fails with the tool-call cause when the denial is shown and the session holds a tool part', async () => {
+    const result = await callWithFakeAgent({ run: 'ok', export: 'tool-part' });
+
+    const error = expectFailure(result, 'ModelCallError');
+    expect(error.cause).toBe('tool-call');
+    expect(error.reason).toBe(
+      'the session called the tool "read" although every tool is denied to a model call',
+    );
+  });
+
+  it('reports the root beside the refusal when the removal fails', async () => {
+    const { environments, roots, disposals } = failRemovals(createEnvironmentAdapter());
+
+    const result = await callWithFakeAgent({
+      run: 'ok',
+      export: 'reply-with-secret',
+      debugConfig: { kind: 'print', stdout: BASH_GRANTED },
+      environments,
+    });
+
+    expectFailure(result, 'AgentProtocolError');
+    expect(roots).toHaveLength(1);
+    expect(result.retainedDirectory).toBe(roots[0]);
+    expect(disposals).toEqual(roots);
+  });
+});
+
 describe('callModelRole providers resolution', () => {
   function buildProviderSnapshot(): ProviderSnapshot {
     return {
@@ -1456,4 +1732,225 @@ describe('listModelsInCallEnvironment', () => {
     expect(seen.config).toBe('{"provider":{}}\n');
     expect(existsSync(seen.root)).toBe(false);
   });
+});
+
+describe('probeToolDenialInCallEnvironment', () => {
+  const AGENT_VARIABLES = { secrets: [], env: [] };
+  const SNAPSHOT: ParentEnvironmentSnapshot = {
+    path: '/usr/bin:/bin',
+    agentValues: {},
+    ordinaryEvaluatorValues: {},
+    secretValues: [],
+  };
+
+  type Spies = {
+    disposals: number;
+    probedEnvironments: ModelCallEnvironment[];
+    signals: unknown[];
+  };
+
+  function buildSpies(): Spies {
+    return { disposals: 0, probedEnvironments: [], signals: [] };
+  }
+
+  function buildEnvironment(
+    spies: Spies,
+    disposal: { ok: true; value: undefined } | { ok: false; error: TevuError } = {
+      ok: true,
+      value: undefined,
+    },
+  ): ModelCallEnvironment {
+    return {
+      rootDirectory: '/synthetic/call-root',
+      workingDirectory: '/synthetic/call-root/work',
+      homeDirectory: '/synthetic/call-root/agent/home',
+      variables: {},
+      async dispose() {
+        spies.disposals += 1;
+        return disposal as Awaited<ReturnType<ModelCallEnvironment['dispose']>>;
+      },
+    };
+  }
+
+  function buildEnvironments(
+    creation: ReturnType<EnvironmentAdapter['createModelCallEnvironment']>,
+  ): EnvironmentAdapter {
+    // The function under test calls only `createModelCallEnvironment`.
+    return { createModelCallEnvironment: () => creation } as unknown as EnvironmentAdapter;
+  }
+
+  function buildGit(
+    initialization: Awaited<ReturnType<GitWorkspaceAdapter['initializeEmptyRepository']>>,
+  ): Pick<GitWorkspaceAdapter, 'initializeEmptyRepository'> {
+    return { initializeEmptyRepository: async () => initialization };
+  }
+
+  function buildProbingAgent(
+    spies: Spies,
+    probe: ToolDenialProbe = { outcome: 'denied' },
+  ): AgentAdapter {
+    // The function under test calls only `probeToolDenial`.
+    return {
+      async probeToolDenial(environment: ModelCallEnvironment, cancellation?: AbortSignal) {
+        spies.probedEnvironments.push(environment);
+        spies.signals.push(cancellation);
+        return probe;
+      },
+    } as unknown as AgentAdapter;
+  }
+
+  it('reports the environment creation failure with its operation and reason and never probes', async () => {
+    const spies = buildSpies();
+
+    const outcome = await probeToolDenialInCallEnvironment(
+      buildProbingAgent(spies),
+      { snapshot: SNAPSHOT, agentVariables: AGENT_VARIABLES, configurationFiles: [] },
+      {
+        environments: buildEnvironments(
+          Promise.resolve({
+            ok: false,
+            error: { kind: 'ArtifactError', operation: 'create-call-root', reason: 'disk full' },
+          }),
+        ),
+        git: buildGit({ ok: true, value: undefined }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      prepared: false,
+      reason: 'create-call-root: disk full',
+      retainedDirectory: null,
+    });
+    expect(spies.probedEnvironments).toEqual([]);
+  });
+
+  it('disposes the environment and reports the failure when the repository cannot be initialized', async () => {
+    const spies = buildSpies();
+
+    const outcome = await probeToolDenialInCallEnvironment(
+      buildProbingAgent(spies),
+      { snapshot: SNAPSHOT, agentVariables: AGENT_VARIABLES, configurationFiles: [] },
+      {
+        environments: buildEnvironments(
+          Promise.resolve({ ok: true, value: buildEnvironment(spies) }),
+        ),
+        git: buildGit({
+          ok: false,
+          error: { kind: 'ArtifactError', operation: 'git-init', reason: 'git is missing' },
+        }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      prepared: false,
+      reason: 'git-init: git is missing',
+      retainedDirectory: null,
+    });
+    expect(spies.disposals).toBe(1);
+    expect(spies.probedEnvironments).toEqual([]);
+  });
+
+  it('names the root directory as retained when disposal also fails after an initialization failure', async () => {
+    const spies = buildSpies();
+    const environment = buildEnvironment(spies, {
+      ok: false,
+      error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
+    });
+
+    const outcome = await probeToolDenialInCallEnvironment(
+      buildProbingAgent(spies),
+      { snapshot: SNAPSHOT, agentVariables: AGENT_VARIABLES, configurationFiles: [] },
+      {
+        environments: buildEnvironments(Promise.resolve({ ok: true, value: environment })),
+        git: buildGit({
+          ok: false,
+          error: { kind: 'ArtifactError', operation: 'git-init', reason: 'git is missing' },
+        }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      prepared: false,
+      reason: 'git-init: git is missing',
+      retainedDirectory: '/synthetic/call-root',
+    });
+  });
+
+  it('names the root directory as retained only when disposal fails after a probe', async () => {
+    const spies = buildSpies();
+    const environment = buildEnvironment(spies, {
+      ok: false,
+      error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
+    });
+
+    const outcome = await probeToolDenialInCallEnvironment(
+      buildProbingAgent(spies),
+      { snapshot: SNAPSHOT, agentVariables: AGENT_VARIABLES, configurationFiles: [] },
+      {
+        environments: buildEnvironments(Promise.resolve({ ok: true, value: environment })),
+        git: buildGit({ ok: true, value: undefined }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      prepared: true,
+      probe: { outcome: 'denied' },
+      retainedDirectory: '/synthetic/call-root',
+    });
+  });
+
+  it('hands the signal and the prepared environment to the probe and reports no retained directory after a clean disposal', async () => {
+    const spies = buildSpies();
+    const environment = buildEnvironment(spies);
+    const cancellation = new AbortController().signal;
+
+    const outcome = await probeToolDenialInCallEnvironment(
+      buildProbingAgent(spies, { outcome: 'cancelled' }),
+      { snapshot: SNAPSHOT, agentVariables: AGENT_VARIABLES, configurationFiles: [], cancellation },
+      {
+        environments: buildEnvironments(Promise.resolve({ ok: true, value: environment })),
+        git: buildGit({ ok: true, value: undefined }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      prepared: true,
+      probe: { outcome: 'cancelled' },
+      retainedDirectory: null,
+    });
+    expect(spies.signals).toEqual([cancellation]);
+    expect(spies.probedEnvironments).toEqual([environment]);
+    expect(spies.disposals).toBe(1);
+  });
+
+  it.each<{ name: string; probe: ToolDenialProbe }>([
+    { name: 'a denied', probe: { outcome: 'denied' } },
+    {
+      name: 'a not-shown',
+      probe: { outcome: 'not-shown', reason: '"x debug config" prints no JSON object' },
+    },
+    {
+      name: 'a failed',
+      probe: { outcome: 'failed', reason: '"x debug config" exits with code 1' },
+    },
+  ])(
+    'returns $name probe inside a prepared outcome and disposes the environment',
+    async ({ probe }) => {
+      const spies = buildSpies();
+
+      const outcome = await probeToolDenialInCallEnvironment(
+        buildProbingAgent(spies, probe),
+        { snapshot: SNAPSHOT, agentVariables: AGENT_VARIABLES, configurationFiles: [] },
+        {
+          environments: buildEnvironments(
+            Promise.resolve({ ok: true, value: buildEnvironment(spies) }),
+          ),
+          git: buildGit({ ok: true, value: undefined }),
+        },
+      );
+
+      expect(outcome).toEqual({ prepared: true, probe, retainedDirectory: null });
+      expect(spies.disposals).toBe(1);
+    },
+  );
 });

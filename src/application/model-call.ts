@@ -25,6 +25,7 @@ import type {
   ParentEnvironmentSnapshot,
   ProviderSnapshot,
   TevuError,
+  ToolDenialProbe,
 } from '@/domain/types';
 
 /** Identifier-only text for a model-role call failure; never includes a secret value. */
@@ -63,13 +64,15 @@ export function describeModelCallFailure(
 
 /**
  * Sends `request.prompt` through the agent configured for `request.role`,
- * inside a private, disposable, empty-Git-repository environment.
+ * inside a private, disposable, empty-Git-repository environment. The call is
+ * refused before it starts unless the agent's `debug config` shows every tool
+ * denied in that environment.
  *
  * `request.cancellation` is checked before the configuration lookup and again
- * before the call environment is created; a signal raised during the agent
- * process reaches the underlying processes through `adapter.callModel`. The
- * call environment is disposed whatever the call's outcome; a failed removal
- * on any path after the call directory exists is reported as
+ * before the call environment is created; a signal raised during the denial
+ * check or the agent process reaches the underlying processes through the
+ * adapter. The call environment is disposed whatever the call's outcome; a
+ * failed removal on any path after the call directory exists is reported as
  * `retainedDirectory` beside the call's own result, never as an error that
  * replaces it.
  */
@@ -169,6 +172,30 @@ export async function callModelRole(
     return { ...initialized, retainedDirectory: await removalOf(environment) };
   }
 
+  const toolDenial = await adapter.probeToolDenial(environment, request.cancellation);
+  if (toolDenial.outcome === 'cancelled') {
+    return {
+      ok: false,
+      error: { kind: 'CancellationError', activeCaseIds: [] },
+      retainedDirectory: await removalOf(environment),
+    };
+  }
+  if (toolDenial.outcome !== 'denied') {
+    return {
+      ok: false,
+      error: {
+        kind: 'AgentProtocolError',
+        agent: role.agent,
+        context: { phase: 'probe' },
+        reason:
+          toolDenial.outcome === 'not-shown'
+            ? describeMissingToolDenial(toolDenial.reason)
+            : describeUncheckedToolDenial(toolDenial.reason),
+      },
+      retainedDirectory: await removalOf(environment),
+    };
+  }
+
   const outcome = await adapter.callModel({
     role: request.role,
     model: role.model,
@@ -197,23 +224,35 @@ export type CallEnvironmentListing =
   | { prepared: false; reason: string; retainedDirectory: string | null };
 
 /**
- * Lists the models `adapter` resolves in a new model-call environment, then
- * removes the environment on every path. The listing runs in an empty Git
- * repository, the only working directory it sees.
+ * Outcome of checking the tool denial in a new call environment.
+ * `retainedDirectory` names the environment's root only when removing it
+ * failed.
  */
-export async function listModelsInCallEnvironment(
-  adapter: AgentAdapter,
-  setup: {
-    snapshot: ParentEnvironmentSnapshot;
-    agentVariables: { secrets: readonly string[]; env: readonly string[] };
-    configurationFiles: readonly AgentConfigurationFile[];
-    cancellation?: AbortSignal;
-  },
-  dependencies: {
-    environments: EnvironmentAdapter;
-    git: Pick<GitWorkspaceAdapter, 'initializeEmptyRepository'>;
-  },
-): Promise<CallEnvironmentListing> {
+export type CallEnvironmentToolDenial =
+  | { prepared: true; probe: ToolDenialProbe; retainedDirectory: string | null }
+  | { prepared: false; reason: string; retainedDirectory: string | null };
+
+type CallEnvironmentSetup = {
+  snapshot: ParentEnvironmentSnapshot;
+  agentVariables: { secrets: readonly string[]; env: readonly string[] };
+  configurationFiles: readonly AgentConfigurationFile[];
+  cancellation?: AbortSignal;
+};
+
+type CallEnvironmentDependencies = {
+  environments: EnvironmentAdapter;
+  git: Pick<GitWorkspaceAdapter, 'initializeEmptyRepository'>;
+};
+
+type InCallEnvironment<T> =
+  | { prepared: true; value: T; retainedDirectory: string | null }
+  | { prepared: false; reason: string; retainedDirectory: string | null };
+
+async function withCallEnvironment<T>(
+  setup: CallEnvironmentSetup,
+  dependencies: CallEnvironmentDependencies,
+  operate: (environment: ModelCallEnvironment) => Promise<T>,
+): Promise<InCallEnvironment<T>> {
   const created = await dependencies.environments.createModelCallEnvironment(
     setup.snapshot,
     setup.agentVariables,
@@ -227,8 +266,6 @@ export async function listModelsInCallEnvironment(
     };
   }
   const environment = created.value;
-  const dispose = async (): Promise<string | null> =>
-    (await environment.dispose()).ok ? null : environment.rootDirectory;
 
   const initialized = await dependencies.git.initializeEmptyRepository(
     environment.workingDirectory,
@@ -237,9 +274,55 @@ export async function listModelsInCallEnvironment(
     return {
       prepared: false,
       reason: `${initialized.error.operation}: ${initialized.error.reason}`,
-      retainedDirectory: await dispose(),
+      retainedDirectory: await removalOf(environment),
     };
   }
-  const listing = await adapter.listModels(environment, setup.cancellation);
-  return { prepared: true, listing, retainedDirectory: await dispose() };
+  const value = await operate(environment);
+  return { prepared: true, value, retainedDirectory: await removalOf(environment) };
+}
+
+/**
+ * Lists the models `adapter` resolves in a new model-call environment, then
+ * removes the environment on every path. The listing runs in an empty Git
+ * repository, the only working directory it sees.
+ */
+export async function listModelsInCallEnvironment(
+  adapter: AgentAdapter,
+  setup: CallEnvironmentSetup,
+  dependencies: CallEnvironmentDependencies,
+): Promise<CallEnvironmentListing> {
+  const result = await withCallEnvironment(setup, dependencies, (environment) =>
+    adapter.listModels(environment, setup.cancellation),
+  );
+  return result.prepared
+    ? { prepared: true, listing: result.value, retainedDirectory: result.retainedDirectory }
+    : result;
+}
+
+/**
+ * Checks, in a new model-call environment, that `adapter` is offered no tool
+ * there, then removes the environment on every path. The check runs in an
+ * empty Git repository, the only working directory it sees.
+ */
+export async function probeToolDenialInCallEnvironment(
+  adapter: AgentAdapter,
+  setup: CallEnvironmentSetup,
+  dependencies: CallEnvironmentDependencies,
+): Promise<CallEnvironmentToolDenial> {
+  const result = await withCallEnvironment(setup, dependencies, (environment) =>
+    adapter.probeToolDenial(environment, setup.cancellation),
+  );
+  return result.prepared
+    ? { prepared: true, probe: result.value, retainedDirectory: result.retainedDirectory }
+    : result;
+}
+
+/** The one owner of the text that names the missing capability. */
+export function describeMissingToolDenial(reason: string): string {
+  return `capability "model call tool denial" is missing: ${reason}`;
+}
+
+/** The one owner of the text for a check that ended without a decision. */
+export function describeUncheckedToolDenial(reason: string): string {
+  return `capability "model call tool denial" could not be checked: ${reason}`;
 }

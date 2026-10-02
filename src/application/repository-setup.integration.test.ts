@@ -242,6 +242,9 @@ function buildDirectEditAgent(): AgentAdapter {
     async listModels() {
       return { outcome: 'listed', models: [], variants: new Map() };
     },
+    async probeToolDenial() {
+      return { outcome: 'denied' };
+    },
     repositoryConfigurationEntries() {
       return [];
     },

@@ -110,6 +110,11 @@ if (args[0] === "models" && args[1] === "--help") {
   console.log("usage: opencode models [provider] --verbose");
   process.exit(0);
 }
+if (args[0] === "debug" && args[1] === "config") {
+  var permission = process.env["OPENCODE_PERMISSION"];
+  console.log(JSON.stringify(permission === undefined ? {} : { permission: JSON.parse(permission) }));
+  process.exit(0);
+}
 `;
 
 function renderRunSection(behavior: Behavior['run'], logPath: string): string {
@@ -306,6 +311,9 @@ function buildRunAdapter(): AgentAdapter {
     },
     async listModels() {
       return { outcome: 'listed', models: [], variants: new Map() };
+    },
+    async probeToolDenial() {
+      return { outcome: 'denied' };
     },
     repositoryConfigurationEntries() {
       return [];

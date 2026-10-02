@@ -4018,3 +4018,241 @@ describe('OpenCode adapter callModel permission and evidence over an injected fa
     });
   });
 });
+
+describe('OpenCode adapter probeToolDenial over an injected fake process', () => {
+  const DENIAL_DOCUMENT = '{"permission":{"*":"deny"}}';
+  const GRANT_DOCUMENT = '{"permission":{"*":"deny","bash":"allow"}}';
+  const SECRET = 'sk-tool-denial-secret-777';
+
+  function completionPrinting(
+    text: string,
+    overrides: Partial<Extract<ManagedProcessResult, { launched: true }>> = {},
+  ) {
+    return buildCompletion({
+      stdout: { text, totalBytes: text.length, truncated: false, incomplete: false },
+      ...overrides,
+    });
+  }
+
+  function recordingRunner(
+    result: ManagedProcessResult,
+    requests: ManagedProcessRequest[] = [],
+  ): ManagedProcessRunner {
+    return async (request) => {
+      requests.push(request);
+      return result;
+    };
+  }
+
+  it('starts one debug config process with the call environment and the denial variable', async () => {
+    const requests: ManagedProcessRequest[] = [];
+    const cancellation = new AbortController().signal;
+    const adapter = buildOpenCodeAdapter({
+      runProcess: recordingRunner(completionPrinting(DENIAL_DOCUMENT), requests),
+      secrets: buildSecretRedactor([SECRET]),
+    });
+
+    const probe = await adapter.probeToolDenial(
+      buildModelCallEnvironment({
+        workingDirectory: '/synthetic/call/work',
+        variables: { HOME: '/synthetic/call/home', OPENCODE_PERMISSION: '{"*":"allow"}' },
+      }),
+      cancellation,
+    );
+
+    expect(probe).toEqual({ outcome: 'denied' });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      argv: ['fake-opencode', 'debug', 'config'],
+      cwd: '/synthetic/call/work',
+      environment: { HOME: '/synthetic/call/home', OPENCODE_PERMISSION: '{"*":"deny"}' },
+      timeoutMs: 120_000,
+      terminationGraceMs: 2_000,
+      cancellation,
+      secretValues: [SECRET],
+      stdoutRedaction: 'structured',
+      stdoutTarget: 'file',
+      maxCaptureBytes: 16_777_216,
+    });
+    expect(requests[0]?.onStdout).toBeUndefined();
+  });
+
+  it('never uses the capability probe environment or directory', async () => {
+    const requests: ManagedProcessRequest[] = [];
+    const adapter = buildOpenCodeAdapter({
+      runProcess: recordingRunner(completionPrinting(DENIAL_DOCUMENT), requests),
+      probeEnvironment: { PATH: '/operator/only/probe/path', OPERATOR_ONLY: 'yes' },
+      probeDirectory: '/operator/only/probe/directory',
+    });
+
+    await adapter.probeToolDenial(buildModelCallEnvironment({ variables: { HOME: '/h' } }));
+
+    expect(requests[0]?.cwd).toBe('/synthetic/model-call/work');
+    expect(requests[0]?.environment).toEqual({
+      HOME: '/h',
+      OPENCODE_PERMISSION: '{"*":"deny"}',
+    });
+  });
+
+  it('reports a not-shown outcome with the quoted command and the clause when a tool is granted', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: recordingRunner(completionPrinting(GRANT_DOCUMENT)),
+    });
+
+    const probe = await adapter.probeToolDenial(buildModelCallEnvironment());
+
+    expect(probe).toEqual({
+      outcome: 'not-shown',
+      reason:
+        '"fake-opencode debug config" lists "bash" after "*" in "permission" with a value other than "deny"',
+    });
+  });
+
+  it('reports the same result whatever a version answer would be', async () => {
+    const requests: ManagedProcessRequest[] = [];
+    const adapter = buildOpenCodeAdapter({
+      runProcess: async (request) => {
+        requests.push(request);
+        const text = request.argv[1] === '--version' ? '2.0.0' : DENIAL_DOCUMENT;
+        return completionPrinting(text);
+      },
+    });
+
+    const probe = await adapter.probeToolDenial(buildModelCallEnvironment());
+
+    expect(probe).toEqual({ outcome: 'denied' });
+    expect(requests.map((request) => request.argv)).toEqual([['fake-opencode', 'debug', 'config']]);
+  });
+
+  it.each<{ name: string; result: ManagedProcessResult; reason: string }>([
+    {
+      name: 'a launch failure',
+      result: { launched: false, reason: 'ENOENT: not found' },
+      reason: '"fake-opencode debug config" cannot be started: ENOENT: not found',
+    },
+    {
+      name: 'a timeout',
+      result: buildCompletion({ exitCode: null, timedOut: true }),
+      reason: '"fake-opencode debug config" did not finish within 120s',
+    },
+    {
+      name: 'a signal exit',
+      result: buildCompletion({ exitCode: null, signal: 'SIGKILL' }),
+      reason: '"fake-opencode debug config" is terminated by signal SIGKILL',
+    },
+    {
+      name: 'a signal exit without a signal name',
+      result: buildCompletion({ exitCode: null, signal: null }),
+      reason: '"fake-opencode debug config" is terminated by signal unknown',
+    },
+    {
+      name: 'a nonzero exit',
+      result: buildCompletion({ exitCode: 1 }),
+      reason: '"fake-opencode debug config" exits with code 1',
+    },
+    {
+      name: 'truncated output',
+      result: completionPrinting(DENIAL_DOCUMENT, {
+        stdout: {
+          text: DENIAL_DOCUMENT,
+          totalBytes: 99_999_999,
+          truncated: true,
+          incomplete: false,
+        },
+      }),
+      reason: '"fake-opencode debug config" prints more than 16777216 bytes',
+    },
+    {
+      name: 'an incomplete capture',
+      result: completionPrinting(DENIAL_DOCUMENT, {
+        stdout: { text: DENIAL_DOCUMENT, totalBytes: 40, truncated: false, incomplete: true },
+      }),
+      reason: '"fake-opencode debug config" prints output tevu could not read to its end',
+    },
+  ])('reports a failed outcome for $name', async ({ result, reason }) => {
+    const adapter = buildOpenCodeAdapter({ runProcess: recordingRunner(result) });
+
+    const probe = await adapter.probeToolDenial(buildModelCallEnvironment());
+
+    expect(probe).toEqual({ outcome: 'failed', reason });
+  });
+
+  it('keeps the truncation reason when a capture is both truncated and incomplete', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: recordingRunner(
+        buildCompletion({
+          stdout: { text: '', totalBytes: 99_999_999, truncated: true, incomplete: true },
+        }),
+      ),
+    });
+
+    const probe = await adapter.probeToolDenial(buildModelCallEnvironment());
+
+    expect(probe).toEqual({
+      outcome: 'failed',
+      reason: '"fake-opencode debug config" prints more than 16777216 bytes',
+    });
+  });
+
+  it('reports a cancelled outcome when the process was cancelled before it launched', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: recordingRunner({ launched: false, reason: 'cancelled before launch' }),
+    });
+
+    const probe = await adapter.probeToolDenial(buildModelCallEnvironment());
+
+    expect(probe).toEqual({ outcome: 'cancelled' });
+  });
+
+  it('reports a cancelled outcome when the process was cancelled while it ran', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: recordingRunner(
+        buildCompletion({ exitCode: null, signal: 'SIGTERM', cancelled: true }),
+      ),
+    });
+
+    const probe = await adapter.probeToolDenial(buildModelCallEnvironment());
+
+    expect(probe).toEqual({ outcome: 'cancelled' });
+  });
+
+  it('redacts a secret value that a reason holds', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: recordingRunner(
+        completionPrinting(JSON.stringify({ permission: { '*': 'deny', [SECRET]: 'allow' } })),
+      ),
+      secrets: buildSecretRedactor([SECRET]),
+    });
+
+    const probe = await adapter.probeToolDenial(buildModelCallEnvironment());
+
+    expect(probe).toEqual({
+      outcome: 'not-shown',
+      reason:
+        '"fake-opencode debug config" lists "[REDACTED]" after "*" in "permission" with a value other than "deny"',
+    });
+  });
+
+  it('answers with the fixed reason and no raw text when the redactor throws', async () => {
+    const adapter = buildOpenCodeAdapter({
+      runProcess: recordingRunner(
+        completionPrinting(JSON.stringify({ permission: { '*': 'deny', [SECRET]: 'allow' } })),
+      ),
+      secrets: {
+        ...buildSecretRedactor([SECRET]),
+        redactText: () => {
+          throw new Error('redactText failure');
+        },
+      },
+    });
+
+    const probe = await adapter.probeToolDenial(buildModelCallEnvironment());
+
+    expect(probe).toEqual({
+      outcome: 'not-shown',
+      reason:
+        '"fake-opencode debug config" does not show every tool denied, and the detail could not be redacted',
+    });
+    expect(JSON.stringify(probe)).not.toContain(SECRET);
+  });
+});

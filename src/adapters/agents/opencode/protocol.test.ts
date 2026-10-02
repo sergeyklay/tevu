@@ -5,6 +5,7 @@ import {
   decodeEvent,
   decodeExport,
   decodeModelListing,
+  decodeToolDenial,
   eventIdentity,
   isRootSessionErrorEvent,
   listMalformedOptionalMetricFields,
@@ -537,5 +538,256 @@ describe('decodeModelListing', () => {
     const decoded = decodeModelListing('');
 
     expect(decoded).toEqual({ models: [], variants: new Map() });
+  });
+});
+
+describe('decodeToolDenial', () => {
+  const NOT_A_JSON_OBJECT = 'prints no JSON object';
+  const NO_PERMISSION = 'shows no "permission", so OPENCODE_PERMISSION is not in force';
+  const NO_WILDCARD = 'shows no "*" rule in "permission", so OPENCODE_PERMISSION is not in force';
+  const WILDCARD_NOT_DENY = 'shows "*" in "permission" as something other than "deny"';
+  const grantedAfterWildcard = (key: string): string =>
+    `lists "${key}" after "*" in "permission" with a value other than "deny"`;
+  const UNKNOWN_RUN_AGENT =
+    'shows the "build" agent disabled, hidden, or as a subagent and no "default_agent", so the agent of a model call is unknown';
+  const grantedByRunAgent = (key: string, agent: string): string =>
+    `lists "${key}" in the permission of agent "${agent}" with a value other than "deny"`;
+  const unread = (field: string): string => `shows ${field} in a shape tevu does not read`;
+
+  it.each([
+    { name: 'the plain denial', text: '{"agent":{},"permission":{"*":"deny"}}' },
+    {
+      name: 'a grant listed before the wildcard',
+      text: '{"permission":{"bash":"allow","*":"deny"}}',
+    },
+    {
+      name: 'a pattern object listed before the wildcard',
+      text: '{"permission":{"bash":{"*":"deny","git status":"allow"},"*":"deny"}}',
+    },
+    {
+      name: 'legacy tools folded in beneath the denial',
+      text: '{"tools":{"bash":true,"edit":false},"permission":{"bash":"allow","edit":"deny","*":"deny"}}',
+    },
+    {
+      name: 'a repeated denial after the wildcard',
+      text: '{"permission":{"*":"deny","bash":"deny"}}',
+    },
+    {
+      name: 'a disabled build agent with a default agent that has no rules',
+      text: '{"default_agent":"plan","agent":{"build":{"disable":true,"options":{},"permission":{}}},"permission":{"*":"deny"}}',
+    },
+    {
+      name: 'an agent block without the selected agent',
+      text: '{"agent":{"plan":{"permission":{"bash":"allow"}}},"permission":{"*":"deny"}}',
+    },
+    {
+      name: 'a selected agent without a permission',
+      text: '{"agent":{"build":{"options":{}}},"permission":{"*":"deny"}}',
+    },
+    {
+      name: 'a selected agent whose permission only denies',
+      text: '{"agent":{"build":{"permission":{"bash":"deny"}}},"permission":{"*":"deny"}}',
+    },
+    {
+      name: 'an empty default agent that falls back to build',
+      text: '{"default_agent":"","permission":{"*":"deny"}}',
+    },
+    {
+      name: 'a visible build agent',
+      text: '{"agent":{"build":{"mode":"primary","hidden":false}},"permission":{"*":"deny"}}',
+    },
+  ])('decodes $name as denied', ({ text }) => {
+    expect(decodeToolDenial(text)).toEqual({ denied: true });
+  });
+
+  it.each([
+    {
+      name: 'output without a permission',
+      text: '{"agent":{},"mode":{},"username":"u"}',
+      reason: NO_PERMISSION,
+    },
+    {
+      name: 'a grant after the wildcard',
+      text: '{"permission":{"*":"deny","bash":"allow"}}',
+      reason: grantedAfterWildcard('bash'),
+    },
+    {
+      name: 'a masked value after the wildcard',
+      text: '{"permission":{"*":"deny","get_token":"***"}}',
+      reason: grantedAfterWildcard('get_token'),
+    },
+    {
+      name: 'a plugin grant after the wildcard',
+      text: '{"permission":{"*":"deny","webfetch":"allow"}}',
+      reason: grantedAfterWildcard('webfetch'),
+    },
+    {
+      name: 'an object value after the wildcard',
+      text: '{"permission":{"*":"deny","bash":{"git *":"deny"}}}',
+      reason: grantedAfterWildcard('bash'),
+    },
+    {
+      name: 'an ask value after the wildcard',
+      text: '{"permission":{"*":"deny","bash":"ask"}}',
+      reason: grantedAfterWildcard('bash'),
+    },
+    {
+      name: 'a grant in the permission of the build agent',
+      text: '{"permission":{"*":"deny"},"agent":{"build":{"tools":{"bash":true},"options":{},"permission":{"bash":"allow"}}}}',
+      reason: grantedByRunAgent('bash', 'build'),
+    },
+    {
+      name: 'a grant in the permission of the default agent',
+      text: '{"default_agent":"plan","permission":{"*":"deny"},"agent":{"build":{"permission":{"bash":"allow"}},"plan":{"permission":{"edit":"allow"}}}}',
+      reason: grantedByRunAgent('edit', 'plan'),
+    },
+    {
+      name: 'a disabled build agent without a default agent',
+      text: '{"permission":{"*":"deny"},"agent":{"build":{"disable":true,"options":{},"permission":{}}}}',
+      reason: UNKNOWN_RUN_AGENT,
+    },
+    {
+      name: 'a hidden build agent without a default agent',
+      text: '{"permission":{"*":"deny"},"agent":{"build":{"hidden":true}}}',
+      reason: UNKNOWN_RUN_AGENT,
+    },
+    {
+      name: 'a build agent demoted to a subagent',
+      text: '{"permission":{"*":"deny"},"agent":{"build":{"mode":"subagent"}}}',
+      reason: UNKNOWN_RUN_AGENT,
+    },
+    {
+      name: 'a document array',
+      text: '[{"type":"document","info":{}}]',
+      reason: NOT_A_JSON_OBJECT,
+    },
+    { name: 'the empty string', text: '', reason: NOT_A_JSON_OBJECT },
+    { name: 'text that is not JSON', text: 'not json', reason: NOT_A_JSON_OBJECT },
+    { name: 'a JSON string', text: '"x"', reason: NOT_A_JSON_OBJECT },
+    { name: 'a JSON null', text: 'null', reason: NOT_A_JSON_OBJECT },
+    {
+      name: 'a permission without a wildcard',
+      text: '{"permission":{"read":"allow"}}',
+      reason: NO_WILDCARD,
+    },
+    {
+      name: 'a wildcard that allows',
+      text: '{"permission":{"*":"allow"}}',
+      reason: WILDCARD_NOT_DENY,
+    },
+    {
+      name: 'a wildcard that masks its value',
+      text: '{"permission":{"*":"***"}}',
+      reason: WILDCARD_NOT_DENY,
+    },
+    {
+      name: 'a wildcard that holds an object',
+      text: '{"permission":{"*":{"*":"deny"}}}',
+      reason: WILDCARD_NOT_DENY,
+    },
+  ])('reports the clause for $name', ({ text, reason }) => {
+    expect(decodeToolDenial(text)).toEqual({ denied: false, reason });
+  });
+
+  it.each([
+    { name: 'a null permission', text: '{"permission":null}', field: '"permission"' },
+    { name: 'an array permission', text: '{"permission":[]}', field: '"permission"' },
+    { name: 'a string permission', text: '{"permission":"deny"}', field: '"permission"' },
+    {
+      name: 'a numeric default agent',
+      text: '{"permission":{"*":"deny"},"default_agent":3}',
+      field: '"default_agent"',
+    },
+    {
+      name: 'a null default agent',
+      text: '{"permission":{"*":"deny"},"default_agent":null}',
+      field: '"default_agent"',
+    },
+    {
+      name: 'an array agent block',
+      text: '{"permission":{"*":"deny"},"agent":[]}',
+      field: '"agent"',
+    },
+    {
+      name: 'a null agent block',
+      text: '{"permission":{"*":"deny"},"agent":null}',
+      field: '"agent"',
+    },
+    {
+      name: 'a non-object build agent',
+      text: '{"permission":{"*":"deny"},"agent":{"build":"x"}}',
+      field: 'the agent "build"',
+    },
+    {
+      name: 'a non-object selected agent',
+      text: '{"default_agent":"x","permission":{"*":"deny"},"agent":{"x":[]}}',
+      field: 'the agent "x"',
+    },
+    {
+      name: 'a non-object agent permission',
+      text: '{"default_agent":"x","permission":{"*":"deny"},"agent":{"x":{"permission":"deny"}}}',
+      field: 'the permission of agent "x"',
+    },
+    {
+      name: 'a null agent permission',
+      text: '{"permission":{"*":"deny"},"agent":{"build":{"permission":null}}}',
+      field: 'the permission of agent "build"',
+    },
+  ])('reports a shape tevu does not read for $name', ({ text, field }) => {
+    expect(decodeToolDenial(text)).toEqual({ denied: false, reason: unread(field) });
+  });
+
+  it('reads only the permission of the agent a model call uses', () => {
+    const text =
+      '{"permission":{"*":"deny"},"agent":{"build":{"permission":{"bash":"deny"}},"plan":{"permission":{"bash":"allow"}}}}';
+
+    expect(decodeToolDenial(text)).toEqual({ denied: true });
+  });
+
+  it('judges the keys after the wildcard in key order, so an integer-like key counts as before it', () => {
+    const text = '{"permission":{"*":"deny","7":"allow"}}';
+
+    expect(decodeToolDenial(text)).toEqual({ denied: true });
+  });
+
+  it('names the first offending key after the wildcard', () => {
+    const text = '{"permission":{"*":"deny","a":"deny","b":"allow","c":"allow"}}';
+
+    expect(decodeToolDenial(text)).toEqual({ denied: false, reason: grantedAfterWildcard('b') });
+  });
+
+  it('enters a key and an agent name into a clause as written, without escaping', () => {
+    const keyed = decodeToolDenial('{"permission":{"*":"deny","a\\"b\\\\c":"allow"}}');
+    const agent = decodeToolDenial(
+      '{"default_agent":"x\\"y","permission":{"*":"deny"},"agent":{"x\\"y":{"permission":{"k\\"":"allow"}}}}',
+    );
+
+    expect(keyed).toEqual({ denied: false, reason: grantedAfterWildcard('a"b\\c') });
+    expect(agent).toEqual({ denied: false, reason: grantedByRunAgent('k"', 'x"y') });
+  });
+
+  it('treats a permission key named like an object prototype member as an ordinary key', () => {
+    expect(decodeToolDenial('{"permission":{"*":"deny","__proto__":"allow"}}')).toEqual({
+      denied: false,
+      reason: grantedAfterWildcard('__proto__'),
+    });
+    expect(decodeToolDenial('{"default_agent":"constructor","permission":{"*":"deny"}}')).toEqual({
+      denied: true,
+    });
+  });
+
+  it.each([
+    { name: 'a JSON null', text: 'null' },
+    { name: 'a JSON string', text: '"x"' },
+    { name: 'an empty array', text: '[]' },
+    { name: 'a null permission', text: '{"permission":null}' },
+    { name: 'an empty array permission', text: '{"permission":[]}' },
+    { name: 'a non-object agent block', text: '{"permission":{"*":"deny"},"agent":[]}' },
+    { name: 'a numeric default agent', text: '{"permission":{"*":"deny"},"default_agent":3}' },
+    { name: 'a deeply nested array', text: `${'['.repeat(200_000)}${']'.repeat(200_000)}` },
+    { name: 'a one megabyte string', text: `"${'x'.repeat(1024 * 1024)}"` },
+    { name: 'binary garbage', text: '\u0000\u0001�{\n"\n}}{{' },
+  ])('never throws for $name', ({ text }) => {
+    expect(() => decodeToolDenial(text)).not.toThrow();
   });
 });
