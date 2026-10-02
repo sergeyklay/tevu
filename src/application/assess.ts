@@ -530,6 +530,11 @@ async function rebuildRunDerived(
     if (!savedConclusions.ok) {
       return savedConclusions;
     }
+    const persisted = await store.readConclusions(runId);
+    if (!persisted.ok) {
+      return persisted;
+    }
+    saved = persisted.value;
   } else {
     const read = await store.readConclusions(runId);
     if (!read.ok) {
