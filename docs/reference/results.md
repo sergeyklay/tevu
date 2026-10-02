@@ -221,7 +221,7 @@ When some settings did not do the task, a cost or speed sentence opens with `Amo
 
 ### The summary model
 
-When the configuration declares [`roles.summary`](agents-and-models.md#model-roles), `tevu run` asks that model once per task, after every case is final, to reword the three conclusions. Nothing is printed while a call runs, and each call ends within `run.timeout`. A call is never retried, and no later command makes one.
+When the configuration declares [`roles.summary`](agents-and-models.md#model-roles), `tevu run` asks that model once per task, after every case is final, to reword the three conclusions. Nothing is printed while a call runs, and `run.timeout` bounds each call's model session. The [tool denial check](agents-and-models.md#tool-denial-check) before the session has its own 120 second limit that does not count against `run.timeout`. A call is never retried, and no later command makes one.
 
 The prompt carries these parts, in this order: instructions, the exact setting names, the facts of the task as JSON without the repository and the date and without each setting's model and effort, the template sentences, the grader's saved rationales for the task as data, and the reply shape. It never carries the task prompt or description, a check ID, a case ID, a run ID, a repository, a path, a date, or the configuration. The model replies with one JSON object: for each aspect, the settings it treats as leaders and its text.
 

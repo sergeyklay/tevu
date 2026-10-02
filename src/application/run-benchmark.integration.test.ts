@@ -268,6 +268,9 @@ function buildFakeAgentAdapter(
     async listModels() {
       return { outcome: 'listed', models: [], variants: new Map() };
     },
+    async probeToolDenial() {
+      return { outcome: 'denied' };
+    },
     repositoryConfigurationEntries() {
       return [];
     },
@@ -750,6 +753,9 @@ describe('runBenchmark grading in the case flow', () => {
       },
       async listModels() {
         return { outcome: 'listed', models: [], variants: new Map() };
+      },
+      async probeToolDenial() {
+        return { outcome: 'denied' };
       },
       repositoryConfigurationEntries() {
         return [];

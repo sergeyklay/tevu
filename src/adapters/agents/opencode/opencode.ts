@@ -7,7 +7,13 @@
  */
 
 import { normalizeFromExport, normalizeMetrics as normalizeOpenCodeMetrics } from './metrics';
-import { decodeEvent, decodeExport, decodeModelListing, isRootSessionErrorEvent } from './protocol';
+import {
+  decodeEvent,
+  decodeExport,
+  decodeModelListing,
+  decodeToolDenial,
+  isRootSessionErrorEvent,
+} from './protocol';
 import { inspectOpenCodeProvider, readOpenCodeProviders } from './providers';
 
 import type { OpenCodeExport, ProtocolContext, ProtocolErrorShape } from './protocol';
@@ -40,6 +46,7 @@ import type {
   SecretRedactor,
   TevuError,
   TevuResult,
+  ToolDenialProbe,
 } from '@/domain/types';
 
 /** Construction inputs identifying this adapter instance within the `AgentRegistry`. */
@@ -75,6 +82,9 @@ const COPIED_PROVIDERS_REDACTION_REASON = 'copied providers redaction failed';
 const MODEL_LISTING_TIMEOUT_MS = 120_000;
 const MODEL_LISTING_TERMINATION_GRACE_MS = 2_000;
 const MODEL_LISTING_MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
+const TOOL_DENIAL_PROBE_TIMEOUT_MS = 120_000;
+const TOOL_DENIAL_PROBE_TERMINATION_GRACE_MS = 2_000;
+const TOOL_DENIAL_PROBE_MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
 
 /**
  * Creates the OpenCode `AgentAdapter` over the managed process boundary and
@@ -103,6 +113,12 @@ export function createOpenCodeAdapter(
       cancellation?: AbortSignal,
     ): Promise<ModelListing> {
       return runListModels(settings, dependencies, environment, cancellation);
+    },
+    probeToolDenial(
+      environment: ModelCallEnvironment,
+      cancellation?: AbortSignal,
+    ): Promise<ToolDenialProbe> {
+      return runToolDenialProbe(settings, dependencies, environment, cancellation);
     },
     repositoryConfigurationEntries(): readonly string[] {
       return ['.opencode', 'opencode.json', 'opencode.jsonc'];
@@ -991,6 +1007,75 @@ async function runListModels(
   }
   const { models, variants } = decodeModelListing(outcome.stdout.text);
   return { outcome: 'listed', models, variants };
+}
+
+/**
+ * Checks, by running `<executable> debug config` without starting a model
+ * session, that the configuration OpenCode resolves in `environment` denies
+ * every tool. The process gets the model call's variables and working
+ * directory, never the capability probe's, so it reads no operator
+ * configuration. Its output stays in this function: only a redacted clause
+ * leaves it.
+ */
+async function runToolDenialProbe(
+  settings: OpenCodeAdapterSettings,
+  dependencies: OpenCodeAdapterDependencies,
+  environment: ModelCallEnvironment,
+  cancellation: AbortSignal | undefined,
+): Promise<ToolDenialProbe> {
+  const outcome = await dependencies.runProcess({
+    argv: [settings.executable, 'debug', 'config'],
+    cwd: environment.workingDirectory,
+    environment: { ...environment.variables, OPENCODE_PERMISSION: MODEL_CALL_PERMISSION },
+    timeoutMs: TOOL_DENIAL_PROBE_TIMEOUT_MS,
+    terminationGraceMs: TOOL_DENIAL_PROBE_TERMINATION_GRACE_MS,
+    cancellation,
+    secretValues: dependencies.secrets.secretValues(),
+    stdoutRedaction: 'structured',
+    // OpenCode exits right after printing, which can drop a pending pipe write
+    // of output this large.
+    stdoutTarget: 'file',
+    maxCaptureBytes: TOOL_DENIAL_PROBE_MAX_CAPTURE_BYTES,
+  });
+  const quoted = (kind: 'failed' | 'not-shown', clause: string): ToolDenialProbe => {
+    const command = `"${settings.executable} debug config"`;
+    try {
+      return {
+        outcome: kind,
+        reason: dependencies.secrets.redactText(`${command} ${clause}`),
+      };
+    } catch {
+      return {
+        outcome: kind,
+        reason: 'the debug config result could not be redacted',
+      };
+    }
+  };
+  if (!outcome.launched) {
+    return outcome.reason === 'cancelled before launch'
+      ? { outcome: 'cancelled' }
+      : quoted('failed', `cannot be started: ${outcome.reason}`);
+  }
+  if (outcome.cancelled) {
+    return { outcome: 'cancelled' };
+  }
+  if (outcome.timedOut) {
+    return quoted('failed', `did not finish within ${TOOL_DENIAL_PROBE_TIMEOUT_MS / 1000}s`);
+  }
+  if (outcome.exitCode === null) {
+    return quoted('failed', `is terminated by signal ${outcome.signal ?? 'unknown'}`);
+  }
+  if (outcome.exitCode !== 0) {
+    return quoted('failed', `exits with code ${outcome.exitCode}`);
+  }
+  if (outcome.stdout.truncated) {
+    return quoted('failed', `prints more than ${TOOL_DENIAL_PROBE_MAX_CAPTURE_BYTES} bytes`);
+  }
+  if (outcome.stdout.incomplete) {
+    return quoted('failed', 'prints output tevu could not read to its end');
+  }
+  const decision = decodeToolDenial(outcome.stdout.text);
+  return decision.denied ? { outcome: 'denied' } : quoted('not-shown', decision.reason);
 }
 
 async function probeCapabilities(

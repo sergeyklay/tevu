@@ -171,6 +171,7 @@ const AGENTS_REGISTRY: AgentRegistry = new Map<string, AgentAdapter>([
         }),
       inspectOperatorProvider: () => Promise.resolve({ ok: true, value: { defined: false } }),
       listModels: () => Promise.resolve({ outcome: 'listed', models: [], variants: new Map() }),
+      probeToolDenial: () => Promise.resolve({ outcome: 'denied' }),
       repositoryConfigurationEntries: () => [],
       run: () => Promise.reject(new Error('unused in report regeneration')),
       exportSession: () => Promise.reject(new Error('unused in report regeneration')),

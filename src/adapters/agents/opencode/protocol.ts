@@ -244,6 +244,107 @@ export function decodeModelListing(text: string): {
   return { models, variants };
 }
 
+/** Verdict of {@link decodeToolDenial}; `reason` is one clause without the command, before redaction. */
+export type ToolDenialDecision = { denied: true } | { denied: false; reason: string };
+
+/**
+ * Decides from `debug config` stdout whether every tool is denied; pure,
+ * never throws.
+ *
+ * A tool stays offered unless the last rule matching its name is `*` with
+ * `deny`, so the top-level `*` rule must be `deny` and so must every key after
+ * it, as must every key in the permission of the agent `run` selects. Only a
+ * permission key or an agent name leaves the function, inside `reason`, as
+ * written and unescaped so that a redactor finds a secret there verbatim.
+ */
+export function decodeToolDenial(text: string): ToolDenialDecision {
+  let document: unknown;
+  try {
+    document = JSON.parse(text);
+  } catch {
+    return notDenied('prints no JSON object');
+  }
+  if (!isRecord(document)) {
+    return notDenied('prints no JSON object');
+  }
+
+  if (!Object.hasOwn(document, 'permission')) {
+    return notDenied('shows no "permission", so OPENCODE_PERMISSION is not in force');
+  }
+  const permission = document['permission'];
+  if (!isRecord(permission)) {
+    return unreadShape('"permission"');
+  }
+  if (!Object.hasOwn(permission, '*')) {
+    return notDenied('shows no "*" rule in "permission", so OPENCODE_PERMISSION is not in force');
+  }
+  if (permission['*'] !== 'deny') {
+    return notDenied('shows "*" in "permission" as something other than "deny"');
+  }
+  const keys = Object.keys(permission);
+  for (const key of keys.slice(keys.indexOf('*') + 1)) {
+    if (permission[key] !== 'deny') {
+      return notDenied(`lists "${key}" after "*" in "permission" with a value other than "deny"`);
+    }
+  }
+
+  const defaultAgent = document['default_agent'];
+  if (Object.hasOwn(document, 'default_agent') && typeof defaultAgent !== 'string') {
+    return unreadShape('"default_agent"');
+  }
+  const agents = document['agent'];
+  if (Object.hasOwn(document, 'agent') && !isRecord(agents)) {
+    return unreadShape('"agent"');
+  }
+  const agentRecords = isRecord(agents) ? agents : {};
+
+  let selected = 'build';
+  if (typeof defaultAgent === 'string' && defaultAgent !== '') {
+    selected = defaultAgent;
+  } else {
+    const build = Object.hasOwn(agentRecords, 'build') ? agentRecords['build'] : undefined;
+    if (
+      isRecord(build) &&
+      (build['disable'] === true || build['hidden'] === true || build['mode'] === 'subagent')
+    ) {
+      return notDenied(
+        'shows the "build" agent disabled, hidden, or as a subagent and no "default_agent", so the agent of a model call is unknown',
+      );
+    }
+  }
+
+  if (!Object.hasOwn(agentRecords, selected)) {
+    return { denied: true };
+  }
+  const agent = agentRecords[selected];
+  if (!isRecord(agent)) {
+    return unreadShape(`the agent "${selected}"`);
+  }
+  if (!Object.hasOwn(agent, 'permission')) {
+    return { denied: true };
+  }
+  const agentPermission = agent['permission'];
+  if (!isRecord(agentPermission)) {
+    return unreadShape(`the permission of agent "${selected}"`);
+  }
+  for (const key of Object.keys(agentPermission)) {
+    if (agentPermission[key] !== 'deny') {
+      return notDenied(
+        `lists "${key}" in the permission of agent "${selected}" with a value other than "deny"`,
+      );
+    }
+  }
+  return { denied: true };
+}
+
+function notDenied(reason: string): ToolDenialDecision {
+  return { denied: false, reason };
+}
+
+function unreadShape(field: string): ToolDenialDecision {
+  return notDenied(`shows ${field} in a shape tevu does not read`);
+}
+
 function isRecordBodyLine(line: string): boolean {
   return line !== '}' && (line === '' || line.startsWith(' ') || line.startsWith('\t'));
 }

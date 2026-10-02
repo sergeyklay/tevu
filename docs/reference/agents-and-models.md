@@ -15,7 +15,7 @@ The `agents`, `models`, and `roles` blocks: the agent adapter, model entries, pr
 
 See [Environment](environment.md) for the variable rules.
 
-The adapter needs these OpenCode capabilities: the `run`, `export`, and `models` commands, the verbose model listing (`models --verbose`), JSON output, model selection, and effort variants. `tevu validate` probes them. Compatibility is decided by these capabilities, never by the OpenCode version, which is recorded as provenance only. The adapter reports its optional outside-worktree restriction as `unavailable`.
+The adapter needs these OpenCode capabilities: the `run`, `export`, and `models` commands, the verbose model listing (`models --verbose`), JSON output, model selection, and effort variants, and, for an agent a declared role names, the [tool denial](#tool-denial-check) of model calls. `tevu validate` probes them. Unlike the other capabilities, the tool denial is not among the capability lines `tevu run --dry-run` prints or the capability reports `run.json` saves; only validation findings and refused calls report it. Compatibility is decided by these capabilities, never by the OpenCode version, which is recorded as provenance only. The adapter reports its optional outside-worktree restriction as `unavailable`.
 
 ## Model entries
 
@@ -174,10 +174,39 @@ A model call is a one-shot use of the agent that runs no case: criteria drafting
 
 - It uses the agent's own home, state, and temporary directories, the variables of its agent block's `secrets` and `env`, and the copied providers. It gets no evaluator environment.
 - Its working directory is an empty Git repository. No configured repository or commit reaches it. The directory is removed when the call ends.
-- Its `run` process, for drafting, grading, and summary calls alike, receives `OPENCODE_PERMISSION` set to `{"*":"deny"}`, so the model is offered no tool. The value replaces any `OPENCODE_PERMISSION` the agent block's `env` passes. Case agents and the model listing keep the environment described above.
-- A call fails with the cause `tool-call` when its saved session holds a tool call, and with the cause `unfinished` when the model's last message ended without the finish reason `stop`, for example because it hit a length limit. The criteria wizard prints the call's own reason for both. A grader call that fails with `unfinished` is made again; see [Graded checks](checks.md#graded-checks).
+- Its `run` process, for drafting, grading, and summary calls alike, receives `OPENCODE_PERMISSION` set to `{"*":"deny"}`, so the model is offered no tool, and [the tool denial check](#tool-denial-check) confirms before the call that OpenCode applies it. The value replaces any `OPENCODE_PERMISSION` the agent block's `env` passes. Case agents and the model listing keep the environment described above.
+- A call fails with the cause `tool-call` when its saved session holds a tool call, which catches a tool the tool denial check could not see, and with the cause `unfinished` when the model's last message ended without the finish reason `stop`, for example because it hit a length limit. The criteria wizard prints the call's own reason for both. A grader call that fails with `unfinished` is made again; see [Graded checks](checks.md#graded-checks).
 - **Grader prompt**, on stdin: the task's `prompt` and `description`, the `id` and `description` of each graded check, and the solution patch. It never carries a reference solution, a case ID, a run ID, or the model entry that produced the solution.
 - **Summary prompt**: the exact names of the task's model settings, the facts of the comparison as JSON, the template sentences, and the grader's saved rationales for the task, fenced as data. It carries no task `prompt` or `description`, check ID, case ID, run ID, repository, path, date, or configuration. See [The summary model](results.md#the-summary-model).
 - **Criteria prompt**: the task's `prompt` and `description` and the reference solution's changes. tevu adds no pull request title or description, commit hash, pull request key or URL, case ID, or run ID. The changes come from GitHub's diff media type for a pull request and from the local repository for a commit.
+
+### Tool denial check
+
+Before each drafting, grading, and summary call, and in `tevu validate` for each agent a declared role names, tevu runs `<command> debug config` and reads the configuration OpenCode resolves. The process runs in a model call's environment, with `OPENCODE_PERMISSION` set as for the call's `run` process, so it sees the configuration the call would. No model session starts. The command can use the network on its own, for example to install a plugin the configuration names, which the call's `run` then reuses. It ends within 120 seconds, a limit that does not count against `run.timeout`. Case agents and the model listing get no check.
+
+The output shows every tool denied when all of these hold:
+
+- In `permission`, `*` is `deny` and so is every key after it. A key before `*` does not matter. A value of `ask`, `allow`, an object, or a masked `***` fails.
+- Every key in the `permission` of the agent `run` uses is `deny`. That agent is `default_agent` when the output has one, else `build`. A `build` agent that is disabled, hidden, or a subagent, with no `default_agent`, fails, because the agent of a model call is then unknown.
+
+Any other output fails, including output that is not one JSON object and a `permission`, `default_agent`, or `agent` field of a shape tevu does not read. The reason names the first key or field that failed.
+
+| Result | In `tevu validate` | Before a call |
+| --- | --- | --- |
+| Every tool is denied | No finding | The call starts |
+| The output does not show every tool denied | The finding `capability "model call tool denial" is missing: <reason>`, which ends with the roles whose calls are refused before they start | The call is refused with the same text |
+| `debug config` fails or does not finish: it cannot start, exits with a nonzero code, is terminated by a signal, exceeds 120 seconds, prints more than 16 MiB, or prints output tevu cannot read to its end | The finding `capability "model call tool denial" could not be checked: <reason>`, which ends with the roles whose calls repeat the check and are refused unless it shows the denial | The call is refused with the same text |
+
+The finding is an error when `roles.grader` names the agent and a configured task declares a graded check, and a warning otherwise. A warning does not let a call through: each call repeats the check and is refused unless it shows the denial.
+
+A refused call starts no `run` process and fails as any model call does:
+
+| Role | Effect of a refused call |
+| --- | --- |
+| `roles.grader` | The grader call is recorded as `no-reply` with the cause `other`, and the case's graded checks stay pending |
+| `roles.summary` | The conclusions stay the template sentences, and the footnote of `report.md` gives the reason |
+| `roles.criteria` | The wizard reports that it could not draft criteria, gives the reason, and offers to draft again |
+
+The check reads the configuration OpenCode reports. An executable that reports the denial but does not apply it, or configuration that changes between the check and the call, is found only after the call; see [Where isolation stops](../concepts/isolation.md#where-isolation-stops).
 
 See [Model access](../concepts/model-access.md) for why calls are shaped this way.

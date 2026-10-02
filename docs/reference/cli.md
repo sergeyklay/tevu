@@ -42,6 +42,7 @@ When the file cannot be read, these commands print its absolute path and the rea
 - that every case executable starts; see [Environment](environment.md#case-executables);
 - that the agent resolves every model entry and role; see [Model resolution](agents-and-models.md#model-resolution);
 - that every model entry's and role's effort is a variant the agent reports for its model; see [Effort check](agents-and-models.md#effort-check);
+- that OpenCode applies the tool denial of model calls, for every agent a role names; see [Tool denial check](agents-and-models.md#tool-denial-check);
 - that a task declaring a graded check has `roles.grader`.
 
 It prints findings, then `Configuration is valid.` or `Configuration is invalid.` (exit `1`). It starts no model session. It never clones or fetches: a missing GitHub clone or commit is a finding that names `tevu run --dry-run`. It checks `trackers.jira` for structure only.
@@ -85,10 +86,10 @@ The [assessment guide](../guides/assess-results.md) covers the workflow.
 
 | Command | Network use |
 | --- | --- |
-| `tevu task add` | Jira or gh, as described in [Trackers](trackers.md). Clone and fetch for a selected GitHub repository entry. `git ls-remote` for each GitHub repository answer. A Git LFS object fetch for each base-commit answer whose tree lacks objects. With `roles.criteria` and a reference solution, a diff read (`gh api` for a pull request), one `<command> models --verbose` listing before each draft, and a model session. In a setup interview, the agent capability probe and one `<command> models --verbose` listing per model answer, which may reach the network on its own |
-| `tevu run` | Preparation clone and fetch, only for a missing clone or commit. A Git LFS object fetch, only for a base commit whose tree lacks objects. Model listing during validation. Model sessions, including one summary call per task at the end when `roles.summary` is declared |
-| `tevu run --dry-run` | The same as `run`, except no model session |
-| `tevu validate` | The `<command> models --verbose` listing for each agent a model entry or role names, which may reach the network on its own. `git lfs version` locally, only when a Git LFS object is missing. Each case executable started with `--version` |
+| `tevu task add` | Jira or gh, as described in [Trackers](trackers.md). Clone and fetch for a selected GitHub repository entry. `git ls-remote` for each GitHub repository answer. A Git LFS object fetch for each base-commit answer whose tree lacks objects. With `roles.criteria` and a reference solution, a diff read (`gh api` for a pull request), one `<command> models --verbose` listing and one `<command> debug config` before each draft's model session, and that model session. The `debug config` run can install a plugin the configuration names. In a setup interview, the agent capability probe and one `<command> models --verbose` listing per model answer, which may reach the network on its own |
+| `tevu run` | Preparation clone and fetch, only for a missing clone or commit. A Git LFS object fetch, only for a base commit whose tree lacks objects. Model listing and one `<command> debug config` for each agent a role names during validation. One `<command> debug config` before each model call. Model sessions, including one summary call per task at the end when `roles.summary` is declared |
+| `tevu run --dry-run` | The same as `run`, except no model session and no `<command> debug config` before a model call |
+| `tevu validate` | The `<command> models --verbose` listing for each agent a model entry or role names, and one `<command> debug config` for each agent a role names. Either may reach the network on its own. `git lfs version` locally, only when a Git LFS object is missing. Each case executable started with `--version` |
 | `tevu assess`, `tevu report`, `tevu config example` | None. `assess` and `report` read saved artifacts only |
 
 ## Exit codes

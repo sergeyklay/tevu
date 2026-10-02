@@ -20,6 +20,7 @@ import type {
   AgentConfigurationFile,
   EnvironmentAdapter,
   TevuConfig,
+  ToolDenialProbe,
   ValidationDependencies,
   ValidationFinding,
 } from '@/domain/types';
@@ -101,6 +102,7 @@ function buildFakeAgentAdapter(
   overrides: {
     readProviders?: AgentAdapter['readProviders'];
     listModels?: AgentAdapter['listModels'];
+    probeToolDenial?: AgentAdapter['probeToolDenial'];
     repositoryConfigurationEntries?: readonly string[];
   } = {},
 ): FakeAgent {
@@ -143,6 +145,8 @@ function buildFakeAgentAdapter(
             ['anthropic/claude-4', ['max']],
           ]),
         })),
+      probeToolDenial:
+        overrides.probeToolDenial ?? vi.fn(async () => ({ outcome: 'denied' as const })),
       repositoryConfigurationEntries: vi.fn(
         () => overrides.repositoryConfigurationEntries ?? ['.opencode', 'opencode.json'],
       ),
@@ -1139,5 +1143,456 @@ describe('validateConfig effort check', () => {
       expect.objectContaining({ severity: 'warning', identifier: 'roles.criteria.effort' }),
     ]);
     expect(report.efforts.roles.criteria?.status).toBe('unsupported');
+  });
+});
+
+describe('validateConfig tool denial check', () => {
+  const BASH_GRANTED_REASON =
+    'lists "bash" after "*" in "permission" with a value other than "deny"';
+  const MODELS = ['acme/model-a', 'acme/model-b'];
+
+  type Roles = {
+    criteria?: `${string}/${string}`;
+    grader?: `${string}/${string}`;
+    summary?: `${string}/${string}`;
+  };
+
+  function listsAcmeModels(): AgentAdapter['listModels'] {
+    return vi.fn(async () => ({
+      outcome: 'listed' as const,
+      models: MODELS,
+      variants: new Map(MODELS.map((model) => [model, ['high']])),
+    }));
+  }
+
+  function notShownBash(command: string): ToolDenialProbe {
+    return { outcome: 'not-shown', reason: `"${command} debug config" ${BASH_GRANTED_REASON}` };
+  }
+
+  async function validateToolDenial(
+    options: {
+      roles?: Roles;
+      gradedCheck?: boolean;
+      probeToolDenial?: AgentAdapter['probeToolDenial'];
+      listModels?: AgentAdapter['listModels'];
+      readProviders?: AgentAdapter['readProviders'];
+      adapter?: (adapter: AgentAdapter) => AgentAdapter;
+      config?: (config: TevuConfig) => TevuConfig;
+      environments?: (real: EnvironmentAdapter) => EnvironmentAdapter;
+      agentCommand?: string;
+      extraAgents?: Record<string, AgentAdapter>;
+    } = {},
+  ) {
+    const repositoryPath = join(workspace, 'repo');
+    const baseCommit = await createSourceRepository(repositoryPath);
+    const agentScript = join(workspace, 'agent-ok.sh');
+    await writeExecutable(agentScript, shellScript('exit 0\n'));
+    const built = buildModelResolutionConfig({
+      agentCommand: options.agentCommand ?? agentScript,
+      repositoryPath,
+      baseCommit,
+      outputDirectory: join(workspace, 'artifacts'),
+      models: [
+        { id: 'alpha', model: 'acme/model-a' },
+        { id: 'beta', model: 'acme/model-b' },
+      ],
+      ...(options.roles === undefined ? {} : { roles: options.roles }),
+      ...(options.gradedCheck === true ? { gradedCheck: true } : {}),
+    });
+    const config = options.config?.(built) ?? built;
+    const { adapter: fake } = buildFakeAgentAdapter({
+      listModels: options.listModels ?? listsAcmeModels(),
+      ...(options.probeToolDenial === undefined
+        ? {}
+        : { probeToolDenial: options.probeToolDenial }),
+      ...(options.readProviders === undefined ? {} : { readProviders: options.readProviders }),
+    });
+    const adapter = options.adapter?.(fake) ?? fake;
+    const dependencies = buildDependencies(adapter);
+    const outcome = await validateConfig(config, {
+      ...dependencies,
+      agents: new Map([...dependencies.agents, ...Object.entries(options.extraAgents ?? {})]),
+      environments: options.environments?.(dependencies.environments) ?? dependencies.environments,
+    });
+    if (!outcome.ok) {
+      throw new Error(`expected validateConfig to succeed: ${JSON.stringify(outcome.error)}`);
+    }
+    return { report: outcome.value, adapter, agentScript };
+  }
+
+  function toolDenialFindings(findings: readonly ValidationFinding[]): ValidationFinding[] {
+    return findings.filter(
+      (finding) =>
+        finding.message.includes('model call tool denial') ||
+        finding.message.startsWith('tool denial check directory'),
+    );
+  }
+
+  it.each<{ name: string; roles: Roles; gradedCheck: boolean; severity: 'error' | 'warning' }>([
+    {
+      name: 'the grader with a graded check',
+      roles: { grader: 'acme/model-a' },
+      gradedCheck: true,
+      severity: 'error',
+    },
+    {
+      name: 'the grader without a graded check',
+      roles: { grader: 'acme/model-a' },
+      gradedCheck: false,
+      severity: 'warning',
+    },
+    {
+      name: 'the criteria role alone',
+      roles: { criteria: 'acme/model-a' },
+      gradedCheck: false,
+      severity: 'warning',
+    },
+    {
+      name: 'the summary role alone',
+      roles: { summary: 'acme/model-a' },
+      gradedCheck: false,
+      severity: 'warning',
+    },
+  ])(
+    'reports a missing denial of $name as a $severity at the agent',
+    async ({ roles, gradedCheck, severity }) => {
+      const { report, agentScript } = await validateToolDenial({
+        roles,
+        gradedCheck,
+        probeToolDenial: vi.fn(async () => notShownBash(join(workspace, 'agent-ok.sh'))),
+      });
+
+      const [finding, ...rest] = toolDenialFindings(report.findings);
+      expect(rest).toEqual([]);
+      expect(finding?.severity).toBe(severity);
+      expect(finding?.identifier).toBe('agents.opencode');
+      expect(finding?.message).toContain(
+        `capability "model call tool denial" is missing: "${agentScript} debug config" ${BASH_GRANTED_REASON}; every call of roles.`,
+      );
+      expect(report.valid).toBe(severity === 'warning');
+    },
+  );
+
+  it.each<{ roles: Roles; list: string }>([
+    { roles: { criteria: 'acme/model-a' }, list: 'roles.criteria' },
+    {
+      roles: { criteria: 'acme/model-a', summary: 'acme/model-a' },
+      list: 'roles.criteria and roles.summary',
+    },
+    {
+      roles: { summary: 'acme/model-a', grader: 'acme/model-a', criteria: 'acme/model-a' },
+      list: 'roles.criteria, roles.grader, and roles.summary',
+    },
+  ])('lists the roles $list in the order criteria, grader, summary', async ({ roles, list }) => {
+    const { report } = await validateToolDenial({
+      roles,
+      probeToolDenial: vi.fn(async () => notShownBash('agent')),
+    });
+
+    expect(toolDenialFindings(report.findings).map((finding) => finding.message)).toEqual([
+      `capability "model call tool denial" is missing: "agent debug config" ${BASH_GRANTED_REASON}; every call of ${list} is refused before it starts`,
+    ]);
+  });
+
+  it('ends a missing-denial finding with the refusal before the call starts', async () => {
+    const { report } = await validateToolDenial({
+      roles: { grader: 'acme/model-a' },
+      probeToolDenial: vi.fn(async () => notShownBash('agent')),
+    });
+
+    const [finding] = toolDenialFindings(report.findings);
+    expect(finding?.message).toContain('is missing: "');
+    expect(finding?.message.endsWith('is refused before it starts')).toBe(true);
+  });
+
+  it('reports a failed check as unchecked and ends with the repeated check', async () => {
+    const { report } = await validateToolDenial({
+      roles: { summary: 'acme/model-a' },
+      probeToolDenial: vi.fn(async () => ({
+        outcome: 'failed' as const,
+        reason: '"agent debug config" exits with code 1',
+      })),
+    });
+
+    expect(toolDenialFindings(report.findings)).toEqual([
+      {
+        severity: 'warning',
+        identifier: 'agents.opencode',
+        message:
+          'capability "model call tool denial" could not be checked: "agent debug config" exits with code 1; every call of roles.summary repeats the check and is refused unless the check shows the denial',
+      },
+    ]);
+  });
+
+  it('reports a cancelled check as unchecked with the configured command', async () => {
+    const { report, agentScript } = await validateToolDenial({
+      roles: { summary: 'acme/model-a' },
+      probeToolDenial: vi.fn(async () => ({ outcome: 'cancelled' as const })),
+    });
+
+    expect(toolDenialFindings(report.findings).map((finding) => finding.message)).toEqual([
+      `capability "model call tool denial" could not be checked: "${agentScript} debug config" is cancelled; every call of roles.summary repeats the check and is refused unless the check shows the denial`,
+    ]);
+  });
+
+  it('reports an environment that cannot be prepared as unchecked and never probes', async () => {
+    const probeToolDenial = vi.fn<AgentAdapter['probeToolDenial']>();
+
+    const { report } = await validateToolDenial({
+      roles: { grader: 'acme/model-a' },
+      gradedCheck: true,
+      probeToolDenial,
+      environments: (real) => ({
+        ...real,
+        createModelCallEnvironment: async () => ({
+          ok: false,
+          error: {
+            kind: 'ArtifactError',
+            operation: 'create-model-call-directory',
+            reason: 'disk full',
+          },
+        }),
+      }),
+    });
+
+    expect(toolDenialFindings(report.findings)).toEqual([
+      {
+        severity: 'error',
+        identifier: 'agents.opencode',
+        message:
+          'capability "model call tool denial" could not be checked: a model call environment could not be prepared: create-model-call-directory: disk full; every call of roles.grader repeats the check and is refused unless the check shows the denial',
+      },
+    ]);
+    expect(probeToolDenial).not.toHaveBeenCalled();
+  });
+
+  it('adds no finding and keeps the configuration valid when the denial is shown', async () => {
+    const probeToolDenial = vi.fn(async () => ({ outcome: 'denied' as const }));
+
+    const { report } = await validateToolDenial({
+      roles: { grader: 'acme/model-a', summary: 'acme/model-b' },
+      gradedCheck: true,
+      probeToolDenial,
+    });
+
+    expect(probeToolDenial).toHaveBeenCalledTimes(1);
+    expect(toolDenialFindings(report.findings)).toEqual([]);
+    expect(report.valid).toBe(true);
+  });
+
+  it('starts no check for a configuration without roles', async () => {
+    const probeToolDenial = vi.fn(async () => ({ outcome: 'denied' as const }));
+
+    await validateToolDenial({ probeToolDenial });
+
+    expect(probeToolDenial).not.toHaveBeenCalled();
+  });
+
+  /** Adds a second agent, `other`, and gives it the criteria role; `opencode` keeps the models and the grader. */
+  function withOtherAgentOnCriteria(config: TevuConfig): TevuConfig {
+    return {
+      ...config,
+      agents: { ...config.agents, other: { ...config.agents['opencode']! } },
+      roles: {
+        ...config.roles,
+        criteria: { agent: 'other', model: 'acme/model-a', effort: 'high' },
+      },
+    };
+  }
+
+  it("reports one finding per agent a role names, each after that agent's model-resolution findings", async () => {
+    const otherProbe = vi.fn(async () => notShownBash('other'));
+
+    const { report } = await validateToolDenial({
+      roles: { grader: 'acme/model-a' },
+      probeToolDenial: vi.fn(async () => notShownBash('opencode')),
+      listModels: vi.fn(async () => ({
+        outcome: 'listed' as const,
+        models: ['acme/model-a'],
+        variants: new Map([['acme/model-a', ['high']]]),
+      })),
+      config: withOtherAgentOnCriteria,
+      extraAgents: {
+        other: buildFakeAgentAdapter({ probeToolDenial: otherProbe, listModels: listsAcmeModels() })
+          .adapter,
+      },
+    });
+
+    const identifiers = report.findings
+      .map((finding) => finding.identifier)
+      .filter((identifier) =>
+        ['models.beta.model', 'agents.opencode', 'agents.other'].includes(identifier),
+      );
+    expect(identifiers).toEqual(['models.beta.model', 'agents.opencode', 'agents.other']);
+    expect(otherProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts no check for an agent only a model entry names', async () => {
+    const opencodeProbe = vi.fn(async () => ({ outcome: 'denied' as const }));
+    const otherProbe = vi.fn(async () => ({ outcome: 'denied' as const }));
+
+    await validateToolDenial({
+      roles: { grader: 'acme/model-a' },
+      probeToolDenial: opencodeProbe,
+      config: (config) => ({
+        ...config,
+        agents: { ...config.agents, other: { ...config.agents['opencode']! } },
+        models: config.models.map((entry) => ({ ...entry, agent: 'other' })),
+      }),
+      extraAgents: {
+        other: buildFakeAgentAdapter({ probeToolDenial: otherProbe, listModels: listsAcmeModels() })
+          .adapter,
+      },
+    });
+
+    expect(opencodeProbe).toHaveBeenCalledTimes(1);
+    expect(otherProbe).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: 'times out', listing: { outcome: 'timed-out' as const, limitMs: 120_000 } },
+    { name: 'fails', listing: { outcome: 'failed' as const, reason: 'exits with code 4' } },
+  ])('still runs the check when the model listing $name', async ({ listing }) => {
+    const probeToolDenial = vi.fn(async () => notShownBash('agent'));
+
+    const { report } = await validateToolDenial({
+      roles: { summary: 'acme/model-a' },
+      probeToolDenial,
+      listModels: vi.fn(async () => listing),
+    });
+
+    expect(probeToolDenial).toHaveBeenCalledTimes(1);
+    expect(toolDenialFindings(report.findings)).toHaveLength(1);
+  });
+
+  it('starts no check when the providers cannot be read', async () => {
+    const probeToolDenial = vi.fn(async () => ({ outcome: 'denied' as const }));
+
+    await validateToolDenial({
+      roles: { summary: 'acme/model-a' },
+      probeToolDenial,
+      readProviders: vi.fn(async () => ({
+        ok: false as const,
+        error: {
+          kind: 'ConfigValidationError' as const,
+          findings: [
+            {
+              severity: 'error' as const,
+              identifier: 'agents.opencode.providers',
+              message: 'unreadable',
+            },
+          ],
+        },
+      })),
+    });
+
+    expect(probeToolDenial).not.toHaveBeenCalled();
+  });
+
+  it('starts no check when the capability probe fails', async () => {
+    const probeToolDenial = vi.fn(async () => ({ outcome: 'denied' as const }));
+
+    await validateToolDenial({
+      roles: { summary: 'acme/model-a' },
+      probeToolDenial,
+      adapter: (adapter) => ({
+        ...adapter,
+        probe: vi.fn(async () => ({
+          ok: false as const,
+          error: {
+            kind: 'PrerequisiteError' as const,
+            tool: 'opencode',
+            expected: 'the executable starts',
+            actual: 'it does not',
+          },
+        })),
+      }),
+    });
+
+    expect(probeToolDenial).not.toHaveBeenCalled();
+  });
+
+  it('starts no check when the parent environment snapshot cannot be taken', async () => {
+    const probeToolDenial = vi.fn(async () => ({ outcome: 'denied' as const }));
+    delete process.env['TEVU_TOOL_DENIAL_UNSET_VARIABLE'];
+
+    await validateToolDenial({
+      roles: { summary: 'acme/model-a' },
+      probeToolDenial,
+      config: (config) => ({
+        ...config,
+        agents: {
+          opencode: { ...config.agents['opencode']!, env: ['TEVU_TOOL_DENIAL_UNSET_VARIABLE'] },
+        },
+      }),
+    });
+
+    expect(probeToolDenial).not.toHaveBeenCalled();
+  });
+
+  it('starts no check for an agent whose case-executable finding is already reported', async () => {
+    const probeToolDenial = vi.fn(async () => ({ outcome: 'denied' as const }));
+    const binDirectory = join(workspace, 'bin');
+    const operatorHome = join(workspace, 'operator-home');
+    await mkdir(binDirectory, { recursive: true });
+    await mkdir(join(operatorHome, 'installs', 'v1'), { recursive: true });
+    await writeExecutable(join(binDirectory, 'toolx'), shellScript(SYNTHETIC_SHIM_BODY));
+    await writeExecutable(join(operatorHome, 'installs', 'v1', 'toolx'), shellScript('exit 0\n'));
+    await writeFile(join(operatorHome, 'synthetic-pin'), 'v1\n');
+    process.env.HOME = operatorHome;
+    process.env.PATH = `${binDirectory}:${process.env.PATH ?? ''}`;
+
+    const { report } = await validateToolDenial({
+      roles: { summary: 'acme/model-a' },
+      probeToolDenial,
+      agentCommand: 'toolx',
+    });
+
+    expect(report.findings.map((finding) => finding.identifier)).toContain(
+      'agents.opencode.command',
+    );
+    expect(probeToolDenial).not.toHaveBeenCalled();
+  });
+
+  it('adds a warning about a directory it could not remove after the finding of the check', async () => {
+    const { report } = await validateToolDenial({
+      roles: { grader: 'acme/model-a' },
+      gradedCheck: true,
+      probeToolDenial: vi.fn(async () => notShownBash('agent')),
+      environments: (real) => ({
+        ...real,
+        createModelCallEnvironment: async (snapshot, agentVariables, configurationFiles) => {
+          const created = await real.createModelCallEnvironment(
+            snapshot,
+            agentVariables,
+            configurationFiles,
+          );
+          if (!created.ok) {
+            return created;
+          }
+          return {
+            ok: true,
+            value: {
+              ...created.value,
+              dispose: async () => {
+                await created.value.dispose();
+                return {
+                  ok: false,
+                  error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
+                };
+              },
+            },
+          };
+        },
+      }),
+    });
+
+    const findings = report.findings.filter((finding) => finding.identifier === 'agents.opencode');
+    expect(findings.map((finding) => finding.severity)).toContain('warning');
+    const toolDenial = toolDenialFindings(report.findings);
+    expect(toolDenial.map((finding) => finding.severity)).toEqual(['error', 'warning']);
+    expect(toolDenial[1]?.message).toMatch(
+      /^tool denial check directory could not be removed; retained at ".+"$/,
+    );
   });
 });

@@ -215,6 +215,18 @@ export type ModelListing =
   | { outcome: 'failed'; reason: string }
   | { outcome: 'cancelled' };
 
+/**
+ * Outcome of one tool denial check: `not-shown` means the output does not show
+ * every tool denied, `failed` means the check produced no readable output. Each
+ * `reason` is one clause that opens with the quoted command, is already
+ * redacted, and carries no process output.
+ */
+export type ToolDenialProbe =
+  | { outcome: 'denied' }
+  | { outcome: 'not-shown'; reason: string }
+  | { outcome: 'failed'; reason: string }
+  | { outcome: 'cancelled' };
+
 /** One provider as the operator's own configuration of an agent defines it; names and states only, never values. */
 export type OperatorProvider =
   | { defined: false }
@@ -1187,6 +1199,11 @@ export interface AgentAdapter {
   ): Promise<TevuResult<OperatorProvider, 'ConfigValidationError'>>;
   /** Lists every model the agent resolves in `environment`, without starting a model session. */
   listModels(environment: ModelCallEnvironment, cancellation?: AbortSignal): Promise<ModelListing>;
+  /** Reports, without starting a model session, whether a model call's `run` process in `environment` is offered no tool. */
+  probeToolDenial(
+    environment: ModelCallEnvironment,
+    cancellation?: AbortSignal,
+  ): Promise<ToolDenialProbe>;
   /** Names of top-level worktree entries through which the agent reads configuration from the repository it works in; pure, starts no process. */
   repositoryConfigurationEntries(): readonly string[];
   run(

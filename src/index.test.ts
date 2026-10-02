@@ -112,6 +112,10 @@ async function createSourceRepository(directory: string): Promise<string> {
   return (await runGit(directory, ['rev-parse', 'HEAD'])).trim();
 }
 
+/** What the fake's `debug config` prints: the permission it received, as OpenCode resolves it. */
+const DEBUG_CONFIG_DOCUMENT_SOURCE =
+  'permission === undefined ? {} : { permission: JSON.parse(permission) }';
+
 /**
  * A fake `opencode`-shaped executable answering every probe invocation, the
  * models listing (from its own written `opencode.json`), and one trivial
@@ -148,6 +152,11 @@ if (args[0] === 'models') {
       console.log(JSON.stringify({ id: name, variants: { low: {}, high: {} } }, null, 2));
     }
   }
+  process.exit(0);
+}
+if (args[0] === 'debug' && args[1] === 'config') {
+  const permission = process.env.OPENCODE_PERMISSION;
+  console.log(JSON.stringify(${DEBUG_CONFIG_DOCUMENT_SOURCE}));
   process.exit(0);
 }
 if (args[0] === 'run') {
@@ -425,6 +434,95 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     );
     expect(modelFindings).toEqual([]);
     expect(outcome.value.valid).toBe(true);
+  });
+
+  describe('model call tool denial check', () => {
+    const GRADED_CHECKS: TevuTaskInput['checks'] = {
+      acceptance: [{ id: 'graded-1', description: 'graded check description', required: true }],
+      done: [{ id: 'manual-done', description: 'Manual review', manual: true }],
+    };
+
+    /** A fake whose `debug config` shows no permission at all, as an executable that ignores the variable does. */
+    const IGNORING_OPENCODE_SCRIPT = FAKE_OPENCODE_SCRIPT.replace(
+      DEBUG_CONFIG_DOCUMENT_SOURCE,
+      '{ agent: {} }',
+    );
+
+    async function validateWithGrader(options: { script: string }) {
+      const directory = await mkdtemp(join(testDirectory, 'denial-'));
+      const executable = join(directory, 'fake-opencode-denial.mjs');
+      await writeFile(executable, options.script, { mode: 0o755 });
+      await writeOperatorFixture();
+      const repositoryPath = join(directory, 'repo');
+      const baseCommit = await createSourceRepository(repositoryPath);
+      const config = TevuConfigSchema.parse({
+        ...buildConfigInput({
+          executable,
+          repositoryPath,
+          baseCommit,
+          outputDirectory: join(directory, 'artifacts'),
+          checks: GRADED_CHECKS,
+        }),
+        roles: { grader: { agent: 'opencode', model: 'acme/synthetic-model-a', effort: 'high' } },
+      });
+      const outcome = await composeProgramDependencies().operations.validateConfig(config);
+      if (!outcome.ok) {
+        throw new Error(`expected validateConfig to succeed: ${JSON.stringify(outcome.error)}`);
+      }
+      return { ...outcome.value, directory };
+    }
+
+    function toolDenialFindingsOf(findings: readonly { message: string }[]) {
+      return findings.filter((finding) => finding.message.includes('model call tool denial'));
+    }
+
+    it('reports no tool denial finding and a valid configuration when debug config shows the denial it was given', async () => {
+      const report = await validateWithGrader({ script: FAKE_OPENCODE_SCRIPT });
+
+      expect(toolDenialFindingsOf(report.findings)).toEqual([]);
+      expect(report.valid).toBe(true);
+    });
+
+    it('reports one missing-denial error at the agent when debug config shows no permission', async () => {
+      const report = await validateWithGrader({ script: IGNORING_OPENCODE_SCRIPT });
+
+      const findings = toolDenialFindingsOf(report.findings);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]).toMatchObject({ severity: 'error', identifier: 'agents.opencode' });
+      expect(
+        findings[0]?.message.startsWith('capability "model call tool denial" is missing: "'),
+      ).toBe(true);
+      expect(findings[0]?.message).toContain('shows no "permission"');
+      expect(report.valid).toBe(false);
+    });
+
+    it('keeps a declared secret that debug config prints out of every finding', async () => {
+      const secret = 'synthetic-acme-secret-value';
+      const leakingScript = FAKE_OPENCODE_SCRIPT.replace(
+        DEBUG_CONFIG_DOCUMENT_SOURCE,
+        `{ provider: { acme: { options: { organization: '${secret}' } } }, permission: { '*': 'deny', '${secret}': 'allow' } }`,
+      );
+      expect(leakingScript).not.toBe(FAKE_OPENCODE_SCRIPT);
+
+      const report = await validateWithGrader({ script: leakingScript });
+
+      const findings = toolDenialFindingsOf(report.findings);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]?.message).toContain('lists "[REDACTED]" after "*"');
+      expect(JSON.stringify(report)).not.toContain(secret);
+    });
+
+    it('reports the same findings whatever version the executable prints', async () => {
+      const versioned = IGNORING_OPENCODE_SCRIPT.replace('1.0.0-composition-fake', '2.0.0');
+      expect(versioned).not.toBe(IGNORING_OPENCODE_SCRIPT);
+
+      const report = await validateWithGrader({ script: IGNORING_OPENCODE_SCRIPT });
+      const versionedReport = await validateWithGrader({ script: versioned });
+
+      const textOf = (result: typeof report): string =>
+        JSON.stringify(result.findings).replaceAll(result.directory, '<directory>');
+      expect(textOf(versionedReport)).toBe(textOf(report));
+    });
   });
 
   describe('effort check', () => {
