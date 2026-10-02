@@ -1,12 +1,14 @@
 import { unavailableAgentMetrics, unavailableBenchmarkMetrics } from '@/domain/types';
 
 import type {
+  AgentMetrics,
   CaseIdentity,
   CaseResult,
   CheckRecord,
   CheckResult,
   GradeRecord,
   GradingArtifact,
+  MetricValue,
   ModelRecord,
   TaskRecord,
   TevuError,
@@ -99,17 +101,88 @@ export function buildFailure(error: TevuError): NonNullable<CaseResult['failure'
   return { error, occurredAt: '2026-09-23T00:00:00.000Z' };
 }
 
+type GraderCallEntry = GradingArtifact['calls'][number];
+
+/** An agent metric set where every value is available and measured as one under the `export` source. */
+export function buildAgentMetrics(overrides: Partial<AgentMetrics> = {}): AgentMetrics {
+  const measured = (unit: MetricValue['unit'], value: number): MetricValue => ({
+    value,
+    unit,
+    availability: { status: 'available', source: 'export' },
+    scope: 'root-session',
+  });
+  return {
+    inputTokens: measured('token', 100),
+    outputTokens: measured('token', 20),
+    reasoningTokens: measured('token', 0),
+    cacheReadTokens: measured('token', 0),
+    cacheWriteTokens: measured('token', 0),
+    turns: measured('count', 1),
+    apiCalls: measured('count', 1),
+    apiErrors: measured('count', 0),
+    toolCalls: measured('count', 0),
+    skillCalls: measured('count', 0),
+    cost: measured('USD', 0.5),
+    ...overrides,
+  };
+}
+
+export function buildGraderCall(overrides: Partial<GraderCallEntry> = {}): GraderCallEntry {
+  return {
+    outcome: { status: 'replied' },
+    metrics: buildAgentMetrics(),
+    events: [],
+    diagnostics: '',
+    session: null,
+    ...overrides,
+  };
+}
+
+function outcomeOf(call: GradingArtifact['call']): GraderCallEntry['outcome'] {
+  return call.status === 'replied' ? { status: 'replied' } : call;
+}
+
+/** A grading whose single call is consistent with `call` and `metrics`, unless `calls` is overridden. */
 export function buildGradingArtifact(overrides: Partial<GradingArtifact> = {}): GradingArtifact {
+  const call = overrides.call ?? { status: 'replied', reply: '{"grades":[]}' };
+  const metrics = overrides.metrics ?? unavailableAgentMetrics('not measured in this fixture');
   return {
     schemaVersion: 1,
     runId: FIXTURE_RUN_ID,
     caseId: 'task-1--m1--1',
     grader: { model: 'vendor/grader-model', effort: 'medium', agent: 'opencode' },
-    call: { status: 'replied', reply: '{"grades":[]}' },
-    metrics: unavailableAgentMetrics('not measured in this fixture'),
+    call,
+    calls: [buildGraderCall({ outcome: outcomeOf(call), metrics })],
+    metrics,
     grades: [],
     ...overrides,
   };
+}
+
+type UnfinishedNoReply = Extract<GradingArtifact['call'], { status: 'no-reply' }>;
+
+/**
+ * A grading that made `callCount` calls and ended without a reply: every call
+ * but the last stopped early, and the last one ended as `call` says.
+ */
+export function buildMultiCallGradingArtifact(
+  callCount: number,
+  overrides: Partial<GradingArtifact> & { call?: UnfinishedNoReply } = {},
+): GradingArtifact {
+  const call: UnfinishedNoReply = overrides.call ?? {
+    status: 'no-reply',
+    cause: 'unfinished',
+    reason: 'the grader call failed: the model stopped before finishing its reply',
+  };
+  const unfinished = {
+    status: 'no-reply',
+    cause: 'unfinished',
+    reason: 'the grader call failed: the model stopped before finishing its reply',
+  } as const;
+  const calls = Array.from({ length: callCount }, (_, index) =>
+    buildGraderCall({ outcome: index === callCount - 1 ? call : unfinished }),
+  );
+  return buildGradingArtifact({ call, calls, ...overrides });
 }
 
 type GradedGrade = Extract<GradeRecord, { status: 'graded' }>;

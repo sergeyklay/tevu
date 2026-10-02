@@ -37,7 +37,7 @@ Each case that has a saved result has a section in `report.md`, preceded by an H
 - one paragraph per statement that explains the attempt, as described in [Messages](#messages), and, when the attempt completed, has manual or graded checks, and none of them waits for a verdict, the `tevu assess <run-id> <case-id>` command to record or replace verdicts;
 - a table of every check with its verdict, name, category (`acceptance` or `Definition of Done`), whether it is `required` or `optional`, its evaluator (`command`, `manual`, or `grader`), duration, and a link to the check evidence;
 - the metrics tevu measured, then one `Not measured` line per reason for the metrics it could not measure;
-- for a graded case, the grades by the grading model, one line per check, and the grading model's own metrics, apart from the attempt's;
+- for a graded case, the grades by the grading model, one line per check, and the grading model's own metrics, apart from the attempt's. The grading's heading reads `Grades by <model> (effort <effort>, agent <agent>)`, followed by `, after <n> calls` when the grading took more than one call. The metrics appear also when the grading returned no reply, summed over its calls;
 - links to the case's artifacts, including the setup logs when a setup command ran, and the current assessments.
 
 ## Outcomes
@@ -118,7 +118,7 @@ With n above 1, a row aggregates the pair's attempts:
 - A measurement is the lower median of the values from the attempts that reported it: the value at position (k - 1) / 2, rounded down, of the sorted values. The median is always a value one attempt reported, so nothing is averaged or rounded before formatting. When only k of the n attempts reported the value, the cell adds `(k/n)` and the footnote markers of the attempts that lack it, one footnote per attempt. When none reported it, the cell is `-` with the markers.
 - Runtime failure counts attempts per label, for example `1/3 agent process failed`, in alphabetical order of the labels, and reads `none` when no attempt had a failure. The markers of the attempts' failure statements follow, and so does the marker of an attempt with no case result.
 
-When a task has gradings, a line under the table totals the grader's usage and cost for the task: `Grading model total for this task, not added to any row: <c> calls`, then `, <m> without a verdict` when m of the calls returned no usable reply, then input, cache read, cache write, output, and reasoning tokens, and cost. Each total sums the grading metrics and follows the same unavailable rules as a cell. A grading that returned no reply contributes its footnote to every total it lacks. Grader usage never enters a row; rows read only the case's own metrics.
+When a task has gradings, a line under the table totals the grader's usage and cost for the task: `Grading model total for this task, not added to any row: <c> calls` (`1 call` for one), where c counts every grader call of the task's gradings, then `, <m> without a verdict` when m of those calls ended without a reply, then input, cache read, cache write, output, and reasoning tokens, and cost. Each total sums the grading metrics and follows the same unavailable rules as a cell. A grading with a measurement gap contributes its footnote to every total it lacks. A task whose only grading made no call reads `0 calls`. Grader usage never enters a row; rows read only the case's own metrics.
 
 ## Messages
 
@@ -156,17 +156,27 @@ An attempt that completed with a check that has no verdict gets a statement that
 | Cause | The check |
 | --- | --- |
 | Manual | Is manual and waits for your verdict |
-| No reply | Is graded, and the grading model returned no reply |
+| No reply | Is graded, and the grading ended without a reply |
 | Unusable reply | Is graded, and the reply had no usable verdict for it |
 | Undetermined | Is graded, and the grading model could not decide it |
 | Not graded | Is graded, and tevu has no grading for the attempt |
 | No verdict | Has no definition, or is a command check without a verdict |
 
+The No reply sentence names the cause, and its first words depend on it:
+
+| Cause | The sentence opens with |
+| --- | --- |
+| The grading model stopped before finishing its reply | `The grading model stopped before finishing its reply` |
+| The grading model's session held a tool call | `The grading model asked to use a tool, which grading does not allow` |
+| Anything else | `The grading model returned no verdict for this solution` |
+
+When the grading took more than one call, the opening reads `After <n> calls, the grading model ...` instead. The sentence continues `, so <counts> graded <check waits or checks wait> for a person's verdict.`
+
 The statement counts the checks as required and optional, says whether the outcome stays pending, is already failed, or stays passed, and gives the `tevu assess <run-id> <case-id>` command that records the verdicts. When the outcome is already failed, the statement names the failed required checks by their descriptions, for example `Failed: Type checking and the test suite pass.`, and says the verdicts no longer change the outcome but can still be recorded for completeness. The case ID, the grading model's reason, and any unusable-reply reason follow as technical detail.
 
 ### Measurement gaps
 
-A metric that tevu has no value for, as an unavailable metric or as a missing value, gets a statement that the value is unknown, not zero, and that the saved files cannot supply it. The reason follows as technical detail. When the grading call returned no reply, the footnote says that the usage and cost of that call are unknown, that the grader total leaves the call out, and whether checks still wait for a verdict.
+A metric that tevu has no value for, as an unavailable metric or as a missing value, gets a statement that the value is unknown, not zero, and that the saved files cannot supply it. The reason follows as technical detail. A grading's metric is the sum over its calls and is known only when tevu has the value for every call. A grader-line footnote reads `tevu has no value for this measurement of its grading`, with the reason as technical detail. When the grading returned no reply, the statement in the grading's block names the cause as above, says whether checks still wait for a verdict, and says that the grader total for the task counts a measurement of this grading only when tevu has it for the whole grading.
 
 ### Effort statements
 
@@ -205,4 +215,4 @@ Scope:
 
 - Model metrics cover the root session only, not a total across child sessions.
 - Elapsed time covers the case's agent process. Acceptance-command results are check verdicts, not model-quality metrics. Repository setup time and output enter no metric.
-- The grader's usage and cost are saved per case in `grading.json` and rendered as `Grader metrics` in the report. They are never added to the case's own metrics. Each comparison block totals them for its task on one line, apart from the rows.
+- The grader's usage and cost are saved per case in `grading.json`, per call and summed over the case's calls, and the sum is rendered as `Grader metrics` in the report. A metric that any call lacks is unavailable for the sum, never a partial total; `grading.json` keeps each call's own values. They are never added to the case's own metrics. Each comparison block totals them for its task on one line, apart from the rows.

@@ -10,6 +10,7 @@ import { renderConfigDocument } from '@/config/document';
 import { parseConfigText } from '@/config/load';
 import { TevuConfigSchema } from '@/config/schema';
 import { CONFIG_TEMPLATE } from '@/config/template';
+import { buildGraderCall } from '@/evaluation/__fixtures__/report.fixtures';
 import { gradeLines } from '@/evaluation/wording';
 
 import { createProgram, runProgram } from './program';
@@ -43,7 +44,7 @@ import type {
   EffortChecks,
   GradeRecord,
   GraderIdentity,
-  GradingArtifact,
+  GradingSummary,
   IssueSnapshot,
   JiraTrackerSettings,
   ManagedCloneAdapter,
@@ -626,10 +627,35 @@ function buildGradedCheckSummary(
   } as AssessableCheckSummary;
 }
 
+type GradingFixture = Pick<GradingSummary, 'grader' | 'call' | 'calls'>;
+
+/** A grading whose single call replied. */
+function buildRepliedGrading(): GradingFixture {
+  return {
+    grader: buildGrader(),
+    call: { status: 'replied', reply: '' },
+    calls: [buildGraderCall()],
+  };
+}
+
+/** A grading that ended without a reply after `callCount` calls, the last of which failed with `cause`. */
+function buildNoReplyGrading(
+  reason: string,
+  options: { cause?: 'unfinished' | 'tool-call' | 'other'; callCount?: number } = {},
+): GradingFixture {
+  const { cause = 'other', callCount = 1 } = options;
+  const call = { status: 'no-reply', cause, reason } as const;
+  return {
+    grader: buildGrader(),
+    call,
+    calls: Array.from({ length: callCount }, () => buildGraderCall({ outcome: call })),
+  };
+}
+
 /** A graded check whose wizard lines come from the same function `readAssessmentContext` uses. */
 function buildGradedCheckFromGrading(
   grade: GradeRecord | null,
-  grading: Pick<GradingArtifact, 'grader' | 'call'> | null,
+  grading: GradingFixture | null,
 ): AssessableCheckSummary {
   return buildGradedCheckSummary({
     grade,
@@ -8906,7 +8932,6 @@ describe('tevu CLI', () => {
     describe('graded checks', () => {
       const NO_VERDICT_TAIL =
         'This check has no verdict until you record one. Choose a verdict below.';
-      const GRADER = buildGrader();
 
       function contextWith(check: AssessableCheckSummary): Partial<ProgramOperations> {
         return {
@@ -8933,12 +8958,7 @@ describe('tevu CLI', () => {
           rationale: 'lines 1-4 add escaping',
         };
         const operations = createOperations(
-          contextWith(
-            buildGradedCheckFromGrading(grade, {
-              grader: GRADER,
-              call: { status: 'replied', reply: '' },
-            }),
-          ),
+          contextWith(buildGradedCheckFromGrading(grade, buildRepliedGrading())),
         );
         scriptAnswers('alice', true, 'failed', 'overridden after review', true);
 
@@ -8981,12 +9001,7 @@ describe('tevu CLI', () => {
           rationale: 'the loader is missing',
         };
         const operations = createOperations(
-          contextWith(
-            buildGradedCheckFromGrading(grade, {
-              grader: GRADER,
-              call: { status: 'replied', reply: '' },
-            }),
-          ),
+          contextWith(buildGradedCheckFromGrading(grade, buildRepliedGrading())),
         );
         scriptAnswers('alice', true, 'passed', '', false);
 
@@ -9009,12 +9024,7 @@ describe('tevu CLI', () => {
           rationale: 'ok',
         };
         const operations = createOperations(
-          contextWith(
-            buildGradedCheckFromGrading(grade, {
-              grader: GRADER,
-              call: { status: 'replied', reply: '' },
-            }),
-          ),
+          contextWith(buildGradedCheckFromGrading(grade, buildRepliedGrading())),
         );
         scriptAnswers('alice', false);
 
@@ -9033,12 +9043,7 @@ describe('tevu CLI', () => {
           rationale: 'the patch does not touch the relevant file',
         };
         const operations = createOperations(
-          contextWith(
-            buildGradedCheckFromGrading(grade, {
-              grader: GRADER,
-              call: { status: 'replied', reply: '' },
-            }),
-          ),
+          contextWith(buildGradedCheckFromGrading(grade, buildRepliedGrading())),
         );
         scriptAnswers('alice', 'failed', 'confirmed manually');
 
@@ -9076,12 +9081,7 @@ describe('tevu CLI', () => {
           reason: 'the reply named no verdict for this check',
         };
         const operations = createOperations(
-          contextWith(
-            buildGradedCheckFromGrading(grade, {
-              grader: GRADER,
-              call: { status: 'replied', reply: '' },
-            }),
-          ),
+          contextWith(buildGradedCheckFromGrading(grade, buildRepliedGrading())),
         );
         scriptAnswers('alice', 'passed', 'confirmed manually');
 
@@ -9113,12 +9113,7 @@ describe('tevu CLI', () => {
           reason,
         };
         const operations = createOperations(
-          contextWith(
-            buildGradedCheckFromGrading(grade, {
-              grader: GRADER,
-              call: { status: 'no-reply', reason },
-            }),
-          ),
+          contextWith(buildGradedCheckFromGrading(grade, buildNoReplyGrading(reason))),
         );
         scriptAnswers('alice', 'passed', 'confirmed manually');
 
@@ -9130,6 +9125,41 @@ describe('tevu CLI', () => {
           message: `The grading model returned no verdict for this solution. This check has no verdict until you record one. Choose a verdict below. Technical detail: ${reason}`,
         });
       });
+
+      it.each([
+        {
+          label: 'a model that stopped before finishing after three calls',
+          options: { cause: 'unfinished', callCount: 3 } as const,
+          sentence: 'After 3 calls, the grading model stopped before finishing its reply.',
+        },
+        {
+          label: 'a session that called a tool',
+          options: { cause: 'tool-call', callCount: 1 } as const,
+          sentence: 'The grading model asked to use a tool, which grading does not allow.',
+        },
+      ])(
+        'names the cause of a grading without a reply for $label',
+        async ({ options, sentence }) => {
+          const reason = 'the grader call failed: synthetic detail';
+          const grade: GradeRecord = {
+            checkId: 'acc-1',
+            category: 'acceptance',
+            status: 'pending',
+            reason,
+          };
+          const operations = createOperations(
+            contextWith(buildGradedCheckFromGrading(grade, buildNoReplyGrading(reason, options))),
+          );
+          scriptAnswers('alice', 'passed', '');
+
+          await runCli(['assess', 'run-1', 'case-1'], { operations });
+
+          expect(clack.state.logs).toContainEqual({
+            kind: 'info',
+            message: `${sentence} ${NO_VERDICT_TAIL} Technical detail: ${reason}`,
+          });
+        },
+      );
 
       it('explains a missing grading artifact and asks directly for a verdict, with replaceExisting: false', async () => {
         const operations = createOperations(contextWith(buildGradedCheckFromGrading(null, null)));
@@ -9178,7 +9208,7 @@ describe('tevu CLI', () => {
                     status: 'pending',
                     reason: 'acc-1 failed',
                   },
-                  { grader: GRADER, call: { status: 'no-reply', reason: 'acc-1 failed' } },
+                  buildNoReplyGrading('acc-1 failed'),
                 ),
               ),
             ),

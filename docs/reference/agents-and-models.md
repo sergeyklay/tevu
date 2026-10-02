@@ -52,7 +52,7 @@ roles:
     effort: medium
 ```
 
-- Each role is read only by the command that uses it. `tevu run` reads `grader`, once per graded case. `tevu task add` reads `criteria`, and only for a task with a reference solution. No command requires `criteria`; without it the interview asks for criteria by hand. A retry of a criteria draft is another model call.
+- Each role is read only by the command that uses it. `tevu run` reads `grader` for every graded case, in up to three calls per case. `tevu task add` reads `criteria`, and only for a task with a reference solution. No command requires `criteria`; without it the interview asks for criteria by hand. A retry of a criteria draft is another model call.
 - A role's provider credential belongs in its agent block's `secrets`. Every case agent of that block receives the same credential, so a role on a provider no model entry uses still exposes its credential to every benchmarked case agent.
 - The same model may serve a role and a model entry. The report prints an informational note when the grader model is also a benchmarked model entry.
 - Neither the loader nor `tevu validate` checks a role's credential value. A missing credential fails the call at run time.
@@ -168,6 +168,8 @@ A model call is a one-shot use of the agent that runs no case: criteria drafting
 
 - It uses the agent's own home, state, and temporary directories, the variables of its agent block's `secrets` and `env`, and the copied providers. It gets no evaluator environment.
 - Its working directory is an empty Git repository. No configured repository or commit reaches it. The directory is removed when the call ends.
+- Its `run` process, for drafting and grading alike, receives `OPENCODE_PERMISSION` set to `{"*":"deny"}`, so the model is offered no tool. The value replaces any `OPENCODE_PERMISSION` the agent block's `env` passes. Case agents and the model listing keep the environment described above.
+- A call fails with the cause `tool-call` when its saved session holds a tool call, and with the cause `unfinished` when the model's last message ended without the finish reason `stop`, for example because it hit a length limit. The criteria wizard prints the call's own reason for both. A grader call that fails with `unfinished` is made again; see [Graded checks](checks.md#graded-checks).
 - **Grader prompt**, on stdin: the task's `prompt` and `description`, the `id` and `description` of each graded check, and the solution patch. It never carries a reference solution, a case ID, a run ID, or the model entry that produced the solution.
 - **Criteria prompt**: the task's `prompt` and `description` and the reference solution's changes. tevu adds no pull request title or description, commit hash, pull request key or URL, case ID, or run ID. The changes come from GitHub's diff media type for a pull request and from the local repository for a commit.
 

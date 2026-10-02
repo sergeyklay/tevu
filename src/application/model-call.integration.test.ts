@@ -27,6 +27,7 @@ import type {
   ManagedProcessRunner,
   ModelCallDependencies,
   ModelCallEnvironment,
+  ModelCallEvidence,
   ModelListing,
   ModelRoleCallRequest,
   ModelRoleName,
@@ -41,6 +42,7 @@ const SECRET_VARIABLE_NAME = 'TEVU_MODEL_CALL_SECRET';
 const SECRET_VALUE = 'sk-live-modelcall-secret-000111';
 const SESSION_ID = 'ses-mc-1';
 const PROMPT = 'Draft acceptance criteria for the CSV export button.';
+const DENY_EVERY_TOOL = '{"*":"deny"}';
 
 function expectOk<T>(outcome: { ok: true; value: T } | { ok: false; error: TevuError }): T {
   if (outcome.ok) {
@@ -323,6 +325,7 @@ type CallOptions = {
   cancellation?: AbortSignal;
   role?: ModelRoleName;
   config?: TevuConfig;
+  onEvidence?: ModelRoleCallRequest['onEvidence'];
 };
 
 async function callWithFakeAgent(options: CallOptions) {
@@ -351,6 +354,7 @@ async function callWithFakeAgent(options: CallOptions) {
     prompt: PROMPT,
     timeoutMs: options.timeoutMs ?? 10_000,
     cancellation: options.cancellation ?? new AbortController().signal,
+    ...(options.onEvidence === undefined ? {} : { onEvidence: options.onEvidence }),
   };
   return callModelRole(request, modelCallDependencies);
 }
@@ -426,12 +430,14 @@ describe('callModelRole against a fake OpenCode executable', () => {
       };
       expect(record.dirEntries).toEqual(['.git']);
       expect(record.stdin).toBe(PROMPT);
+      expect(record.env['OPENCODE_PERMISSION']).toBe(DENY_EVERY_TOOL);
       expect(Object.keys(record.env).sort()).toEqual(
         [
           'CI',
           'HOME',
           'LANG',
           'LC_ALL',
+          'OPENCODE_PERMISSION',
           'PATH',
           SECRET_VARIABLE_NAME,
           'TMPDIR',
@@ -616,12 +622,6 @@ describe('callModelRole against a fake OpenCode executable', () => {
         exportBehavior: 'assistant-error' as const,
         reason: 'final assistant message carries an error: Synthetic failure',
       },
-      {
-        name: 'a final assistant message with a non-stop finish reason',
-        run: 'ok' as const,
-        exportBehavior: 'finish-length' as const,
-        reason: 'final assistant message finished with "length"',
-      },
     ])('fails the call with cause failed for $name', async ({ run, exportBehavior, reason }) => {
       const result = await callWithFakeAgent({ run, export: exportBehavior });
 
@@ -629,6 +629,112 @@ describe('callModelRole against a fake OpenCode executable', () => {
       expect(error.cause).toBe('failed');
       expect(error.reason).toBe(reason);
     });
+
+    it('fails the call with cause unfinished for a final assistant message with a non-stop finish reason', async () => {
+      const result = await callWithFakeAgent({ run: 'ok', export: 'finish-length' });
+
+      const error = expectFailure(result, 'ModelCallError');
+      expect(error.cause).toBe('unfinished');
+      expect(error.reason).toBe('final assistant message finished with "length"');
+    });
+  });
+});
+
+describe('callModelRole tool denial and evidence against a fake OpenCode executable', () => {
+  const OPERATOR_PERMISSION = '{"bash":"allow"}';
+
+  function buildConfigForRole(role: ModelRoleName, env: string[] = []): TevuConfig {
+    const base = buildConfig();
+    return buildConfig({
+      agents: { opencode: { ...base.agents['opencode']!, env } },
+      roles: { [role]: { model: 'openai/role-model', effort: 'high', agent: 'opencode' } },
+    });
+  }
+
+  it.each<ModelRoleName>(['grader', 'criteria'])(
+    'starts the run of the %s role with every tool denied',
+    async (role) => {
+      const recordPath = nextRecordPath();
+
+      const result = await callWithFakeAgent({
+        run: 'ok',
+        export: 'reply-with-secret',
+        recordPath,
+        role,
+        config: buildConfigForRole(role),
+      });
+
+      expect(result.ok).toBe(true);
+      const record = JSON.parse(readFileSync(recordPath, 'utf8')) as {
+        env: Record<string, string>;
+      };
+      expect(record.env['OPENCODE_PERMISSION']).toBe(DENY_EVERY_TOOL);
+    },
+  );
+
+  it('replaces a permission the agent block passes through its env list', async () => {
+    const recordPath = nextRecordPath();
+    process.env['OPENCODE_PERMISSION'] = OPERATOR_PERMISSION;
+    try {
+      const result = await callWithFakeAgent({
+        run: 'ok',
+        export: 'reply-with-secret',
+        recordPath,
+        config: buildConfigForRole('grader', ['OPENCODE_PERMISSION']),
+      });
+
+      expect(result.ok).toBe(true);
+    } finally {
+      delete process.env['OPENCODE_PERMISSION'];
+    }
+    const record = JSON.parse(readFileSync(recordPath, 'utf8')) as {
+      env: Record<string, string>;
+    };
+    expect(record.env['OPENCODE_PERMISSION']).toBe(DENY_EVERY_TOOL);
+  });
+
+  it('forwards the evidence of the call to the request callback once', async () => {
+    const delivered: ModelCallEvidence[] = [];
+
+    const result = await callWithFakeAgent({
+      run: 'ok',
+      export: 'reply-with-secret',
+      onEvidence: (evidence) => delivered.push(evidence),
+    });
+
+    const value = expectOk(result);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.session?.metrics).toEqual(value.metrics);
+    expect(delivered[0]?.events).toHaveLength(1);
+    expect(JSON.stringify(delivered)).not.toContain(SECRET_VALUE);
+  });
+
+  it('forwards the evidence without a session when the run fails', async () => {
+    const delivered: ModelCallEvidence[] = [];
+
+    const result = await callWithFakeAgent({
+      run: 'error-exit-1',
+      export: 'none',
+      onEvidence: (evidence) => delivered.push(evidence),
+    });
+
+    expectFailure(result, 'ModelCallError');
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.session).toBeNull();
+  });
+
+  it('forwards no evidence when the call is rejected before any process starts', async () => {
+    const delivered: ModelCallEvidence[] = [];
+
+    const result = await callWithFakeAgent({
+      run: 'ok',
+      export: 'none',
+      config: buildConfig({ roles: {} }),
+      onEvidence: (evidence) => delivered.push(evidence),
+    });
+
+    expectFailure(result, 'ConfigValidationError');
+    expect(delivered).toEqual([]);
   });
 });
 

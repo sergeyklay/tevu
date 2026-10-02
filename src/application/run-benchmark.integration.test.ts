@@ -10,11 +10,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createArtifactStore } from '@/adapters/artifact-store';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
-import { createEnvironmentAdapter, createEvaluatorProcessAdapter } from '@/adapters/process';
+import {
+  createEnvironmentAdapter,
+  createEvaluatorProcessAdapter,
+  createRedactor,
+} from '@/adapters/process';
 import { durationMs, TevuConfigSchema } from '@/config/schema';
 import { unavailableMetric } from '@/domain/types';
 
 import { buildVerifiedEfforts } from './__fixtures__/effort.fixtures';
+import { rebuildReport } from './assess';
 import { planBenchmark, runBenchmark } from './run-benchmark';
 
 import type { TaskInput, TevuConfigInput } from '@/config/schema';
@@ -27,6 +32,7 @@ import type {
   CaseResult,
   Clock,
   EnvironmentAdapter,
+  ModelCallEvidence,
   ModelCallInput,
   ModelCallResult,
   PrerequisiteAdapter,
@@ -1086,5 +1092,186 @@ describe('runBenchmark grading in the case flow', () => {
     expect(retained[0]?.message).toMatch(
       /^tevu could not delete the temporary directory of this attempt's grading call\. The results are not affected\. Delete `\/[^`]+` when no tevu command uses it\.$/,
     );
+  });
+
+  describe('saved grader calls', () => {
+    const SECRET = 'sk-live-saved-grader-call-secret';
+    const REPLY = '{"grades":[{"check":"csv-content","verdict":"passed","rationale":"ok"}]}';
+    const FIRST_CASE = 'graded-task--m1--1';
+
+    function evidenceWithSecret(): ModelCallEvidence {
+      return {
+        events: [{ type: 'text', note: `event ${SECRET}` }],
+        diagnostics: `stderr ${SECRET}`,
+        session: {
+          export: { info: { id: 'ses-1', note: `session ${SECRET}` }, messages: [] },
+          metrics: unavailableAgentMetrics('integration test: metrics not measured'),
+        },
+      };
+    }
+
+    /** Fails every odd call as unfinished and replies on every even call, so each case needs two calls. */
+    function retryThenReplyImpl(
+      callModelCalls: ModelCallInput[],
+    ): (input: ModelCallInput) => Promise<TevuResult<ModelCallResult, TevuError['kind']>> {
+      return async (input) => {
+        input.onEvidence?.(evidenceWithSecret());
+        if (callModelCalls.length % 2 === 1) {
+          return {
+            ok: false,
+            error: {
+              kind: 'ModelCallError',
+              role: 'grader',
+              agent: FAKE_AGENT_NAME,
+              cause: 'unfinished',
+              reason: 'final assistant message finished with "length"',
+            },
+          };
+        }
+        return { ok: true, value: repliedGrade(REPLY) };
+      };
+    }
+
+    async function runWithRetries() {
+      const repository = await createSyntheticRepository(testDirectory);
+      const config = buildGradedConfig({
+        repositoryPath: repository.path,
+        commit: repository.commit,
+        outputDirectory: join(testDirectory, 'artifacts'),
+      });
+      const callModelCalls: ModelCallInput[] = [];
+      const agent = buildGradingFakeAgentAdapter(
+        callModelCalls,
+        retryThenReplyImpl(callModelCalls),
+      );
+      const artifacts = createArtifactStore({
+        artifactsDirectory: config.run.output_dir,
+        redact: createRedactor([SECRET]),
+      });
+      const dependencies = buildGradingDependencies(config, agent, testDirectory, { artifacts });
+
+      const run = unwrapOk(
+        await runBenchmark(
+          planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+          dependencies,
+        ),
+      );
+      return { run, config, dependencies, agent, callModelCalls };
+    }
+
+    function gradingPath(config: TevuConfig, runId: string, caseId = FIRST_CASE): string {
+      return join(config.run.output_dir, runId, 'cases', caseId, 'grading.json');
+    }
+
+    it('writes every call of a retried grading with its outcome, metrics, and redacted records', async () => {
+      const { run, dependencies, config, callModelCalls } = await runWithRetries();
+
+      const grading = unwrapOk(
+        await dependencies.artifacts.readGrading(run.manifest.runId, FIRST_CASE),
+      );
+
+      expect(callModelCalls).toHaveLength(4);
+      expect(grading.calls.map((call) => call.outcome)).toEqual([
+        {
+          status: 'no-reply',
+          cause: 'unfinished',
+          reason:
+            'the grader call failed: ModelCallError (unfinished): final assistant message finished with "length"',
+        },
+        { status: 'replied' },
+      ]);
+      expect(grading.call).toEqual({ status: 'replied', reply: REPLY });
+      for (const call of grading.calls) {
+        expect(call.events).toEqual([{ type: 'text', note: 'event [REDACTED]' }]);
+        expect(call.diagnostics).toBe('stderr [REDACTED]');
+        expect(call.session).toEqual({
+          info: { id: 'ses-1', note: 'session [REDACTED]' },
+          messages: [],
+        });
+        expect(call.metrics.cost.availability.status).toBe('unavailable');
+      }
+      const raw = await readFile(gradingPath(config, run.manifest.runId), 'utf8');
+      expect(raw).not.toContain(SECRET);
+      expect(raw).toContain('[REDACTED]');
+    });
+
+    it('keeps the records of grader calls out of root result.json and regenerates it and report.md byte-identically', async () => {
+      const { run, dependencies, config, agent } = await runWithRetries();
+      const runId = run.manifest.runId;
+      const agents = new Map([[FAKE_AGENT_NAME, agent]]);
+      const resultPath = join(config.run.output_dir, runId, 'result.json');
+      const reportPath = join(config.run.output_dir, runId, 'report.md');
+
+      unwrapOk(await rebuildReport(runId, dependencies.artifacts, agents));
+      const firstResult = await readFile(resultPath, 'utf8');
+      const firstReport = await readFile(reportPath, 'utf8');
+      unwrapOk(await rebuildReport(runId, dependencies.artifacts, agents));
+
+      const normalized = JSON.parse(firstResult) as {
+        gradings: { calls: Record<string, unknown>[] }[];
+      };
+      const calls = normalized.gradings.flatMap((grading) => grading.calls);
+      expect(calls).toHaveLength(4);
+      for (const call of calls) {
+        expect(Object.keys(call).sort()).toEqual(['metrics', 'outcome']);
+      }
+      expect(firstResult).not.toContain('[REDACTED]');
+      expect(await readFile(resultPath, 'utf8')).toBe(firstResult);
+      expect(await readFile(reportPath, 'utf8')).toBe(firstReport);
+      expect(firstReport).toContain(', after 2 calls:');
+    });
+
+    it.each([
+      {
+        name: 'a grading without calls',
+        mutate: (grading: Record<string, unknown>) => {
+          delete grading['calls'];
+        },
+      },
+      {
+        name: 'a no-reply call without a cause',
+        mutate: (grading: Record<string, unknown>) => {
+          grading['call'] = { status: 'no-reply', reason: 'no cause' };
+        },
+      },
+      {
+        name: 'a no-reply call with an unknown cause',
+        mutate: (grading: Record<string, unknown>) => {
+          grading['call'] = { status: 'no-reply', cause: 'sleepy', reason: 'unknown cause' };
+        },
+      },
+      {
+        name: 'a call outcome without a cause',
+        mutate: (grading: Record<string, unknown>) => {
+          const [first] = grading['calls'] as Record<string, unknown>[];
+          grading['calls'] = [{ ...first, outcome: { status: 'no-reply', reason: 'no cause' } }];
+        },
+      },
+      {
+        name: 'a call whose events are not a list',
+        mutate: (grading: Record<string, unknown>) => {
+          const [first] = grading['calls'] as Record<string, unknown>[];
+          grading['calls'] = [{ ...first, events: 'not a list' }];
+        },
+      },
+    ])('refuses $name as malformed when it reads the saved grading', async ({ mutate }) => {
+      const { run, dependencies, config } = await runWithRetries();
+      const runId = run.manifest.runId;
+      const path = gradingPath(config, runId);
+      const saved = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+      mutate(saved);
+      await writeFile(path, JSON.stringify(saved));
+
+      const result = await dependencies.artifacts.readGrading(runId, FIRST_CASE);
+
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          kind: 'ArtifactError',
+          operation: 'read-grading',
+          reason: `grading artifact for "${FIRST_CASE}" in run "${runId}" has a malformed shape`,
+        },
+      });
+    });
   });
 });

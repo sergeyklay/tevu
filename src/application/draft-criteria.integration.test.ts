@@ -55,7 +55,7 @@ type ModelsBehavior =
   | 'reports-other-variants'
   | 'reports-no-variants'
   | 'sleep';
-type ExportBehavior = 'reply' | 'garbage';
+type ExportBehavior = 'reply' | 'garbage' | 'finish-length' | 'tool-call';
 
 type FakeBehavior = {
   run: RunBehavior;
@@ -153,6 +153,20 @@ function renderExportSection(behavior: ExportBehavior, replyText: string): strin
     return `
 if (args[0] === "export") {
   console.log("this is not a session export");
+  process.exit(0);
+}
+`;
+  }
+  if (behavior === 'finish-length' || behavior === 'tool-call') {
+    const finish = behavior === 'tool-call' ? 'tool-calls' : 'length';
+    const toolPart =
+      behavior === 'tool-call'
+        ? ', parts: [{ id: "prt-1", sessionID: requested, messageID: "msg-1", type: "tool", callID: "call-1", tool: "read", state: { status: "error" } }]'
+        : ', parts: []';
+    return `
+if (args[0] === "export") {
+  var requested = args[1] || "";
+  console.log(JSON.stringify({ info: { id: requested }, messages: [{ info: { id: "msg-1", sessionID: requested, role: "assistant", parentID: "msg-0", finish: "${finish}", cost: 0.1, tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }${toolPart} }] }));
   process.exit(0);
 }
 `;
@@ -662,7 +676,38 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
 
     expect(outcome.status).toBe('failed');
     if (outcome.status !== 'failed') return;
-    expect(outcome.failure).toEqual({ cause: 'call-failed', detail: expect.any(String) });
+    expect(outcome.failure).toEqual({
+      cause: 'call-failed',
+      detail: expect.stringMatching(/^AgentProtocolError: /),
+    });
+  });
+
+  it.each([
+    {
+      name: 'a non-stop finish',
+      behavior: 'finish-length' as const,
+      detail: 'final assistant message finished with "length"',
+    },
+    {
+      name: 'a session that called a tool',
+      behavior: 'tool-call' as const,
+      detail: 'the session called the tool "read" although every tool is denied to a model call',
+    },
+  ])('carries the reason of the call as the detail for $name', async ({ behavior, detail }) => {
+    const repository = await createSyntheticRepository();
+
+    const outcome = await draftWithFakeAgent({
+      run: 'ok',
+      export: behavior,
+      reference: buildResolvedCommitReference(repository.commit),
+      repository: { id: 'repo-1', path: repository.path },
+    });
+
+    expect(outcome).toEqual({
+      status: 'failed',
+      failure: { cause: 'call-failed', detail },
+      retainedDirectories: [],
+    });
   });
 
   it('fails as variables-unset naming each unset declared variable, with no read and no call', async () => {

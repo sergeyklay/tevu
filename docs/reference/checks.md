@@ -51,13 +51,14 @@ Execution rules:
 
 ## Graded checks
 
-`roles.grader` grades every graded check of a case in one model call, after the case's other checks run. `tevu validate` and `tevu run` require `roles.grader` whenever a task declares a graded check.
+`roles.grader` grades every graded check of a case from one reply, after the case's other checks run. `tevu validate` and `tevu run` require `roles.grader` whenever a task declares a graded check.
 
 - **Input.** The task's `prompt` and `description`, the `id` and `description` of every graded check, and the whole solution patch with no size limit. The grader never receives a reference solution, a case ID, a run ID, or the identity of the model entry that produced the solution.
-- **Time limit.** `run.timeout`, even when the task sets its own `timeout`. There is no separate grader setting.
+- **Tools.** None. The grader's calls run with every tool denied, so a grading cannot read or change files.
+- **Time limit.** `run.timeout` for each call, even when the task sets its own `timeout`. There is no separate grader setting.
 - **Cases graded.** A case is graded only when it reached check evaluation. A timed-out, cancelled, or unreadable case is not.
 - **Verdicts.** `passed`, `failed`, or `undetermined`, each with a rationale. The grader is asked to name the patch files and line ranges it relies on; the parser requires only a non-empty rationale.
-- **Failures.** A call that fails or times out leaves every graded check of the case pending with the reason recorded, and its usage and cost are unavailable. A reply tevu cannot parse also leaves every graded check pending, but keeps the call's real usage and cost.
+- **Failures.** A call whose model stopped before finishing its reply is made again, up to three calls in total. A call whose session holds a tool call is not made again, and neither is a call that times out or fails any other way. A failure leaves every graded check of the case pending, and `grading.json` records its cause and every call. The usage and cost of each call enter the grading's totals only when every call has the value; otherwise the total is unavailable. A reply tevu cannot parse also leaves every graded check pending, but keeps the call's real usage and cost.
 - **Recovery.** A pending or `undetermined` verdict is never recorded as a pass or a fail. Resolve it with `tevu assess` or by running the task again in a new run.
 
 ## Restore and overlay

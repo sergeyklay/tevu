@@ -27,6 +27,7 @@ import type {
   EffortCheck,
   GraderIdentity,
   GradingArtifact,
+  GradingSummary,
   MetricValue,
   ModelRecord,
   ReportResult,
@@ -83,7 +84,7 @@ export type NormalizedRunModel = {
   tasks: TaskRecord[];
   cases: CaseResult[];
   assessments: AssessmentArtifact[];
-  gradings: GradingArtifact[];
+  gradings: GradingSummary[];
   graders: GraderSummary[];
   pairs: PairSummary[];
 };
@@ -167,6 +168,7 @@ export function buildNormalizedRun(input: ReportInput): NormalizedRunModel {
       .sort((a, b) => compareCaseIds(identities, a.caseId, b.caseId))
       .map((grading) => ({
         ...grading,
+        calls: grading.calls.map(({ outcome, metrics }) => ({ outcome, metrics })),
         grades: [...grading.grades].sort((a, b) => compareStrings(a.checkId, b.checkId)),
       })),
     graders: buildGraderSummaries(input.gradings, input.models),
@@ -871,7 +873,7 @@ function renderMeasurementCell(
 function gradedAttemptsOfTask(
   context: ReportContext,
   taskId: string,
-): { attempt: Attempt; grading: GradingArtifact }[] {
+): { attempt: Attempt; grading: GradingSummary }[] {
   return context.model.gradings.flatMap((grading) => {
     const attempt = context.attemptsByCaseId.get(grading.caseId);
     return attempt?.result !== undefined && attempt.identity.taskId === taskId
@@ -880,8 +882,8 @@ function gradedAttemptsOfTask(
   });
 }
 
-/** The statement that explains a grader call without a reply, counting the graded checks still waiting. */
-function gradingGapOf(attempt: Attempt, grading: GradingArtifact, runId: string): Statement | null {
+/** The statement that explains a grading without a reply, counting the graded checks still waiting. */
+function gradingGapOf(attempt: Attempt, grading: GradingSummary, runId: string): Statement | null {
   const pendingGraded = (attempt.result?.checks ?? []).filter(
     (check) =>
       check.verdict === 'pending' &&
@@ -902,7 +904,7 @@ function gradingGapOf(attempt: Attempt, grading: GradingArtifact, runId: string)
 
 /** Classifies one grading's metric for the grader line or a case section. */
 function gradingMeasurementItem(
-  { attempt, grading }: { attempt: Attempt; grading: GradingArtifact },
+  attempt: Attempt,
   metric: MetricValue,
   context: ReportContext,
 ): MeasurementItem {
@@ -914,29 +916,28 @@ function gradingMeasurementItem(
     kind: 'lacking',
     footnote: {
       attemptName: context.names.attempt(attempt.identity),
-      statement:
-        gradingGapOf(attempt, grading, context.model.manifest.runId) ??
-        measurementGapStatement({ reason: measured.reason, count: 1, graderLine: true }),
+      statement: measurementGapStatement({ reason: measured.reason, count: 1, graderLine: true }),
     },
   };
 }
 
 /** Renders the grader's summed usage and cost, read from grading metrics only. */
 function renderGraderLine(
-  graded: readonly { attempt: Attempt; grading: GradingArtifact }[],
+  graded: readonly { attempt: Attempt; grading: GradingSummary }[],
   context: ReportContext,
   footnotes: FootnoteRegistry,
 ): string {
   const totals = GRADER_TOTALS.map(({ label, metric, format }) => {
     const items = graded.map((entry) =>
-      gradingMeasurementItem(entry, entry.grading.metrics[metric], context),
+      gradingMeasurementItem(entry.attempt, entry.grading.metrics[metric], context),
     );
     return `${label} ${renderMeasurementCell(items, sum, format, footnotes)}`;
   });
-  const withoutVerdict = graded.filter(({ grading }) => grading.call.status === 'no-reply').length;
-  const calls = `${formatCount(graded.length)} ${graded.length === 1 ? 'call' : 'calls'}`;
+  const calls = graded.flatMap(({ grading }) => grading.calls);
+  const withoutVerdict = calls.filter(({ outcome }) => outcome.status === 'no-reply').length;
+  const callCount = `${formatCount(calls.length)} ${calls.length === 1 ? 'call' : 'calls'}`;
   const gap = withoutVerdict > 0 ? `, ${formatCount(withoutVerdict)} without a verdict` : '';
-  return `Grading model total for this task, not added to any row: ${calls}${gap}, ${totals.join(', ')}.`;
+  return `Grading model total for this task, not added to any row: ${callCount}${gap}, ${totals.join(', ')}.`;
 }
 
 /** Numbers footnote texts by first use; an identical text reuses its number. */
@@ -1261,7 +1262,7 @@ function renderMetricLines(metrics: Readonly<Partial<BenchmarkMetrics>>): string
  */
 function renderGradingBlock(
   attempt: Attempt,
-  grading: GradingArtifact,
+  grading: GradingSummary,
   context: ReportContext,
 ): string[] {
   const { names } = context;
@@ -1276,22 +1277,18 @@ function renderGradingBlock(
       ? `- ${name}: no verdict.`
       : `- ${name}: no usable verdict. Technical detail: ${cell(grade.reason)}`;
   });
-  const lines = [
-    `Grades by ${cell(grading.grader.model)} (effort ${cell(effortLabel(grading.grader.effort, check))}, agent ${cell(grading.grader.agent)}):`,
+  const callCount = grading.calls.length > 1 ? `, after ${grading.calls.length} calls` : '';
+  return [
+    `Grades by ${cell(grading.grader.model)} (effort ${cell(effortLabel(grading.grader.effort, check))}, agent ${cell(grading.grader.agent)})${callCount}:`,
     '',
     ...(gap === null ? [] : [`- ${cell(renderStatement(gap))}`]),
     ...gradeLines,
     '',
+    'Grader metrics (separate from the agent metrics above; never added to them):',
+    '',
+    ...renderMetricLines(grading.metrics),
+    '',
   ];
-  if (grading.call.status === 'replied') {
-    lines.push(
-      'Grader metrics (separate from the agent metrics above; never added to them):',
-      '',
-      ...renderMetricLines(grading.metrics),
-      '',
-    );
-  }
-  return lines;
 }
 
 /** One line per imported task source; a hand-written task has none. */

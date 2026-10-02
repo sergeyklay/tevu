@@ -15,7 +15,7 @@ import type {
   CheckRecord,
   EffortCheck,
   GradeRecord,
-  GradingArtifact,
+  GradingSummary,
   ModelRecord,
   TaskRecord,
   TevuError,
@@ -40,7 +40,7 @@ export type AttemptFacts = {
   identity: CaseIdentity;
   result: CaseResult | undefined;
   checks: readonly CheckRecord[];
-  grading: GradingArtifact | undefined;
+  grading: GradingSummary | undefined;
   /** The check's reader name from the run's `ReaderNames`, so every surface names it alike. */
   checkName(checkId: string): string;
 };
@@ -448,7 +448,7 @@ const PENDING_CAUSE_ORDER: readonly PendingCause[] = [
 
 function pendingCauseOf(
   definition: CheckRecord | undefined,
-  grading: GradingArtifact | undefined,
+  grading: GradingSummary | undefined,
   grade: GradeRecord | undefined,
 ): PendingCause {
   if (definition === undefined || definition.evaluator === 'command') {
@@ -469,14 +469,41 @@ function pendingCauseOf(
   return 'not-graded';
 }
 
-function pendingSentence(cause: PendingCause, required: number, optional: number): string {
+type NoReplyCause = Extract<GradingSummary['call'], { status: 'no-reply' }>['cause'];
+
+const NO_REPLY_CLAUSES: Record<NoReplyCause, string> = {
+  unfinished: 'the grading model stopped before finishing its reply',
+  'tool-call': 'the grading model asked to use a tool, which grading does not allow',
+  other: 'the grading model returned no verdict for this solution',
+};
+
+/** Names why a grading ended without a reply; past one call it opens with the call count. */
+function noReplyClause(cause: NoReplyCause, callCount: number): string {
+  const base = NO_REPLY_CLAUSES[cause];
+  return callCount > 1
+    ? `After ${callCount} calls, ${base}`
+    : `${base.charAt(0).toUpperCase()}${base.slice(1)}`;
+}
+
+function noReplyClauseOf(grading: Pick<GradingSummary, 'call' | 'calls'> | undefined): string {
+  return grading?.call.status === 'no-reply'
+    ? noReplyClause(grading.call.cause, grading.calls.length)
+    : noReplyClause('other', 1);
+}
+
+function pendingSentence(
+  cause: PendingCause,
+  required: number,
+  optional: number,
+  grading: GradingSummary | undefined,
+): string {
   const total = required + optional;
   const counts = describeCounts(required, optional);
   switch (cause) {
     case 'manual':
       return `${counts} manual ${pickCount(total, 'check waits', 'checks wait')} for a person's verdict.`;
     case 'no-reply':
-      return `The grading model returned no verdict for this solution, so ${counts} graded ${pickCount(total, 'check waits', 'checks wait')} for a person's verdict.`;
+      return `${noReplyClauseOf(grading)}, so ${counts} graded ${pickCount(total, 'check waits', 'checks wait')} for a person's verdict.`;
     case 'unusable':
       return `The grading model's reply had no usable verdict for ${counts} graded ${pickCount(total, 'check', 'checks')}, so ${pickCount(total, 'it waits', 'they wait')} for a person's verdict.`;
     case 'undetermined':
@@ -549,7 +576,9 @@ function pendingStatement(
 
   const sentences = PENDING_CAUSE_ORDER.flatMap((cause) => {
     const tally = tallies.get(cause);
-    return tally === undefined ? [] : [pendingSentence(cause, tally.required, tally.optional)];
+    return tally === undefined
+      ? []
+      : [pendingSentence(cause, tally.required, tally.optional, facts.grading)];
   });
   const noReply =
     tallies.has('no-reply') && facts.grading?.call.status === 'no-reply'
@@ -573,13 +602,13 @@ function pendingStatement(
 }
 
 /**
- * Explains a grader call that returned no reply, or `null` for a call that did.
+ * Explains a grading that ended without a reply, or `null` for a grading that has one.
  * `pendingGradedChecks` counts the attempt's graded checks still waiting for a verdict.
  */
 export function gradingGapStatement(facts: {
   runId: string;
   caseId: string;
-  grading: GradingArtifact;
+  grading: GradingSummary;
   lifecycle: CaseLifecycle | undefined;
   pendingGradedChecks: { required: number; optional: number };
 }): Statement | null {
@@ -591,22 +620,23 @@ export function gradingGapStatement(facts: {
   const waiting = required + optional;
   const isWaiting = facts.lifecycle === 'completed' && waiting > 0;
   return {
-    happened: `The grading model returned no verdict for this solution, so the usage and cost of that call are unknown${
+    happened: `${noReplyClause(call.cause, facts.grading.calls.length)}${
       isWaiting
-        ? ` and ${describeCounts(required, optional)} graded ${pickCount(waiting, 'check still waits', 'checks still wait')} for a person's verdict`
+        ? `, so ${describeCounts(required, optional)} graded ${pickCount(waiting, 'check still waits', 'checks still wait')} for a person's verdict`
         : ''
     }.`,
-    means: 'The grader total for the task leaves this call out.',
+    means:
+      'The grader total for the task counts a measurement of this grading only when tevu has it for the whole grading.',
     next: isWaiting
       ? assessCommand(facts.runId, facts.caseId, waiting)
-      : 'Nothing more is needed for this call.',
+      : 'Nothing more is needed for this grading.',
     detail: `case ${facts.caseId}: ${call.reason}`,
   };
 }
 
 /**
  * Explains `count` metrics that tevu has no value for. A footnote always uses
- * a count of 1; `graderLine` names the grading call as their source.
+ * a count of 1; `graderLine` names the grading as their source.
  */
 export function measurementGapStatement(input: {
   reason: string;
@@ -615,7 +645,7 @@ export function measurementGapStatement(input: {
 }): Statement {
   const { count } = input;
   return {
-    happened: `tevu has no value for ${pickCount(count, 'this measurement', 'these measurements')}${input.graderLine ? ' of its grading call' : ''}.`,
+    happened: `tevu has no value for ${pickCount(count, 'this measurement', 'these measurements')}${input.graderLine ? ' of its grading' : ''}.`,
     means: `${pickCount(count, 'It is', 'They are')} unknown, not zero.`,
     next: `This run's saved files cannot supply ${pickCount(count, 'it', 'them')}; to measure ${pickCount(count, 'it', 'them')}, fix the cause in the technical detail and run the comparison again.`,
     detail: input.reason,
@@ -702,7 +732,7 @@ function gradeStatement(happened: string, detail: string | null): string {
  */
 export function gradeLines(
   grade: GradeRecord | null,
-  grading: Pick<GradingArtifact, 'grader' | 'call'> | null,
+  grading: Pick<GradingSummary, 'grader' | 'call' | 'calls'> | null,
 ): string[] {
   if (grade === null) {
     return [
@@ -718,7 +748,7 @@ export function gradeLines(
     return grading?.call.status === 'no-reply'
       ? [
           gradeStatement(
-            'The grading model returned no verdict for this solution.',
+            `${noReplyClause(grading.call.cause, grading.calls.length)}.`,
             grading.call.reason,
           ),
         ]

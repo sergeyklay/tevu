@@ -24,12 +24,14 @@ import {
   unavailableMetric,
 } from '@/domain/types';
 
+import { buildGraderCall } from './__fixtures__/report.fixtures';
 import {
   buildCheckEnvironment,
   evaluateChecks,
   orderTaskChecks,
   reduceRequiredOutcome,
 } from './checks';
+import { sumGraderCallMetrics } from './grading';
 import { combineCaseMetrics } from './metrics';
 import { buildNormalizedRun, buildReport, serializeNormalizedRun } from './report';
 
@@ -2587,7 +2589,7 @@ describe('comparison table in the report', () => {
 
   /** The measurement-gap statement of spec 3.3.2 for one measurement, rendered with its technical detail. */
   function gapText(detail: string, options: { graderLine?: boolean } = {}): string {
-    const source = options.graderLine === true ? ' of its grading call' : '';
+    const source = options.graderLine === true ? ' of its grading' : '';
     return `tevu has no value for this measurement${source}. It is unknown, not zero. This run's saved files cannot supply it; to measure it, fix the cause in the technical detail and run the comparison again. Technical detail: ${detail}`;
   }
 
@@ -3573,6 +3575,78 @@ describe('comparison table in the report', () => {
       ]);
     });
 
+    it('counts the calls of every grading and those that ended without a verdict', () => {
+      const models = buildDistinctModels(['alpha', 'beta']);
+      const stopped = buildGraderCall({
+        outcome: { status: 'no-reply', cause: 'unfinished', reason: 'the model stopped' },
+      });
+
+      const markdown = reportOf({
+        models,
+        gradings: [
+          buildGradingArtifact({
+            caseId: 'task-1--alpha--1',
+            calls: [stopped, buildGraderCall()],
+            metrics: buildAgentMetrics(),
+          }),
+          buildGradingArtifact({ caseId: 'task-1--beta--1', metrics: buildAgentMetrics() }),
+        ],
+      });
+
+      expect(graderLineOf(markdown, 'task-1')).toContain(
+        `${GRADER_LINE_START}3 calls, 1 without a verdict, input `,
+      );
+    });
+
+    it('reads 0 calls for a task whose only grading made no call', () => {
+      const markdown = reportOf({
+        gradings: [
+          buildGradingArtifact({
+            call: {
+              status: 'no-reply',
+              cause: 'other',
+              reason: 'the grader prompt could not be redacted; the grader was not called',
+            },
+            calls: [],
+          }),
+        ],
+      });
+
+      const line = graderLineOf(markdown, 'task-1');
+
+      expect(line).toContain(`${GRADER_LINE_START}0 calls, input `);
+      expect(line).not.toContain('without a verdict');
+    });
+
+    it('leaves a metric that one call of a grading lacks out of the grader total with the grader-line footnote', () => {
+      const first = buildAgentMetrics();
+      const second = buildAgentMetrics({ cost: unavailableMetric('USD', 'the call timed out') });
+      const markdown = reportOf({
+        gradings: [
+          buildGradingArtifact({
+            call: { status: 'no-reply', cause: 'other', reason: 'the grader call failed' },
+            calls: [
+              buildGraderCall({ metrics: first }),
+              buildGraderCall({
+                outcome: { status: 'no-reply', cause: 'other', reason: 'the grader call failed' },
+                metrics: second,
+              }),
+            ],
+            metrics: sumGraderCallMetrics([first, second]),
+          }),
+        ],
+      });
+
+      const line = graderLineOf(markdown, 'task-1');
+
+      expect(line).toBe(
+        `${GRADER_LINE_START}2 calls, 1 without a verdict, input 260, cache read 60, cache write 20, output 90, reasoning 32, cost - ${markers(1)}.`,
+      );
+      expect(footnotesOf(markdown, 'task-1')).toEqual([
+        `1. ${SETTING}: ${gapText('the call timed out', { graderLine: true })}`,
+      ]);
+    });
+
     it('renders the line only in the block of the task whose case was graded', () => {
       const markdown = reportOf({
         taskIds: ['task-1', 'task-2'],
@@ -3590,6 +3664,108 @@ describe('comparison table in the report', () => {
       });
 
       expect(graderLineOf(markdown, 'task-1')).toBeUndefined();
+    });
+  });
+
+  describe('grading block', () => {
+    const NO_REPLY = {
+      status: 'no-reply',
+      cause: 'unfinished',
+      reason: 'the grader call failed: the model stopped',
+    } as const;
+
+    function gradingHeaderOf(markdown: string): string | undefined {
+      return markdown.split('\n').find((line) => line.startsWith('Grades by '));
+    }
+
+    it('adds no call count to the header of a grading that made one call', () => {
+      const markdown = reportOf({ gradings: [buildGradingArtifact()] });
+
+      expect(gradingHeaderOf(markdown)).toMatch(/^Grades by openai\/grader-model \(.*\):$/);
+    });
+
+    it.each([2, 3])('names the %i calls after the closing parenthesis of the header', (count) => {
+      const calls = Array.from({ length: count }, () => buildGraderCall({ outcome: NO_REPLY }));
+
+      const markdown = reportOf({
+        gradings: [buildGradingArtifact({ call: NO_REPLY, calls, metrics: buildAgentMetrics() })],
+      });
+
+      expect(gradingHeaderOf(markdown)).toMatch(
+        new RegExp(`^Grades by openai/grader-model \\(.*\\), after ${count} calls:$`),
+      );
+    });
+
+    it('renders the grader metrics of a grading that returned no reply', () => {
+      const markdown = reportOf({
+        gradings: [
+          buildGradingArtifact({
+            call: { ...NO_REPLY, cause: 'tool-call' },
+            calls: [buildGraderCall({ outcome: { ...NO_REPLY, cause: 'tool-call' } })],
+            metrics: buildAgentMetrics({ cost: reported(0.0125, 'USD') }),
+          }),
+        ],
+      });
+
+      expect(markdown).toContain(
+        'Grader metrics (separate from the agent metrics above; never added to them):',
+      );
+      expect(markdown).toContain('- Cost: $0.0125');
+    });
+  });
+
+  describe('grader calls in the normalized run', () => {
+    const RECORDS = {
+      events: [{ type: 'text' }],
+      diagnostics: 'KEPT IN THE INPUT',
+      session: { info: { id: 'session-1' } },
+    };
+
+    function multiCallGrading(): GradingArtifact {
+      return buildGradingArtifact({
+        calls: [
+          buildGraderCall({
+            outcome: { status: 'no-reply', cause: 'unfinished', reason: 'the model stopped' },
+            ...RECORDS,
+          }),
+          buildGraderCall(RECORDS),
+        ],
+        metrics: buildAgentMetrics(),
+      });
+    }
+
+    it('holds only the outcome and metrics of each call, in call order, and leaves the input untouched', () => {
+      const grading = multiCallGrading();
+
+      const model = buildNormalizedRun(buildComparisonInput({ gradings: [grading] }));
+
+      expect(model.gradings.flatMap(({ calls }) => calls)).toEqual([
+        { outcome: grading.calls[0]?.outcome, metrics: grading.calls[0]?.metrics },
+        { outcome: { status: 'replied' }, metrics: grading.calls[1]?.metrics },
+      ]);
+      expect(grading.calls.map((call) => call.diagnostics)).toEqual([
+        RECORDS.diagnostics,
+        RECORDS.diagnostics,
+      ]);
+    });
+
+    it('serializes without any run event, diagnostics, or session export of a call', () => {
+      const model = buildNormalizedRun(buildComparisonInput({ gradings: [multiCallGrading()] }));
+
+      const json = serializeNormalizedRun(model);
+
+      expect(json).not.toContain(RECORDS.diagnostics);
+      expect(json).not.toContain('session-1');
+    });
+
+    it('rebuilds byte-identical JSON and Markdown from unchanged input', () => {
+      const input = buildComparisonInput({ gradings: [multiCallGrading()] });
+
+      const first = buildReport(input);
+      const second = buildReport(input);
+
+      expect(second.normalizedJson).toBe(first.normalizedJson);
+      expect(second.markdown).toBe(first.markdown);
     });
   });
 
@@ -3746,7 +3922,11 @@ describe('comparison table in the report', () => {
         gradings: [
           buildGradingArtifact({
             caseId: caseId(ids.m1, 1),
-            call: { status: 'no-reply', reason: `${GRADER_REASON} for ${ids.task}` },
+            call: {
+              status: 'no-reply',
+              cause: 'other',
+              reason: `${GRADER_REASON} for ${ids.task}`,
+            },
             grades: [
               {
                 checkId: ids.graded,
@@ -3861,7 +4041,7 @@ describe('comparison table in the report', () => {
           gradings: [
             buildGradingArtifact({
               caseId: CASE_ID,
-              call: { status: 'no-reply', reason: GRADER_REASON },
+              call: { status: 'no-reply', cause: 'other', reason: GRADER_REASON },
               grades: GRADED_IDS.map((checkId) => ({
                 checkId,
                 category: 'acceptance' as const,
@@ -5019,13 +5199,21 @@ function buildGrader(overrides: Partial<GraderIdentity> = {}): GraderIdentity {
 }
 
 function buildGradingArtifact(overrides: Partial<GradingArtifact> = {}): GradingArtifact {
+  const call = overrides.call ?? { status: 'replied', reply: '{"grades":[]}' };
+  const metrics = overrides.metrics ?? unavailableAgentMetrics('unused in this fixture');
   return {
     schemaVersion: 1,
     runId: '20260923t000000z-grading',
     caseId: 'task-1--alpha--1',
     grader: buildGrader(),
-    call: { status: 'replied', reply: '{"grades":[]}' },
-    metrics: unavailableAgentMetrics('unused in this fixture'),
+    call,
+    calls: [
+      buildGraderCall({
+        outcome: call.status === 'replied' ? { status: 'replied' } : call,
+        metrics,
+      }),
+    ],
+    metrics,
     grades: [],
     ...overrides,
   };
@@ -5278,6 +5466,7 @@ describe('grading rendered in the report', () => {
     const grading = buildGradingArtifact({
       call: {
         status: 'no-reply',
+        cause: 'other',
         reason:
           'the grader call failed: ModelCallError (timed-out): run process did not finish within 30000ms',
       },
@@ -5316,7 +5505,7 @@ describe('grading rendered in the report', () => {
       `\nThe grading model returned no verdict for this solution, so 1 required graded check waits for a person's verdict. The outcome stays pending until every required check has a verdict. Record the verdict with ${assess}. Technical detail: case task-1--alpha--1: ${reason}\n`,
     );
     expect(markdown).toContain(
-      `Grades by openai/grader-model (effort high, agent fake-agent):\n\n- The grading model returned no verdict for this solution, so the usage and cost of that call are unknown and 1 required graded check still waits for a person's verdict. The grader total for the task leaves this call out. Record the verdict with ${assess}. Technical detail: case task-1--alpha--1: ${reason}\n- escapes every value correctly: no verdict.\n`,
+      `Grades by openai/grader-model (effort high, agent fake-agent):\n\n- The grading model returned no verdict for this solution, so 1 required graded check still waits for a person's verdict. The grader total for the task counts a measurement of this grading only when tevu has it for the whole grading. Record the verdict with ${assess}. Technical detail: case task-1--alpha--1: ${reason}\n- escapes every value correctly: no verdict.\n`,
     );
     expect(markdown).not.toContain('Pending graded checks:');
     expect(markdown).not.toContain('Grader call:');
@@ -5387,6 +5576,12 @@ describe('grading rendered in the report', () => {
 });
 
 describe('grading and report regeneration stay byte-identical (P7)', () => {
+  const CALL_RECORDS = {
+    events: [{ type: 'text', part: { text: 'EVENT_RECORD_MARKER' } }],
+    diagnostics: 'DIAGNOSTICS_MARKER',
+    session: { info: { id: 'SESSION_RECORD_MARKER' } },
+  };
+
   async function createGradedSyntheticRun(root: string): Promise<{
     runId: string;
     store: ReturnType<typeof createArtifactStore>;
@@ -5422,6 +5617,7 @@ describe('grading and report regeneration stay byte-identical (P7)', () => {
       'task-1--alpha--1',
       buildGradingArtifact({
         runId,
+        calls: [buildGraderCall(CALL_RECORDS)],
         grades: [
           {
             checkId: 'acc-acceptance-command',
@@ -5471,6 +5667,29 @@ describe('grading and report regeneration stay byte-identical (P7)', () => {
       expect(first.value.markdown).toContain(
         '- Grader: openai/grader-model (effort high, agent fake-agent)',
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the run events, diagnostics, and session export of every grader call out of the normalized JSON', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-eval-grading-records-'));
+    try {
+      const { runId, store } = await createGradedSyntheticRun(root);
+
+      const rebuilt = await rebuildReport(runId, store, AGENTS_REGISTRY);
+
+      expect(rebuilt.ok).toBe(true);
+      if (!rebuilt.ok) return;
+      const normalized = JSON.parse(rebuilt.value.normalizedJson) as {
+        gradings: { calls: Record<string, unknown>[] }[];
+      };
+      const calls = normalized.gradings.flatMap((grading) => grading.calls);
+      expect(calls.map((call) => Object.keys(call).sort())).toEqual([['metrics', 'outcome']]);
+      for (const marker of ['EVENT_RECORD_MARKER', 'DIAGNOSTICS_MARKER', 'SESSION_RECORD_MARKER']) {
+        expect(rebuilt.value.normalizedJson).not.toContain(marker);
+        expect(rebuilt.value.markdown).not.toContain(marker);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -5563,6 +5782,7 @@ describe('assessCase for graded checks (P9)', () => {
       const gradingWrite = await store.writeGrading('graded-assess-task--alpha--1', {
         grader,
         call: { status: 'replied', reply: '{"grades":[]}' },
+        calls: [buildGraderCall({ metrics: unavailableAgentMetrics('unused in this fixture') })],
         metrics: unavailableAgentMetrics('unused in this fixture'),
         grades: [grade],
       });

@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,6 +15,7 @@ import {
   runManagedProcess,
 } from '@/adapters/process';
 import { describeModelCallFailure } from '@/application/model-call';
+import { gradeLines } from '@/evaluation/wording';
 
 import { gradeCase } from './grade-case';
 
@@ -113,6 +114,87 @@ if (args[0] === "export") {
 `;
 }
 
+type ExportScript =
+  | { kind: 'reply'; text: string; cost?: number; tokens?: ScriptTokens }
+  | { kind: 'unfinished'; cost?: number; tokens?: ScriptTokens }
+  | { kind: 'tool-call'; cost?: number; tokens?: ScriptTokens }
+  | { kind: 'assistant-error'; cost?: number; tokens?: ScriptTokens };
+
+type ScriptTokens = {
+  input: number;
+  output: number;
+  reasoning: number;
+  cache: { read: number; write: number };
+};
+
+/** What the scripted fake does on its n-th `run` start; the last script repeats for every later start. */
+type CallScript = { run: 'ok'; export: ExportScript } | { run: 'error-exit-1' } | { run: 'sleep' };
+
+/** Placeholder the scripted fake replaces with the configured secret value wherever it writes text. */
+const SECRET_PLACEHOLDER = '{{SECRET}}';
+
+function renderScriptedBody(scripts: readonly CallScript[], logPath: string): string {
+  return (
+    '#!/usr/bin/env node\n' +
+    'import { appendFileSync, existsSync, readFileSync } from "node:fs";\n' +
+    PROBE_PREAMBLE +
+    `
+const scripts = ${JSON.stringify(scripts)};
+const LOG = ${JSON.stringify(logPath)};
+const SECRET = process.env[${JSON.stringify(SECRET_VARIABLE_NAME)}] || "";
+const PLACEHOLDER = ${JSON.stringify(SECRET_PLACEHOLDER)};
+function withSecret(text) { return text.split(PLACEHOLDER).join(SECRET); }
+function scriptFor(index) { return scripts[Math.min(index, scripts.length - 1)]; }
+if (args[0] === "run") {
+  readFileSync(0, "utf8");
+  var index = existsSync(LOG) ? readFileSync(LOG, "utf8").split("\\n").filter(Boolean).length : 0;
+  appendFileSync(LOG, "run\\n");
+  var script = scriptFor(index);
+  var sessionId = "ses-seq-" + index;
+  console.error("grader stderr " + SECRET);
+  if (script.run === "sleep") {
+    setInterval(function () {}, 1000);
+  } else {
+    console.log(JSON.stringify({ type: "step_start", timestamp: 1, sessionID: sessionId, part: { id: "prt-seq-0", sessionID: sessionId, messageID: "msg-seq-0", type: "step-start", note: "event " + SECRET } }));
+    if (script.run === "error-exit-1") {
+      console.log(JSON.stringify({ type: "error", timestamp: 2, sessionID: sessionId, error: { data: { message: "Synthetic grader failure" } } }));
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+}
+if (args[0] === "export") {
+  var requested = args[1] || "";
+  var exported = scriptFor(Number(requested.slice("ses-seq-".length))).export;
+  var info = { id: "msg-seq-1", sessionID: requested, role: "assistant", parentID: "msg-seq-0", cost: exported.cost === undefined ? 0.42 : exported.cost, tokens: exported.tokens || { input: 11, output: 22, reasoning: 0, cache: { read: 0, write: 0 } } };
+  var parts = [];
+  function textPart(text) { return { id: "prt-seq-1", sessionID: requested, messageID: "msg-seq-1", type: "text", text: withSecret(text) }; }
+  if (exported.kind === "reply") { info.finish = "stop"; parts.push(textPart(exported.text)); }
+  if (exported.kind === "unfinished") { info.finish = "length"; parts.push(textPart("partial " + PLACEHOLDER)); }
+  if (exported.kind === "assistant-error") { info.finish = "stop"; info.error = { data: { message: "Synthetic grader failure" } }; }
+  if (exported.kind === "tool-call") { info.finish = "tool-calls"; parts.push({ id: "prt-seq-2", sessionID: requested, messageID: "msg-seq-1", type: "tool", callID: "call-1", tool: "read", state: { status: "error" } }); }
+  console.log(JSON.stringify({ info: { id: requested }, messages: [{ info: info, parts: parts }] }));
+  process.exit(0);
+}
+` +
+    '\nif (args[0] !== "run" && args[0] !== "export") { process.exit(3); }\n'
+  );
+}
+
+async function writeScriptedGraderExecutable(
+  scripts: readonly CallScript[],
+  logPath: string,
+): Promise<string> {
+  const filePath = nextScriptPath();
+  await writeFile(filePath, renderScriptedBody(scripts, logPath), { mode: 0o755 });
+  await chmod(filePath, 0o755);
+  return filePath;
+}
+
+function countRunStarts(logPath: string): number {
+  return existsSync(logPath) ? readFileSync(logPath, 'utf8').split('\n').filter(Boolean).length : 0;
+}
+
 async function writeFakeGraderExecutable(options: {
   run: RunBehavior;
   replyText?: string;
@@ -193,6 +275,7 @@ function buildConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
 
 type CallOptions = {
   run: RunBehavior;
+  executable?: string;
   replyText?: string;
   withCost?: boolean;
   timeoutMs?: number;
@@ -206,12 +289,14 @@ type CallOptions = {
 };
 
 async function gradeWithFakeExecutable(options: CallOptions) {
-  const executable = await writeFakeGraderExecutable({
-    run: options.run,
-    replyText: options.replyText,
-    withCost: options.withCost,
-    recordPath: options.recordPath,
-  });
+  const executable =
+    options.executable ??
+    (await writeFakeGraderExecutable({
+      run: options.run,
+      replyText: options.replyText,
+      withCost: options.withCost,
+      recordPath: options.recordPath,
+    }));
   const secrets = createSecretRedactor(() => [SECRET_VALUE], createRedactor([SECRET_VALUE]));
   const adapter: AgentAdapter = createOpenCodeAdapter(
     { agent: 'opencode', executable, providers: [], declaredVariables: { secrets: [], env: [] } },
@@ -348,7 +433,7 @@ describe('gradeCase against a fake OpenCode executable', () => {
       if (outcome.status !== 'graded') {
         throw new Error(`expected a graded (pending) outcome, got ${JSON.stringify(outcome)}`);
       }
-      expect(outcome.grading.call.status).toBe('no-reply');
+      expect(outcome.grading.call).toMatchObject({ status: 'no-reply', cause: 'other' });
       expect(outcome.grading.grades).toHaveLength(1);
       expect(outcome.grading.grades[0]).toMatchObject({
         checkId: 'csv-content',
@@ -373,10 +458,12 @@ describe('gradeCase against a fake OpenCode executable', () => {
     if (outcome.status !== 'graded') {
       throw new Error(`expected a graded (pending) outcome, got ${JSON.stringify(outcome)}`);
     }
-    expect(outcome.grading.call).toEqual({
-      status: 'no-reply',
-      reason: 'the grader prompt could not be redacted; the grader was not called',
-    });
+    const reason = 'the grader prompt could not be redacted; the grader was not called';
+    expect(outcome.grading.call).toEqual({ status: 'no-reply', cause: 'other', reason });
+    expect(outcome.grading.calls).toEqual([]);
+    for (const metric of Object.values(outcome.grading.metrics)) {
+      expect(metric.availability).toEqual({ status: 'unavailable', reason });
+    }
     expect(outcome.grading.grades).toEqual([
       {
         checkId: 'csv-content',
@@ -405,6 +492,193 @@ describe('gradeCase against a fake OpenCode executable', () => {
     expect(outcome.grading.call.status).toBe('no-reply');
     if (outcome.grading.call.status === 'no-reply') {
       expect(outcome.grading.call.reason).toContain('PrerequisiteError:');
+    }
+  });
+});
+
+describe('gradeCase call loop against a scripted fake OpenCode executable', () => {
+  const REPLY_PASSED =
+    '{"grades":[{"check":"csv-content","verdict":"passed","rationale":"lines added"}]}';
+  const FIRST_TOKENS = { input: 11, output: 22, reasoning: 3, cache: { read: 4, write: 5 } };
+  const SECOND_TOKENS = { input: 100, output: 200, reasoning: 30, cache: { read: 40, write: 50 } };
+
+  async function gradeWithScripts(
+    scripts: readonly CallScript[],
+    options: Partial<CallOptions> = {},
+  ) {
+    const logPath = nextRecordPath();
+    const executable = await writeScriptedGraderExecutable(scripts, logPath);
+    const outcome = await gradeWithFakeExecutable({ run: 'ok', ...options, executable });
+    if (outcome.status !== 'graded') {
+      throw new Error(`expected a graded outcome, got ${JSON.stringify(outcome)}`);
+    }
+    return { grading: outcome.grading, retainedDirectory: outcome.retainedDirectory, logPath };
+  }
+
+  it('starts the run once and leaves every check pending when the session holds a tool call', async () => {
+    const { grading, logPath } = await gradeWithScripts([
+      { run: 'ok', export: { kind: 'tool-call' } },
+    ]);
+
+    expect(countRunStarts(logPath)).toBe(1);
+    expect(grading.calls).toHaveLength(1);
+    expect(grading.call).toMatchObject({ status: 'no-reply', cause: 'tool-call' });
+    expect(grading.calls[0]?.outcome).toEqual(grading.call);
+    expect(grading.grades).toEqual([
+      expect.objectContaining({ checkId: 'csv-content', status: 'pending' }),
+    ]);
+    expect(grading.metrics).toEqual(grading.calls[0]?.metrics);
+    expect(grading.metrics.inputTokens.value).toBe(11);
+    expect(grading.metrics.outputTokens.value).toBe(22);
+    expect(grading.metrics.cost.value).toBe(0.42);
+  });
+
+  it('calls again after an unfinished call, takes the grades from the reply, and sums both exports', async () => {
+    const { grading, logPath, retainedDirectory } = await gradeWithScripts([
+      { run: 'ok', export: { kind: 'unfinished', cost: 0.25, tokens: FIRST_TOKENS } },
+      {
+        run: 'ok',
+        export: { kind: 'reply', text: REPLY_PASSED, cost: 0.5, tokens: SECOND_TOKENS },
+      },
+    ]);
+
+    expect(countRunStarts(logPath)).toBe(2);
+    expect(grading.calls.map((call) => call.outcome.status)).toEqual(['no-reply', 'replied']);
+    expect(grading.calls[0]?.outcome).toMatchObject({ cause: 'unfinished' });
+    expect(grading.call).toEqual({ status: 'replied', reply: REPLY_PASSED });
+    expect(grading.grades).toEqual([
+      {
+        checkId: 'csv-content',
+        category: 'acceptance',
+        status: 'graded',
+        verdict: 'passed',
+        rationale: 'lines added',
+      },
+    ]);
+    expect(grading.metrics.inputTokens.value).toBe(111);
+    expect(grading.metrics.outputTokens.value).toBe(222);
+    expect(grading.metrics.reasoningTokens.value).toBe(33);
+    expect(grading.metrics.cacheReadTokens.value).toBe(44);
+    expect(grading.metrics.cacheWriteTokens.value).toBe(55);
+    expect(grading.metrics.cost.value).toBe(0.75);
+    expect(retainedDirectory).toBeNull();
+  });
+
+  it('stops after three unfinished calls and opens the pending wording with the call count', async () => {
+    const { grading, logPath } = await gradeWithScripts([
+      { run: 'ok', export: { kind: 'unfinished' } },
+    ]);
+
+    expect(countRunStarts(logPath)).toBe(3);
+    expect(grading.calls).toHaveLength(3);
+    expect(grading.call).toMatchObject({ status: 'no-reply', cause: 'unfinished' });
+    const [grade] = grading.grades;
+    expect(grade).toMatchObject({ status: 'pending' });
+    const lines = gradeLines(grade ?? null, grading);
+    expect(lines[0]).toMatch(
+      /^After 3 calls, the grading model stopped before finishing its reply\. /,
+    );
+    expect(grading.metrics.inputTokens.value).toBe(33);
+  });
+
+  it.each([
+    { scenario: 'the run process exits nonzero', script: { run: 'error-exit-1' } as const },
+    { scenario: 'the run process times out', script: { run: 'sleep' } as const },
+    {
+      scenario: 'the final assistant message carries an error',
+      script: { run: 'ok', export: { kind: 'assistant-error' } } as const,
+    },
+  ])('starts the run once when $scenario', async ({ script }) => {
+    const { grading, logPath } = await gradeWithScripts([script], { timeoutMs: 700 });
+
+    expect(countRunStarts(logPath)).toBe(1);
+    expect(grading.calls).toHaveLength(1);
+    expect(grading.call).toMatchObject({ status: 'no-reply', cause: 'other' });
+  });
+
+  it('keeps the first call cost and makes the grading cost unavailable with the reason of a call that timed out', async () => {
+    const { grading, logPath } = await gradeWithScripts(
+      [{ run: 'ok', export: { kind: 'unfinished', cost: 0.25 } }, { run: 'sleep' }],
+      { timeoutMs: 1_000 },
+    );
+
+    expect(countRunStarts(logPath)).toBe(2);
+    const [first, second] = grading.calls;
+    expect(first?.metrics.cost).toMatchObject({
+      value: 0.25,
+      availability: { status: 'available' },
+    });
+    expect(second?.metrics.cost.availability).toMatchObject({ status: 'unavailable' });
+    expect(second?.session).toBeNull();
+    expect(grading.call).toMatchObject({ status: 'no-reply', cause: 'other' });
+    expect(grading.metrics.cost.value).toBeNull();
+    expect(grading.metrics.cost.availability).toEqual(second?.metrics.cost.availability);
+    expect(grading.metrics.cost.availability).toMatchObject({
+      reason: expect.stringContaining('timed-out'),
+    });
+  });
+
+  it('returns a cancelled outcome and drops the earlier calls when cancellation arrives before a retry', async () => {
+    const controller = new AbortController();
+    const logPath = nextRecordPath();
+    const executable = await writeScriptedGraderExecutable(
+      [{ run: 'ok', export: { kind: 'unfinished' } }],
+      logPath,
+    );
+    const realAdapter = createOpenCodeAdapter(
+      { agent: 'opencode', executable, providers: [], declaredVariables: { secrets: [], env: [] } },
+      {
+        runProcess: runManagedProcess,
+        secrets: createSecretRedactor(() => [SECRET_VALUE], createRedactor([SECRET_VALUE])),
+        probeEnvironment: { PATH: process.env['PATH'] ?? '' },
+        probeDirectory: process.cwd(),
+        operatorDirectories: { home: undefined, xdgConfigHome: undefined },
+      },
+    );
+    let started = 0;
+    const agent: AgentAdapter = {
+      ...realAdapter,
+      async callModel(input) {
+        started += 1;
+        if (started === 2) {
+          controller.abort();
+        }
+        return realAdapter.callModel(input);
+      },
+    };
+
+    const outcome = await gradeWithFakeExecutable({
+      run: 'ok',
+      executable,
+      agents: new Map([['opencode', agent]]),
+      cancellation: controller.signal,
+    });
+
+    expect(outcome).toEqual({ status: 'cancelled' });
+    expect(started).toBe(2);
+    expect(countRunStarts(logPath)).toBe(1);
+  });
+
+  it('keeps a configured secret out of every field of the grading and records its replacement', async () => {
+    const { grading } = await gradeWithScripts([
+      { run: 'ok', export: { kind: 'unfinished' } },
+      {
+        run: 'ok',
+        export: {
+          kind: 'reply',
+          text: `{"grades":[{"check":"csv-content","verdict":"passed","rationale":"saw ${SECRET_PLACEHOLDER}"}]}`,
+        },
+      },
+    ]);
+
+    const serialized = JSON.stringify(grading);
+    expect(serialized).not.toContain(SECRET_VALUE);
+    expect(serialized).toContain('[REDACTED]');
+    for (const call of grading.calls) {
+      expect(JSON.stringify(call.events)).toContain('[REDACTED]');
+      expect(call.diagnostics).toContain('[REDACTED]');
+      expect(call.diagnostics).not.toContain(SECRET_VALUE);
+      expect(JSON.stringify(call.session)).toContain('[REDACTED]');
     }
   });
 });

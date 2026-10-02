@@ -1,20 +1,26 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
 
+import { unavailableAgentMetrics } from '@/domain/types';
+
+import { buildAgentMetrics, buildGraderCall } from './__fixtures__/report.fixtures';
 import {
   applyGrades,
   buildGraderPrompt,
   deriveGrades,
   gradedChecksOf,
   pendingGrades,
+  sumGraderCallMetrics,
 } from './grading';
 
 import type { GradedCheckSummary } from './grading';
 import type {
+  AgentMetrics,
   CaseGrading,
   CheckDefinition,
   CheckResult,
   GraderIdentity,
+  MetricValue,
   TaskDefinition,
 } from '@/domain/types';
 
@@ -76,77 +82,12 @@ function buildGrader(overrides: Partial<GraderIdentity> = {}): GraderIdentity {
 }
 
 function buildCaseGrading(overrides: Partial<CaseGrading> = {}): CaseGrading {
+  const metrics = buildAgentMetrics();
   return {
     grader: buildGrader(),
     call: { status: 'replied', reply: '{"grades":[]}' },
-    metrics: {
-      inputTokens: {
-        value: 10,
-        unit: 'token',
-        availability: { status: 'available', source: 'export' },
-        scope: 'root-session',
-      },
-      outputTokens: {
-        value: 20,
-        unit: 'token',
-        availability: { status: 'available', source: 'export' },
-        scope: 'root-session',
-      },
-      reasoningTokens: {
-        value: 0,
-        unit: 'token',
-        availability: { status: 'available', source: 'export' },
-        scope: 'root-session',
-      },
-      cacheReadTokens: {
-        value: 0,
-        unit: 'token',
-        availability: { status: 'available', source: 'export' },
-        scope: 'root-session',
-      },
-      cacheWriteTokens: {
-        value: 0,
-        unit: 'token',
-        availability: { status: 'available', source: 'export' },
-        scope: 'root-session',
-      },
-      turns: {
-        value: 1,
-        unit: 'count',
-        availability: { status: 'available', source: 'export' },
-        scope: 'root-session',
-      },
-      apiCalls: {
-        value: 1,
-        unit: 'count',
-        availability: { status: 'available', source: 'export' },
-        scope: 'root-session',
-      },
-      apiErrors: {
-        value: 0,
-        unit: 'count',
-        availability: { status: 'available', source: 'export' },
-        scope: 'root-session',
-      },
-      toolCalls: {
-        value: 0,
-        unit: 'count',
-        availability: { status: 'available', source: 'export' },
-        scope: 'root-session',
-      },
-      skillCalls: {
-        value: 0,
-        unit: 'count',
-        availability: { status: 'available', source: 'export' },
-        scope: 'root-session',
-      },
-      cost: {
-        value: 0.5,
-        unit: 'USD',
-        availability: { status: 'available', source: 'export' },
-        scope: 'root-session',
-      },
-    },
+    calls: [buildGraderCall({ metrics })],
+    metrics,
     grades: [],
     ...overrides,
   };
@@ -559,5 +500,134 @@ describe('applyGrades', () => {
     expect(applyGrades(checks, grading)).toEqual([
       { ...checks[0], verdict: 'pending', evidence: 'not graded: the grader call failed' },
     ]);
+  });
+});
+
+describe('sumGraderCallMetrics', () => {
+  function available(
+    unit: MetricValue['unit'],
+    value: number,
+    source = 'export',
+    scope: MetricValue['scope'] = 'root-session',
+  ): MetricValue {
+    return { value, unit, availability: { status: 'available', source }, scope };
+  }
+
+  function unavailable(unit: MetricValue['unit'], reason: string): MetricValue {
+    return {
+      value: null,
+      unit,
+      availability: { status: 'unavailable', reason },
+      scope: 'root-session',
+    };
+  }
+
+  it('returns the only call metrics unchanged', () => {
+    const only = buildAgentMetrics({ cost: unavailable('USD', 'the call had no export') });
+
+    expect(sumGraderCallMetrics([only])).toBe(only);
+  });
+
+  it('sums every metric across calls when every call has a value', () => {
+    const first = buildAgentMetrics({
+      inputTokens: available('token', 100),
+      outputTokens: available('token', 20),
+      cost: available('USD', 0.25),
+    });
+    const second = buildAgentMetrics({
+      inputTokens: available('token', 40),
+      outputTokens: available('token', 5),
+      cost: available('USD', 0.5),
+    });
+    const third = buildAgentMetrics({ inputTokens: available('token', 1) });
+
+    const total = sumGraderCallMetrics([first, second, third]);
+
+    expect(total.inputTokens.value).toBe(141);
+    expect(total.outputTokens.value).toBe(45);
+    expect(total.turns.value).toBe(3);
+    expect(total.cost.value).toBe(1.25);
+    expect(total.cost.availability).toEqual({ status: 'available', source: 'export' });
+  });
+
+  it('joins the distinct sources in call order', () => {
+    const first = buildAgentMetrics({ turns: available('count', 1, 'export') });
+    const second = buildAgentMetrics({ turns: available('count', 1, 'events') });
+    const third = buildAgentMetrics({ turns: available('count', 2, 'export') });
+
+    const total = sumGraderCallMetrics([first, second, third]);
+
+    expect(total.turns.availability).toEqual({ status: 'available', source: 'export, events' });
+    expect(total.turns.value).toBe(4);
+  });
+
+  it('takes unit and scope from the first call', () => {
+    const first = buildAgentMetrics({ turns: available('count', 1, 'export', 'session-tree') });
+    const second = buildAgentMetrics({ turns: available('count', 1) });
+
+    const total = sumGraderCallMetrics([first, second]);
+
+    expect(total.turns).toMatchObject({ unit: 'count', scope: 'session-tree', value: 2 });
+  });
+
+  it('makes a metric unavailable with the reason of the call that lacks it', () => {
+    const first = buildAgentMetrics({ cost: available('USD', 0.25) });
+    const second = buildAgentMetrics({ cost: unavailable('USD', 'the call timed out') });
+
+    const total = sumGraderCallMetrics([first, second]);
+
+    expect(total.cost).toEqual({
+      value: null,
+      unit: 'USD',
+      scope: 'root-session',
+      availability: { status: 'unavailable', reason: 'the call timed out' },
+    });
+    expect(total.inputTokens.value).toBe(200);
+  });
+
+  it('makes a metric unavailable when the first call lacks it', () => {
+    const first = buildAgentMetrics({ cost: unavailable('USD', 'no export was read') });
+    const second = buildAgentMetrics({ cost: available('USD', 0.25) });
+
+    const total = sumGraderCallMetrics([first, second]);
+
+    expect(total.cost.value).toBeNull();
+    expect(total.cost.availability).toEqual({
+      status: 'unavailable',
+      reason: 'no export was read',
+    });
+  });
+
+  it('reports no value recorded for an available metric whose value is null', () => {
+    const first = buildAgentMetrics({ apiCalls: available('count', 1) });
+    const second = buildAgentMetrics({
+      apiCalls: { ...available('count', 1), value: null },
+    });
+
+    const total = sumGraderCallMetrics([first, second]);
+
+    expect(total.apiCalls.availability).toEqual({
+      status: 'unavailable',
+      reason: 'no value recorded',
+    });
+    expect(total.apiCalls.value).toBeNull();
+  });
+
+  it('keeps the first gap in call order when several calls lack the metric', () => {
+    const first = buildAgentMetrics({ cost: available('USD', 0.25) });
+    const second = buildAgentMetrics({ cost: unavailable('USD', 'second reason') });
+    const third = buildAgentMetrics({ cost: unavailable('USD', 'third reason') });
+
+    const total = sumGraderCallMetrics([first, second, third]);
+
+    expect(total.cost.availability).toEqual({ status: 'unavailable', reason: 'second reason' });
+  });
+
+  it('keeps the metric keys in declaration order', () => {
+    const metrics: AgentMetrics = buildAgentMetrics();
+
+    const total = sumGraderCallMetrics([metrics, metrics]);
+
+    expect(Object.keys(total)).toEqual(Object.keys(unavailableAgentMetrics('any reason')));
   });
 });

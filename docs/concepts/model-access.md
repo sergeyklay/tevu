@@ -1,6 +1,6 @@
 # Model access
 
-Why a case receives your provider definitions but nothing else from your agent setup, and why one-shot model calls run without a task repository.
+Why a case receives your provider definitions but nothing else from your agent setup, and why one-shot model calls run without a task repository or tools.
 
 ## Providers cross, the rest of your setup does not
 
@@ -22,6 +22,8 @@ A model call's working directory is an empty Git repository, not a case's sealed
 - **Ambient instructions.** Agents search upward for project instructions and configuration. A directory that is its own Git top level stops that search, the way a case's sealed repository does at its own worktree.
 
 The prompts are narrow for the same reason. A grader sees the task text, the graded criteria, and the solution patch. It never sees a reference solution, a case ID, a run ID, or which model entry produced the patch, so its verdict cannot depend on who wrote the solution. A criteria draft sees the task text and the reference solution's changes, and tevu adds no identifying metadata to it. The exact contents are in [Model calls](../reference/agents-and-models.md#model-calls).
+
+A model call also gets no tools. tevu sets OpenCode's `OPENCODE_PERMISSION` to `{"*":"deny"}` for the `run` process of every drafting and grading call, so the model is offered none. A grader that could call a tool could read or change files on the host, and a call that ends in a tool call produces no reply, so it grades nothing. tevu replaces any `OPENCODE_PERMISSION` you pass through the agent block's `env` for model calls only; case agents keep it. Configuration outside tevu can still allow a tool, which tevu detects only after the call. See [Where isolation stops](isolation.md#where-isolation-stops).
 
 A model call runs no check, so it gets no evaluator environment, and its directory is removed when the call ends.
 

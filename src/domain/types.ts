@@ -86,7 +86,7 @@ export type TevuError =
       kind: 'ModelCallError';
       role: ModelRoleName;
       agent: string;
-      cause: 'launch-failed' | 'failed' | 'timed-out';
+      cause: 'launch-failed' | 'failed' | 'timed-out' | 'unfinished' | 'tool-call';
       reason: string;
       /** First line of the agent's own error message, redacted; absent when the agent reported none. */
       agentMessage?: string;
@@ -1069,14 +1069,31 @@ export type GradeRecord =
     }
   | { checkId: string; category: CheckCategory; status: 'pending'; reason: string };
 
-/** The grader call's raw outcome: the reply text as returned, or that no reply was usable. */
-type GraderCallRecord =
-  { status: 'replied'; reply: string } | { status: 'no-reply'; reason: string };
+/** Why a grader call returned no reply: the model stopped early, its session held a tool call, or anything else. */
+type GraderNoReplyCause = 'unfinished' | 'tool-call' | 'other';
 
-/** One case's grading: the grader identity, its raw call outcome, its own metrics, and every graded check's grade. */
+type GraderNoReply = { status: 'no-reply'; cause: GraderNoReplyCause; reason: string };
+
+/** The reply a grading's grades come from, or why it has none. */
+type GraderCallRecord = { status: 'replied'; reply: string } | GraderNoReply;
+
+/** One grader call: how it ended, its own metrics, and the redacted records it left. */
+type GraderCall = {
+  outcome: { status: 'replied' } | GraderNoReply;
+  metrics: AgentMetrics;
+  events: AgentEventRecord[];
+  diagnostics: string;
+  session: AgentSessionExport | null;
+};
+
+/** One case's grading: the grader identity, its raw call outcome, its calls, its metrics, and every graded check's grade. */
 export type CaseGrading = {
   grader: GraderIdentity;
+  /** Describes the last element of `calls`; with no call, why the grader was not called. */
   call: GraderCallRecord;
+  /** Every grader call tevu made for the case, in call order; empty when it made none. */
+  calls: GraderCall[];
+  /** `sumGraderCallMetrics` over `calls[].metrics`; every metric unavailable with `call.reason` when `calls` is empty. */
   metrics: AgentMetrics;
   /** One per graded check: acceptance, then done, configuration order. */
   grades: GradeRecord[];
@@ -1084,6 +1101,21 @@ export type CaseGrading = {
 
 /** Versioned case artifact: `cases/<case-id>/grading.json`. */
 export type GradingArtifact = CaseGrading & { schemaVersion: 1; runId: string; caseId: string };
+
+/** A grading as the normalized run model holds it: its calls without their records. */
+export type GradingSummary = Omit<GradingArtifact, 'calls'> & {
+  calls: Array<Pick<GraderCall, 'outcome' | 'metrics'>>;
+};
+
+/** Redacted records one model call left. */
+export type ModelCallEvidence = {
+  /** Every redacted run event record the adapter consumed, in arrival order. */
+  events: AgentEventRecord[];
+  /** The run process's redacted stderr capture text, bounded by the managed-process capture. */
+  diagnostics: string;
+  /** The redacted root-session export and the metrics derived from it; null when tevu read no export. */
+  session: { export: AgentSessionExport; metrics: AgentMetrics } | null;
+};
 
 export type ModelCallInput = {
   role: ModelRoleName;
@@ -1097,6 +1129,8 @@ export type ModelCallInput = {
   cancellation: AbortSignal;
   /** Copied providers of the snapshot the call environment was built from. Required, never defaulted. */
   copiedProviders: readonly CopiedProvider[];
+  /** Receives the call's evidence once, before `callModel` resolves, when the `run` process started. */
+  onEvidence?: (evidence: ModelCallEvidence) => void;
 };
 
 export type ModelCallResult = {
@@ -1543,6 +1577,8 @@ export type ModelRoleCallRequest = {
   cancellation: AbortSignal;
   /** The run's snapshot of the role's agent; absent means `callModelRole` reads one. */
   providers?: ProviderSnapshot;
+  /** Forwarded unchanged to `AgentAdapter.callModel`. */
+  onEvidence?: (evidence: ModelCallEvidence) => void;
 };
 
 /** Result of one model-role call. */
