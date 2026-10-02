@@ -1167,12 +1167,13 @@ describe('TevuConfigSchema', () => {
   });
 
   describe('roles', () => {
-    it('parses CONFIG_TEMPLATE with roles.criteria and roles.grader declared', () => {
+    it('parses CONFIG_TEMPLATE with roles.criteria, roles.grader, and roles.summary declared', () => {
       const parsed = expectOk(parseConfigText(CONFIG_TEMPLATE));
 
       expect(parsed.roles).toEqual({
         criteria: { model: 'openai/your-criteria-model', effort: 'high', agent: 'opencode' },
         grader: { model: 'openai/your-grader-model', effort: 'medium', agent: 'opencode' },
+        summary: { model: 'openai/your-summary-model', effort: 'medium', agent: 'opencode' },
       });
     });
 
@@ -1200,6 +1201,54 @@ describe('TevuConfigSchema', () => {
         identifier: 'roles.grader',
         message: 'Unknown configuration field',
       });
+    });
+
+    it('accepts roles.summary alone and defaults its agent to the sole configured agent', () => {
+      const config = buildConfig({
+        roles: { summary: buildModelRole({ model: 'openai/summary-model', effort: 'medium' }) },
+      });
+
+      expect(expectSchemaAcceptance(config).roles).toEqual({
+        summary: { model: 'openai/summary-model', effort: 'medium', agent: 'opencode' },
+      });
+    });
+
+    it('reports an unknown field inside roles.summary as an unknown configuration field', () => {
+      const text =
+        configYaml({ outputDirectory: './runs', repositoryPath: './repo', command: 'opencode' }) +
+        'roles:\n  summary:\n    model: openai/summary-model\n    effort: medium\n    extra: nope\n';
+
+      const parsed = expectFailure(parseConfigText(text), 'ConfigValidationError');
+
+      expect(parsed.findings).toContainEqual({
+        severity: 'error',
+        identifier: 'roles.summary',
+        message: 'Unknown configuration field',
+      });
+    });
+
+    it('rejects a summary agent that does not name a configured agent', () => {
+      const config = buildConfig({ roles: { summary: buildModelRole({ agent: 'claude' }) } });
+
+      expect(expectSchemaRejection(config)).toContainEqual({
+        path: 'roles.summary.agent',
+        message: 'agent must name a configured agent: opencode',
+      });
+    });
+
+    it('re-parses a materialized configuration with every model role to a deeply equal value', () => {
+      const config = buildConfig({
+        roles: {
+          criteria: buildModelRole({ model: 'anthropic/criteria-model', effort: 'medium' }),
+          grader: buildModelRole(),
+          summary: buildModelRole({ model: 'anthropic/summary-model', effort: 'low' }),
+        },
+      });
+
+      const parsedOnce = expectSchemaAcceptance(config);
+      const parsedTwice = expectSchemaAcceptance(parsedOnce);
+
+      expect(parsedTwice).toEqual(parsedOnce);
     });
 
     it('rejects a role agent that does not name a configured agent', () => {

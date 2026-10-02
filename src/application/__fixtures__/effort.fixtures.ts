@@ -43,7 +43,7 @@ export function buildEffortConfig(
   overrides: {
     agents?: Record<string, { command: string }>;
     models?: ModelDefinitionInput[];
-    roles?: { criteria?: ModelRoleInput; grader?: ModelRoleInput };
+    roles?: { criteria?: ModelRoleInput; grader?: ModelRoleInput; summary?: ModelRoleInput };
     tasks?: TaskInput[];
   } = {},
 ): TevuConfig {

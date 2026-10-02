@@ -6,8 +6,8 @@ The source directories of tevu, what each holds, and how the executable is built
 | --- | --- |
 | `src/config` | YAML loading, configuration file search, the strict schema, the template, document rendering and append, and run-snapshot decoding |
 | `src/domain` | Shared records, dependency contracts, and helpers every layer may import |
-| `src/application` | Task creation and prompts, reference-solution resolution, managed-clone preparation, validation, run orchestration, assessment, report rebuilding, the one-shot model, grading, and criteria calls, and the model access check of the setup interview |
-| `src/evaluation` | Checks, agent-independent metric rules, grading logic, and report rendering |
+| `src/application` | Task creation and prompts, reference-solution resolution, managed-clone preparation, validation, run orchestration, assessment, report rebuilding, the one-shot model, grading, criteria, and summary calls, writing the summary conclusions, and the model access check of the setup interview |
+| `src/evaluation` | Checks, agent-independent metric rules, grading logic, report rendering, and the run summary: its facts, template sentences, rendering, prompt, and acceptance check |
 | `src/adapters` | Git, managed clones, trackers, process supervision, and artifact I/O |
 | `src/adapters/agents` | One directory per agent adapter: probing, case runs, session export, model calls, metric normalization, protocol decoding, provider copying, and model listing |
 | `src/interface` | Command parsing and interactive prompts |

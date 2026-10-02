@@ -36,7 +36,7 @@ type EffortCheckInput = {
 
 type EffortSubject = { model: string; agent: string; command: string; effort: string };
 
-const ROLE_NAMES = ['criteria', 'grader'] as const;
+const ROLE_NAMES = ['criteria', 'grader', 'summary'] as const;
 
 /**
  * Checks one role's effort where no repository exists, as in a model call.
@@ -63,7 +63,8 @@ export function checkRoleEffort(request: {
  * Checks every configured model entry and declared role and builds their findings.
  *
  * Findings follow configuration order: model entries, then `roles.criteria`,
- * then `roles.grader`.
+ * `roles.grader`, and `roles.summary`. Only a `roles.grader` finding can be an
+ * error, and only when a task declares a graded check.
  */
 export function checkEfforts(input: EffortCheckInput): {
   checks: EffortChecks;

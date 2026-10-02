@@ -30,7 +30,7 @@ type SnapshotTask = {
 
 type SnapshotModel = { id: string; model: string; effort: string; agent?: string };
 
-type SnapshotRepository = { id: string; path: string };
+type SnapshotRepository = { id: string; path: string; github?: string };
 
 type Snapshot = {
   tasks: SnapshotTask[];
@@ -241,6 +241,49 @@ describe('decodeRunConfig', () => {
     );
 
     expect(decoded.repositories).toEqual([{ id: 'repo-9', path: '/repos/9' }]);
+  });
+
+  it('copies the github value of a GitHub repository entry, as written', () => {
+    const github = 'https://github.com/acme/app.git';
+
+    const decoded = expectDecoded(
+      decodeRunConfig(
+        buildSnapshot({
+          repositories: [buildSnapshotRepository({ id: 'repo-9', path: '/clones/app', github })],
+        }),
+      ),
+    );
+
+    expect(decoded.repositories).toStrictEqual([{ id: 'repo-9', path: '/clones/app', github }]);
+  });
+
+  it('leaves github out of the record of a path entry and keeps the order of the entries', () => {
+    const decoded = expectDecoded(
+      decodeRunConfig(
+        buildSnapshot({
+          repositories: [
+            buildSnapshotRepository({ id: 'repo-b', path: '/repos/b', github: 'acme/b' }),
+            buildSnapshotRepository({ id: 'repo-a', path: '/repos/a' }),
+          ],
+        }),
+      ),
+    );
+
+    expect(decoded.repositories).toStrictEqual([
+      { id: 'repo-b', path: '/repos/b', github: 'acme/b' },
+      { id: 'repo-a', path: '/repos/a' },
+    ]);
+  });
+
+  it('refuses a github value that is not text', () => {
+    const snapshot = {
+      ...buildSnapshot(),
+      repositories: [{ id: 'repo-1', path: '/repos/1', github: 7 }],
+    };
+
+    const result = decodeRunConfig(snapshot);
+
+    expect(result.ok).toBe(false);
   });
 
   it('ignores unknown keys on tasks, checks, models, and repositories', () => {

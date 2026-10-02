@@ -43,7 +43,11 @@ const projectionTaskSchema = z.object({
 
 const projectionModelSchema = z.object({ id: z.string(), model: z.string(), effort: z.string() });
 
-const projectionRepositorySchema = z.object({ id: z.string(), path: z.string() });
+const projectionRepositorySchema = z.object({
+  id: z.string(),
+  path: z.string(),
+  github: z.string().optional(),
+});
 
 const projectionConfigSchema = z.object({
   tasks: z.array(projectionTaskSchema),
@@ -100,6 +104,7 @@ export function decodeRunConfig(snapshot: unknown): TevuResult<RunConfigRecord, 
       repositories: data.repositories.map((repository) => ({
         id: repository.id,
         path: repository.path,
+        ...(repository.github === undefined ? {} : { github: repository.github }),
       })),
     },
   };

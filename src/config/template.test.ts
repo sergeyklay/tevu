@@ -53,17 +53,23 @@ describe('CONFIG_TEMPLATE', () => {
     expect(CONFIG_TEMPLATE.endsWith('\n\n')).toBe(false);
   });
 
-  it('enables exactly twenty-eight commented-out key lines', () => {
+  it('enables exactly twenty-nine commented-out key lines', () => {
     const enabledCount = CONFIG_TEMPLATE.split('\n').filter((line) =>
       OPTIONAL_LINE_PATTERN.test(line),
     ).length;
 
-    expect(enabledCount).toBe(28);
+    expect(enabledCount).toBe(29);
   });
 
   it('declares roles.criteria before roles.grader', () => {
     expect(CONFIG_TEMPLATE.indexOf('  criteria:')).toBeLessThan(
       CONFIG_TEMPLATE.indexOf('  grader:'),
+    );
+  });
+
+  it('declares roles.summary after roles.grader', () => {
+    expect(CONFIG_TEMPLATE.indexOf('  grader:')).toBeLessThan(
+      CONFIG_TEMPLATE.indexOf('  summary:'),
     );
   });
 

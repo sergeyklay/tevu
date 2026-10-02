@@ -752,6 +752,15 @@ function createHarness(config: TevuConfig) {
     async writeReport() {
       return { ok: true, value: undefined };
     },
+    async readConclusions() {
+      return { ok: true, value: null };
+    },
+    async writeConclusions() {
+      return { ok: true, value: undefined };
+    },
+    async writeSummary() {
+      return { ok: true, value: undefined };
+    },
     async readRunManifest() {
       return { ok: true, value: buildRunManifest() };
     },
@@ -1229,6 +1238,20 @@ describe('planBenchmark', () => {
       const plan = planBenchmark(config, CONFIG_PATH, {
         models: { c1: { status: 'verified' }, c2: { status: 'verified' } },
         roles: { criteria: unsupported },
+      });
+
+      expect(plan.efforts).toEqual({
+        models: { c1: { status: 'verified' }, c2: { status: 'verified' } },
+        grader: null,
+      });
+    });
+
+    it('leaves the summary check out of the plan', () => {
+      const config = buildTevuConfig();
+
+      const plan = planBenchmark(config, CONFIG_PATH, {
+        models: { c1: { status: 'verified' }, c2: { status: 'verified' } },
+        roles: { summary: unsupported },
       });
 
       expect(plan.efforts).toEqual({

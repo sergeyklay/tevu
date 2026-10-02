@@ -37,7 +37,7 @@ The `tevu task add` setup interview does this for you when it finds the provider
 
 tevu reports cost only as the agent measures it, and never derives cost from token counts or model names. An agent that has no price for a model reports a cost of zero. When tevu can tell that no price stands behind that zero, it shows the cost as unavailable rather than as free, both for a case and for the grader; what tevu can tell depends on the agent. Tokens, time, and outcomes are still reported. The rule is in [Metrics](../reference/results.md#metrics).
 
-So the price of every model you compare, and of the grader's model, has to be known to the agent. Where you set it depends on the agent.
+So the price of every model you compare, and of the grader's and the summary model, has to be known to the agent. Where you set it depends on the agent.
 
 ### OpenCode
 

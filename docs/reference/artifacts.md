@@ -7,8 +7,10 @@ The files a run writes under `run.output_dir`, the fields they record, and how `
 ```text
 <run-id>/
   run.json
+  conclusions.json
   result.json
   report.md
+  summary.md
   cases/<task-id>--<model-id>--<attempt>/
     events.jsonl
     stderr.log
@@ -29,8 +31,10 @@ Some files are absent when the evidence was unavailable. Their absence is record
 | File | Contents |
 | --- | --- |
 | `run.json` | Run identity, configuration snapshot, `configPath` (the absolute path of the file the run read), tool information, per-agent capability reports, `execution.repeat` (`value`, and `source`: `config` or `cli`), `execution.caseTimeoutMs`, case records, and findings. See [Run manifest](#run-manifest) |
-| Root `result.json` | Normalized report data: a `models` array of `{id, model, effort}` per configured model entry, and `pairs`, one [pair summary](results.md#pair-summary) per task and model entry pair |
+| `conclusions.json` | A source artifact written once, by `tevu run`: per task, the facts of the [run summary](results.md#run-summary), the rows of its comparison table, its three conclusions, and `call`. `call` is `null` when no summary call was made, and otherwise records the model role, the outcome (`accepted` with the reply, `rejected` with the reply and the reason, or `no-reply` with the reason), and the call's usage and cost. Absent for a run cancelled during its cases |
+| Root `result.json` | Normalized report data: a `models` array of `{id, model, effort}` per configured model entry, and `pairs`, one [pair summary](results.md#pair-summary) per task and model entry pair. A repository record carries `github`, as written, for a GitHub entry |
 | `report.md` | Human-readable comparison with links to evidence |
+| `summary.md` | The [run summary](results.md#run-summary): a short comparison per task for a reader who has not seen the configuration, derived from the saved `conclusions.json`, with one link, to `report.md` |
 | `events.jsonl` | Raw agent event records, one JSON value per line. Only the case's agent adapter interprets them |
 | `stderr.log` | Process diagnostics, including non-JSON run output |
 | `session.json` | Raw root-session export. Only the case's agent adapter interprets it |
@@ -87,13 +91,15 @@ A command that fails, times out, or does not start ends the case with lifecycle 
 
 ## Data handling
 
-Configured credential values are redacted before persistent or terminal output. Environment metadata records variable names and classifications (fixed, secret, or ordinary) rather than values. Private task text, repository content, model output, and check evidence stay in the configuration and run files. Host permissions govern access. A failed redaction aborts the affected write.
+Configured credential values are redacted before persistent or terminal output. Environment metadata records variable names and classifications (fixed, secret, or ordinary) rather than values. Private task text, repository content, model output, and check evidence stay in the configuration and run files. Host permissions govern access. A failed redaction aborts the affected write, including the write of `conclusions.json` and `summary.md`, which pass through the same redaction as `report.md`.
 
 Artifacts remain until the operator deletes the run directory. There is no automatic retention and no upload.
 
 ## Regeneration
 
-`tevu report <run-id>` recomputes normalized results and Markdown from saved evidence, saved grades, and current assessments. It resolves each case's metrics through the adapter registered under that case's `agent`, from that agent's `tools.copiedProviders`. It reads a case's `grading.json` only when the case's `artifacts.grading` is set. It never calls the grader, starts a model session, or contacts Git or an issue tracker. Unchanged source artifacts produce identical regenerated JSON and Markdown.
+`tevu report <run-id>` recomputes normalized results and Markdown from saved evidence, saved grades, and current assessments, and renders `summary.md` from the saved `conclusions.json`. It resolves each case's metrics through the adapter registered under that case's `agent`, from that agent's `tools.copiedProviders`. It reads a case's `grading.json` only when the case's `artifacts.grading` is set. It never calls the grader, starts a model session, or contacts Git or an issue tracker. Unchanged source artifacts produce identical regenerated JSON and Markdown, `summary.md` included.
+
+`tevu assess` rebuilds `result.json` and `report.md` but changes neither `conclusions.json` nor `summary.md`: the summary is written once, at the end of `tevu run`. A run without `conclusions.json` renders its summary from the facts derived from the saved artifacts, with template sentences. A malformed `conclusions.json`, including one with a malformed `call`, is refused with an error that names the file; delete it to make `tevu report` use template sentences.
 
 `tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. They refuse a run that lacks any of:
 

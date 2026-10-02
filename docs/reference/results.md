@@ -4,7 +4,7 @@ How a run's cases are identified and named, the outcome values, how the report w
 
 ## Cases
 
-A run holds n cases for each task and model entry pair, where n is the effective repeat: `run.repeat`, or `--repeat` for that run. A case ID is `<task-id>--<model-id>--<attempt>`. Attempts are numbered from 1 even when n is 1. The report compares cases per task, opening with a [comparison table](#comparison-table) for each task, and summarizes each pair's attempts. It selects no winner and calculates no combined score.
+A run holds n cases for each task and model entry pair, where n is the effective repeat: `run.repeat`, or `--repeat` for that run. A case ID is `<task-id>--<model-id>--<attempt>`. Attempts are numbered from 1 even when n is 1. The report compares cases per task, opening with a [comparison table](#comparison-table) for each task, and summarizes each pair's attempts. It names no overall winner and calculates no combined score.
 
 A case's effort is the configured string, whether or not the model has a variant of that name. When the effort is `unverified` or `unsupported`, the case may have run the model with its default options, and `report.md` marks the effort of every model entry, the grader, and each case with its status. See [Effort check](agents-and-models.md#effort-check).
 
@@ -15,23 +15,34 @@ A case's effort is the configured string, whether or not the model has a variant
 | Name | Rule | Example |
 | --- | --- | --- |
 | Task name | The task `title`, each run of whitespace collapsed to one space | `Fix the login redirect` |
-| Setting name | `<model>, <effort>` of the model entry, both as configured | `openai/model-a, high` |
-| Attempt name | The setting name. When the effective repeat is above 1, `, attempt <n>` follows | `openai/model-a, high, attempt 2` |
-| Case name | `<attempt name> on "<task name>"` | `openai/model-a, high on "Fix the login redirect"` |
+| Setting name | `<display model>, <effort>` of the model entry, with the effort as configured | `model-a, high` |
+| Attempt name | The setting name. When the effective repeat is above 1, `, attempt <n>` follows | `model-a, high, attempt 2` |
+| Case name | `<attempt name> on "<task name>"` | `model-a, high on "Fix the login redirect"` |
 | Check name | The check `description`, collapsed like a title. When nothing is left, `Acceptance check <n>` or `Definition of Done check <n>`, n being its position in that list | `Definition of Done check 2` |
+
+The display model is the `model` of the entry without its provider prefix: the text after the last `/`. An entry keeps its full `model` when that text is empty, or when another entry of the run has a different `model` with the same text, so two settings never read as one model.
+
+| `model` of the run's entries | Display models |
+| --- | --- |
+| `litellm/openai/model-a`, `anthropic/model-b` | `model-a`, `model-b` |
+| `openai/model-a` at effort `low`, `openai/model-a` at effort `high` | `model-a`, `model-a` |
+| `openai/model-a`, `azure/model-a` | `openai/model-a`, `azure/model-a` |
+| `litellm/openai/model-a`, `openai/model-a` | `litellm/openai/model-a`, `openai/model-a` |
+
+The full `model` stays in the `Model:` line of a case section, in the grader lines, in `tevu run --dry-run`, and in `run.json` and `result.json`.
 
 Names that would be identical are told apart:
 
 - Tasks that share a task name, and checks of one task that share a check name, each get ` (<k>)` appended, k being the position among them in configuration order.
-- Model entries that share both a model and an effort each get `, <agent>` after the effort, for example `openai/model-a, high, opencode`. Entries that still share a setting name, because they also share an agent, each get ` (<k>)` appended after that, k being the position among them in configuration order.
-- The Model column of the comparison table carries the same addition after the model: `openai/model-a, opencode`.
+- Model entries that share both a model and an effort each get `, <agent>` after the effort, for example `model-a, high, opencode`. Entries that still share a setting name, because they also share an agent, each get ` (<k>)` appended after that, k being the position among them in configuration order.
+- The Model column of the comparison table carries the same addition after the display model: `model-a, opencode`.
 - An attempt name and a case name carry the setting name with its addition.
 
 A configuration ID or case ID appears in the report only in an inline code span, after `Technical detail:`, in a link destination or an HTML anchor, or inside text you wrote or a model wrote, such as a task title or description, a check description, a model or effort string, a grade rationale, an assessor, or a note. tevu never strips IDs from that text.
 
 ### Case sections
 
-Each case that has a saved result has a section in `report.md`, preceded by an HTML anchor line that the Model and Attempt links point to and headed by its attempt name. The section holds, in order:
+Each case that has a saved result has a section in `report.md`, preceded by an HTML anchor line that the Attempt links of the task section's case table point to and headed by its attempt name. The section holds, in order:
 
 - the outcome with its required checks, the model with its effort, and how the agent process ended;
 - one paragraph per statement that explains the attempt, as described in [Messages](#messages), and, when the attempt completed, has manual or graded checks, and none of them waits for a verdict, the `tevu assess <run-id> <case-id>` command to record or replace verdicts;
@@ -71,13 +82,13 @@ An attempt with no case result, such as one still queued when the run was cancel
 
 ## Comparison table
 
-`report.md` opens with one comparison block per task, directly under the title and ahead of the run parameters and every task section. The blocks follow the task ID order of the task sections. Each block has a `## Comparison: <task name>` heading, with the task's plain name from [Names](#names), a table, an optional [note about outcomes that do not separate the settings](#outcomes-that-do-not-separate-the-settings), an optional grader line, and an optional list of numbered footnotes. The task sections, pair summaries, case tables, and case sections follow unchanged, as the detail to open when a row raises a question.
+`report.md` opens with one comparison block per task, directly under the title and ahead of the run parameters and every task section. The blocks follow the task ID order of the task sections. Each block has a `## Comparison: <task name>` heading, with the task's plain name from [Names](#names), a table, an optional [note about outcomes that do not separate the settings](#outcomes-that-do-not-separate-the-settings), an optional grader line, an optional summary-model line, and an optional list of numbered footnotes. The task sections, pair summaries, case tables, and case sections follow unchanged, as the detail to open when a row raises a question.
 
-The table has one row per model entry, in the order of the `models` list in the configuration. The order is not a ranking: no row is sorted by an outcome, check, or metric, and tevu computes no composite score and names no winner.
+The table has one row per model entry, in the order of the `models` list in the configuration. The order is not a ranking: no row is sorted by an outcome, check, or metric, and tevu computes no composite score and names no overall winner.
 
 | Column | Contents |
 | --- | --- |
-| Model | The model of the entry, with the addition of [Names](#names) when entries share a model and an effort, linked to the case section of its first attempt that has a case result |
+| Model | The display model of the entry, with the addition of [Names](#names) when entries share a model and an effort, as plain text |
 | Effort | The configured effort with its status, as in the case table, for example `high, unverified` |
 | Outcome | The pair's outcome, or the count of attempts per outcome when n is above 1, followed by footnote markers for an attempt that did not finish its checks or whose checks wait for a verdict |
 | Required checks | Passed required checks over required checks, counted across all attempts, with failed, pending, and not-run checks counted apart, for example `1/6 passed, 5 pending` |
@@ -100,7 +111,7 @@ An unavailable value appears as `-` followed by a footnote marker such as `[1]`,
 
 Each footnote names one attempt: it reads `<attempt name>: <statement>`. Footnotes are numbered from 1 in each block in the order the cells use them, row by row and from left to right, then the grader line. Within one cell, statements follow the order of the attempts. Footnotes with the same text share one number. A cell lists its distinct markers in ascending order, one space apart, for example `1/3 passed, 2 pending [1] [2]`.
 
-An attempt with no case result, such as one still queued when the run was cancelled, has no values. Every cell that would hold one carries the no-result footnote, and the pair counts the attempt as `not-evaluated`. A row with no case result at all shows its model as plain text, because no case section exists to link to.
+An attempt with no case result, such as one still queued when the run was cancelled, has no values. Every cell that would hold one carries the no-result footnote, and the pair counts the attempt as `not-evaluated`.
 
 With n above 1, a row aggregates the pair's attempts:
 
@@ -119,6 +130,8 @@ With n above 1, a row aggregates the pair's attempts:
 - Runtime failure counts attempts per label, for example `1/3 agent process failed`, in alphabetical order of the labels, and reads `none` when no attempt had a failure. The markers of the attempts' failure statements follow, and so does the marker of an attempt with no case result.
 
 When a task has gradings, a line under the table totals the grader's usage and cost for the task: `Grading model total for this task, not added to any row: <c> calls` (`1 call` for one), where c counts every grader call of the task's gradings, then `, <m> without a verdict` when m of those calls ended without a reply, then input, cache read, cache write, output, and reasoning tokens, and cost. Each total sums the grading metrics and follows the same unavailable rules as a cell. A grading with a measurement gap contributes its footnote to every total it lacks. A task whose only grading made no call reads `0 calls`. Grader usage never enters a row; rows read only the case's own metrics.
+
+When the task's saved conclusions record a [summary call](#the-summary-model), one more line follows the table, the note, and the grader line, and precedes the footnotes: `Summary model for this task, not added to any row: <model> (effort <effort>, agent <agent>), <status>, input <v>, cache read <v>, cache write <v>, output <v>, reasoning <v>, cost <v>.` The effort is printed as configured, without a check status. The status reads `its sentences are in the summary` when tevu accepted the model's sentences, and otherwise `its sentences are not in the summary` followed by a footnote marker. That footnote reads `Summary model: <statement>`, and the statement follows the three parts of [Messages](#messages): the summary states each conclusion in a template sentence built from the facts of the run; either tevu rejected the model's sentences because they did not match the facts, with the reason of the first rule they broke as technical detail, or the model returned no sentences, with the cause as technical detail and a next step to fix it before the next run. Each value uses the formats of the grader line, and an unavailable value is `-` with a footnote marker, as there. The markers of this line number after those of the grader line, the status first, then the values from left to right. These values never enter a row, a grader total, the terminal summary, or `summary.md`.
 
 ### Outcomes that do not separate the settings
 
@@ -145,7 +158,93 @@ The second part says that the outcomes cannot tell the settings apart on this ta
 
 The third part names what would tell the settings apart. When every attempt passed, it suggests more attempts with `run.repeat` or `--repeat`, a harder task, or checks that capture more of what a good solution does. When every attempt failed, it suggests more attempts, an easier task, or confirming in the attempt sections that a correct solution can pass the failed checks.
 
-The note is informational. Tevu still computes no composite score and names no winner, and the note ranks no setting. `tevu assess` and `tevu report` rebuild the note from the saved case results and the current assessments, so recording a verdict adds, keeps, or removes it, and unchanged artifacts give the same text.
+The note is informational. Tevu still computes no composite score and names no overall winner, and the note ranks no setting. `tevu assess` and `tevu report` rebuild the note from the saved case results and the current assessments, so recording a verdict adds, keeps, or removes it, and unchanged artifacts give the same text.
+
+## Run summary
+
+`tevu run` ends by writing `summary.md` next to `report.md`: a file short enough to read on one screen, for a reader who has never seen the configuration. `report.md` stays the detailed evidence, and `summary.md` holds one link, to `report.md`.
+
+The file has one block per task, in task ID order, and the details line once after the last block:
+
+```markdown
+# Model comparison summary
+
+## <task name>
+
+<context line>
+
+| Model | Effort | Outcome | Required checks | Elapsed | Cost |
+|---|---|---|---|---|---|
+| <model> | <effort> | <outcome> | <required checks> | <elapsed> | <cost> |
+
+- **Correctness:** <conclusion>
+- **Cost:** <conclusion>
+- **Speed:** <conclusion>
+- <one sentence per setting that dropped out>
+
+Details of every attempt, check, and measurement: [report.md](report.md)
+```
+
+- The context line reads `Compared <n> model settings on this task in <repository>, with <r> attempts each, on <date> at <hh:mm> UTC.` The repository is `<owner>/<repo>` for a GitHub entry, or the last segment of the path of a local one, and is left out when the run's saved configuration has no record of it. The time is the run's start time. With more than one attempt, `Times and costs are medians of the attempts that measured them.` follows.
+- The table has every column of the [comparison table](#comparison-table), with the same row order, [names](#names), cells, and outcome words, but without footnote markers. A value that no attempt reported reads `unknown`, and a value that only k of the n attempts reported keeps its `(k/n)` count.
+- Every name and sentence is escaped, so the details line holds the file's only link. The file has no anchor, footnote marker, case ID, file path, or error kind.
+
+### Facts
+
+The conclusions state facts that tevu derives from the saved outcomes and measurements by fixed rules. Each aspect is judged on its own, and no rule weighs one aspect against another.
+
+- A setting did the task when every planned attempt of it passed.
+- An attempt dropped out when it timed out (lifecycle `timed-out`), failed to run (no case result, or lifecycle `process-failed`, `infrastructure-failed`, or `cancelled`), or is waiting (outcome `pending`). The sentence for a failed-to-run attempt names its [runtime failure label](#runtime-failure-labels), `no result was saved` when the attempt has none, `cancelled` for a cancellation without a failure, and `tevu error` otherwise.
+- The cost and time of a setting are the lower median of the attempts that reported them, as in the [comparison table](#comparison-table). A value is unknown when no attempt reported it.
+- Cheapest and fastest are chosen only among the settings that did the task, and a leader needs a known value for at least two of them. Values are compared as displayed, so two settings that show the same text tie. Without two known values, the summary says which settings have an unknown value and names no leader. When no setting did the task, it says so.
+- The margin states how much lower the leader's value is than the next one. A ratio of 2 or more reads `about <r> times less` for cost and `about <r> times faster` for time. A smaller one reads as a percentage, `<p>% less` or `<p>% less time`, and is left out when it rounds below 1%. A margin against a leader whose value is exactly zero is left out.
+- A leader or tie whose comparison has a setting with an unknown value, or a value that only some attempts reported, adds a sentence that says the comparison is incomplete and names those settings.
+
+A cost of `$0.0000` can be a free model or a model the agent has no price for, so when a setting that did the task shows it, the Cost line adds `A cost of $0.0000 can also mean the agent had no price for the model.`
+
+### Template sentences
+
+Each conclusion is a sentence built from the facts. These are the sentences `summary.md` holds when no model reworded them.
+
+| Aspect | Sentence |
+| --- | --- |
+| Correctness, every setting did the task | `Every model setting did the task: each passed all <n> required checks.` With [outcomes that do not separate the settings](#outcomes-that-do-not-separate-the-settings), the second sentence of that note follows |
+| Correctness, some did | `<d> of <s> model settings did the task, passing all <n> required checks: <settings>.` Then `The other did not: <entries>.` or `The others did not: <entries>.`, with one entry per setting as `<setting> passed <p> of <t> required checks` (or `<setting> passed <a> of <k> attempts and <p> of <t> required checks` for more than one attempt) |
+| Correctness, none did | `No model setting did the task: <entries>.` With every attempt failed and no pending verdict, the second sentence of the separation note follows |
+| Cost, one leader | `<setting> was cheapest: <value> against <next value><margin>.` |
+| Speed, one leader | `<setting> was fastest: <value> against <next value><margin>.` |
+| Cost or speed, tie | `The lowest cost was a tie at <value> each, against <next value> for the next setting<margin>: <settings>.` For speed, `The shortest time was a tie ...` |
+| Cost or speed, one setting did the task | `<setting> was the only model setting that did the task; its cost was <value>.` For speed, `it took <value>` |
+| Cost or speed, no leader | `No model setting did the task, so no cheapest setting is named.`, or `The cheapest model setting cannot be named: the cost is unknown for <settings>.` The speed sentences say `fastest` and `time` |
+
+When some settings did not do the task, a cost or speed sentence opens with `Among the settings that did the task,`. A dropout sentence reads `<setting> dropped out: <phrase>.` for one attempt, with the phrase `it did not finish within its time limit`, `it failed to run (<label>)`, or `it had required checks still waiting for a verdict when the run ended`. With more attempts it reads `<setting> dropped out of <d> of <n> attempts: <parts>.`, one part per class in that order, such as `1 did not finish within the time limit; 1 failed to run (agent process failed)`.
+
+### The summary model
+
+When the configuration declares [`roles.summary`](agents-and-models.md#model-roles), `tevu run` asks that model once per task, after every case is final, to reword the three conclusions. Nothing is printed while a call runs, and each call ends within `run.timeout`. A call is never retried, and no later command makes one.
+
+The prompt carries these parts, in this order: instructions, the exact setting names, the facts of the task as JSON without the repository and the date and without each setting's model and effort, the template sentences, the grader's saved rationales for the task as data, and the reply shape. It never carries the task prompt or description, a check ID, a case ID, a run ID, a repository, a path, a date, or the configuration. The model replies with one JSON object: for each aspect, the settings it treats as leaders and its text.
+
+tevu accepts the reply only when it is valid and every aspect passes these rules, checked per aspect in the order correctness, cost, speed:
+
+1. The reply is a JSON object with exactly the three aspects, each with a list of distinct leaders and a text.
+2. The text is one paragraph that ends in `.`, `!`, or `?`.
+3. The text has one or two sentences.
+4. The text holds no Markdown, link, address, code, slash, or `@`. Names of settings and of the task, which the check sets aside first, may hold any of them.
+5. The text holds no case ID, and no configuration ID as a whole word, except an ID that is itself a whole word of a task, setting, or check name.
+6. The text holds no internal error name such as `ModelCallError`.
+7. Every number in the text is one the facts or the template sentences write, and no number is spelled out, as `two`, `half`, or `percent`.
+8. The text names no model except inside an exact setting name.
+9. The leaders it declares are exactly the leaders the facts name: for correctness, the settings that did the task; for cost and speed, the leaders of the comparison.
+10. The text names its leaders as the facts do: with no leader, it holds the first template sentence of the aspect; when every setting leads, it names none or all of them; otherwise it names every leader and a leader first.
+
+A reply that breaks one rule is rejected as a whole. The saved conclusions are then the template sentences of all three aspects, and `conclusions.json` keeps the reply and the reason. The same happens without `roles.summary`, when the call fails, and when the prompt cannot be redacted, in which case tevu makes no call. A cancellation during the calls skips every remaining call: those tasks save template sentences with no call, and the command finishes its writes and keeps the exit code it would have returned without the cancellation. A failed or rejected call prints nothing and changes no exit code; the `Summary model` footnote of `report.md` says what happened.
+
+The call's usage and cost are saved in `conclusions.json` and shown only in the summary-model line of `report.md`. They never enter a row, a grader total, or `summary.md`.
+
+### Saving and regenerating
+
+`tevu run` saves the facts and the three conclusions of every task, with the summary call when there was one, in `conclusions.json` once, before it writes `report.md` and `summary.md`, and writes `summary.md` from them. The summary is final: `tevu assess` neither writes `conclusions.json` nor changes `summary.md`, so a verdict recorded later shows in `report.md` and not in the summary. `tevu report` renders `summary.md` from the saved entries, offline and without a model call, and unchanged artifacts give the same bytes. A task with no saved entry, such as one of a run cancelled during its cases, renders the facts derived from the saved artifacts with the template sentences. A malformed `conclusions.json` is refused; deleting it makes `tevu report` use template sentences.
 
 ## Messages
 
@@ -243,3 +342,4 @@ Scope:
 - Model metrics cover the root session only, not a total across child sessions.
 - Elapsed time covers the case's agent process. Acceptance-command results are check verdicts, not model-quality metrics. Repository setup time and output enter no metric.
 - The grader's usage and cost are saved per case in `grading.json`, per call and summed over the case's calls, and the sum is rendered as `Grader metrics` in the report. A metric that any call lacks is unavailable for the sum, never a partial total; `grading.json` keeps each call's own values. They are never added to the case's own metrics. Each comparison block totals them for its task on one line, apart from the rows.
+- A summary call's usage and cost are saved per task in `conclusions.json` and shown in the [summary-model line](#comparison-table) of `report.md`. They never enter a row, a grader total, the terminal summary, or `summary.md`.

@@ -320,7 +320,7 @@ function checkModelsListed(
     }
   }
   const hasGradedCheck = config.tasks.some((task) => gradedChecksOf(task).length > 0);
-  for (const roleName of ['criteria', 'grader'] as const) {
+  for (const roleName of ['criteria', 'grader', 'summary'] as const) {
     const role = config.roles?.[roleName];
     if (role === undefined || role.agent !== name || listed.has(role.model)) {
       continue;

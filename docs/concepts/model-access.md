@@ -14,7 +14,7 @@ The copy is readable by the agent, on disk, in the agent's own home. It is conte
 
 ## Model calls get no task repository
 
-Drafting acceptance criteria and grading a solution are one-shot model calls. They reuse the same agent adapter and the same private environment shape as a case agent, and differ in what they do not get.
+Drafting acceptance criteria, grading a solution, and writing the conclusions of the run summary are one-shot model calls. They reuse the same agent adapter and the same private environment shape as a case agent, and differ in what they do not get.
 
 A model call's working directory is an empty Git repository, not a case's sealed worktree. No configured repository or commit reaches it. That keeps two kinds of contamination out:
 
@@ -23,8 +23,10 @@ A model call's working directory is an empty Git repository, not a case's sealed
 
 The prompts are narrow for the same reason. A grader sees the task text, the graded criteria, and the solution patch. It never sees a reference solution, a case ID, a run ID, or which model entry produced the patch, so its verdict cannot depend on who wrote the solution. A criteria draft sees the task text and the reference solution's changes, and tevu adds no identifying metadata to it. The exact contents are in [Model calls](../reference/agents-and-models.md#model-calls).
 
-A model call also gets no tools. tevu sets OpenCode's `OPENCODE_PERMISSION` to `{"*":"deny"}` for the `run` process of every drafting and grading call, so the model is offered none. A grader that could call a tool could read or change files on the host, and a call that ends in a tool call produces no reply, so it grades nothing. tevu replaces any `OPENCODE_PERMISSION` you pass through the agent block's `env` for model calls only; case agents keep it. Configuration outside tevu can still allow a tool, which tevu detects only after the call. See [Where isolation stops](isolation.md#where-isolation-stops).
+The summary call sees even less. Its prompt carries the exact names of the model settings, the facts tevu derived from the saved outcomes and measurements, the template sentences, and the grader's rationales as data. It omits the task text, every ID, the repository, the date, and the configuration, so the model can reword a comparison but has nothing to change it with, and tevu rejects a reply that names a number, setting, or leader the facts do not hold.
+
+A model call also gets no tools. tevu sets OpenCode's `OPENCODE_PERMISSION` to `{"*":"deny"}` for the `run` process of every drafting, grading, and summary call, so the model is offered none. A grader that could call a tool could read or change files on the host, and a call that ends in a tool call produces no reply, so it grades nothing. tevu replaces any `OPENCODE_PERMISSION` you pass through the agent block's `env` for model calls only; case agents keep it. Configuration outside tevu can still allow a tool, which tevu detects only after the call. See [Where isolation stops](isolation.md#where-isolation-stops).
 
 A model call runs no check, so it gets no evaluator environment, and its directory is removed when the call ends.
 
-Grading and drafting are separate roles, configured separately, because a model that grades or drafts for its own family can favor solutions shaped like its own. tevu allows the same model in both places and prints a note in the report when that happens. Choosing different families is your decision to make.
+Grading, drafting, and summarizing are separate roles, configured separately, because a model that grades or drafts for its own family can favor solutions shaped like its own. tevu allows the same model in both places and prints a note in the report when that happens. Choosing different families is your decision to make.

@@ -480,7 +480,11 @@ function buildModelResolutionConfig(options: {
   baseCommit: string;
   outputDirectory: string;
   models: Array<{ id: string; model: `${string}/${string}`; effort?: string }>;
-  roles?: { criteria?: `${string}/${string}`; grader?: `${string}/${string}` };
+  roles?: {
+    criteria?: `${string}/${string}`;
+    grader?: `${string}/${string}`;
+    summary?: `${string}/${string}`;
+  };
   roleEffort?: string;
   gradedCheck?: boolean;
 }): TevuConfig {
@@ -519,6 +523,15 @@ function buildModelResolutionConfig(options: {
                   grader: {
                     agent: 'opencode',
                     model: options.roles.grader,
+                    effort: options.roleEffort ?? 'high',
+                  },
+                }),
+            ...(options.roles.summary === undefined
+              ? {}
+              : {
+                  summary: {
+                    agent: 'opencode',
+                    model: options.roles.summary,
                     effort: options.roleEffort ?? 'high',
                   },
                 }),
@@ -692,6 +705,47 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
       expect.objectContaining({ severity: 'error', identifier: 'roles.grader.model' }),
     );
     expect(outcome.value.valid).toBe(false);
+  });
+
+  it('reports an unlisted summary model as a warning even when a task declares a graded check', async () => {
+    const repositoryPath = join(workspace, 'repo');
+    const baseCommit = await createSourceRepository(repositoryPath);
+    const agentScript = join(workspace, 'agent-ok.sh');
+    await writeExecutable(agentScript, shellScript('exit 0\n'));
+    const config = buildModelResolutionConfig({
+      agentCommand: agentScript,
+      repositoryPath,
+      baseCommit,
+      outputDirectory: join(workspace, 'artifacts'),
+      models: [
+        { id: 'alpha', model: 'acme/model-a' },
+        { id: 'beta', model: 'acme/model-b' },
+      ],
+      roles: { grader: 'acme/model-a', summary: 'acme/model-missing-summary' },
+      gradedCheck: true,
+    });
+    const { adapter } = buildFakeAgentAdapter({
+      readProviders: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          agent: 'opencode',
+          configurationFiles: acmeConfigurationFiles(),
+          findings: [],
+          copiedProviders: [],
+        },
+      })),
+      listModels: buildDependentListModels(['acme/model-a', 'acme/model-b']),
+    });
+
+    const outcome = await validateConfig(config, buildDependencies(adapter));
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.findings).toContainEqual(
+      expect.objectContaining({ severity: 'warning', identifier: 'roles.summary.model' }),
+    );
+    expect(outcome.value.findings.filter((finding) => finding.severity === 'error')).toEqual([]);
+    expect(outcome.value.valid).toBe(true);
   });
 
   it('stays valid on a provider snapshot carrying only a P-NOKEY warning', async () => {
@@ -887,7 +941,11 @@ describe('validateConfig effort check', () => {
     listModels: AgentAdapter['listModels'];
     baseFiles?: readonly string[];
     configurationEntries?: readonly string[];
-    roles?: { criteria?: `${string}/${string}`; grader?: `${string}/${string}` };
+    roles?: {
+      criteria?: `${string}/${string}`;
+      grader?: `${string}/${string}`;
+      summary?: `${string}/${string}`;
+    };
     roleEffort?: string;
     gradedCheck?: boolean;
   }) {
@@ -1051,6 +1109,21 @@ describe('validateConfig effort check', () => {
       expect.objectContaining({ severity: 'error', identifier: 'roles.grader.effort' }),
     ]);
     expect(report.efforts.roles.grader?.status).toBe('unsupported');
+  });
+
+  it('only warns for a summary effort outside the reported variants', async () => {
+    const { report } = await validateEfforts({
+      efforts: ['high', 'low'],
+      listModels: listVariants(['high', 'low']),
+      roles: { summary: VARIANT_MODEL },
+      roleEffort: 'hihg',
+    });
+
+    expect(report.valid).toBe(true);
+    expect(effortFindings(report.findings)).toEqual([
+      expect.objectContaining({ severity: 'warning', identifier: 'roles.summary.effort' }),
+    ]);
+    expect(report.efforts.roles.summary?.status).toBe('unsupported');
   });
 
   it('only warns for a criteria effort outside the reported variants', async () => {

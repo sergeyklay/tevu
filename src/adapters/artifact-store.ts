@@ -29,6 +29,7 @@ import type {
   CaseGrading,
   CaseResult,
   CheckResult,
+  ConclusionsArtifact,
   ConfigReadCause,
   ConfigStore,
   GradingArtifact,
@@ -94,6 +95,8 @@ const CASE_FILE = {
 
 const RUN_MANIFEST_FILE = 'run.json';
 const REPORT_FILE = 'report.md';
+const SUMMARY_FILE = 'summary.md';
+const CONCLUSIONS_FILE = 'conclusions.json';
 const CASES_DIRECTORY = 'cases';
 const ASSESSMENT_LOCK_DIRECTORY = 'assessment.lock';
 
@@ -663,6 +666,83 @@ class FileArtifactStore implements ArtifactStore {
     return this.writeTextFile(
       operation,
       path.join(runDirectory.value, REPORT_FILE),
+      redacted.value,
+    );
+  }
+
+  async readConclusions(
+    runId: string,
+  ): Promise<TevuResult<ConclusionsArtifact | null, 'ArtifactError'>> {
+    const operation = 'read-conclusions';
+    const runDirectory = this.resolveRunDirectory(operation, runId);
+    if (!runDirectory.ok) {
+      return runDirectory;
+    }
+    let text: string;
+    try {
+      text = await fs.readFile(path.join(runDirectory.value, CONCLUSIONS_FILE), 'utf8');
+    } catch (cause) {
+      if (systemErrorCode(cause) === 'ENOENT') {
+        // A run has no conclusions until `tevu run` writes them, and a cancelled run may never.
+        return { ok: true, value: null };
+      }
+      return artifactFailure(
+        operation,
+        `cannot read ${CONCLUSIONS_FILE} of run "${runId}": ${describeCause(cause)}`,
+      );
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return artifactFailure(
+        operation,
+        `${describeMalformedConclusions(runId)}: it is not valid JSON`,
+      );
+    }
+    const defect = describeConclusionsDefect(value, runId);
+    if (defect !== null) {
+      return artifactFailure(operation, defect);
+    }
+    return { ok: true, value: value as ConclusionsArtifact };
+  }
+
+  async writeConclusions(
+    artifact: ConclusionsArtifact,
+  ): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'write-conclusions';
+    const runDirectory = this.resolveRunDirectory(operation, artifact.runId);
+    if (!runDirectory.ok) {
+      return runDirectory;
+    }
+    const defect = describeConclusionsDefect(artifact, artifact.runId);
+    if (defect !== null) {
+      return artifactFailure(operation, defect);
+    }
+    const present = await directoryExists(runDirectory.value);
+    if (!present) {
+      return artifactFailure(operation, `run directory for "${artifact.runId}" does not exist`);
+    }
+    return this.writeJsonSink(operation, runDirectory.value, CONCLUSIONS_FILE, artifact);
+  }
+
+  async writeSummary(runId: string, markdown: string): Promise<TevuResult<void, 'ArtifactError'>> {
+    const operation = 'write-summary';
+    const runDirectory = this.resolveRunDirectory(operation, runId);
+    if (!runDirectory.ok) {
+      return runDirectory;
+    }
+    const present = await directoryExists(runDirectory.value);
+    if (!present) {
+      return artifactFailure(operation, `run directory for "${runId}" does not exist`);
+    }
+    const redacted = redactForSink(this.redact, operation, markdown);
+    if (!redacted.ok) {
+      return redacted;
+    }
+    return this.writeTextFile(
+      operation,
+      path.join(runDirectory.value, SUMMARY_FILE),
       redacted.value,
     );
   }
@@ -1533,6 +1613,188 @@ function describeGradingDefect(value: unknown, runId: string, caseId: string): s
     return malformed;
   }
   return null;
+}
+
+function describeMalformedConclusions(runId: string): string {
+  return `${CONCLUSIONS_FILE} of run "${runId}" is malformed; delete it to make the summary use template sentences`;
+}
+
+function describeConclusionsDefect(value: unknown, runId: string): string | null {
+  if (
+    !isRecord(value) ||
+    value['schemaVersion'] !== 1 ||
+    value['runId'] !== runId ||
+    !Array.isArray(value['tasks']) ||
+    !value['tasks'].every(isTaskConclusions)
+  ) {
+    return `${describeMalformedConclusions(runId)}: it has a malformed shape or mismatched identity`;
+  }
+  return null;
+}
+
+/** Holds for a decoded summary call: a resolved role, one of the three outcomes, and agent metrics. */
+function isSummaryCall(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const { model, outcome } = value;
+  return (
+    isRecord(model) &&
+    isNonEmptyString(model['model']) &&
+    isNonEmptyString(model['effort']) &&
+    isNonEmptyString(model['agent']) &&
+    isRecord(outcome) &&
+    isSummaryCallOutcome(outcome) &&
+    isAgentMetrics(value['metrics'])
+  );
+}
+
+function isSummaryCallOutcome(outcome: Record<string, unknown>): boolean {
+  switch (outcome['status']) {
+    case 'accepted':
+      return typeof outcome['reply'] === 'string';
+    case 'rejected':
+      return typeof outcome['reply'] === 'string' && typeof outcome['reason'] === 'string';
+    case 'no-reply':
+      return typeof outcome['reason'] === 'string';
+    default:
+      return false;
+  }
+}
+
+function isCount(value: unknown): boolean {
+  return Number.isInteger(value) && (value as number) >= 0;
+}
+
+function isStringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+function isSummaryMeasure(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    value['status'] === 'unknown' ||
+    (value['status'] === 'known' &&
+      typeof value['value'] === 'number' &&
+      typeof value['text'] === 'string' &&
+      isCount(value['reportedAttempts']))
+  );
+}
+
+function isSummaryDropout(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isCount(value['timedOut']) &&
+    isCount(value['failedToRun']) &&
+    isStringArray(value['failedToRunLabels']) &&
+    isCount(value['waiting'])
+  );
+}
+
+function isSummarySetting(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const { outcomes, requiredChecks } = value;
+  return (
+    typeof value['name'] === 'string' &&
+    typeof value['model'] === 'string' &&
+    typeof value['effort'] === 'string' &&
+    isCount(value['planned']) &&
+    isRecord(outcomes) &&
+    ['passed', 'failed', 'pending', 'notEvaluated'].every((key) => isCount(outcomes[key])) &&
+    isRecord(requiredChecks) &&
+    ['passed', 'failed', 'pending', 'notRun', 'total'].every((key) =>
+      isCount(requiredChecks[key]),
+    ) &&
+    typeof value['didTask'] === 'boolean' &&
+    isSummaryMeasure(value['cost']) &&
+    isSummaryMeasure(value['elapsed']) &&
+    (value['dropout'] === null || isSummaryDropout(value['dropout']))
+  );
+}
+
+function isSummaryComparison(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  switch (value['kind']) {
+    case 'none-did-the-task':
+      return true;
+    case 'only-setting':
+      return typeof value['leader'] === 'string';
+    case 'not-enough-data':
+      return isStringArray(value['unknown']);
+    case 'leader':
+    case 'tie':
+      return (
+        isStringArray(value['leaders']) &&
+        typeof value['value'] === 'string' &&
+        (value['next'] === null || isSummaryNext(value['next'])) &&
+        isStringArray(value['unknown']) &&
+        Array.isArray(value['partial']) &&
+        value['partial'].every(
+          (entry) =>
+            isRecord(entry) &&
+            typeof entry['name'] === 'string' &&
+            isCount(entry['reportedAttempts']),
+        )
+      );
+    default:
+      return false;
+  }
+}
+
+function isSummaryNext(value: unknown): boolean {
+  if (!isRecord(value) || typeof value['value'] !== 'string') {
+    return false;
+  }
+  const { margin } = value;
+  return (
+    margin === null ||
+    (isRecord(margin) &&
+      (margin['kind'] === 'times' || margin['kind'] === 'percent') &&
+      typeof margin['value'] === 'string')
+  );
+}
+
+/** Holds for decoded `SummaryFacts`: every field the report renders, so a rendering never throws on a saved artifact. */
+function isSummaryFacts(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value['task'] === 'string' &&
+    typeof value['repository'] === 'string' &&
+    typeof value['when'] === 'string' &&
+    isCount(value['repeat']) &&
+    isCount(value['requiredChecksPerAttempt']) &&
+    Array.isArray(value['settings']) &&
+    value['settings'].every(isSummarySetting) &&
+    (value['separation'] === null ||
+      value['separation'] === 'passed' ||
+      value['separation'] === 'failed') &&
+    isSummaryComparison(value['cost']) &&
+    isSummaryComparison(value['speed'])
+  );
+}
+
+/** Holds for a decoded `TaskConclusions`: a task ID, complete facts, three sentences, and a call or `null`. */
+function isTaskConclusions(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const conclusions = value['conclusions'];
+  return (
+    isNonEmptyString(value['taskId']) &&
+    isSummaryFacts(value['facts']) &&
+    isStringArray(value['table']) &&
+    isRecord(conclusions) &&
+    typeof conclusions['correctness'] === 'string' &&
+    typeof conclusions['cost'] === 'string' &&
+    typeof conclusions['speed'] === 'string' &&
+    (value['call'] === null || isSummaryCall(value['call']))
+  );
 }
 
 function describeAssessmentDefect(value: unknown, runId: string, caseId: string): string | null {

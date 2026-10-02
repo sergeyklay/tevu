@@ -444,6 +444,7 @@ export type ModelRoleInput = z.input<typeof ModelRoleSchema>;
 const ROLES_SHAPE = {
   criteria: ModelRoleSchema.optional(),
   grader: ModelRoleSchema.optional(),
+  summary: ModelRoleSchema.optional(),
 } satisfies Record<ModelRoleName, unknown>;
 
 /** One-time tracker import snapshot; later tracker changes never alter the task. */
@@ -919,6 +920,9 @@ function materializeTevuConfig(raw: RawTevuConfig): TevuConfig {
           ...(rolesInput.grader === undefined
             ? {}
             : { grader: materializeModelRole(rolesInput.grader, firstAgentKey) }),
+          ...(rolesInput.summary === undefined
+            ? {}
+            : { summary: materializeModelRole(rolesInput.summary, firstAgentKey) }),
         };
 
   const tasks: TaskDefinition[] = raw.tasks.map((task: RawTask) => {

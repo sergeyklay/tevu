@@ -19,7 +19,7 @@ import { createStatusLine } from './status-line';
 import { runAssessmentWizard, runTaskWizard } from './task-wizard';
 
 import type { WaitInterrupt } from './wait-interrupt';
-import type { AssessedCase, AssessmentCaseContext } from '@/application/assess';
+import type { AssessedCase, AssessmentCaseContext, RebuiltReport } from '@/application/assess';
 import type { CreateTaskErrorKind, TaskWizardInput } from '@/application/create-task';
 import type { CriteriaDraftOutcome, CriteriaDraftRequest } from '@/application/draft-criteria';
 import type {
@@ -47,7 +47,6 @@ import type {
   IssueSnapshot,
   JiraTrackerSettings,
   LoadConfigErrorKind,
-  ReportResult,
   RunResult,
   TaskDefinition,
   TaskReference,
@@ -204,7 +203,8 @@ export type ProgramOperations = {
   rebuildRunReport(
     config: TevuConfig,
     runId: string,
-  ): Promise<TevuResult<ReportResult, 'AgentProtocolError' | 'ArtifactError'>>;
+    conclusions: 'write' | 'saved',
+  ): Promise<TevuResult<RebuiltReport, 'AgentProtocolError' | 'ArtifactError'>>;
   readAssessmentContext(
     config: TevuConfig,
     runId: string,
@@ -716,7 +716,7 @@ async function runBenchmarkCommand(
     );
     return EXIT_CANCELLED;
   }
-  const rebuilt = await operations.rebuildRunReport(loaded.value.config, runId);
+  const rebuilt = await operations.rebuildRunReport(loaded.value.config, runId, 'write');
   if (!rebuilt.ok) {
     out(`Artifacts: ${runDirectory}`);
     for (const line of renderTevuError(rebuilt.error, dependencies.redact)) {
@@ -725,13 +725,19 @@ async function runBenchmarkCommand(
     err(`The report could not be generated; recover with: tevu report ${runId}`);
     return EXIT_FAILURE;
   }
+  const { report, retainedDirectories } = rebuilt.value;
   for (const line of [
-    ...rebuilt.value.summary.attempts.flatMap((attempt) => attempt.lines),
-    ...rebuilt.value.summary.findings,
+    ...report.summary.attempts.flatMap((attempt) => attempt.lines),
+    ...report.summary.findings,
+    ...retainedDirectories.map(
+      (directory) =>
+        `Warning: tevu could not delete the temporary directory of a summary call. The results are not affected. Delete ${directory} when no tevu command uses it.`,
+    ),
   ]) {
     out(line);
   }
   out(`Artifacts: ${runDirectory}`);
+  out(`Summary: ${runDirectory}/summary.md`);
   out(`Report: ${runDirectory}/report.md`);
   return run.exitCode;
 }
@@ -790,10 +796,15 @@ async function runReport(
   if (!loaded.ok) {
     return reportFailure(err, loaded.error, dependencies.redact);
   }
-  const rebuilt = await dependencies.operations.rebuildRunReport(loaded.value.config, runId);
+  const rebuilt = await dependencies.operations.rebuildRunReport(
+    loaded.value.config,
+    runId,
+    'saved',
+  );
   if (!rebuilt.ok) {
     return reportFailure(err, rebuilt.error, dependencies.redact);
   }
+  out(`Summary regenerated: ${loaded.value.config.run.output_dir}/${runId}/summary.md`);
   out(`Report regenerated: ${loaded.value.config.run.output_dir}/${runId}/report.md`);
   return EXIT_COMPLETED;
 }
