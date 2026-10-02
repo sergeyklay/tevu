@@ -338,6 +338,7 @@ export function buildReport(input: ReportInput): ReportResult {
   const summaryTasks = deriveTaskFacts(context).map(({ taskId, facts }) => {
     const saved = savedByTask.get(taskId);
     return {
+      table: summaryTableOf(context, taskId),
       facts: saved?.facts ?? facts,
       conclusions: saved?.conclusions ?? templateConclusions(facts),
     };
@@ -870,12 +871,22 @@ function renderComparisonRow(
   context: ReportContext,
   footnotes: FootnoteRegistry,
 ): string[] {
+  const cells = comparisonCellsOf(pair, context, footnotes);
+  return cells === null ? [] : [`| ${cells.join(' | ')} |`];
+}
+
+/** The cells of one comparison row, or `null` for a pair without a planned attempt. */
+function comparisonCellsOf(
+  pair: PairSummary,
+  context: ReportContext,
+  footnotes: FootnoteRegistry,
+): string[] | null {
   const attempts = attemptsOfPair(context, pair);
   const [lowest] = attempts;
   if (lowest === undefined) {
-    return [];
+    return null;
   }
-  const cells = [
+  return [
     renderModelCell(lowest.identity, context.names),
     renderEffortCell(lowest.identity, pair, context.model.manifest.efforts),
     renderOutcomeCell(pair, attempts, context.names, footnotes),
@@ -892,7 +903,25 @@ function renderComparisonRow(
     ),
     renderRuntimeFailureCell(attempts, context.names, footnotes),
   ];
-  return [`| ${cells.join(' | ')} |`];
+}
+
+/**
+ * The comparison table of one task for `summary.md`: the same columns and
+ * cells as the report, without footnote markers, and `unknown` for a value no
+ * attempt reported.
+ */
+function summaryTableOf(context: ReportContext, taskId: string): string[] {
+  const footnotes = createFootnoteRegistry(true);
+  const rows = orderPairsForRows(
+    context.model.pairs.filter((pair) => pair.taskId === taskId),
+    context.configurationModelIds,
+  ).flatMap((pair) => {
+    const cells = comparisonCellsOf(pair, context, footnotes);
+    return cells === null
+      ? []
+      : [`| ${cells.map((text) => (text.trim() === '-' ? 'unknown' : text.trim())).join(' | ')} |`];
+  });
+  return [COMPARISON_HEADER_ROW, COMPARISON_SEPARATOR_ROW, ...rows];
 }
 
 /** The planned attempts of `pair` in ascending attempt order. */
@@ -1195,14 +1224,17 @@ function renderSummaryModelLine(call: SummaryCall, footnotes: FootnoteRegistry):
 
 /** Numbers footnote texts by first use; an identical text reuses its number. */
 type FootnoteRegistry = {
+  /** A silent registry numbers nothing, so cells carry no marker. */
+  silent: boolean;
   numberFor(text: string): number;
   /** One `<n>. <text>` line per footnote in ascending number. */
   lines(): string[];
 };
 
-function createFootnoteRegistry(): FootnoteRegistry {
+function createFootnoteRegistry(silent = false): FootnoteRegistry {
   const numbers = new Map<string, number>();
   return {
+    silent,
     numberFor(text) {
       const existing = numbers.get(text);
       if (existing !== undefined) {
@@ -1225,6 +1257,9 @@ function createFootnoteRegistry(): FootnoteRegistry {
  * marker into a link.
  */
 function footnoteMarkers(entries: readonly Footnoted[], footnotes: FootnoteRegistry): string {
+  if (footnotes.silent) {
+    return '';
+  }
   const numbers = entries.map(({ attemptName, statement }) =>
     footnotes.numberFor(`${attemptName}: ${renderStatement(statement)}`),
   );

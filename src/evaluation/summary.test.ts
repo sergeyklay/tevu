@@ -575,10 +575,19 @@ describe('templateConclusions', () => {
   });
 });
 
+const TABLE = [
+  '| Model | Effort | Outcome | Required checks | Elapsed | Cost |',
+  '|---|---|---|---|---|---|',
+  '| gpt-5.6-luna | high | passed | 6/6 passed | 6.3 min | $0.0800 |',
+  '| gpt-5.6-luna | low | passed | 6/6 passed | 2.1 min | $0.0200 |',
+];
+
 describe('renderSummaryMarkdown', () => {
   function renderOne(view: SummaryTaskView): string {
     const facts = summarizeTask(view);
-    return renderSummaryMarkdown([{ facts, conclusions: templateConclusions(facts) }]);
+    return renderSummaryMarkdown([
+      { table: TABLE, facts, conclusions: templateConclusions(facts) },
+    ]);
   }
 
   function linksOf(markdown: string): string[] {
@@ -615,7 +624,11 @@ describe('renderSummaryMarkdown', () => {
     const facts = [buildSummaryFacts(), buildSummaryFacts({ task: 'Second task' })];
 
     const markdown = renderSummaryMarkdown(
-      facts.map((entry) => ({ facts: entry, conclusions: templateConclusions(entry) })),
+      facts.map((entry) => ({
+        table: TABLE,
+        facts: entry,
+        conclusions: templateConclusions(entry),
+      })),
     );
 
     expect(linksOf(markdown)).toEqual(['[report.md](report.md)']);
@@ -629,8 +642,8 @@ describe('renderSummaryMarkdown', () => {
     const second = buildSummaryFacts({ task: 'Second task' });
 
     const markdown = renderSummaryMarkdown([
-      { facts: first, conclusions: templateConclusions(first) },
-      { facts: second, conclusions: templateConclusions(second) },
+      { table: TABLE, facts: first, conclusions: templateConclusions(first) },
+      { table: TABLE, facts: second, conclusions: templateConclusions(second) },
     ]);
 
     expect(markdown.match(/^## .*$/gm)).toEqual(['## First task', '## Second task']);
@@ -642,6 +655,7 @@ describe('renderSummaryMarkdown', () => {
 
     const markdown = renderSummaryMarkdown([
       {
+        table: TABLE,
         facts,
         conclusions: {
           correctness: 'Saved correctness.',
@@ -674,30 +688,6 @@ describe('renderSummaryMarkdown', () => {
     expect(renderOne(buildSummaryView())).not.toContain('medians');
   });
 
-  it('shows the outcome per attempt count, and the measured attempts when some did not report', () => {
-    const markdown = renderOne(buildRepeatView());
-
-    expect(markdown).toContain(
-      '| gpt-5.6-luna | high | 3/3 passed | 18/18 passed | 6.3 min | $0.0800 |',
-    );
-    expect(markdown).toContain(
-      '| gpt-5.6-luna | low | 3/3 passed | 18/18 passed | 2.1 min | $0.0200 (2 of 3 attempts) |',
-    );
-  });
-
-  it('shows unknown, never a value, for an unavailable measure', () => {
-    const markdown = renderOne(buildUnavailableCostView());
-
-    expect(markdown).toContain('| gpt-5.6-luna | low | passed | 6/6 passed | 2.1 min | unknown |');
-  });
-
-  it('leaves the technical columns out of the table', () => {
-    const markdown = renderOne(buildSummaryView());
-
-    expect(markdown).toContain('| Model | Effort | Outcome | Required checks | Elapsed | Cost |\n');
-    expect(markdown).not.toMatch(/Turns|Tool calls|Cache|Reasoning|API errors|Runtime failure/);
-  });
-
   describe('the zero-cost line', () => {
     function zeroCostFacts(settings: ReturnType<typeof buildSummarySetting>[]): SummaryFacts {
       return buildSummaryFacts({ settings });
@@ -709,7 +699,9 @@ describe('renderSummaryMarkdown', () => {
         buildSummarySetting({ name: LOW, cost: knownMeasure(0.02, '$0.0200') }),
       ]);
 
-      const markdown = renderSummaryMarkdown([{ facts, conclusions: templateConclusions(facts) }]);
+      const markdown = renderSummaryMarkdown([
+        { table: TABLE, facts, conclusions: templateConclusions(facts) },
+      ]);
 
       expect(markdown).toContain(
         `- **Cost:** ${templateConclusions(facts).cost} ${ZERO_COST_LINE}\n`,
@@ -727,7 +719,9 @@ describe('renderSummaryMarkdown', () => {
         }),
       ]);
 
-      const markdown = renderSummaryMarkdown([{ facts, conclusions: templateConclusions(facts) }]);
+      const markdown = renderSummaryMarkdown([
+        { table: TABLE, facts, conclusions: templateConclusions(facts) },
+      ]);
 
       expect(markdown).not.toContain(ZERO_COST_LINE);
     });
@@ -743,6 +737,7 @@ describe('renderSummaryMarkdown', () => {
 
       const markdown = renderSummaryMarkdown([
         {
+          table: TABLE,
           facts,
           conclusions: { correctness: 'A.', cost: 'Saved cost.', speed: 'B.' },
         },
@@ -842,7 +837,9 @@ describe('renderSummaryMarkdown', () => {
         cost: { kind: 'only-setting', leader: name },
         speed: { kind: 'only-setting', leader: name },
       });
-      return renderSummaryMarkdown([{ facts, conclusions: templateConclusions(facts) }]);
+      return renderSummaryMarkdown([
+        { table: TABLE, facts, conclusions: templateConclusions(facts) },
+      ]);
     }
 
     it('escapes brackets, angle brackets, backslashes, and pipes in the heading, the cells, and the sentences', () => {
@@ -850,7 +847,6 @@ describe('renderSummaryMarkdown', () => {
 
       const escaped = 'a\\]b\\[c \\<i>d\\\\e\\|f';
       expect(markdown).toContain(`## ${escaped}\n`);
-      expect(markdown).toContain(`| ${escaped} | ${escaped} |`);
       expect(markdown).toContain(`${escaped} was the only model setting that did the task`);
     });
 

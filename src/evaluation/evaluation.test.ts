@@ -4246,10 +4246,10 @@ describe('comparison table in the report', () => {
             '',
             'Compared 2 model settings on this task, with 1 attempt each, on 2026-09-23 at 00:00 UTC.',
             '',
-            '| Model | Effort | Outcome | Required checks | Elapsed | Cost |',
-            '|---|---|---|---|---|---|',
-            '| model-alpha-synth | effort-high | passed | 1/1 passed | 1.5 s | $0.0125 |',
-            '| model-beta-synth | effort-high | passed | 1/1 passed | 1.5 s | $0.0125 |',
+            '| Model | Effort | Outcome | Required checks | Elapsed | Cost | Turns | Tool calls | Input | Cache read | Cache write | Output | Reasoning | API errors | Runtime failure |',
+            '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+            '| model-alpha-synth | effort-high | passed | 1/1 passed | 1.5 s | $0.0125 | 1 | 2 | 130 | 30 | 10 | 45 | 16 | 1 | none |',
+            '| model-beta-synth | effort-high | passed | 1/1 passed | 1.5 s | $0.0125 | 1 | 2 | 130 | 30 | 10 | 45 | 16 | 1 | none |',
             '',
             `- **Correctness:** Every model setting did the task: each passed the 1 required check. ${SEPARATION_MEANS}`,
             '- **Cost:** The lowest cost was a tie at $0.0125 each: model-alpha-synth, effort-high; model-beta-synth, effort-high.',
@@ -4265,6 +4265,22 @@ describe('comparison table in the report', () => {
         const options = { models, tasks, results: () => passingChecks() };
 
         expect(reportFor(options).summaryMarkdown).toBe(reportFor(options).summaryMarkdown);
+      });
+
+      it('shows an unreported value as unknown, with no footnote marker', () => {
+        const { summaryMarkdown } = reportFor({
+          models,
+          tasks,
+          results: () => ({
+            ...passingChecks(),
+            metrics: unavailableBenchmarkMetrics('root session export unavailable'),
+          }),
+        });
+
+        expect(summaryMarkdown).toContain(
+          '| model-alpha-synth | effort-high | passed | 1/1 passed | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | none |',
+        );
+        expect(summaryMarkdown).not.toMatch(/\\\[\d+\\\]/);
       });
 
       it('is not part of the normalized JSON', () => {

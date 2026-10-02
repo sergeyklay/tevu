@@ -186,7 +186,7 @@ Details of every attempt, check, and measurement: [report.md](report.md)
 ```
 
 - The context line reads `Compared <n> model settings on this task in <repository>, with <r> attempts each, on <date> at <hh:mm> UTC.` The repository is `<owner>/<repo>` for a GitHub entry, or the last segment of the path of a local one, and is left out when the run's saved configuration has no record of it. The time is the run's start time. With more than one attempt, `Times and costs are medians of the attempts that measured them.` follows.
-- The table keeps the Model, Effort, Outcome, Required checks, Elapsed, and Cost columns of the [comparison table](#comparison-table), with the same row order, [names](#names), and outcome words, but without footnote markers, and shows the effort without its check status. Elapsed and Cost read `unknown` when no attempt reported the value, and add `(<k> of <n> attempts)` when only k of the n attempts did.
+- The table has every column of the [comparison table](#comparison-table), with the same row order, [names](#names), cells, and outcome words, but without footnote markers. A value that no attempt reported reads `unknown`, and a value that only k of the n attempts reported keeps its `(k/n)` count.
 - Every name and sentence is escaped, so the details line holds the file's only link. The file has no anchor, footnote marker, case ID, file path, or error kind.
 
 ### Facts

@@ -11,14 +11,7 @@
 
 import { codeFenceFor, decodeReplyObject } from '@/domain/model-text';
 
-import {
-  cell,
-  escapeLinkText,
-  formatCount,
-  formatOutcomeWords,
-  formatRequiredChecks,
-  nonSeparatingOutcomesStatement,
-} from './wording';
+import { cell, escapeLinkText, formatCount, nonSeparatingOutcomesStatement } from './wording';
 
 import type {
   CaseResult,
@@ -446,25 +439,16 @@ function plain(text: string): string {
   return cell(escapeLinkText(text).replaceAll('<', '\\<'));
 }
 
-function describeMeasure(measure: SummaryMeasure, planned: number): string {
-  if (measure.status === 'unknown') {
-    return 'unknown';
-  }
-  return measure.reportedAttempts < planned
-    ? `${measure.text} (${formatCount(measure.reportedAttempts)} of ${formatCount(planned)} attempts)`
-    : measure.text;
-}
-
 /**
  * Renders `summary.md`: one block per task, in the order given, and one link,
  * to `report.md`, once after the last block. Every name and sentence is
  * escaped, so the details line holds the file's only link.
  */
 export function renderSummaryMarkdown(
-  tasks: readonly { facts: SummaryFacts; conclusions: ConclusionTexts }[],
+  tasks: readonly { table: readonly string[]; facts: SummaryFacts; conclusions: ConclusionTexts }[],
 ): string {
   const lines = ['# Model comparison summary', ''];
-  for (const { facts, conclusions } of tasks) {
+  for (const { table, facts, conclusions } of tasks) {
     const { context, zeroCost, dropouts } = templateLines(facts);
     const costConclusion = zeroCost === null ? conclusions.cost : `${conclusions.cost} ${zeroCost}`;
     lines.push(
@@ -472,21 +456,7 @@ export function renderSummaryMarkdown(
       '',
       plain(context),
       '',
-      '| Model | Effort | Outcome | Required checks | Elapsed | Cost |',
-      '|---|---|---|---|---|---|',
-      ...facts.settings.map(
-        (setting) =>
-          `| ${[
-            setting.model,
-            setting.effort,
-            formatOutcomeWords(setting.outcomes, setting.planned),
-            formatRequiredChecks(setting.requiredChecks),
-            describeMeasure(setting.elapsed, setting.planned),
-            describeMeasure(setting.cost, setting.planned),
-          ]
-            .map(plain)
-            .join(' | ')} |`,
-      ),
+      ...table,
       '',
       `- **Correctness:** ${plain(conclusions.correctness)}`,
       `- **Cost:** ${plain(costConclusion)}`,
