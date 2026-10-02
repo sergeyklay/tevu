@@ -1016,7 +1016,12 @@ describe('acceptConclusions', () => {
     if (comparison.kind === 'leader' || comparison.kind === 'tie') {
       return comparison.leaders;
     }
-    return comparison.kind === 'only-setting' ? [comparison.leader] : [];
+    if (comparison.kind !== 'only-setting') {
+      return [];
+    }
+    const sole = facts.settings.find((setting) => setting.name === comparison.leader);
+    const measure = aspect === 'cost' ? sole?.cost : sole?.elapsed;
+    return measure?.status === 'known' ? [comparison.leader] : [];
   }
 
   /** The template sentences with the leaders of the facts, as a model would reply when it adds nothing. */
@@ -1260,6 +1265,33 @@ describe('acceptConclusions', () => {
         );
       },
     );
+  });
+
+  describe('a sole setting with an unknown cost', () => {
+    const soleFacts = buildSummaryFacts({
+      settings: [
+        buildSummarySetting({ name: HIGH, cost: { status: 'unknown' } }),
+        buildSummarySetting({
+          name: LOW,
+          didTask: false,
+          outcomes: { passed: 0, failed: 1, pending: 0, notEvaluated: 0 },
+        }),
+      ],
+      cost: { kind: 'only-setting', leader: HIGH },
+    });
+    const soleEvidence = buildSummaryEvidenceRecord(soleFacts);
+
+    it('rejects a reply that names it the cheapest', () => {
+      const reply = templateReply(soleFacts, { cost: { leaders: [HIGH] } });
+
+      expect(rejectionOf(reply, soleEvidence)).toMatch(/cost/);
+    });
+
+    it('accepts a reply that names no leader', () => {
+      const reply = templateReply(soleFacts, { cost: { leaders: [] } });
+
+      expect(rejectionOf(reply, soleEvidence)).toBeUndefined();
+    });
   });
 
   describe('rule 8: models outside a setting name', () => {

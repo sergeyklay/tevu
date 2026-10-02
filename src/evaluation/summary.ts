@@ -486,6 +486,8 @@ export type SummaryRationale = {
 export type SummaryEvidence = {
   taskId: string;
   facts: SummaryFacts;
+  /** The table rows of `summary.md`, saved beside the facts. */
+  table: string[];
   rationales: SummaryRationale[];
   /** Distinct display models of the run's model entries, without additions. */
   displayModels: string[];
@@ -670,8 +672,12 @@ function leadersOf(facts: SummaryFacts, aspect: SummaryAspect): string[] {
     case 'leader':
     case 'tie':
       return comparison.leaders;
-    case 'only-setting':
-      return [comparison.leader];
+    case 'only-setting': {
+      const measure = facts.settings.find((setting) => setting.name === comparison.leader)?.[
+        aspect === 'cost' ? 'cost' : 'elapsed'
+      ];
+      return measure?.status === 'known' ? [comparison.leader] : [];
+    }
     case 'none-did-the-task':
     case 'not-enough-data':
       return [];
