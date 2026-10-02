@@ -139,7 +139,13 @@ function written(
 ): TaskConclusionsOutcome {
   return {
     status: 'written',
-    conclusions: { taskId: evidence.taskId, facts: evidence.facts, conclusions, call },
+    conclusions: {
+      taskId: evidence.taskId,
+      facts: evidence.facts,
+      table: evidence.table,
+      conclusions,
+      call,
+    },
     retainedDirectory,
   };
 }

@@ -1788,6 +1788,7 @@ function isTaskConclusions(value: unknown): boolean {
   return (
     isNonEmptyString(value['taskId']) &&
     isSummaryFacts(value['facts']) &&
+    isStringArray(value['table']) &&
     isRecord(conclusions) &&
     typeof conclusions['correctness'] === 'string' &&
     typeof conclusions['cost'] === 'string' &&

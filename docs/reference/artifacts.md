@@ -31,10 +31,10 @@ Some files are absent when the evidence was unavailable. Their absence is record
 | File | Contents |
 | --- | --- |
 | `run.json` | Run identity, configuration snapshot, `configPath` (the absolute path of the file the run read), tool information, per-agent capability reports, `execution.repeat` (`value`, and `source`: `config` or `cli`), `execution.caseTimeoutMs`, case records, and findings. See [Run manifest](#run-manifest) |
-| `conclusions.json` | A source artifact written once, by `tevu run`: per task, the facts of the [run summary](results.md#run-summary), its three conclusions, and `call`. `call` is `null` when no summary call was made, and otherwise records the model role, the outcome (`accepted` with the reply, `rejected` with the reply and the reason, or `no-reply` with the reason), and the call's usage and cost. Absent for a run cancelled during its cases |
+| `conclusions.json` | A source artifact written once, by `tevu run`: per task, the facts of the [run summary](results.md#run-summary), the rows of its comparison table, its three conclusions, and `call`. `call` is `null` when no summary call was made, and otherwise records the model role, the outcome (`accepted` with the reply, `rejected` with the reply and the reason, or `no-reply` with the reason), and the call's usage and cost. Absent for a run cancelled during its cases |
 | Root `result.json` | Normalized report data: a `models` array of `{id, model, effort}` per configured model entry, and `pairs`, one [pair summary](results.md#pair-summary) per task and model entry pair. A repository record carries `github`, as written, for a GitHub entry |
 | `report.md` | Human-readable comparison with links to evidence |
-| `summary.md` | The [run summary](results.md#run-summary): a short comparison per task for a reader who has not seen the configuration, derived from `conclusions.json`, with one link, to `report.md` |
+| `summary.md` | The [run summary](results.md#run-summary): a short comparison per task for a reader who has not seen the configuration, derived from the saved `conclusions.json`, with one link, to `report.md` |
 | `events.jsonl` | Raw agent event records, one JSON value per line. Only the case's agent adapter interprets them |
 | `stderr.log` | Process diagnostics, including non-JSON run output |
 | `session.json` | Raw root-session export. Only the case's agent adapter interprets it |

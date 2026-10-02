@@ -575,6 +575,7 @@ async function writeTaskConclusionsInOrder(
       conclusions.push({
         taskId: entry.taskId,
         facts: entry.facts,
+        table: entry.table,
         conclusions: templateConclusions(entry.facts),
         call: null,
       });

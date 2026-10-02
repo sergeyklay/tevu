@@ -1424,6 +1424,8 @@ export type SummaryCall = {
 export type TaskConclusions = {
   taskId: string;
   facts: SummaryFacts;
+  /** The comparison table of `summary.md`, saved so a later `tevu report` renders the same rows. */
+  table: string[];
   conclusions: ConclusionTexts;
   /** `null` when no summary call was made: no `roles.summary` was declared, or a cancellation skipped the call. */
   call: SummaryCall | null;

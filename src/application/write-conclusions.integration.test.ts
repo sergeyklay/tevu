@@ -797,6 +797,7 @@ describe('rebuildReport with a conclusion writer', () => {
       conclusions: {
         taskId: evidence.taskId,
         facts: evidence.facts,
+        table: evidence.table,
         conclusions: { correctness: 'A.', cost: 'B.', speed: 'C.' },
         call: null,
       },
@@ -1056,6 +1057,7 @@ describe('the redacting sinks of the store', () => {
     const entry: ConclusionsArtifact['tasks'][number] = {
       taskId: 'alpha-task',
       facts: buildSummaryFacts({ task: `leaks ${secret}` }),
+      table: [],
       conclusions: { correctness: `uses ${secret}`, cost: 'c.', speed: 's.' },
       call: null,
     };

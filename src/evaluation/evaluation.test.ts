@@ -4028,7 +4028,9 @@ describe('comparison table in the report', () => {
       return {
         schemaVersion: 1,
         runId: '20260923t000000z-comparison',
-        tasks: [{ taskId, facts: buildSummaryFacts(), conclusions: SAVED_CONCLUSIONS, call }],
+        tasks: [
+          { taskId, facts: buildSummaryFacts(), table: [], conclusions: SAVED_CONCLUSIONS, call },
+        ],
       };
     }
 
@@ -4198,6 +4200,7 @@ describe('comparison table in the report', () => {
       return {
         taskId,
         facts: buildSummaryFacts({ task: `Saved ${taskId}` }),
+        table: ['| Model | Effort |', '|---|---|', '| Saved model | saved effort |'],
         conclusions: {
           correctness: `Saved correctness of ${taskId}.`,
           cost: `Saved cost of ${taskId}.`,
@@ -4261,6 +4264,22 @@ describe('comparison table in the report', () => {
         );
       });
 
+      it('keeps a link in a configured effort from becoming a second link', () => {
+        const { summaryMarkdown } = reportFor({
+          models: buildDistinctModels(['alpha', 'beta']).map((entry) => ({
+            ...entry,
+            effort: '[fast](https://example.test)',
+          })),
+          tasks,
+          results: () => passingChecks(),
+        });
+
+        expect(summaryMarkdown).toContain('\\[fast\\](https://example.test)');
+        expect(summaryMarkdown.match(/(?<!\\)\[[^\]]*\]\([^)]*\)/g)).toEqual([
+          '[report.md](report.md)',
+        ]);
+      });
+
       it('is byte-identical across two builds of the same input', () => {
         const options = { models, tasks, results: () => passingChecks() };
 
@@ -4304,6 +4323,16 @@ describe('comparison table in the report', () => {
         expect(summaryMarkdown).toContain('- **Correctness:** Saved correctness of task-1.\n');
         expect(summaryMarkdown).toContain('- **Speed:** Saved speed of task-1.\n');
         expect(summaryMarkdown).not.toContain('## Task task-1');
+      });
+
+      it('renders the saved table of a task, not one derived from the current report context', () => {
+        const { summaryMarkdown } = reportFor(
+          { tasks: [taskWithChecks('task-1')] },
+          artifactOf(entryOf('task-1', { table: ['| Saved table |', '|---|', '| saved row |'] })),
+        );
+
+        expect(summaryMarkdown).toContain('| Saved table |\n|---|\n| saved row |\n');
+        expect(summaryMarkdown).not.toContain('| Model | Effort |');
       });
 
       it('renders a task without an entry from the derived facts beside one with an entry', () => {

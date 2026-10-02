@@ -338,7 +338,7 @@ export function buildReport(input: ReportInput): ReportResult {
   const summaryTasks = deriveTaskFacts(context).map(({ taskId, facts }) => {
     const saved = savedByTask.get(taskId);
     return {
-      table: summaryTableOf(context, taskId),
+      table: saved?.table ?? summaryTableOf(context, taskId),
       facts: saved?.facts ?? facts,
       conclusions: saved?.conclusions ?? templateConclusions(facts),
     };
@@ -371,6 +371,7 @@ export function buildSummaryEvidence(input: Omit<ReportInput, 'conclusions'>): S
   return deriveTaskFacts(context).map(({ taskId, facts }) => ({
     taskId,
     facts,
+    table: summaryTableOf(context, taskId),
     rationales: rationalesOfTask(context, taskId),
     displayModels,
     identifiers,
@@ -880,6 +881,7 @@ function comparisonCellsOf(
   pair: PairSummary,
   context: ReportContext,
   footnotes: FootnoteRegistry,
+  escapeName: (text: string) => string = cell,
 ): string[] | null {
   const attempts = attemptsOfPair(context, pair);
   const [lowest] = attempts;
@@ -887,8 +889,13 @@ function comparisonCellsOf(
     return null;
   }
   return [
-    renderModelCell(lowest.identity, context.names),
-    renderEffortCell(lowest.identity, pair, context.model.manifest.efforts),
+    escapeName(context.names.settingModel(lowest.identity.modelId)),
+    escapeName(
+      effortLabel(
+        lowest.identity.effort,
+        effortCheckOf(context.model.manifest.efforts, pair.modelId),
+      ),
+    ),
     renderOutcomeCell(pair, attempts, context.names, footnotes),
     formatRequiredChecks(
       countRequiredChecks(attempts, context.tasksById.get(pair.taskId)?.checks ?? []),
@@ -910,13 +917,18 @@ function comparisonCellsOf(
  * cells as the report, without footnote markers, and `unknown` for a value no
  * attempt reported.
  */
+/** Escapes a name so it cannot open a Markdown link or HTML tag in `summary.md`, then makes it safe for a table cell. */
+function plainName(text: string): string {
+  return cell(escapeLinkText(text).replaceAll('<', '\\<'));
+}
+
 function summaryTableOf(context: ReportContext, taskId: string): string[] {
   const footnotes = createFootnoteRegistry(true);
   const rows = orderPairsForRows(
     context.model.pairs.filter((pair) => pair.taskId === taskId),
     context.configurationModelIds,
   ).flatMap((pair) => {
-    const cells = comparisonCellsOf(pair, context, footnotes);
+    const cells = comparisonCellsOf(pair, context, footnotes, plainName);
     return cells === null
       ? []
       : [`| ${cells.map((text) => (text.trim() === '-' ? 'unknown' : text.trim())).join(' | ')} |`];
@@ -949,18 +961,6 @@ function orderPairsForRows(
 
 function caseResultsOf(attempts: readonly Attempt[]): CaseResult[] {
   return attempts.flatMap((attempt) => (attempt.result === undefined ? [] : [attempt.result]));
-}
-
-function renderModelCell(identity: CaseIdentity, names: ReaderNames): string {
-  return cell(names.settingModel(identity.modelId));
-}
-
-function renderEffortCell(
-  identity: CaseIdentity,
-  pair: PairSummary,
-  efforts: RunManifest['efforts'],
-): string {
-  return cell(effortLabel(identity.effort, effortCheckOf(efforts, pair.modelId)));
 }
 
 function renderOutcomeCell(

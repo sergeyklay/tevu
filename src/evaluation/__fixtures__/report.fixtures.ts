@@ -397,6 +397,7 @@ export function buildSummaryEvidenceRecord(
   return {
     taskId: 'fix-login',
     facts,
+    table: [],
     rationales: [],
     displayModels: [...new Set(facts.settings.map((setting) => setting.model))],
     identifiers: [
