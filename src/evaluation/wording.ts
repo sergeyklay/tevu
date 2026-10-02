@@ -679,6 +679,41 @@ export function effortStatement(
 }
 
 /**
+ * Explains that the outcomes of one task do not separate its model settings:
+ * every planned attempt of every setting passed, or every one failed.
+ */
+export function nonSeparatingOutcomesStatement(facts: {
+  outcome: 'passed' | 'failed';
+  /** The task name. */
+  taskName: string;
+  /** The setting name of every row, in comparison-table row order. */
+  settingNames: readonly string[];
+  /** The effective repeat, `manifest.execution.repeat.value`. */
+  repeat: number;
+}): Statement {
+  const attempts = facts.repeat > 1 ? ' in every attempt' : '';
+  const where = `of "${facts.taskName}"${attempts}: ${facts.settingNames.join('; ')}.`;
+  const cannotSeparate =
+    'The outcomes cannot tell the settings apart on this task, and a difference in time or cost does not show which setting produces the better solution';
+  const repeatMore =
+    'To tell the settings apart, run more attempts with `run.repeat` or `--repeat`,';
+  if (facts.outcome === 'passed') {
+    return {
+      happened: `Every model setting passed every required check ${where}`,
+      means: `${cannotSeparate}.`,
+      next: `${repeatMore} compare them on a harder task, or add checks that capture more of what a good solution does.`,
+      detail: null,
+    };
+  }
+  return {
+    happened: `Every model setting failed at least one required check ${where}`,
+    means: `${cannotSeparate}; the Required checks column still shows how many required checks each setting passed.`,
+    next: `${repeatMore} compare them on an easier task, or confirm in the attempt sections below that a correct solution can pass the failed checks.`,
+    detail: null,
+  };
+}
+
+/**
  * Counts every pair of attempt and required check of one task into exactly one
  * class. An attempt without a case result, a check without a result, and the
  * verdict `not-run` all count as not run.

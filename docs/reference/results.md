@@ -71,7 +71,7 @@ An attempt with no case result, such as one still queued when the run was cancel
 
 ## Comparison table
 
-`report.md` opens with one comparison block per task, directly under the title and ahead of the run parameters and every task section. The blocks follow the task ID order of the task sections. Each block has a `## Comparison: <task name>` heading, with the task's plain name from [Names](#names), a table, an optional grader line, and an optional list of numbered footnotes. The task sections, pair summaries, case tables, and case sections follow unchanged, as the detail to open when a row raises a question.
+`report.md` opens with one comparison block per task, directly under the title and ahead of the run parameters and every task section. The blocks follow the task ID order of the task sections. Each block has a `## Comparison: <task name>` heading, with the task's plain name from [Names](#names), a table, an optional [note about outcomes that do not separate the settings](#outcomes-that-do-not-separate-the-settings), an optional grader line, and an optional list of numbered footnotes. The task sections, pair summaries, case tables, and case sections follow unchanged, as the detail to open when a row raises a question.
 
 The table has one row per model entry, in the order of the `models` list in the configuration. The order is not a ranking: no row is sorted by an outcome, check, or metric, and tevu computes no composite score and names no winner.
 
@@ -119,6 +119,33 @@ With n above 1, a row aggregates the pair's attempts:
 - Runtime failure counts attempts per label, for example `1/3 agent process failed`, in alphabetical order of the labels, and reads `none` when no attempt had a failure. The markers of the attempts' failure statements follow, and so does the marker of an attempt with no case result.
 
 When a task has gradings, a line under the table totals the grader's usage and cost for the task: `Grading model total for this task, not added to any row: <c> calls` (`1 call` for one), where c counts every grader call of the task's gradings, then `, <m> without a verdict` when m of those calls ended without a reply, then input, cache read, cache write, output, and reasoning tokens, and cost. Each total sums the grading metrics and follows the same unavailable rules as a cell. A grading with a measurement gap contributes its footnote to every total it lacks. A task whose only grading made no call reads `0 calls`. Grader usage never enters a row; rows read only the case's own metrics.
+
+### Outcomes that do not separate the settings
+
+When the outcomes of a task cannot tell its model settings apart, the block says so in one paragraph, so a difference in time or cost is not read as a difference in quality. The note appears when all of these hold:
+
+- The block has two or more rows. A block with one row has nothing to separate.
+- Every planned attempt of every row passed, or every planned attempt of every row failed. An attempt with no case result counts as `not-evaluated`, so it prevents the note, and so does any other mix of outcomes, between rows or between the attempts of one row. A block whose attempts all wait (`pending`) or all hold no evaluation (`not-evaluated`) gets no note: the first waits for verdicts, and the footnotes of the second already say to run again.
+- No attempt of the task has a pending verdict, whether the check is required or optional. Tevu withholds the note until `tevu assess` records the verdict, even when the verdict can no longer change the outcome.
+
+Optional checks, runtime failures, measurements, and the number of passed required checks take no other part in the decision.
+
+The note sits directly under the table, before the grader line and the footnotes, and is followed by one empty line. It carries no footnote marker and takes no footnote number, so the numbering of the footnotes does not change.
+
+The note follows the three parts of [Messages](#messages) and has no technical detail. The first part has one of two patterns, with the task name and the setting names from [Names](#names). The setting names follow the row order of the table and are joined by `; `. ` in every attempt` appears after the task name only when the effective repeat is above 1.
+
+| Outcome | What happened |
+| --- | --- |
+| Every attempt passed | `Every model setting passed every required check of "<task name>": <setting names>.` |
+| Every attempt failed | `Every model setting failed at least one required check of "<task name>": <setting names>.` |
+
+With the repeat above 1, both patterns continue as `... of "<task name>" in every attempt: <setting names>.`
+
+The second part says that the outcomes cannot tell the settings apart on this task and that a difference in time or cost does not show which setting produces the better solution. When every attempt failed, it adds that the Required checks column still shows how many required checks each setting passed, because those counts can differ between rows that all failed.
+
+The third part names what would tell the settings apart. When every attempt passed, it suggests more attempts with `run.repeat` or `--repeat`, a harder task, or checks that capture more of what a good solution does. When every attempt failed, it suggests more attempts, an easier task, or confirming in the attempt sections that a correct solution can pass the failed checks.
+
+The note is informational. Tevu still computes no composite score and names no winner, and the note ranks no setting. `tevu assess` and `tevu report` rebuild the note from the saved case results and the current assessments, so recording a verdict adds, keeps, or removes it, and unchanged artifacts give the same text.
 
 ## Messages
 

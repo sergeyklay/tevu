@@ -26,6 +26,7 @@ import {
   gradeLines,
   gradingGapStatement,
   measurementGapStatement,
+  nonSeparatingOutcomesStatement,
   renderStatement,
 } from './wording';
 
@@ -1206,6 +1207,108 @@ describe('effortStatement', () => {
     { label: 'undefined', check: undefined },
   ])('returns null for a $label check', ({ check }) => {
     expect(effortStatement('high', check)).toBeNull();
+  });
+});
+
+describe('nonSeparatingOutcomesStatement', () => {
+  const TASK = 'Fix the login redirect';
+  const SETTINGS = ['openai/model-a, high', 'openai/model-a, low'];
+  const MEANS_PASSED =
+    'The outcomes cannot tell the settings apart on this task, and a difference in time or cost does not show which setting produces the better solution.';
+  const MEANS_FAILED =
+    'The outcomes cannot tell the settings apart on this task, and a difference in time or cost does not show which setting produces the better solution; the Required checks column still shows how many required checks each setting passed.';
+  const NEXT_PASSED =
+    'To tell the settings apart, run more attempts with `run.repeat` or `--repeat`, compare them on a harder task, or add checks that capture more of what a good solution does.';
+  const NEXT_FAILED =
+    'To tell the settings apart, run more attempts with `run.repeat` or `--repeat`, compare them on an easier task, or confirm in the attempt sections below that a correct solution can pass the failed checks.';
+
+  it('states that every setting passed every required check at repeat 1, without an attempts phrase', () => {
+    const statement = nonSeparatingOutcomesStatement({
+      outcome: 'passed',
+      taskName: TASK,
+      settingNames: SETTINGS,
+      repeat: 1,
+    });
+
+    expect(statement).toEqual({
+      happened:
+        'Every model setting passed every required check of "Fix the login redirect": openai/model-a, high; openai/model-a, low.',
+      means: MEANS_PASSED,
+      next: NEXT_PASSED,
+      detail: null,
+    });
+  });
+
+  it('states that every setting failed at least one required check at repeat 1, without an attempts phrase', () => {
+    const statement = nonSeparatingOutcomesStatement({
+      outcome: 'failed',
+      taskName: TASK,
+      settingNames: SETTINGS,
+      repeat: 1,
+    });
+
+    expect(statement).toEqual({
+      happened:
+        'Every model setting failed at least one required check of "Fix the login redirect": openai/model-a, high; openai/model-a, low.',
+      means: MEANS_FAILED,
+      next: NEXT_FAILED,
+      detail: null,
+    });
+  });
+
+  it.each([
+    {
+      outcome: 'passed',
+      happened:
+        'Every model setting passed every required check of "Fix the login redirect" in every attempt: openai/model-a, high; openai/model-a, low.',
+      means: MEANS_PASSED,
+      next: NEXT_PASSED,
+    },
+    {
+      outcome: 'failed',
+      happened:
+        'Every model setting failed at least one required check of "Fix the login redirect" in every attempt: openai/model-a, high; openai/model-a, low.',
+      means: MEANS_FAILED,
+      next: NEXT_FAILED,
+    },
+  ] as const)(
+    'adds " in every attempt" to the $outcome statement above repeat 1',
+    ({ outcome, happened, means, next }) => {
+      const statement = nonSeparatingOutcomesStatement({
+        outcome,
+        taskName: TASK,
+        settingNames: SETTINGS,
+        repeat: 2,
+      });
+
+      expect(statement).toEqual({ happened, means, next, detail: null });
+    },
+  );
+
+  it('joins setting names with "; " in the given order and keeps the task name unchanged inside double quotes', () => {
+    const statement = nonSeparatingOutcomesStatement({
+      outcome: 'passed',
+      taskName: 'Odd "name"; (2)',
+      settingNames: ['z-model, low', 'a-model, high', 'm-model'],
+      repeat: 1,
+    });
+
+    expect(statement.happened).toBe(
+      'Every model setting passed every required check of "Odd "name"; (2)": z-model, low; a-model, high; m-model.',
+    );
+  });
+
+  it('renders as the one-paragraph example of the specification', () => {
+    const statement = nonSeparatingOutcomesStatement({
+      outcome: 'passed',
+      taskName: TASK,
+      settingNames: SETTINGS,
+      repeat: 1,
+    });
+
+    expect(renderStatement(statement)).toBe(
+      `Every model setting passed every required check of "Fix the login redirect": openai/model-a, high; openai/model-a, low. ${MEANS_PASSED} ${NEXT_PASSED}`,
+    );
   });
 });
 

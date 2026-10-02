@@ -140,6 +140,8 @@ Required checks reads as `<passed>/<total> passed`, followed by the checks that 
 
 A `[n]` after a value marks a footnote under the table. Each footnote names the attempt it describes and says what happened, what it means for the result, and what to do next, for example the `tevu assess` command that records a verdict. The raw reason follows after `Technical detail:`. A `-` means tevu could not take the value. Its footnote says the value is unknown, not zero, and the attempt's section lists it under `Not measured`.
 
+A note under a task's table appears when every attempt of every setting passed every required check of that task, or every attempt of every setting failed, and no attempt of that task has a pending verdict. It says the outcomes do not separate the settings: a difference in time or cost does not show which setting produces the better solution. It also names what would tell the settings apart, such as more attempts or a different task. A small, already solved task like this tutorial's can end this way. See [Outcomes that do not separate the settings](../reference/results.md#outcomes-that-do-not-separate-the-settings).
+
 Below the tables, each case has its own section. For each model setting it shows:
 
 - the task outcome and its required checks, and every check with its verdict;

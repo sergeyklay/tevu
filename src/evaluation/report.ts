@@ -12,6 +12,7 @@ import {
   formatRequiredChecks,
   gradingGapStatement,
   measurementGapStatement,
+  nonSeparatingOutcomesStatement,
   renderStatement,
 } from './wording';
 
@@ -612,6 +613,17 @@ function renderComparisonBlocks(context: ReportContext): string[] {
       '',
     );
 
+    const shared = nonSeparatingOutcomeOf(pairs, context);
+    if (shared !== null) {
+      const statement = nonSeparatingOutcomesStatement({
+        outcome: shared,
+        taskName: names.task(taskId),
+        settingNames: pairs.map((pair) => names.setting(pair.modelId)),
+        repeat: model.manifest.execution.repeat.value,
+      });
+      lines.push(cell(renderStatement(statement)), '');
+    }
+
     const graded = gradedAttemptsOfTask(context, taskId);
     if (graded.length > 0) {
       lines.push(renderGraderLine(graded, context, footnotes), '');
@@ -623,6 +635,32 @@ function renderComparisonBlocks(context: ReportContext): string[] {
     }
   }
   return lines;
+}
+
+/**
+ * The outcome every planned attempt of one task shares when its outcomes do not
+ * separate its model settings, or `null` when its block gets no separation note.
+ * A pending verdict in any planned attempt, required or optional, withholds the note.
+ */
+function nonSeparatingOutcomeOf(
+  pairs: readonly PairSummary[],
+  context: ReportContext,
+): 'passed' | 'failed' | null {
+  if (pairs.length < 2) {
+    return null;
+  }
+  let shared: 'passed' | 'failed';
+  if (pairs.every((pair) => pair.outcomes.passed === pair.planned)) {
+    shared = 'passed';
+  } else if (pairs.every((pair) => pair.outcomes.failed === pair.planned)) {
+    shared = 'failed';
+  } else {
+    return null;
+  }
+  const hasPendingVerdict = pairs
+    .flatMap((pair) => caseResultsOf(attemptsOfPair(context, pair)))
+    .some((result) => result.checks.some((check) => check.verdict === 'pending'));
+  return hasPendingVerdict ? null : shared;
 }
 
 /**
