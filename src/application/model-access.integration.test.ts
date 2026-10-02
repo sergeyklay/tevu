@@ -129,6 +129,7 @@ type DependencyOptions = {
   cancellation?: AbortSignal;
   environments?: EnvironmentAdapter;
   wrapAdapter?: (adapter: AgentAdapter) => AgentAdapter;
+  git?: ModelAccessDependencies['git'];
   blocks?: TevuConfig['agents']['opencode'][];
 };
 
@@ -156,13 +157,49 @@ function buildDependencies(options: DependencyOptions = {}): ModelAccessDependen
       return new Map([['opencode', options.wrapAdapter?.(adapter) ?? adapter]]);
     },
     environments: options.environments ?? createEnvironmentAdapter(),
-    git: createGitWorkspaceAdapter({ workspacesDirectory: join(tempRoot, 'workspaces') }),
+    git:
+      options.git ??
+      createGitWorkspaceAdapter({ workspacesDirectory: join(tempRoot, 'workspaces') }),
     cancellation: options.cancellation ?? new AbortController().signal,
   };
 }
 
 function buildAgent(overrides: Partial<AgentDraft> = {}): AgentDraft {
   return { command: 'opencode', secrets: [], env: [], providers: [], ...overrides };
+}
+
+/** Wraps the real environment adapter so every removal deletes the call directory and then fails, recording each root. */
+function buildRetainingEnvironments(): { environments: EnvironmentAdapter; roots: string[] } {
+  const real = createEnvironmentAdapter();
+  const roots: string[] = [];
+  const environments: EnvironmentAdapter = {
+    ...real,
+    createModelCallEnvironment: async (snapshot, agentVariables, configurationFiles) => {
+      const created = await real.createModelCallEnvironment(
+        snapshot,
+        agentVariables,
+        configurationFiles,
+      );
+      if (!created.ok) {
+        return created;
+      }
+      roots.push(created.value.rootDirectory);
+      return {
+        ok: true,
+        value: {
+          ...created.value,
+          dispose: async () => {
+            await created.value.dispose();
+            return {
+              ok: false,
+              error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
+            };
+          },
+        },
+      };
+    },
+  };
+  return { environments, roots };
 }
 
 const CONFIG_PATH = () => join(tempRoot, 'tevu.yaml');
@@ -412,6 +449,7 @@ describe('checkModelAccess against a fake OpenCode executable', () => {
     expect(outcome).toEqual({
       status: 'listing-failed',
       detail: `"${executable} models --verbose" exits with code 3`,
+      retainedDirectory: null,
     });
   });
 
@@ -434,6 +472,7 @@ describe('checkModelAccess against a fake OpenCode executable', () => {
       status: 'provider-rejected',
       findings: [{ severity: 'error', identifier: 'agents.opencode.providers.acme' }],
     });
+    expect(outcome).not.toHaveProperty('retainedDirectory');
     expect(JSON.stringify(outcome)).not.toContain(LITERAL_KEY);
   });
 
@@ -449,7 +488,7 @@ describe('checkModelAccess against a fake OpenCode executable', () => {
       buildDependencies({ cancellation: AbortSignal.abort() }),
     );
 
-    expect(outcome).toEqual({ status: 'cancelled' });
+    expect(outcome).toEqual({ status: 'cancelled', retainedDirectory: null });
     expect(existsSync(recordPath)).toBe(false);
   });
 
@@ -472,7 +511,7 @@ describe('checkModelAccess against a fake OpenCode executable', () => {
     controller.abort();
     const outcome = await pending;
 
-    expect(outcome).toEqual({ status: 'cancelled' });
+    expect(outcome).toEqual({ status: 'cancelled', retainedDirectory: null });
     expect(() => process.kill(record.pid, 0)).toThrow();
     expect(existsSync(dirname(record.cwd))).toBe(false);
   });
@@ -534,6 +573,7 @@ describe('checkModelAccess against a fake OpenCode executable', () => {
       expect(outcome).toEqual({
         status: 'listing-failed',
         detail: '"opencode models --verbose" did not finish within 120s',
+        retainedDirectory: null,
       });
     });
 
@@ -558,6 +598,7 @@ describe('checkModelAccess against a fake OpenCode executable', () => {
       expect(outcome).toEqual({
         status: 'listing-failed',
         detail: 'create-model-call-directory: disk full',
+        retainedDirectory: null,
       });
     });
 
@@ -584,7 +625,127 @@ describe('checkModelAccess against a fake OpenCode executable', () => {
         status: 'listing-failed',
         detail:
           'prerequisite "environment" is not satisfied; expected non-empty parent PATH, actual empty',
+        retainedDirectory: null,
       });
     });
+
+    it('reports a missing adapter as a failed listing with no directory', async () => {
+      const dependencies = {
+        ...buildDependencies(),
+        agentsFor: () => new Map<string, AgentAdapter>(),
+      };
+
+      const outcome = await checkModelAccess(
+        { configPath: CONFIG_PATH(), agent: buildAgent(), model: 'acme/model-a' },
+        dependencies,
+      );
+
+      expect(outcome).toEqual({
+        status: 'listing-failed',
+        detail: 'no adapter is registered for the agent',
+        retainedDirectory: null,
+      });
+    });
+  });
+
+  describe('retained call directory of the listing', () => {
+    const failingGit: ModelAccessDependencies['git'] = {
+      initializeEmptyRepository: async () => ({
+        ok: false,
+        error: {
+          kind: 'ArtifactError',
+          operation: 'initialize-repository',
+          reason: 'git init exited with code 1',
+        },
+      }),
+    };
+
+    function listsAs(listing: Awaited<ReturnType<AgentAdapter['listModels']>>) {
+      return (adapter: AgentAdapter): AgentAdapter => ({
+        ...adapter,
+        listModels: async () => listing,
+      });
+    }
+
+    const scenarios = [
+      {
+        name: 'a listing that timed out',
+        options: (): DependencyOptions => ({
+          wrapAdapter: listsAs({ outcome: 'timed-out', limitMs: 120_000 }),
+        }),
+        expected: (retainedDirectory: string | null) => ({
+          status: 'listing-failed',
+          detail: '"opencode models --verbose" did not finish within 120s',
+          retainedDirectory,
+        }),
+      },
+      {
+        name: 'a listing that failed',
+        options: (): DependencyOptions => ({
+          wrapAdapter: listsAs({ outcome: 'failed', reason: 'exits with code 3' }),
+        }),
+        expected: (retainedDirectory: string | null) => ({
+          status: 'listing-failed',
+          detail: '"opencode models --verbose" exits with code 3',
+          retainedDirectory,
+        }),
+      },
+      {
+        name: 'a listing cancelled while the adapter lists',
+        options: (): DependencyOptions => {
+          const controller = new AbortController();
+          return {
+            cancellation: controller.signal,
+            wrapAdapter: (adapter) => ({
+              ...adapter,
+              listModels: async () => {
+                controller.abort();
+                return { outcome: 'cancelled' };
+              },
+            }),
+          };
+        },
+        expected: (retainedDirectory: string | null) => ({
+          status: 'cancelled',
+          retainedDirectory,
+        }),
+      },
+      {
+        name: 'a repository that cannot be initialized',
+        options: (): DependencyOptions => ({ git: failingGit }),
+        expected: (retainedDirectory: string | null) => ({
+          status: 'listing-failed',
+          detail: 'initialize-repository: git init exited with code 1',
+          retainedDirectory,
+        }),
+      },
+    ];
+
+    it.each(scenarios)(
+      'keeps the status and detail and reports the root for $name when its removal fails',
+      async ({ options, expected }) => {
+        const { environments, roots } = buildRetainingEnvironments();
+
+        const outcome = await checkModelAccess(
+          { configPath: CONFIG_PATH(), agent: buildAgent(), model: 'acme/model-a' },
+          buildDependencies({ ...options(), environments }),
+        );
+
+        expect(roots).toHaveLength(1);
+        expect(outcome).toEqual(expected(roots[0]!));
+      },
+    );
+
+    it.each(scenarios)(
+      'reports no directory for $name when its removal succeeds',
+      async ({ options, expected }) => {
+        const outcome = await checkModelAccess(
+          { configPath: CONFIG_PATH(), agent: buildAgent(), model: 'acme/model-a' },
+          buildDependencies(options()),
+        );
+
+        expect(outcome).toEqual(expected(null));
+      },
+    );
   });
 });

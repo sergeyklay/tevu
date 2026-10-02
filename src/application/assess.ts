@@ -559,7 +559,8 @@ async function rebuildRunDerived(
 /**
  * Writes the conclusions of every task in order. After a cancellation, each
  * remaining task saves its template sentences with no call, so the summary is
- * complete without the model.
+ * complete without the model. The call directory a cancelled outcome carries is
+ * listed like any other; the tasks after the cancellation add none.
  */
 async function writeTaskConclusionsInOrder(
   evidence: readonly SummaryEvidence[],
@@ -569,7 +570,12 @@ async function writeTaskConclusionsInOrder(
   const retainedDirectories: string[] = [];
   let isCancelled = false;
   for (const entry of evidence) {
-    const outcome = isCancelled ? { status: 'cancelled' as const } : await writer.write(entry);
+    const outcome = isCancelled
+      ? { status: 'cancelled' as const, retainedDirectory: null }
+      : await writer.write(entry);
+    if (outcome.retainedDirectory !== null) {
+      retainedDirectories.push(outcome.retainedDirectory);
+    }
     if (outcome.status === 'cancelled') {
       isCancelled = true;
       conclusions.push({
@@ -582,9 +588,6 @@ async function writeTaskConclusionsInOrder(
       continue;
     }
     conclusions.push(outcome.conclusions);
-    if (outcome.retainedDirectory !== null) {
-      retainedDirectories.push(outcome.retainedDirectory);
-    }
   }
   return { conclusions, retainedDirectories };
 }

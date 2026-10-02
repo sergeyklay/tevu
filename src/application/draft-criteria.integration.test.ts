@@ -540,7 +540,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
 
     const outcome = await draftWithFakeAgent({ run: 'ok', cancellation: controller.signal });
 
-    expect(outcome).toEqual({ status: 'cancelled' });
+    expect(outcome).toEqual({ status: 'cancelled', retainedDirectories: [] });
   });
 
   it('returns cancelled when the pull-request diff read reports cancellation', async () => {
@@ -554,7 +554,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
       pullRequests: { readPullRequestDiff },
     });
 
-    expect(outcome).toEqual({ status: 'cancelled' });
+    expect(outcome).toEqual({ status: 'cancelled', retainedDirectories: [] });
   });
 
   it('sends the task prompt and description to the model for a pull-request reference', async () => {
@@ -794,7 +794,7 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
     await waitForInvocation(invocationsPath, 'models');
     controller.abort();
 
-    expect(await pending).toEqual({ status: 'cancelled' });
+    expect(await pending).toEqual({ status: 'cancelled', retainedDirectories: [] });
     expect(await readInvocations(invocationsPath)).toEqual(['models']);
   });
 });
@@ -1016,7 +1016,7 @@ describe('draftCriteria effort check against a fake OpenCode executable', () => 
     expect(outcome).toMatchObject({ status: 'failed', retainedDirectories: roots });
   });
 
-  it('carries the retained directory of the listing when the call times out', async () => {
+  it('lists the retained directory of the listing, then of the call, when the call times out', async () => {
     const { environments, roots } = buildRetainingEnvironments();
     const config = buildConfig();
 
@@ -1031,7 +1031,91 @@ describe('draftCriteria effort check against a fake OpenCode executable', () => 
     expect(outcome).toMatchObject({
       status: 'failed',
       failure: { cause: 'timed-out' },
-      retainedDirectories: [roots[0]],
+      retainedDirectories: roots,
     });
   });
+
+  it('lists the retained directory of the listing, then of the call, when the call fails', async () => {
+    const { environments, roots } = buildRetainingEnvironments();
+
+    const outcome = await draft({
+      run: 'error-exit-1',
+      models: 'reports-matching-variant',
+      environments,
+    });
+
+    expect(roots).toHaveLength(2);
+    expect(outcome).toMatchObject({
+      status: 'failed',
+      failure: { cause: 'call-failed' },
+      retainedDirectories: roots,
+    });
+  });
+
+  it('lists the retained directory of the listing, then of the call, when the signal aborts during the call', async () => {
+    const { environments, roots } = buildRetainingEnvironments();
+    const invocationsPath = join(tempRoot, nextScriptName());
+    const controller = new AbortController();
+
+    const pending = draft({
+      run: 'sleep',
+      models: 'reports-matching-variant',
+      invocationsPath,
+      environments,
+      cancellation: controller.signal,
+    });
+    await vi.waitFor(() => expect(readInvocationLog(invocationsPath)).toContain('run'));
+    controller.abort();
+
+    expect(await pending).toEqual({ status: 'cancelled', retainedDirectories: roots });
+    expect(roots).toHaveLength(2);
+  });
+
+  it('lists the retained directory of the listing when the signal aborts during the listing', async () => {
+    const { environments, roots } = buildRetainingEnvironments();
+    const invocationsPath = join(tempRoot, nextScriptName());
+    const controller = new AbortController();
+
+    const pending = draft({
+      models: 'sleep',
+      invocationsPath,
+      environments,
+      cancellation: controller.signal,
+    });
+    await vi.waitFor(() => expect(readInvocationLog(invocationsPath)).toContain('models'));
+    controller.abort();
+
+    expect(await pending).toEqual({ status: 'cancelled', retainedDirectories: roots });
+    expect(roots).toHaveLength(1);
+  });
+
+  it.each([
+    { name: 'fails', options: {} },
+    {
+      name: 'times out',
+      options: {
+        wrapAdapter: (adapter: AgentAdapter): AgentAdapter => ({
+          ...adapter,
+          listModels: async () => ({ outcome: 'timed-out', limitMs: 120_000 }),
+        }),
+      },
+    },
+  ] satisfies { name: string; options: Partial<BuildOptions> }[])(
+    'drafts with the effort unverified and lists the directory of the listing that $name, then of the call',
+    async ({ options }) => {
+      const { environments, roots } = buildRetainingEnvironments();
+
+      const outcome = await draft({ ...options, environments });
+
+      expect(roots).toHaveLength(2);
+      expect(outcome).toMatchObject({
+        status: 'drafted',
+        effort: {
+          status: 'unverified',
+          reason: expect.stringContaining('produced no model listing') as string,
+        },
+        retainedDirectories: roots,
+      });
+    },
+  );
 });

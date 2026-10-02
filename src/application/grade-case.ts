@@ -45,10 +45,14 @@ export type GradeCaseRequest = {
   providers: ProviderSnapshot;
 };
 
-/** Outcome of one grading call; cancellation carries no grading to persist. */
+/**
+ * Outcome of one grading; cancellation carries no grading to persist.
+ * `retainedDirectories` is present on every status and lists, in call order,
+ * the call directory of each grader call whose removal failed.
+ */
 export type GradeCaseOutcome =
-  | { status: 'graded'; grading: CaseGrading; retainedDirectory: string | null }
-  | { status: 'cancelled' };
+  | { status: 'graded'; grading: CaseGrading; retainedDirectories: readonly string[] }
+  | { status: 'cancelled'; retainedDirectories: readonly string[] };
 
 /**
  * Resolves the declared grader role and the task's graded checks.
@@ -85,7 +89,7 @@ function unredactedPromptOutcome(
       metrics: unavailableAgentMetrics(reason),
       grades: pendingGrades(checks, reason),
     },
-    retainedDirectory: null,
+    retainedDirectories: [],
   };
 }
 
@@ -111,7 +115,8 @@ function sumCallMetrics(calls: CaseGrading['calls']): AgentMetrics {
  * without a reply leaves every graded check pending with the last call's
  * reason. Every call is recorded with the redacted records it left, and the
  * grading's metrics sum the calls'. Cancellation during any call returns
- * `{ status: 'cancelled' }` with nothing to persist.
+ * `{ status: 'cancelled' }` with no grading to persist, carrying the retained
+ * directories of the calls made so far.
  */
 export async function gradeCase(
   request: GradeCaseRequest,
@@ -138,6 +143,7 @@ export async function gradeCase(
   }
 
   const calls: CaseGrading['calls'] = [];
+  const retainedDirectories: string[] = [];
   for (;;) {
     let evidence: ModelCallEvidence | undefined;
     const result = await callModelRole(
@@ -154,6 +160,9 @@ export async function gradeCase(
       },
       dependencies,
     );
+    if (result.retainedDirectory !== null) {
+      retainedDirectories.push(result.retainedDirectory);
+    }
     const records = {
       events: evidence?.events ?? [],
       diagnostics: evidence?.diagnostics ?? '',
@@ -171,12 +180,12 @@ export async function gradeCase(
           metrics: sumCallMetrics(calls),
           grades: deriveGrades(result.value.text, checks),
         },
-        retainedDirectory: result.value.retainedDirectory,
+        retainedDirectories,
       };
     }
 
     if (result.error.kind === 'CancellationError') {
-      return { status: 'cancelled' };
+      return { status: 'cancelled', retainedDirectories };
     }
     const cause = noReplyCauseOf(result.error);
     const reason = `the grader call failed: ${describeModelCallFailure(result.error)}`;
@@ -195,7 +204,7 @@ export async function gradeCase(
           metrics: sumCallMetrics(calls),
           grades: pendingGrades(checks, reason),
         },
-        retainedDirectory: null,
+        retainedDirectories,
       };
     }
   }

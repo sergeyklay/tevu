@@ -325,6 +325,35 @@ async function runWait<T>(
   return result;
 }
 
+/**
+ * Runs {@link runWait} and, when the wizard cancels after the operation
+ * settled, hands the settled outcome to `reportSettled` before the
+ * cancellation escapes, because the caller never sees an outcome `runWait`
+ * discards.
+ */
+async function runWaitReporting<T>(
+  io: WizardIo,
+  label: string,
+  operation: () => Promise<T>,
+  reportSettled: (settled: T) => void,
+): Promise<T> {
+  // A holder object: a closure's assignment to a plain `let` is invisible to
+  // the compiler's narrowing in the catch block.
+  const holder: { settled?: { outcome: T } } = {};
+  try {
+    return await runWait(io, label, async () => {
+      const outcome = await operation();
+      holder.settled = { outcome };
+      return outcome;
+    });
+  } catch (error) {
+    if (error instanceof WizardCancelledError && holder.settled !== undefined) {
+      reportSettled(holder.settled.outcome);
+    }
+    throw error;
+  }
+}
+
 /** Opens the wait's interrupt slot; absent unless the wizard can also ask the exit question. */
 function openWaitInterrupt(io: WizardIo, label: string): { close(): boolean } | undefined {
   const { waitInterrupt, exitLoss, redact } = io;
@@ -969,20 +998,27 @@ async function checkRound(
       declareSecret(state, candidate, key);
     }
 
-    const outcome = await runWait(io, 'Checking model', () =>
-      dependencies.checkModelAccess(candidate, model),
+    const outcome = await runWaitReporting(
+      io,
+      'Checking model',
+      () => dependencies.checkModelAccess(candidate, model),
+      (settled) => {
+        if (settled.status !== 'provider-rejected' && settled.retainedDirectory !== null) {
+          warnRetainedDirectory(io, dependencies.redact, settled.retainedDirectory);
+        }
+      },
     );
-    if (outcome.status === 'cancelled') {
-      throw new WizardCancelledError();
-    }
     if (outcome.status === 'provider-rejected') {
       return { kind: 'provider-rejected', provider, findings: outcome.findings };
     }
-    if (outcome.status === 'listing-failed') {
-      return { kind: 'listing-failed', detail: outcome.detail };
-    }
     if (outcome.retainedDirectory !== null) {
       warnRetainedDirectory(io, dependencies.redact, outcome.retainedDirectory);
+    }
+    if (outcome.status === 'cancelled') {
+      throw new WizardCancelledError();
+    }
+    if (outcome.status === 'listing-failed') {
+      return { kind: 'listing-failed', detail: outcome.detail };
     }
     if (
       outcome.status === 'not-listed' &&
@@ -2268,16 +2304,25 @@ async function draftCriteriaUntilDone(
   progress: WizardProgress,
 ): Promise<CriteriaDraft | undefined> {
   for (;;) {
-    const outcome = await runWait(io, 'Drafting criteria', async () => {
-      const drafting = await dependencies.draftCriteria(request);
-      progress.holdsCriteriaDraft = drafting.status === 'drafted';
-      return drafting;
-    });
-    if (outcome.status === 'cancelled') {
-      throw new WizardCancelledError();
-    }
+    const outcome = await runWaitReporting(
+      io,
+      'Drafting criteria',
+      async () => {
+        const drafting = await dependencies.draftCriteria(request);
+        progress.holdsCriteriaDraft = drafting.status === 'drafted';
+        return drafting;
+      },
+      (settled) => {
+        for (const directory of settled.retainedDirectories) {
+          warnRetainedDirectory(io, dependencies.redact, directory);
+        }
+      },
+    );
     for (const directory of outcome.retainedDirectories) {
       warnRetainedDirectory(io, dependencies.redact, directory);
+    }
+    if (outcome.status === 'cancelled') {
+      throw new WizardCancelledError();
     }
     if (outcome.status === 'drafted') {
       if (outcome.effort.status !== 'verified') {

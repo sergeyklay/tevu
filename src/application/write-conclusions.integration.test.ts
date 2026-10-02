@@ -26,7 +26,7 @@ import { assessCase, rebuildReport } from './assess';
 import { planBenchmark, runBenchmark } from './run-benchmark';
 import { writeTaskConclusions } from './write-conclusions';
 
-import type { ConclusionWriter } from './write-conclusions';
+import type { ConclusionWriter, TaskConclusionsOutcome } from './write-conclusions';
 import type { TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentAdapter,
@@ -444,6 +444,7 @@ function buildWriter(options: {
   executable: FakeExecutable;
   redact?: Redactor;
   cancellation?: AbortSignal;
+  environments?: EnvironmentAdapter;
 }): ConclusionWriter {
   const secrets = createSecretRedactor(() => [], createRedactor([]));
   const adapter = createOpenCodeAdapter(
@@ -461,7 +462,7 @@ function buildWriter(options: {
       operatorDirectories: { home: undefined, xdgConfigHome: undefined },
     },
   );
-  const environments: EnvironmentAdapter = createEnvironmentAdapter();
+  const environments = options.environments ?? createEnvironmentAdapter();
   return {
     write: (evidence) =>
       writeTaskConclusions(
@@ -477,6 +478,58 @@ function buildWriter(options: {
           git: createGitWorkspaceAdapter({ workspacesDirectory: join(root, 'call-workspaces') }),
         },
       ),
+  };
+}
+
+/** Wraps the environment adapter so every removal deletes the call directory and then fails, recording each root in call order. */
+function buildRetainingEnvironments(): { environments: EnvironmentAdapter; roots: string[] } {
+  const real = createEnvironmentAdapter();
+  const roots: string[] = [];
+  const environments: EnvironmentAdapter = {
+    ...real,
+    createModelCallEnvironment: async (snapshot, agentVariables, configurationFiles) => {
+      const created = await real.createModelCallEnvironment(
+        snapshot,
+        agentVariables,
+        configurationFiles,
+      );
+      if (!created.ok) {
+        return created;
+      }
+      roots.push(created.value.rootDirectory);
+      return {
+        ok: true,
+        value: {
+          ...created.value,
+          dispose: async () => {
+            await created.value.dispose();
+            return {
+              ok: false,
+              error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
+            };
+          },
+        },
+      };
+    },
+  };
+  return { environments, roots };
+}
+
+/** Records the outcome of every task the wrapped writer settles. */
+function recordOutcomes(writer: ConclusionWriter): {
+  writer: ConclusionWriter;
+  outcomes: TaskConclusionsOutcome[];
+} {
+  const outcomes: TaskConclusionsOutcome[] = [];
+  return {
+    outcomes,
+    writer: {
+      write: async (evidence) => {
+        const outcome = await writer.write(evidence);
+        outcomes.push(outcome);
+        return outcome;
+      },
+    },
   };
 }
 
@@ -708,6 +761,48 @@ describe('tevu run with roles.summary', () => {
     expect(report).toContain('The summary model returned no sentences.');
   });
 
+  it('lists the directory of each failed call in task ID order when every removal fails', async () => {
+    const { store, runId } = await copyOf(mainRun);
+    const executable = await writeFakeOpenCode({ run: 'error' });
+    const { environments, roots } = buildRetainingEnvironments();
+    const { writer, outcomes } = recordOutcomes(
+      buildWriter({ config: mainRun.config, executable, environments }),
+    );
+
+    const rebuilt = unwrapOk(await rebuildReport(runId, store, RUN_AGENTS, writer));
+
+    expect(roots).toHaveLength(2);
+    expect(outcomes).toEqual([
+      expect.objectContaining({ status: 'written', retainedDirectory: roots[0] }),
+      expect.objectContaining({ status: 'written', retainedDirectory: roots[1] }),
+    ]);
+    expect(rebuilt.retainedDirectories).toEqual(roots);
+  });
+
+  it('lists the directory of a cancelled call and adds none for the tasks after it', async () => {
+    const { store, runId } = await copyOf(mainRun);
+    const executable = await writeFakeOpenCode({ run: 'sleep' });
+    const { environments, roots } = buildRetainingEnvironments();
+    const controller = new AbortController();
+    const { writer, outcomes } = recordOutcomes(
+      buildWriter({
+        config: mainRun.config,
+        executable,
+        environments,
+        cancellation: controller.signal,
+      }),
+    );
+
+    const rebuilding = rebuildReport(runId, store, RUN_AGENTS, writer);
+    await vi.waitFor(() => expect(executable.calls()).toBe(1), { timeout: 15_000 });
+    controller.abort();
+    const rebuilt = unwrapOk(await rebuilding);
+
+    expect(roots).toHaveLength(1);
+    expect(outcomes).toEqual([{ status: 'cancelled', retainedDirectory: roots[0] }]);
+    expect(rebuilt.retainedDirectories).toEqual(roots);
+  }, 30_000);
+
   describe('a prompt that cannot be redacted', () => {
     // The injected redactor is typed to return text; a defective one is simulated through a double assertion.
     const NON_STRING_REDACTOR = (() => 42) as unknown as Redactor;
@@ -775,7 +870,10 @@ describe('tevu run with roles.summary', () => {
 describe('rebuildReport with a conclusion writer', () => {
   it('asks for no conclusions after a cancellation and saves template sentences with no call for the remaining tasks', async () => {
     const { store, directory, runId } = await copyOf(mainRun);
-    const write = vi.fn<ConclusionWriter['write']>(async () => ({ status: 'cancelled' }));
+    const write = vi.fn<ConclusionWriter['write']>(async () => ({
+      status: 'cancelled',
+      retainedDirectory: null,
+    }));
 
     const rebuilt = unwrapOk(await rebuildReport(runId, store, RUN_AGENTS, { write }));
 
@@ -788,6 +886,19 @@ describe('rebuildReport with a conclusion writer', () => {
     );
     const { summary } = await readFiles(directory, runId);
     expect(summarySentences(summary, 'Speed')).toEqual([TEMPLATE_SPEED, TEMPLATE_SPEED]);
+  });
+
+  it('lists the directory of a cancelled outcome and adds none for the tasks after it', async () => {
+    const { store, runId } = await copyOf(mainRun);
+    const write = vi.fn<ConclusionWriter['write']>(async () => ({
+      status: 'cancelled',
+      retainedDirectory: '/tmp/tevu-call-cancelled',
+    }));
+
+    const rebuilt = unwrapOk(await rebuildReport(runId, store, RUN_AGENTS, { write }));
+
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(rebuilt.retainedDirectories).toEqual(['/tmp/tevu-call-cancelled']);
   });
 
   it('returns the retained directory of every task in task ID order', async () => {

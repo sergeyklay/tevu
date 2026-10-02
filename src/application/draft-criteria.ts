@@ -67,9 +67,10 @@ export type CriteriaDraftFailure =
 /**
  * Outcome of one criteria-drafting call; a failure or cancellation drafts nothing to review.
  *
- * `retainedDirectories` lists the call directories left behind because removing
- * them failed: the model listing's, then the model call's. An outcome returned
- * before the listing carries none.
+ * `retainedDirectories` is present on every status and lists the call
+ * directories left behind because removing them failed: the model listing's
+ * when `checkModelAccess` reports one, then the model call's. An outcome
+ * returned before the listing carries none.
  */
 export type CriteriaDraftOutcome =
   | {
@@ -79,7 +80,7 @@ export type CriteriaDraftOutcome =
       retainedDirectories: readonly string[];
     }
   | { status: 'failed'; failure: CriteriaDraftFailure; retainedDirectories: readonly string[] }
-  | { status: 'cancelled' };
+  | { status: 'cancelled'; retainedDirectories: readonly string[] };
 
 /** Effects injected into the criteria-drafting use case. */
 export type CriteriaDraftDependencies = {
@@ -206,7 +207,7 @@ export async function draftCriteria(
   dependencies: CriteriaDraftDependencies,
 ): Promise<CriteriaDraftOutcome> {
   if (dependencies.cancellation.aborted) {
-    return { status: 'cancelled' };
+    return { status: 'cancelled', retainedDirectories: [] };
   }
 
   const source =
@@ -242,7 +243,7 @@ export async function draftCriteria(
 
   const changes = await readReferenceChanges(request, dependencies);
   if (changes.status === 'cancelled') {
-    return changes;
+    return { status: 'cancelled', retainedDirectories: listingDirectories };
   }
   if (changes.status === 'failed') {
     return draftFailure(changes.failure, listingDirectories);
@@ -279,15 +280,16 @@ export async function draftCriteria(
       git: dependencies.git,
     },
   );
+  const retainedDirectories = withRetained(listingDirectories, result.retainedDirectory);
   if (!result.ok) {
     const { error } = result;
     if (error.kind === 'CancellationError') {
-      return { status: 'cancelled' };
+      return { status: 'cancelled', retainedDirectories };
     }
     if (error.kind === 'ModelCallError' && error.cause === 'timed-out') {
       return draftFailure(
         { cause: 'timed-out', limit: callConfig.run.timeout },
-        listingDirectories,
+        retainedDirectories,
       );
     }
     return draftFailure(
@@ -302,11 +304,10 @@ export async function draftCriteria(
             ? error.reason
             : describeModelCallFailure(error),
       },
-      listingDirectories,
+      retainedDirectories,
     );
   }
 
-  const retainedDirectories = withRetained(listingDirectories, result.value.retainedDirectory);
   const parsed = parseCriteriaReply(result.value.text);
   if (!parsed.ok) {
     return draftFailure({ cause: 'reply-invalid', defect: parsed.defect }, retainedDirectories);
@@ -340,14 +341,13 @@ async function checkCriteriaEffort(
   dependencies: CriteriaDraftDependencies,
 ): Promise<CriteriaEffortOutcome> {
   const access = await checkModelAccess({ configPath, agent, model: role.model }, dependencies);
+  const listingDirectories =
+    access.status === 'provider-rejected' ? [] : withRetained([], access.retainedDirectory);
   if (access.status === 'cancelled') {
-    return { status: 'cancelled' };
+    return { status: 'cancelled', retainedDirectories: listingDirectories };
   }
   if (access.status === 'not-listed') {
-    return draftFailure(
-      { cause: 'model-unavailable', model: role.model },
-      withRetained([], access.retainedDirectory),
-    );
+    return draftFailure({ cause: 'model-unavailable', model: role.model }, listingDirectories);
   }
   const evidence: ModelVariantEvidence =
     access.status === 'listed'
@@ -361,8 +361,6 @@ async function checkCriteriaEffort(
     effort: role.effort,
     evidence,
   });
-  const retainedDirectories =
-    access.status === 'listed' ? withRetained([], access.retainedDirectory) : [];
   if (
     effort.status === 'unsupported' &&
     evidence.kind === 'listed' &&
@@ -376,10 +374,10 @@ async function checkCriteriaEffort(
         effort: role.effort,
         variants: evidence.variants,
       },
-      retainedDirectories,
+      listingDirectories,
     );
   }
-  return { status: 'checked', effort, retainedDirectories };
+  return { status: 'checked', effort, retainedDirectories: listingDirectories };
 }
 
 function withRetained(directories: readonly string[], directory: string | null): string[] {

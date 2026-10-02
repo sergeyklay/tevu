@@ -1685,9 +1685,20 @@ export type ModelRoleCallRequest = {
   onEvidence?: (evidence: ModelCallEvidence) => void;
 };
 
-/** Result of one model-role call. */
-export type ModelRoleCallResult = ModelCallResult & {
-  /** The call directory left behind because removing it failed; null when removed. */
+/**
+ * What one model-role call returns: the call's own result and, on every
+ * path, the call directory left behind because removing it failed.
+ */
+export type ModelRoleCallOutcome = TevuResult<
+  ModelCallResult,
+  | 'ConfigValidationError'
+  | 'PrerequisiteError'
+  | 'AgentProtocolError'
+  | 'ArtifactError'
+  | 'ModelCallError'
+  | 'CancellationError'
+> & {
+  /** The call directory left behind because removing it failed; null when it was removed or never created. */
   retainedDirectory: string | null;
 };
 
