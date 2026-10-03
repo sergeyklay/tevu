@@ -45,7 +45,7 @@ The [CLI reference](cli.md#configuration-file-search) lists the search order tha
 
 ## Identifiers
 
-Identifiers match `^[a-z][a-z0-9-]{0,63}$`. They are unique within their collection: repositories, model entries, tasks, and providers. Check IDs are unique across both check collections of a task.
+Identifiers match `^[a-z][a-z0-9-]{0,63}$`. They are unique within their collection: repositories, model entries, tasks, and providers. Check IDs are unique across both check collections of a task. `tevu task add` derives the IDs it writes; see [Identifiers](task-wizard.md#identifiers).
 
 ## Value grammars
 

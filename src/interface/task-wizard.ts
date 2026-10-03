@@ -30,10 +30,18 @@ import {
   parseGitHubRepository,
 } from '@/domain/github-reference';
 
+import {
+  deriveCheckId,
+  deriveGitHubRepositoryId,
+  deriveLocalRepositoryId,
+  deriveModelEntryId,
+  deriveTaskId,
+} from './derived-identifiers';
 import { renderTevuError } from './render-error';
 import { sectionedSelect } from './sectioned-select';
 import { confirm, select, text } from './wizard-prompts';
 
+import type { LocalRepositoryNaming } from './derived-identifiers';
 import type { StatusLine, StatusLineDisplay } from './status-line';
 import type { WaitInterrupt } from './wait-interrupt';
 import type { AssessableCheckSummary, AssessmentCaseContext } from '@/application/assess';
@@ -164,6 +172,8 @@ export type TaskWizardDependencies = {
   ) => Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>>;
   /** Reports whether a local repository answer, resolved against the configuration file's directory, lies in a Git repository. */
   isGitRepository: (repositoryPath: string) => Promise<boolean>;
+  /** Reads the directory name and `origin` remote URL of a local repository answer, resolved against the configuration file's directory. */
+  readLocalRepositoryNaming: (repositoryPath: string) => Promise<LocalRepositoryNaming>;
   /** Reports whether a variable is set in this terminal. */
   isVariableSet: (name: string) => boolean;
   /** Drafts acceptance criteria and a Definition of Done from a resolved reference solution. */
@@ -229,8 +239,6 @@ export type AssessmentWizardDependencies = {
 type AssessmentWizardErrorKind =
   'ConfigValidationError' | 'ArtifactError' | 'PrerequisiteError' | 'CancellationError';
 
-const ID_RULE = 'must match ^[a-z][a-z0-9-]{0,63}$';
-const ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 const FIXED_ENVIRONMENT_NAMES = new Set(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'CI']);
 const NEW_REPOSITORY_CHOICE = '__add-new-repository__';
 const OUTPUT_DIRECTORY_CHOICE = '__change-output-directory__';
@@ -753,10 +761,15 @@ async function interviewBootstrap(
     if (current === undefined) {
       throw new Error('unreachable: the answer select returns one of its own options');
     }
+    const otherIds = new Set(
+      repositories
+        .filter((repository) => repository.id !== current.id)
+        .map((repository) => repository.id),
+    );
     const changed = await askRepositoryLocation(
       io,
       dependencies,
-      current.id,
+      otherIds,
       repositoryPrefill(current),
     );
     repositories = repositories.map((repository) =>
@@ -1240,18 +1253,18 @@ async function interviewRepositories(
   dependencies: TaskWizardDependencies,
 ): Promise<RepositoryInput[]> {
   const repositories: RepositoryInput[] = [];
-  const usedIds = new Set<string>();
+  const takenIds = new Set<string>();
   do {
-    const entry = await interviewRepositoryEntry(io, dependencies, usedIds);
-    usedIds.add(entry.id);
+    const entry = await interviewRepositoryEntry(io, dependencies, takenIds);
+    takenIds.add(entry.id);
     repositories.push(entry);
   } while (await askConfirm(io, { message: 'Add another repository?', initialValue: false }));
   return repositories;
 }
 
 /**
- * Asks the ID and source of one repository: a local path, or a GitHub
- * repository tevu clones itself.
+ * Asks the source and location of one repository: a local path, or a GitHub
+ * repository tevu clones itself. The ID is derived from the final answers.
  *
  * A GitHub entry's `path` is set to its managed-clone location up front, the
  * same value the configuration schema derives on load, so every downstream
@@ -1261,36 +1274,32 @@ async function interviewRepositories(
 async function interviewRepositoryEntry(
   io: WizardIo,
   dependencies: TaskWizardDependencies,
-  usedIds: ReadonlySet<string>,
+  takenIds: ReadonlySet<string>,
   prefill?: RepositoryPrefill,
 ): Promise<RepositoryDefinition> {
-  const id = await askText(io, {
-    message: 'Repository ID',
-    ...(prefill === undefined ? {} : { initialValue: prefill.id }),
-    validate: validateId(usedIds),
-  });
-  return askRepositoryLocation(io, dependencies, id, prefill);
+  return askRepositoryLocation(io, dependencies, takenIds, prefill);
 }
 
 /** The answers of one repository entry, to open its questions again with them filled in. */
-type RepositoryPrefill = { id: string; source: 'path' | 'github'; location: string };
+type RepositoryPrefill = { source: 'path' | 'github'; location: string };
 
 function repositoryPrefill(
-  repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>,
+  repository: Pick<RepositoryInput, 'path' | 'github'>,
 ): RepositoryPrefill {
   return repository.github === undefined
-    ? { id: repository.id, source: 'path', location: repository.path ?? '' }
-    : { id: repository.id, source: 'github', location: repository.github };
+    ? { source: 'path', location: repository.path ?? '' }
+    : { source: 'github', location: repository.github };
 }
 
 /**
- * Asks the source and location of the repository `id`. The location opens
- * with the prefill's value only while the source stays the prefill's source.
+ * Asks the source and location of a repository and derives its ID from them,
+ * so the ID always follows the final answers. The location opens with the
+ * prefill's value only while the source stays the prefill's source.
  */
 async function askRepositoryLocation(
   io: WizardIo,
   dependencies: TaskWizardDependencies,
-  id: string,
+  takenIds: ReadonlySet<string>,
   prefill: RepositoryPrefill | undefined,
 ): Promise<RepositoryDefinition> {
   const source = await askSelect<'path' | 'github'>(io, {
@@ -1303,18 +1312,26 @@ async function askRepositoryLocation(
   });
   const location = prefill?.source === source ? prefill.location : undefined;
   if (source === 'path') {
-    return { id, path: await askLocalRepositoryPath(io, dependencies, location) };
+    const { path, naming } = await askLocalRepositoryPath(io, dependencies, location);
+    return { id: deriveLocalRepositoryId(naming, takenIds), path };
   }
   const github = await askGitHubRepository(io, dependencies, location);
-  return { id, path: managedCloneLocation(github), github: github.text };
+  return {
+    id: deriveGitHubRepositoryId(github, takenIds),
+    path: managedCloneLocation(github),
+    github: github.text,
+  };
 }
 
-/** Asks a local repository path, re-asking with the refused answer filled in until it lies in a Git repository. */
+/**
+ * Asks a local repository path, re-asking with the refused answer filled in
+ * until it lies in a Git repository, and reads its naming in the same wait.
+ */
 async function askLocalRepositoryPath(
   io: WizardIo,
   dependencies: TaskWizardDependencies,
   initialAnswer: string | undefined,
-): Promise<string> {
+): Promise<{ path: string; naming: LocalRepositoryNaming }> {
   let answer = await askText(io, {
     message: 'Local path',
     ...(initialAnswer === undefined ? {} : { initialValue: initialAnswer }),
@@ -1322,8 +1339,13 @@ async function askLocalRepositoryPath(
   });
   for (;;) {
     const path = answer;
-    if (await runWait(io, `Checking ${path}`, () => dependencies.isGitRepository(path))) {
-      return path;
+    const naming = await runWait(io, `Checking ${path}`, async () =>
+      (await dependencies.isGitRepository(path))
+        ? dependencies.readLocalRepositoryNaming(path)
+        : undefined,
+    );
+    if (naming !== undefined) {
+      return { path, naming };
     }
     warnLines(io, dependencies.redact, {
       headline: `${path} isn't a Git repository.`,
@@ -1388,15 +1410,12 @@ async function interviewModels(
   const models: ModelDefinitionInput[] = [];
   const usedIds = new Set<string>();
   for (;;) {
-    const id = await askText(io, {
-      message: 'Model entry ID',
-      validate: validateId(usedIds),
-    });
     const model = await askCheckedModel(io, dependencies, 'Model', checkState);
     const effort = await askText(io, {
       message: 'Reasoning effort',
       validate: validateNonWhitespace,
     });
+    const id = deriveModelEntryId(model, effort, usedIds);
     usedIds.add(id);
     models.push({ id, model, effort });
     if (models.length < 2) {
@@ -1451,10 +1470,7 @@ async function interviewTask(
     resolvedReference,
     baseCommitAnswer,
   );
-  const taskId = await askText(io, {
-    message: 'Task ID',
-    validate: validateId(new Set((existing?.tasks ?? []).map((task) => task.id))),
-  });
+  const taskId = deriveTaskId(new Set((existing?.tasks ?? []).map((task) => task.id)));
   const title = await askText(io, {
     message: 'Title',
     ...(source.value.importedTitle === undefined
@@ -1471,7 +1487,6 @@ async function interviewTask(
     validate: validateNonWhitespace,
   });
   const readiness = await interviewReadiness(io);
-  const usedCheckIds = new Set<string>();
   const configuredAgents = existing?.agents ?? bootstrap?.agents ?? {};
   const agentNames = new Set(
     Object.values(configuredAgents).flatMap((settings) => [
@@ -1498,7 +1513,6 @@ async function interviewTask(
     selectedRepository,
     prompt,
     description,
-    usedCheckIds,
     validateCheckVariables,
     existing?.run.check_timeout ?? bootstrap?.run.check_timeout,
     progress,
@@ -1835,7 +1849,7 @@ async function interviewReferenceSolution(
 
 /**
  * Ensures a GitHub entry's base-commit answer resolves in its managed clone
- * before the `Task ID` question; a path entry returns the answer unchanged.
+ * before the title question; a path entry returns the answer unchanged.
  *
  * A commit still missing after the fetch keeps the answer unchanged for a
  * pull-request task whose answer is a full hash, per `resolveTaskBaseCommit`'s
@@ -2063,7 +2077,6 @@ async function interviewReadiness(io: WizardIo): Promise<string[]> {
 async function interviewChecks(
   io: WizardIo,
   collection: 'acceptance' | 'done',
-  usedCheckIds: Set<string>,
   validateCheckVariables: TextValidator,
   checkTimeout: string | undefined,
   drafted: CheckInput[] = [],
@@ -2081,10 +2094,7 @@ async function interviewChecks(
     }
   }
   for (;;) {
-    const id = await askText(io, {
-      message: `${collection === 'acceptance' ? 'Acceptance' : 'Definition of Done'} check ID`,
-      validate: validateId(usedCheckIds),
-    });
+    const id = deriveCheckId(collection, checks.length + 1);
     const kind = await askSelect<'graded' | 'command' | 'manual'>(io, {
       message: 'Check type',
       options: [
@@ -2114,7 +2124,6 @@ async function interviewChecks(
               ...(await interviewCommandEvaluator(io, validateCheckVariables, checkTimeout)),
               ...(required ? {} : { required }),
             };
-    usedCheckIds.add(id);
     checks.push(check);
     if (!checks.some((candidate) => candidate.required !== false)) {
       log.info(`At least one required ${collection} check is needed.`, promptOptions(io));
@@ -2211,20 +2220,13 @@ async function interviewCriteria(
   repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>,
   prompt: string,
   description: string,
-  usedCheckIds: Set<string>,
   validateCheckVariables: TextValidator,
   checkTimeout: string | undefined,
   progress: WizardProgress,
 ): Promise<DraftedTaskChecks> {
   const byHand = async (): Promise<DraftedTaskChecks> => ({
-    acceptance: await interviewChecks(
-      io,
-      'acceptance',
-      usedCheckIds,
-      validateCheckVariables,
-      checkTimeout,
-    ),
-    done: await interviewChecks(io, 'done', usedCheckIds, validateCheckVariables, checkTimeout),
+    acceptance: await interviewChecks(io, 'acceptance', validateCheckVariables, checkTimeout),
+    done: await interviewChecks(io, 'done', validateCheckVariables, checkTimeout),
   });
 
   if (resolvedReference === undefined) {
@@ -2259,33 +2261,22 @@ async function interviewCriteria(
     return byHand();
   }
   const draftedAcceptance: CheckInput[] = review.acceptance.map((text, index) => ({
-    id: `acceptance-${String(index + 1)}`,
+    id: deriveCheckId('acceptance', index + 1),
     description: text,
   }));
   const draftedDone: CheckInput[] = review.done.map((text, index) => ({
-    id: `done-${String(index + 1)}`,
+    id: deriveCheckId('done', index + 1),
     description: text,
   }));
-  for (const check of [...draftedAcceptance, ...draftedDone]) {
-    usedCheckIds.add(check.id);
-  }
   return {
     acceptance: await interviewChecks(
       io,
       'acceptance',
-      usedCheckIds,
       validateCheckVariables,
       checkTimeout,
       draftedAcceptance,
     ),
-    done: await interviewChecks(
-      io,
-      'done',
-      usedCheckIds,
-      validateCheckVariables,
-      checkTimeout,
-      draftedDone,
-    ),
+    done: await interviewChecks(io, 'done', validateCheckVariables, checkTimeout, draftedDone),
   };
 }
 
@@ -3071,21 +3062,6 @@ type TextValidator = (value: string | undefined) => string | undefined;
 
 function validateNonWhitespace(value: string | undefined): string | undefined {
   return (value ?? '').trim().length === 0 ? 'a non-empty value is required' : undefined;
-}
-
-function validateId(
-  usedIds: ReadonlySet<string>,
-): (value: string | undefined) => string | undefined {
-  return (raw) => {
-    const value = raw ?? '';
-    if (!ID_PATTERN.test(value)) {
-      return `IDs ${ID_RULE}`;
-    }
-    if (usedIds.has(value)) {
-      return `"${value}" is already used`;
-    }
-    return undefined;
-  };
 }
 
 function validateModel(value: string | undefined): string | undefined {

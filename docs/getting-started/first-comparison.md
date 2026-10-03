@@ -53,11 +53,10 @@ The wizard runs in two parts, the configuration first and the task second. Press
 | Stop grace period, Check time limit, Agent command | Enter |
 | Secret variable names | Enter for none. The wizard asks for the key when it reaches a model that needs one |
 | Non-secret variable names, Import issues from Jira? | Enter |
-| Repository ID | A short name, for example `app` |
 | Repository source | **GitHub, cloned by tevu** |
 | GitHub repository | `OWNER/REPO` |
 | Add another repository? | Enter, for No |
-| Model entry ID, Model | One setting to compare, for example `low` and `openai/your-model` |
+| Model | A model to compare, for example `openai/your-model` |
 | API key variable for *provider* | The variable name you exported in step 1. Asked only when the model needs a key |
 | Reasoning effort | A variant the model offers, for example `low`. `opencode models <provider> --verbose` lists them under `variants` |
 
@@ -78,7 +77,7 @@ Choose the grading and drafting models from a different model family than the mo
 | Repository | The repository you added |
 | Reference PR or commit | The accepted pull request, as `OWNER/REPO#NUMBER` or its URL |
 | Base commit | Enter, to start from the commit the wizard proposes |
-| Task ID, Title | A short ID and a title |
+| Title | A short title |
 | Description, Prompt for the models | The problem, in your own words. Describe what is wrong and what must be true afterward, not how the accepted solution fixed it |
 | Confirmed prerequisite | A fact you checked before adding the task, for example that the problem reproduces on the base commit. Answer No at `Add another prerequisite?` |
 
@@ -109,7 +108,7 @@ A command check runs in the case worktree after the agent finishes. The worktree
 
 ## 5. Save and check the configuration
 
-Review the summary and answer Yes at `Save to <path>?`. Then check the configuration without starting any model:
+Review the summary and answer Yes at `Save to <path>?`. The review lists the IDs tevu chose for the repository, the two model settings, the task, and its checks; [Identifiers](../reference/task-wizard.md#identifiers) explains how it picks them. Then check the configuration without starting any model:
 
 ```sh
 tevu validate

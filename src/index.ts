@@ -16,7 +16,12 @@ import { pathToFileURL } from 'node:url';
 
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createArtifactStore, createConfigStore } from '@/adapters/artifact-store';
-import { createGitWorkspaceAdapter, createSourceValidator, isGitRepository } from '@/adapters/git';
+import {
+  createGitWorkspaceAdapter,
+  createSourceValidator,
+  isGitRepository,
+  readOriginRemoteUrl,
+} from '@/adapters/git';
 import { createManagedCloneAdapter } from '@/adapters/managed-clone';
 import {
   createCaseExecutableAdapter,
@@ -245,6 +250,14 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
     checkGitHubRepository: (repository) => clones.checkRemote(repository),
     isGitRepository: (configPath, repositoryPath) =>
       isGitRepository(path.resolve(path.dirname(path.resolve(configPath)), repositoryPath)),
+    readLocalRepositoryNaming: async (configPath, repositoryPath) => {
+      const directory = path.resolve(path.dirname(path.resolve(configPath)), repositoryPath);
+      const originUrl = await readOriginRemoteUrl(directory);
+      return {
+        directoryName: path.basename(directory),
+        ...(originUrl === undefined ? {} : { originUrl }),
+      };
+    },
     unsetVariables: (names) => environments.unsetVariables(names),
     draftCriteria: (request) =>
       draftCriteria(request, {

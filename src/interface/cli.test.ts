@@ -1,7 +1,8 @@
 // @vitest-environment node
 
+import { basename } from 'node:path';
 import { Readable, Writable } from 'node:stream';
-import { stripVTControlCharacters } from 'node:util';
+import { inspect, stripVTControlCharacters } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createGitHubPullRequestReader } from '@/adapters/trackers/github-issues';
@@ -760,6 +761,9 @@ function createOperations(overrides: Partial<ProgramOperations> = {}): ProgramOp
     inspectBaseCommit: vi.fn(async () => ({ ok: true as const, value: undefined })),
     checkRepositoryPlacement: vi.fn(async () => []),
     isGitRepository: vi.fn(async () => true),
+    readLocalRepositoryNaming: vi.fn(async (_configPath, repositoryPath) => ({
+      directoryName: basename(repositoryPath),
+    })),
     unsetVariables: vi.fn(unsetPrefixedVariables),
     draftCriteria: vi.fn(async () => {
       throw new Error(
@@ -960,18 +964,15 @@ function taskInterviewAnswers(repositoryChoice: string): unknown[] {
     repositoryChoice,
     '',
     'abc123',
-    'task-2',
     'Add an export button',
     'Export the current view as CSV.',
     'Implement CSV export for the current view.',
     'Repository is readable',
     false,
-    'acc-1',
     'manual',
     'Export produces a CSV',
     true,
     false,
-    'dod-1',
     'manual',
     'README documents the button',
     true,
@@ -988,7 +989,6 @@ function commandCheckAnswers(
   } = {},
 ): unknown[] {
   return [
-    'acc-1',
     'command',
     'The test suite passes',
     true,
@@ -1010,14 +1010,12 @@ function taskAnswersWithAcceptanceCheck(
     repositoryChoice,
     '',
     'abc123',
-    'task-2',
     'Add an export button',
     'Export the current view as CSV.',
     'Implement CSV export for the current view.',
     'Repository is readable',
     false,
     ...acceptanceCheck,
-    'dod-1',
     'manual',
     'README documents the button',
     true,
@@ -1061,7 +1059,6 @@ const READY_ANSWERS = [
   'repo-1',
   'HEAD~3',
   '',
-  'task-2',
   'Add an export button',
   'Export the current view as CSV.',
   'Implement CSV export for the current view.',
@@ -1079,14 +1076,11 @@ const BOOTSTRAP_PROMPTS = [
   'Secret variable names',
   'Non-secret variable names',
   'Import issues from Jira?',
-  'Repository ID',
   'Repository source',
   'Local path',
   'Add another repository?',
-  'Model entry ID',
   'Model',
   'Reasoning effort',
-  'Model entry ID',
   'Model',
   'Reasoning effort',
   'Add another model?',
@@ -1104,14 +1098,11 @@ const BOOTSTRAP_ANSWERS: unknown[] = [
   '',
   '',
   false,
-  'alpha',
   'path',
   '../repos/alpha',
   false,
-  'c1',
   'provider/model-a',
   'high',
-  'c2',
   'provider/model-b',
   'low',
   false,
@@ -1231,10 +1222,9 @@ function setupAnswers(
     options.secrets ?? '',
     options.env ?? '',
     ...(options.jira ?? [false]),
-    ...BOOTSTRAP_ANSWERS.slice(9, 14),
+    ...BOOTSTRAP_ANSWERS.slice(9, 12),
     ...(options.firstModel ?? ['provider/model-a']),
     'high',
-    'c2',
     ...(options.secondModel ?? ['provider/model-b']),
     'low',
     false,
@@ -2966,7 +2956,6 @@ describe('tevu CLI', () => {
         '',
         '',
         false,
-        'alpha',
         'github',
         { invalid: 'bad repo' },
         'octo/app',
@@ -2978,7 +2967,7 @@ describe('tevu CLI', () => {
       expect(code).toBe(130);
       expect(clack.state.prompts.map((prompt) => prompt.message)).toEqual([
         'tevu task add',
-        ...BOOTSTRAP_PROMPTS.slice(0, 10),
+        ...BOOTSTRAP_PROMPTS.slice(0, 9),
         'Repository source',
         'GitHub repository',
         'GitHub repository',
@@ -3012,7 +3001,7 @@ describe('tevu CLI', () => {
         checkGitHubRepository,
       });
       scriptAnswers(
-        ...BOOTSTRAP_ANSWERS.slice(0, 10),
+        ...BOOTSTRAP_ANSWERS.slice(0, 9),
         'github',
         'octo/missing',
         'octo/app',
@@ -3047,7 +3036,7 @@ describe('tevu CLI', () => {
           error: { kind: 'CancellationError' as const, activeCaseIds: [] },
         })),
       });
-      scriptAnswers(...BOOTSTRAP_ANSWERS.slice(0, 10), 'github', 'octo/app');
+      scriptAnswers(...BOOTSTRAP_ANSWERS.slice(0, 9), 'github', 'octo/app');
 
       const { code } = await runCli(['task', 'add'], { operations });
 
@@ -3065,7 +3054,7 @@ describe('tevu CLI', () => {
         configExists: vi.fn(async () => false),
         isGitRepository,
       });
-      scriptAnswers(...BOOTSTRAP_ANSWERS.slice(0, 12), '../repos/alpha-fixed', clack.CANCEL);
+      scriptAnswers(...BOOTSTRAP_ANSWERS.slice(0, 11), '../repos/alpha-fixed', clack.CANCEL);
 
       const { code } = await runCli(['task', 'add'], { operations });
 
@@ -3155,6 +3144,7 @@ describe('tevu CLI', () => {
         { repository: { id: 'repo-1', github: 'octo/app' }, revisions: [] },
         expect.any(Function),
       );
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('bootstraps the complete configuration, re-prompts invalid integers, and lets createTask perform the only write', async () => {
@@ -3196,12 +3186,12 @@ describe('tevu CLI', () => {
           agents: { opencode: { command: 'opencode', secrets: [], env: [] } },
           repositories: [{ id: 'alpha', path: '../repos/alpha' }],
           models: [
-            { id: 'c1', model: 'provider/model-a', effort: 'high' },
-            { id: 'c2', model: 'provider/model-b', effort: 'low' },
+            { id: 'model-a-high', model: 'provider/model-a', effort: 'high' },
+            { id: 'model-b-low', model: 'provider/model-b', effort: 'low' },
           ],
         },
         task: {
-          id: 'task-2',
+          id: 'task-1',
           title: 'Add an export button',
           repo: 'alpha',
           base_commit: 'abc123',
@@ -3209,11 +3199,14 @@ describe('tevu CLI', () => {
           prompt: 'Implement CSV export for the current view.',
           readiness: ['Repository is readable'],
           checks: {
-            acceptance: [{ id: 'acc-1', description: 'Export produces a CSV', manual: true }],
-            done: [{ id: 'dod-1', description: 'README documents the button', manual: true }],
+            acceptance: [
+              { id: 'acceptance-1', description: 'Export produces a CSV', manual: true },
+            ],
+            done: [{ id: 'done-1', description: 'README documents the button', manual: true }],
           },
         },
       });
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('declares roles.grader in the bootstrap answers when the operator opts in, and the written configuration parses with the role (P11)', async () => {
@@ -3242,6 +3235,7 @@ describe('tevu CLI', () => {
       const parsed = renderAndParseBootstrap(call);
 
       expect(parsed.roles?.grader).toEqual(buildGrader({ agent: 'opencode' }));
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('asks the criteria question after the grader question and declares roles.criteria when the operator opts in (E5)', async () => {
@@ -3279,6 +3273,7 @@ describe('tevu CLI', () => {
         effort: 'high',
         agent: 'opencode',
       });
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('omits roles from the bootstrap answers when the operator declines a grader model, and the written configuration still parses (P11)', async () => {
@@ -3295,6 +3290,7 @@ describe('tevu CLI', () => {
 
       expect(parsed.roles?.grader).toBeUndefined();
       expect(parsed.roles?.criteria).toBeUndefined();
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('re-prompts the grader model question until the answer is a valid provider/model identifier', async () => {
@@ -3347,11 +3343,14 @@ describe('tevu CLI', () => {
           prompt: 'Implement CSV export for the current view.',
           readiness: ['Repository is readable'],
           checks: {
-            acceptance: [{ id: 'acc-1', description: 'Export produces a CSV', manual: true }],
-            done: [{ id: 'dod-1', description: 'README documents the button', manual: true }],
+            acceptance: [
+              { id: 'acceptance-1', description: 'Export produces a CSV', manual: true },
+            ],
+            done: [{ id: 'done-1', description: 'README documents the button', manual: true }],
           },
         },
       });
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('appends to a found search candidate and prints it as both the Configuration line and the added-to target (AC-2)', async () => {
@@ -3368,6 +3367,7 @@ describe('tevu CLI', () => {
       expect(clack.state.outros).toEqual([`Task task-2 added to ${foundPath}`]);
       expect(vi.mocked(operations.configExists)).toHaveBeenCalledExactlyOnceWith(foundPath);
       expect(vi.mocked(operations.loadConfig)).toHaveBeenCalledExactlyOnceWith(foundPath);
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('creates the current-directory file named by searchedPaths[0] when the search reports ConfigNotFoundError (AC-2)', async () => {
@@ -3390,6 +3390,7 @@ describe('tevu CLI', () => {
         '/work/tevu.yaml',
       );
       expect(operations.loadConfig).not.toHaveBeenCalled();
+      expect(clack.state.answers).toEqual([]);
     });
 
     it("exits 1 before the wizard's first question and before configExists or requireConfigDirectory when the search reports a ConfigReadError", async () => {
@@ -3424,18 +3425,15 @@ describe('tevu CLI', () => {
         'repo-1',
         '',
         'abc123',
-        'task-2',
         'Add an export button',
         'Export the current view as CSV.',
         'Implement CSV export for the current view.',
         'Repository is readable',
         false,
-        'acc-1',
         'manual',
         'Export produces a CSV',
         true,
         false,
-        'dod-1',
         'manual',
         'README documents the button',
         true,
@@ -3464,6 +3462,7 @@ describe('tevu CLI', () => {
         title: 'Add an export button',
         body: 'Users cannot export the current view.',
       });
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('imports a GitHub issue exactly once and travels the snapshot inside the wizard input', async () => {
@@ -3480,18 +3479,15 @@ describe('tevu CLI', () => {
         'repo-1',
         '',
         'abc123',
-        'task-2',
         'Add an export button',
         'Export the current view as CSV.',
         'Implement CSV export for the current view.',
         'Repository is readable',
         false,
-        'acc-1',
         'manual',
         'Export produces a CSV',
         true,
         false,
-        'dod-1',
         'manual',
         'README documents the button',
         true,
@@ -3522,6 +3518,7 @@ describe('tevu CLI', () => {
         title: 'Add an export button',
         body: 'Users cannot export the current view.',
       });
+      expect(clack.state.answers).toEqual([]);
     });
 
     it.each([
@@ -3663,6 +3660,7 @@ describe('tevu CLI', () => {
 
       expect(code).toBe(0);
       expect(operations.requireConfigDirectory).not.toHaveBeenCalled();
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('adds a task exactly as without a reference when the reference question is left empty', async () => {
@@ -3689,6 +3687,7 @@ describe('tevu CLI', () => {
       );
       const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
       expect(reviewNote?.message).not.toContain('reference');
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('resolves a local commit reference, retries after a failed resolution, and proposes its parent as the base commit', async () => {
@@ -3717,18 +3716,15 @@ describe('tevu CLI', () => {
         'bad-ref',
         'HEAD~3',
         '',
-        'task-2',
         'Add an export button',
         'Export the current view as CSV.',
         'Implement CSV export for the current view.',
         'Repository is readable',
         false,
-        'acc-1',
         'manual',
         'Export produces a CSV',
         true,
         false,
-        'dod-1',
         'manual',
         'README documents the button',
         true,
@@ -3771,6 +3767,7 @@ describe('tevu CLI', () => {
       });
       const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
       expect(reviewNote?.message).toContain('  reference: commit HEAD~3\n  reference commits: 1');
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('resolves a pull-request reference through resolveReferenceSolution over a fake gh, recording its merge commit', async () => {
@@ -3834,18 +3831,15 @@ describe('tevu CLI', () => {
         'repo-1',
         'octo/app#128',
         '',
-        'task-2',
         'Add an export button',
         'Export the current view as CSV.',
         'Implement CSV export for the current view.',
         'Repository is readable',
         false,
-        'acc-1',
         'manual',
         'Export produces a CSV',
         true,
         false,
-        'dod-1',
         'manual',
         'README documents the button',
         true,
@@ -3872,6 +3866,7 @@ describe('tevu CLI', () => {
       });
       const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
       expect(reviewNote?.message).toContain(`  reference merge commit: ${mergeHash}`);
+      expect(clack.state.answers).toEqual([]);
     });
 
     it.each([
@@ -3960,18 +3955,15 @@ describe('tevu CLI', () => {
         'repo-1',
         'octo/app#128',
         '',
-        'task-2',
         'Add an export button',
         'Export the current view as CSV.',
         'Implement CSV export for the current view.',
         'Repository is readable',
         false,
-        'acc-1',
         'manual',
         'Export produces a CSV',
         true,
         false,
-        'dod-1',
         'manual',
         'README documents the button',
         true,
@@ -3983,6 +3975,7 @@ describe('tevu CLI', () => {
 
       expect(code).toBe(0);
       expect(clack.state.logs).toContainEqual({ kind: 'warn', message: expectedWarning });
+      expect(clack.state.answers).toEqual([]);
     });
 
     it("records the reference and asks today's base commit question when no base is proposed", async () => {
@@ -4011,18 +4004,15 @@ describe('tevu CLI', () => {
         'repo-1',
         'octo/app#128',
         base,
-        'task-2',
         'Add an export button',
         'Export the current view as CSV.',
         'Implement CSV export for the current view.',
         'Repository is readable',
         false,
-        'acc-1',
         'manual',
         'Export produces a CSV',
         true,
         false,
-        'dod-1',
         'manual',
         'README documents the button',
         true,
@@ -4048,6 +4038,211 @@ describe('tevu CLI', () => {
       expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task).toMatchObject({
         base_commit: base,
         reference: { kind: 'pull-request', identifier: 'octo/app#128', commits: [firstCommit] },
+      });
+      expect(clack.state.answers).toEqual([]);
+    });
+
+    describe('derived identifiers', () => {
+      const COMPLETE_INSPECTION = {
+        depth: null,
+        maxArrayLength: null,
+        maxStringLength: null,
+      } as const;
+
+      /** Answers a new configuration's setup from the first question through `Add another model?`, with the given model entries. */
+      function setupWithModels(...models: Array<[model: string, effort: string]>): unknown[] {
+        return [
+          ...BOOTSTRAP_ANSWERS.slice(0, 12),
+          ...models.flat(),
+          false,
+          false,
+          false,
+          ...taskInterviewAnswers('alpha'),
+          true,
+        ];
+      }
+
+      it('normalizes a provider prefix and dots in a model entry ID', async () => {
+        const operations = createOperations({ configExists: vi.fn(async () => false) });
+        scriptAnswers(
+          ...setupWithModels(['acme/vendor/model-5.6', 'high'], ['provider/model-b', 'low']),
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(
+          requireCreateTaskCall(operations).bootstrap?.models.map((model) => model.id),
+        ).toEqual(['model-5-6-high', 'model-b-low']);
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      it('suffixes a model entry ID that collides with an earlier one', async () => {
+        const operations = createOperations({ configExists: vi.fn(async () => false) });
+        scriptAnswers(
+          ...setupWithModels(['acme/vendor/model-5.6', 'high'], ['other/model_5.6', 'high']),
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(
+          requireCreateTaskCall(operations).bootstrap?.models.map((model) => model.id),
+        ).toEqual(['model-5-6-high', 'model-5-6-high-2']);
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      it('uses the next free task number', async () => {
+        const config = buildTevuConfig({
+          tasks: [buildTaskDefinition({ id: 'task-1' }), buildTaskDefinition({ id: 'task-3' })],
+        });
+        const operations = createOperations({
+          loadConfig: vi.fn(async () => ({ ok: true as const, value: config })),
+        });
+        scriptAnswers(...taskInterviewAnswers('repo-1'), true);
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(requireCreateTaskCall(operations).task.id).toBe('task-2');
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      it('continues check numbering after drafted criteria', async () => {
+        const operations = criteriaOperations({
+          draftCriteria: vi.fn(async () => ({
+            status: 'drafted' as const,
+            effort: { status: 'verified' as const },
+            draft: { acceptance: ['A1', 'A2'], done: ['D1'] },
+            retainedDirectories: [],
+          })),
+        });
+        scriptAnswers(
+          ...READY_ANSWERS,
+          'accept',
+          true,
+          'manual',
+          'Added by hand',
+          true,
+          false,
+          true,
+          'manual',
+          'Added by hand',
+          true,
+          false,
+          true,
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        const { checks } = requireCreateTaskCall(operations).task;
+        expect(checks.acceptance.map((check) => check.id)).toEqual([
+          'acceptance-1',
+          'acceptance-2',
+          'acceptance-3',
+        ]);
+        expect(checks.done.map((check) => check.id)).toEqual(['done-1', 'done-2']);
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      it('saves a 64-character derived ID that the real writer and parser accept', async () => {
+        const operations = createOperations({ configExists: vi.fn(async () => false) });
+        const longName = 'a'.repeat(70);
+        scriptAnswers(
+          ...setupWithModels([`acme/${longName}`, 'high'], ['provider/model-b', 'low']),
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        const call = requireCreateTaskCall(operations);
+        expect(call.bootstrap?.models[0]?.id).toBe('a'.repeat(64));
+        expect(renderAndParseBootstrap(call).models[0]?.id).toBe('a'.repeat(64));
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      describe.each([
+        {
+          configuration: 'a new configuration',
+          operations: () => createOperations({ configExists: vi.fn(async () => false) }),
+          answers: () => fullSetupAnswers(),
+        },
+        {
+          configuration: 'an existing configuration',
+          operations: () => createOperations(),
+          answers: () => [...taskInterviewAnswers('repo-1'), true],
+        },
+        {
+          configuration: 'a repository added to an existing configuration',
+          operations: () =>
+            createOperations({
+              ensureManagedCommits: vi.fn(async () => ({
+                ok: true as const,
+                value: { missing: [] },
+              })),
+            }),
+          answers: () => [
+            'manual',
+            clack.pickLabel('Add a repository'),
+            'github',
+            'octo/app',
+            ...taskInterviewAnswers('repo-1').slice(2),
+            true,
+          ],
+        },
+      ])('for $configuration', ({ operations, answers }) => {
+        it('asks no question whose message holds the word ID', async () => {
+          const ops = operations();
+          scriptAnswers(...answers());
+
+          const { code } = await runCli(['task', 'add'], { operations: ops });
+
+          const questions = clack.state.prompts.map((prompt) => prompt.message);
+          expect(code).toBe(0);
+          expect(questions.filter((message) => /\bID\b/i.test(message))).toEqual([]);
+          expect(clack.state.answers).toEqual([]);
+        });
+      });
+
+      describe.each([
+        {
+          form: 'URL',
+          originUrl: 'https://user:SENTINEL@host.example/owner/repo.git',
+          repositoryId: 'owner-repo',
+        },
+        {
+          form: 'scp-like',
+          originUrl: 'user:SENTINEL@host.example:owner/repo.git',
+          repositoryId: 'alpha',
+        },
+      ])('with a credential in an origin $form', ({ originUrl, repositoryId }) => {
+        it('keeps a credential in an origin URL out of every output', async () => {
+          const readLocalRepositoryNaming = vi.fn<ProgramOperations['readLocalRepositoryNaming']>(
+            async () => ({ directoryName: 'alpha', originUrl }),
+          );
+          const operations = createOperations({
+            configExists: vi.fn(async () => false),
+            readLocalRepositoryNaming,
+          });
+          scriptAnswers(
+            ...setupAnswers(),
+            false,
+            false,
+            ...taskInterviewAnswers(repositoryId),
+            true,
+          );
+
+          const { code, out, err } = await runCli(['task', 'add'], { operations });
+
+          const everyCall = Object.values(operations).map((operation) =>
+            vi.isMockFunction(operation) ? operation.mock.calls : [],
+          );
+          const call = requireCreateTaskCall(operations);
+          expect(code).toBe(0);
+          expect(readLocalRepositoryNaming).toHaveBeenCalledOnce();
+          expect(call.bootstrap?.repositories[0]?.id).toBe(repositoryId);
+          expect(inspect(clack.state, COMPLETE_INSPECTION)).not.toContain('SENTINEL');
+          expect(inspect([out, err], COMPLETE_INSPECTION)).not.toContain('SENTINEL');
+          expect(inspect(everyCall, COMPLETE_INSPECTION)).not.toContain('SENTINEL');
+          expect(inspect(call, COMPLETE_INSPECTION)).not.toContain('SENTINEL');
+          expect(clack.state.answers).toEqual([]);
+        });
       });
     });
 
@@ -4093,6 +4288,7 @@ describe('tevu CLI', () => {
             criteria: { model: 'openai/criteria-model', effort: 'high' },
           },
         });
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('shows every default as the placeholder of its prompt', async () => {
@@ -4182,6 +4378,7 @@ describe('tevu CLI', () => {
             },
           });
           expect(call.task.checks.acceptance[0]).toMatchObject({ env: ['CHECK_ONE', 'CHECK_TWO'] });
+          expect(clack.state.answers).toEqual([]);
         },
       );
 
@@ -4261,6 +4458,7 @@ describe('tevu CLI', () => {
         );
         const check = requireCreateTaskCall(operations).task.checks.acceptance[0];
         expect(check).not.toHaveProperty('timeout');
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('writes a typed check time limit', async () => {
@@ -4275,6 +4473,7 @@ describe('tevu CLI', () => {
         expect(requireCreateTaskCall(operations).task.checks.acceptance[0]).toMatchObject({
           timeout: '2m',
         });
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('requires a check time limit when the configuration has none to inherit', async () => {
@@ -4300,6 +4499,7 @@ describe('tevu CLI', () => {
         expect(requireCreateTaskCall(operations).task.checks.acceptance[0]).toMatchObject({
           timeout: '2m',
         });
+        expect(clack.state.answers).toEqual([]);
       });
     });
 
@@ -4317,22 +4517,20 @@ describe('tevu CLI', () => {
           'https://jira.example.com',
           'JIRA_EMAIL',
           'JIRA_TOKEN',
-          'alpha',
           'github',
           'octo/app',
           true,
-          'beta',
           'path',
           '../beta',
           false,
-          ...BOOTSTRAP_ANSWERS.slice(13),
+          ...BOOTSTRAP_ANSWERS.slice(12),
           true,
           'openai/grader-model',
           '',
           true,
           'openai/criteria-model',
           '',
-          ...taskAnswersWithAcceptanceCheck('alpha', commandCheckAnswers()),
+          ...taskAnswersWithAcceptanceCheck('octo-app', commandCheckAnswers()),
           true,
         );
 
@@ -4354,16 +4552,14 @@ describe('tevu CLI', () => {
 
         const labels = clack.state.prompts.map((prompt) => prompt.message);
         const jiraStart = labels.indexOf('Import issues from Jira?');
-        expect(labels.slice(jiraStart, jiraStart + 12)).toEqual([
+        expect(labels.slice(jiraStart, jiraStart + 10)).toEqual([
           'Import issues from Jira?',
           'Jira site URL',
           'Jira email variable',
           'Jira token variable',
-          'Repository ID',
           'Repository source',
           'GitHub repository',
           'Add another repository?',
-          'Repository ID',
           'Repository source',
           'Local path',
           'Add another repository?',
@@ -4377,7 +4573,7 @@ describe('tevu CLI', () => {
           (prompt) => prompt.message === 'Repository',
         );
         expect(repositoryPrompt?.options).toEqual([
-          { label: 'alpha', hint: 'GitHub octo/app', disabled: false },
+          { label: 'octo-app', hint: 'GitHub octo/app', disabled: false },
           { label: 'beta', hint: '../beta', disabled: false },
           { label: 'Add a repository', hint: undefined, disabled: false },
         ]);
@@ -4423,12 +4619,13 @@ describe('tevu CLI', () => {
 
         expect(code).toBe(0);
         expect(requireCreateTaskCall(operations).task.checks.acceptance[0]).toEqual({
-          id: 'acc-1',
+          id: 'acceptance-1',
           description: 'The test suite passes',
           run: commandLine,
         });
         const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
         expect(reviewNote?.message).toContain(`command ${commandLine}, `);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('asks for the command with the label Command', async () => {
@@ -4438,9 +4635,8 @@ describe('tevu CLI', () => {
         await runCli(['task', 'add'], { operations });
 
         const messages = clack.state.prompts.map((prompt) => prompt.message);
-        const checkStart = messages.indexOf('Acceptance check ID');
-        expect(messages.slice(checkStart, checkStart + 8)).toEqual([
-          'Acceptance check ID',
+        const checkStart = messages.indexOf('Check type');
+        expect(messages.slice(checkStart, checkStart + 7)).toEqual([
           'Check type',
           'Description',
           'Required?',
@@ -4476,6 +4672,7 @@ describe('tevu CLI', () => {
         expect(requireCreateTaskCall(operations).task.checks.acceptance[0]).toMatchObject({
           run: 'npm test',
         });
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('rejects a check variable not set in this terminal and asks again', async () => {
@@ -4500,6 +4697,7 @@ describe('tevu CLI', () => {
         expect(requireCreateTaskCall(operations).task.checks.acceptance[0]).toMatchObject({
           env: ['CHECK_A'],
         });
+        expect(clack.state.answers).toEqual([]);
       });
     });
 
@@ -4620,6 +4818,7 @@ describe('tevu CLI', () => {
         expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
         expect(clack.state.cancels).toEqual([]);
         expect(clack.state.timeline.at(-1)).toBe('outro');
+        expect(clack.state.answers).toEqual([]);
       });
     });
 
@@ -4629,7 +4828,7 @@ describe('tevu CLI', () => {
       it.each([
         { kind: 'select', at: 0 },
         { kind: 'text', at: 3 },
-        { kind: 'confirm', at: 9 },
+        { kind: 'confirm', at: 8 },
       ])('ignores Escape at a $kind question and asks nothing extra', async ({ kind, at }) => {
         const baseline = createOperations();
         const baselinePrompts = await drawnPrompts(SCRIPT, baseline);
@@ -4644,6 +4843,7 @@ describe('tevu CLI', () => {
         expect(clack.state.cancels).toEqual([]);
         expect(clack.state.prompts).toEqual(baselinePrompts);
         expect(requireCreateTaskCall(operations)).toEqual(requireCreateTaskCall(baseline));
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('ignores Escape at What next? of the draft review', async () => {
@@ -4663,6 +4863,7 @@ describe('tevu CLI', () => {
         expect(clack.state.cancels).toEqual([]);
         expect(clack.state.prompts).toEqual(baselinePrompts);
         expect(requireCreateTaskCall(operations)).toEqual(requireCreateTaskCall(baseline));
+        expect(clack.state.answers).toEqual([]);
       });
     });
 
@@ -4800,7 +5001,7 @@ describe('tevu CLI', () => {
         return input;
       }
 
-      it('warns, asks Base commit again with the answer filled in before Task ID, and keeps every earlier answer', async () => {
+      it('warns, asks Base commit again with the answer filled in before Title, and keeps every earlier answer', async () => {
         const answers = taskInterviewAnswers('repo-1');
         const baseline = await baselineInput([...answers, true]);
         const inspectBaseCommit = refusedOnce({
@@ -4822,12 +5023,13 @@ describe('tevu CLI', () => {
         });
         expect(askedAgain.map((prompt) => prompt.initialValue)).toEqual([undefined, 'bad123']);
         expect(askedAgain[1]?.defaultValue).toBeUndefined();
-        expect(messages.lastIndexOf('Base commit')).toBeLessThan(messages.indexOf('Task ID'));
+        expect(messages.lastIndexOf('Base commit')).toBeLessThan(messages.indexOf('Title'));
         expect(inspectBaseCommit.mock.calls).toEqual([
           ['tevu.yaml', REPOSITORY, 'bad123', undefined],
           ['tevu.yaml', REPOSITORY, 'abc123', undefined],
         ]);
         expect(requireCreateTaskCall(operations)).toEqual(baseline);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('lists each finding message of a configuration refusal as a detail line', async () => {
@@ -4867,6 +5069,7 @@ describe('tevu CLI', () => {
           'good456',
         ]);
         expect(requireCreateTaskCall(operations).task.base_commit).toBe('good456');
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('runs neither draftCriteria nor createTask before an inspection succeeds', async () => {
@@ -4896,6 +5099,7 @@ describe('tevu CLI', () => {
         expect(inspectBaseCommit).toHaveBeenCalledTimes(2);
         expect(draftStart).toBeGreaterThan(lastInspection);
         expect(saveStart).toBeGreaterThan(lastInspection);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('inspects a GitHub entry only after its clone holds the answer', async () => {
@@ -4964,6 +5168,7 @@ describe('tevu CLI', () => {
           ['abc123'],
           ['abc123'],
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('inspects the full hash of a pull-request task that the clone does not hold, as typed', async () => {
@@ -5015,6 +5220,7 @@ describe('tevu CLI', () => {
           clack.state.prompts.filter((prompt) => prompt.message === 'Base commit'),
         ).toHaveLength(1);
         expect(requireCreateTaskCall(operations).task.base_commit).toBe(fullHash);
+        expect(clack.state.answers).toEqual([]);
       });
 
       describe('the Git LFS objects of a GitHub entry', () => {
@@ -5075,6 +5281,7 @@ describe('tevu CLI', () => {
             expect.any(Function),
           );
           expect(clack.state.logs).toContainEqual({ kind: 'step', message: line });
+          expect(clack.state.answers).toEqual([]);
         });
 
         it('prints the headline, the rendered failure, and the next step, then asks Base commit again with the answer filled in', async () => {
@@ -5094,6 +5301,7 @@ describe('tevu CLI', () => {
           expect(asked.map((prompt) => prompt.initialValue)).toEqual([undefined, 'abc123']);
           expect(asked[1]?.defaultValue).toBeUndefined();
           expect(ensureManagedLfsObjects).toHaveBeenCalledTimes(2);
+          expect(clack.state.answers).toEqual([]);
         });
 
         it('keeps every earlier answer when Enter retries the fetch', async () => {
@@ -5111,6 +5319,7 @@ describe('tevu CLI', () => {
           await runCli(['task', 'add'], { operations });
 
           expect(requireCreateTaskCall(operations)).toEqual(baseline);
+          expect(clack.state.answers).toEqual([]);
         });
 
         it('renders a missing managed-clone directory as the prerequisite it is', async () => {
@@ -5195,6 +5404,7 @@ describe('tevu CLI', () => {
 
           expect(code).toBe(0);
           expect(ensureManagedLfsObjects).not.toHaveBeenCalled();
+          expect(clack.state.answers).toEqual([]);
         });
 
         it('never fetches them for a path entry', async () => {
@@ -5215,9 +5425,9 @@ describe('tevu CLI', () => {
       const NEW_ENTRY_ANSWERS = ['manual', clack.pickLabel('Add a repository')];
       const PLACEMENT_FINDING = buildFinding({
         severity: 'error',
-        identifier: 'repositories.new-repo.github',
+        identifier: 'repositories.octo-app.github',
         message:
-          'repository "new-repo" overlaps the run output directory after real-path resolution',
+          'repository "octo-app" overlaps the run output directory after real-path resolution',
       });
       const PLACEMENT_LAST_LINE =
         'Choose another repository below, or pick Add a repository to change the answers. Press Enter to retry, or Ctrl-C to cancel.';
@@ -5234,10 +5444,9 @@ describe('tevu CLI', () => {
         const operations = createOperations({ ensureManagedCommits });
         scriptAnswers(
           ...NEW_ENTRY_ANSWERS,
-          'new-repo',
           'github',
           'octo/app',
-          clack.pickLabel('new-repo'),
+          clack.pickLabel('octo-app'),
           ...taskInterviewAnswers('repo-1').slice(2),
           true,
         );
@@ -5249,23 +5458,24 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(clack.state.logs).toContainEqual({
           kind: 'warn',
-          message: `Can't use repository new-repo.\ncloning github.com/octo/app failed: git clone exited with code 128\nFix the cause or choose another repository below. Press Enter to retry, or Ctrl-C to cancel.`,
+          message: `Can't use repository octo-app.\ncloning github.com/octo/app failed: git clone exited with code 128\nFix the cause or choose another repository below. Press Enter to retry, or Ctrl-C to cancel.`,
         });
-        expect(second?.initialLabel).toBe('new-repo');
+        expect(second?.initialLabel).toBe('octo-app');
         expect(second?.options).toEqual([
           { label: 'repo-1', hint: '../repos/fixture', disabled: false },
-          { label: 'new-repo', hint: 'new, GitHub octo/app', disabled: false },
+          { label: 'octo-app', hint: 'new, GitHub octo/app', disabled: false },
           { label: 'Add a repository', hint: undefined, disabled: false },
         ]);
-        expect(messages.filter((message) => message === 'Repository ID')).toHaveLength(1);
+        expect(messages.filter((message) => message === 'Repository source')).toHaveLength(1);
         expect(ensureManagedCommits.mock.calls.map(([request]) => request).slice(0, 2)).toEqual([
-          { repository: { id: 'new-repo', github: 'octo/app' }, revisions: [] },
-          { repository: { id: 'new-repo', github: 'octo/app' }, revisions: [] },
+          { repository: { id: 'octo-app', github: 'octo/app' }, revisions: [] },
+          { repository: { id: 'octo-app', github: 'octo/app' }, revisions: [] },
         ]);
         expect(requireCreateTaskCall(operations)).toMatchObject({
-          newRepository: { id: 'new-repo', github: 'octo/app' },
-          task: { repo: 'new-repo' },
+          newRepository: { id: 'octo-app', github: 'octo/app' },
+          task: { repo: 'octo-app' },
         });
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('asks Repository again with the configured entry as its initial value and no added option after a failed clone', async () => {
@@ -5299,6 +5509,7 @@ describe('tevu CLI', () => {
           messages.lastIndexOf('Repository'),
         );
         expect(requireCreateTaskCall(operations).newRepository).toBeUndefined();
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('checks a new entry before it prepares the clone, and asks Repository again on findings', async () => {
@@ -5312,10 +5523,9 @@ describe('tevu CLI', () => {
         });
         scriptAnswers(
           ...NEW_ENTRY_ANSWERS,
-          'new-repo',
           'github',
           'octo/app',
-          clack.pickLabel('new-repo'),
+          clack.pickLabel('octo-app'),
           ...taskInterviewAnswers('repo-1').slice(2),
           true,
         );
@@ -5327,12 +5537,12 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(clack.state.logs).toContainEqual({
           kind: 'warn',
-          message: `Can't add repository new-repo.\nrepositories.new-repo.github: repository "new-repo" overlaps the run output directory after real-path resolution\n${PLACEMENT_LAST_LINE}`,
+          message: `Can't add repository octo-app.\nrepositories.octo-app.github: repository "octo-app" overlaps the run output directory after real-path resolution\n${PLACEMENT_LAST_LINE}`,
         });
-        expect(second?.initialLabel).toBe('new-repo');
+        expect(second?.initialLabel).toBe('octo-app');
         expect(second?.options?.map((option) => option.label)).toEqual([
           'repo-1',
-          'new-repo',
+          'octo-app',
           'Add a repository',
         ]);
         expect(checkRepositoryPlacement.mock.calls).toEqual([
@@ -5341,7 +5551,7 @@ describe('tevu CLI', () => {
             '/tmp/artifacts',
             [
               expect.objectContaining({ id: 'repo-1' }),
-              expect.objectContaining({ id: 'new-repo', github: 'octo/app' }),
+              expect.objectContaining({ id: 'octo-app', github: 'octo/app' }),
             ],
           ],
           [
@@ -5349,7 +5559,7 @@ describe('tevu CLI', () => {
             '/tmp/artifacts',
             [
               expect.objectContaining({ id: 'repo-1' }),
-              expect.objectContaining({ id: 'new-repo', github: 'octo/app' }),
+              expect.objectContaining({ id: 'octo-app', github: 'octo/app' }),
             ],
           ],
         ]);
@@ -5361,7 +5571,8 @@ describe('tevu CLI', () => {
         expect(timeline.lastIndexOf('prompt:Repository')).toBeLessThan(
           timeline.indexOf('spinner:start:Preparing repository'),
         );
-        expect(requireCreateTaskCall(operations).newRepository).toMatchObject({ id: 'new-repo' });
+        expect(requireCreateTaskCall(operations).newRepository).toMatchObject({ id: 'octo-app' });
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('leaves a configured entry unchecked for placement', async () => {
@@ -5384,11 +5595,9 @@ describe('tevu CLI', () => {
         });
         scriptAnswers(
           ...NEW_ENTRY_ANSWERS,
-          'new-repo',
           'github',
           'octo/app',
           clack.pickLabel('Add a repository'),
-          'new-repo',
           'github',
           'octo/other',
           ...taskInterviewAnswers('repo-1').slice(2),
@@ -5401,12 +5610,11 @@ describe('tevu CLI', () => {
           clack.state.prompts
             .filter((prompt) => prompt.message === message)
             .map((prompt) => prompt.initialValue ?? prompt.initialLabel);
-        expect(asked('Repository ID')).toEqual([undefined, 'new-repo']);
         expect(asked('Repository source')).toEqual([undefined, 'github']);
         expect(asked('GitHub repository')).toEqual([undefined, 'octo/app']);
       });
 
-      it('asks Answer to change after setup placement findings, before Model entry ID, and sends a changed output directory on', async () => {
+      it('asks Answer to change after setup placement findings, before the model questions, and sends a changed output directory on', async () => {
         const checkRepositoryPlacement = vi
           .fn<ProgramOperations['checkRepositoryPlacement']>()
           .mockResolvedValueOnce([
@@ -5423,10 +5631,10 @@ describe('tevu CLI', () => {
           checkRepositoryPlacement,
         });
         scriptAnswers(
-          ...BOOTSTRAP_ANSWERS.slice(0, 13),
+          ...BOOTSTRAP_ANSWERS.slice(0, 12),
           clack.pickLabel('Output directory'),
           '/tmp/other-artifacts',
-          ...BOOTSTRAP_ANSWERS.slice(13),
+          ...BOOTSTRAP_ANSWERS.slice(12),
           false,
           false,
           ...taskInterviewAnswers('alpha'),
@@ -5449,9 +5657,7 @@ describe('tevu CLI', () => {
         expect(messages.indexOf('Answer to change')).toBe(
           messages.indexOf('Add another repository?') + 1,
         );
-        expect(messages.indexOf('Answer to change')).toBeLessThan(
-          messages.indexOf('Model entry ID'),
-        );
+        expect(messages.indexOf('Answer to change')).toBeLessThan(messages.indexOf('Model'));
         expect(change?.options).toEqual([
           { label: 'Output directory', hint: '/tmp/bench-artifacts', disabled: false },
           { label: 'Repository alpha', hint: '../repos/alpha', disabled: false },
@@ -5469,9 +5675,10 @@ describe('tevu CLI', () => {
         expect(requireCreateTaskCall(operations).bootstrap?.run.output_dir).toBe(
           '/tmp/other-artifacts',
         );
+        expect(clack.state.answers).toEqual([]);
       });
 
-      it('re-asks source and location of a changed setup repository with their current values and keeps its ID', async () => {
+      it('re-asks source and location of a changed setup repository with their current values', async () => {
         const checkRepositoryPlacement = vi
           .fn<ProgramOperations['checkRepositoryPlacement']>()
           .mockResolvedValueOnce([
@@ -5488,14 +5695,14 @@ describe('tevu CLI', () => {
           checkRepositoryPlacement,
         });
         scriptAnswers(
-          ...BOOTSTRAP_ANSWERS.slice(0, 13),
+          ...BOOTSTRAP_ANSWERS.slice(0, 12),
           clack.pickLabel('Repository alpha'),
           'path',
           '../repos/alpha-fixed',
-          ...BOOTSTRAP_ANSWERS.slice(13),
+          ...BOOTSTRAP_ANSWERS.slice(12),
           false,
           false,
-          ...taskInterviewAnswers('alpha'),
+          ...taskInterviewAnswers('alpha-fixed'),
           true,
         );
 
@@ -5508,10 +5715,192 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(source).toMatchObject({ message: 'Repository source', initialValue: 'path' });
         expect(location).toMatchObject({ message: 'Local path', initialValue: '../repos/alpha' });
-        expect(promptsAfterChange.map((prompt) => prompt.message)).not.toContain('Repository ID');
         expect(requireCreateTaskCall(operations).bootstrap?.repositories).toEqual([
-          { id: 'alpha', path: '../repos/alpha-fixed' },
+          { id: 'alpha-fixed', path: '../repos/alpha-fixed' },
         ]);
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      it('adds a repository whose derived ID equals a configured repository ID and saves it with a -2 suffix', async () => {
+        const operations = createOperations();
+        scriptAnswers(
+          'manual',
+          clack.pickLabel('Add a repository'),
+          'path',
+          '../elsewhere/repo-1',
+          ...taskInterviewAnswers('repo-1').slice(2),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        const call = requireCreateTaskCall(operations);
+        expect(code).toBe(0);
+        expect(call.newRepository).toEqual({ id: 'repo-1-2', path: '../elsewhere/repo-1' });
+        expect(call.task.repo).toBe('repo-1-2');
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      it('derives the repository ID again from the changed answers after Answer to change', async () => {
+        const checkRepositoryPlacement = vi
+          .fn<ProgramOperations['checkRepositoryPlacement']>()
+          .mockResolvedValueOnce([PLACEMENT_FINDING])
+          .mockResolvedValue([]);
+        const operations = createOperations({
+          configExists: vi.fn(async () => false),
+          checkRepositoryPlacement,
+        });
+        scriptAnswers(
+          ...BOOTSTRAP_ANSWERS.slice(0, 9),
+          'path',
+          '../repos/alpha',
+          true,
+          'path',
+          '../repos/beta',
+          false,
+          clack.pickLabel('Repository alpha'),
+          'path',
+          '../repos/gamma',
+          ...BOOTSTRAP_ANSWERS.slice(12),
+          false,
+          false,
+          ...taskInterviewAnswers('gamma'),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        const call = requireCreateTaskCall(operations);
+        expect(code).toBe(0);
+        expect(call.bootstrap?.repositories).toEqual([
+          { id: 'gamma', path: '../repos/gamma' },
+          { id: 'beta', path: '../repos/beta' },
+        ]);
+        expect(call.task.repo).toBe('gamma');
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      it('derives the changed setup repository ID against the other setup repositories only', async () => {
+        const checkRepositoryPlacement = vi
+          .fn<ProgramOperations['checkRepositoryPlacement']>()
+          .mockResolvedValueOnce([PLACEMENT_FINDING])
+          .mockResolvedValue([]);
+        const operations = createOperations({
+          configExists: vi.fn(async () => false),
+          checkRepositoryPlacement,
+        });
+        scriptAnswers(
+          ...BOOTSTRAP_ANSWERS.slice(0, 9),
+          'path',
+          '../repos/alpha',
+          true,
+          'path',
+          '../repos/beta',
+          false,
+          clack.pickLabel('Repository alpha'),
+          'path',
+          '../repos/alpha-new/alpha',
+          ...BOOTSTRAP_ANSWERS.slice(12),
+          false,
+          false,
+          ...taskInterviewAnswers('alpha'),
+          true,
+        );
+
+        await runCli(['task', 'add'], { operations });
+
+        expect(requireCreateTaskCall(operations).bootstrap?.repositories).toEqual([
+          { id: 'alpha', path: '../repos/alpha-new/alpha' },
+          { id: 'beta', path: '../repos/beta' },
+        ]);
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      it('derives the repository ID again when a refused new repository is filled in through Add a repository', async () => {
+        const checkRepositoryPlacement = vi
+          .fn<ProgramOperations['checkRepositoryPlacement']>()
+          .mockResolvedValueOnce([PLACEMENT_FINDING])
+          .mockResolvedValue([]);
+        const operations = createOperations({
+          checkRepositoryPlacement,
+          ensureManagedCommits: vi.fn(async () => ({ ok: true as const, value: { missing: [] } })),
+        });
+        scriptAnswers(
+          ...NEW_ENTRY_ANSWERS,
+          'github',
+          'octo/app',
+          clack.pickLabel('Add a repository'),
+          'github',
+          'octo/other',
+          ...taskInterviewAnswers('repo-1').slice(2),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        const call = requireCreateTaskCall(operations);
+        expect(code).toBe(0);
+        expect(call.newRepository).toMatchObject({ id: 'octo-other', github: 'octo/other' });
+        expect(call.task.repo).toBe('octo-other');
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      describe('reading the local repository naming', () => {
+        function waitStarts(label: string): number[] {
+          return clack.state.timeline.flatMap((event, index) =>
+            event === `spinner:start:${label}` ? [index] : [],
+          );
+        }
+
+        it('reads the local repository naming inside the one Checking wait', async () => {
+          const readLocalRepositoryNaming = vi.fn<ProgramOperations['readLocalRepositoryNaming']>(
+            recordOperation('readLocalRepositoryNaming', async (_configPath, repositoryPath) => ({
+              directoryName: basename(repositoryPath),
+            })),
+          );
+          const operations = createOperations({
+            configExists: vi.fn(async () => false),
+            readLocalRepositoryNaming,
+          });
+          scriptAnswers(...fullSetupAnswers());
+
+          await runCli(['task', 'add'], { operations });
+
+          const timeline = clack.state.timeline;
+          const [start, ...otherStarts] = waitStarts('Checking ../repos/alpha');
+          expect(otherStarts).toEqual([]);
+          expect(readLocalRepositoryNaming).toHaveBeenCalledExactlyOnceWith(
+            'tevu.yaml',
+            '../repos/alpha',
+          );
+          const read = timeline.indexOf('operation:readLocalRepositoryNaming:start');
+          expect(read).toBeGreaterThan(start ?? Infinity);
+          expect(timeline.indexOf('operation:readLocalRepositoryNaming:end')).toBeLessThan(
+            timeline.indexOf('spinner:stop:Checking ../repos/alpha'),
+          );
+          expect(clack.state.answers).toEqual([]);
+        });
+
+        it('reads no naming for a path that is not in a Git repository', async () => {
+          const isGitRepository = vi
+            .fn<ProgramOperations['isGitRepository']>()
+            .mockResolvedValueOnce(false)
+            .mockResolvedValueOnce(true);
+          const operations = createOperations({
+            configExists: vi.fn(async () => false),
+            isGitRepository,
+          });
+          scriptAnswers(...BOOTSTRAP_ANSWERS.slice(0, 11), '../repos/alpha-fixed', clack.CANCEL);
+
+          await runCli(['task', 'add'], { operations });
+
+          expect(operations.readLocalRepositoryNaming).toHaveBeenCalledExactlyOnceWith(
+            'tevu.yaml',
+            '../repos/alpha-fixed',
+          );
+          expect(waitStarts('Checking ../repos/alpha')).toHaveLength(1);
+          expect(waitStarts('Checking ../repos/alpha-fixed')).toHaveLength(1);
+        });
       });
     });
 
@@ -5569,6 +5958,7 @@ describe('tevu CLI', () => {
           expect(asked.at(-1)?.initialValue).toBe(GITHUB_ISSUE);
           expect(importGitHubIssue.mock.calls).toEqual([[GITHUB_ISSUE], [GITHUB_ISSUE]]);
           expect(requireCreateTaskCall(operations).task.source).toMatchObject({ kind: 'github' });
+          expect(clack.state.answers).toEqual([]);
         },
       );
 
@@ -5626,6 +6016,7 @@ describe('tevu CLI', () => {
           [jiraSettings, 'TEVU-42'],
           [jiraSettings, 'TEVU-43'],
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('continues without a source when the issue answer is cleared after a failure', async () => {
@@ -5644,6 +6035,7 @@ describe('tevu CLI', () => {
         expect(clack.state.prompts.find((prompt) => prompt.message === 'Title')?.initialValue).toBe(
           undefined,
         );
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('still refuses an empty issue answer before any failure', async () => {
@@ -5695,6 +6087,7 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(resolveReference).toHaveBeenCalledOnce();
         expect(requireCreateTaskCall(operations).task).not.toHaveProperty('reference');
+        expect(clack.state.answers).toEqual([]);
       });
     });
 
@@ -5738,6 +6131,7 @@ describe('tevu CLI', () => {
           expect(requireCreateTaskCall(operations).task.checks.acceptance).toEqual([
             { id: 'acceptance-1', description: 'Retried acceptance.' },
           ]);
+          expect(clack.state.answers).toEqual([]);
         },
       );
 
@@ -5746,25 +6140,26 @@ describe('tevu CLI', () => {
         async ({ failure }) => {
           const draftCriteria = failsOnce(failure);
           const operations = criteriaOperations({ draftCriteria });
-          scriptAnswers(...READY_ANSWERS, false, ...taskInterviewAnswers('repo-1').slice(10), true);
+          scriptAnswers(...READY_ANSWERS, false, ...taskInterviewAnswers('repo-1').slice(9), true);
 
           const { code } = await runCli(['task', 'add'], { operations });
 
           const messages = clack.state.prompts.map((prompt) => prompt.message);
           expect(code).toBe(0);
           expect(draftCriteria).toHaveBeenCalledOnce();
-          expect(messages).toContain('Acceptance check ID');
+          expect(messages).toContain('Check type');
           expect(messages).not.toContain('What next?');
           expect(requireCreateTaskCall(operations).task.checks.acceptance).toEqual([
-            { id: 'acc-1', description: 'Export produces a CSV', manual: true },
+            { id: 'acceptance-1', description: 'Export produces a CSV', manual: true },
           ]);
+          expect(clack.state.answers).toEqual([]);
         },
       );
 
       it.each(FALL_BACK)('never asks to draft again after $name', async ({ failure }) => {
         const draftCriteria = failsOnce(failure);
         const operations = criteriaOperations({ draftCriteria });
-        scriptAnswers(...READY_ANSWERS, ...taskInterviewAnswers('repo-1').slice(10), true);
+        scriptAnswers(...READY_ANSWERS, ...taskInterviewAnswers('repo-1').slice(9), true);
 
         const { code } = await runCli(['task', 'add'], { operations });
 
@@ -5773,6 +6168,7 @@ describe('tevu CLI', () => {
         expect(clack.state.prompts.map((prompt) => prompt.message)).not.toContain(
           'Draft the criteria again?',
         );
+        expect(clack.state.answers).toEqual([]);
       });
     });
 
@@ -5814,7 +6210,7 @@ describe('tevu CLI', () => {
           'HEAD~3',
           false,
           ...READY_ANSWERS.slice(3),
-          ...AFTER_REFERENCE.slice(7),
+          ...AFTER_REFERENCE.slice(6),
           true,
         );
 
@@ -5840,6 +6236,7 @@ describe('tevu CLI', () => {
         expect(
           clack.state.prompts.find((prompt) => prompt.message === EXIT_QUESTION),
         ).toMatchObject({ kind: 'confirm', initialValue: false });
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('continues as the same script without the take when the exit question is answered No', async () => {
@@ -5847,7 +6244,7 @@ describe('tevu CLI', () => {
           ...BEFORE_REFERENCE,
           'HEAD~3',
           ...READY_ANSWERS.slice(3),
-          ...AFTER_REFERENCE.slice(7),
+          ...AFTER_REFERENCE.slice(6),
           true,
         ];
         const baseline = createOperations({
@@ -5865,7 +6262,7 @@ describe('tevu CLI', () => {
           'HEAD~3',
           false,
           ...READY_ANSWERS.slice(3),
-          ...AFTER_REFERENCE.slice(7),
+          ...AFTER_REFERENCE.slice(6),
           true,
         );
 
@@ -5873,6 +6270,7 @@ describe('tevu CLI', () => {
 
         expect(code).toBe(0);
         expect(requireCreateTaskCall(operations)).toEqual(requireCreateTaskCall(baseline));
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('ends with one cancel line and exit 130 when the exit question is answered Yes', async () => {
@@ -5947,6 +6345,7 @@ describe('tevu CLI', () => {
         expect(afterWait.indexOf(`prompt:${EXIT_QUESTION_WITH_DRAFT}`)).toBeLessThan(
           afterWait.indexOf('log:success'),
         );
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('takes a Ctrl-C during each later wait separately', async () => {
@@ -5966,7 +6365,7 @@ describe('tevu CLI', () => {
           ...READY_ANSWERS.slice(3, 4),
           false,
           ...READY_ANSWERS.slice(4),
-          ...AFTER_REFERENCE.slice(7),
+          ...AFTER_REFERENCE.slice(6),
           true,
         );
 
@@ -5975,6 +6374,7 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(taken).toEqual([true, false, true]);
         expect(noticeLogs()).toHaveLength(2);
+        expect(clack.state.answers).toEqual([]);
       });
 
       describe('during Saving task', () => {
@@ -6004,6 +6404,7 @@ describe('tevu CLI', () => {
           expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
           expect(clack.state.cancels).toEqual([]);
           expect(clack.state.prompts.map((prompt) => prompt.message)).not.toContain(EXIT_QUESTION);
+          expect(clack.state.answers).toEqual([]);
         });
 
         it('states the criteria draft in the saving notice once a draft is held', async () => {
@@ -6045,6 +6446,7 @@ describe('tevu CLI', () => {
           ]);
           expect(createTask).toHaveBeenCalledTimes(2);
           expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
+          expect(clack.state.answers).toEqual([]);
         });
 
         it('ends cancelled without the failure warning when Yes answers the exit question after a failed save', async () => {
@@ -6103,6 +6505,7 @@ describe('tevu CLI', () => {
         expect(createTask.mock.calls[1]).toEqual(createTask.mock.calls[0]);
         expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
         expect(clack.state.cancels).toEqual([]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('keeps every rendered line of a multi-line error as a detail line', async () => {
@@ -6153,6 +6556,7 @@ describe('tevu CLI', () => {
 
         expect(code).toBe(0);
         expect(createTask).toHaveBeenCalledTimes(3);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('ends cancelled on Ctrl-C at the Save question after a failed save', async () => {
@@ -6178,6 +6582,7 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         expect(messages.slice(-3)).toEqual([SAVE_PROMPT, EXIT_QUESTION, SAVE_PROMPT]);
         expect(operations.createTask).toHaveBeenCalledOnce();
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('ends with one cancel line, exit 130, and no write on Yes at the exit question', async () => {
@@ -6211,6 +6616,7 @@ describe('tevu CLI', () => {
         expect(err).toEqual([]);
         expect(clack.state.outros).toEqual(['Task task-2 added to tevu.yaml']);
         expect(clack.state.cancels).toEqual([]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('ends cancelled without a failure warning when the signal aborted and the save failed', async () => {
@@ -6454,7 +6860,6 @@ describe('tevu CLI', () => {
             answers: [
               'manual',
               clack.pickLabel('Add a repository'),
-              'new-repo',
               'path',
               '../repos/new',
               clack.CANCEL,
@@ -6473,7 +6878,7 @@ describe('tevu CLI', () => {
                 return outcome === 'returns an error' ? [buildFinding({ severity: 'error' })] : [];
               }),
             }),
-            answers: [...BOOTSTRAP_ANSWERS.slice(0, 13), clack.CANCEL, true],
+            answers: [...BOOTSTRAP_ANSWERS.slice(0, 12), clack.CANCEL, true],
           }),
         },
         {
@@ -6528,7 +6933,7 @@ describe('tevu CLI', () => {
                 },
               ),
             }),
-            answers: [...BOOTSTRAP_ANSWERS.slice(0, 15), clack.CANCEL, true],
+            answers: [...BOOTSTRAP_ANSWERS.slice(0, 13), clack.CANCEL, true],
           }),
         },
         {
@@ -6548,7 +6953,7 @@ describe('tevu CLI', () => {
                   : accessOutcome('listed');
               }),
             }),
-            answers: [...BOOTSTRAP_ANSWERS.slice(0, 15), clack.CANCEL, true],
+            answers: [...BOOTSTRAP_ANSWERS.slice(0, 13), clack.CANCEL, true],
           }),
         },
       ];
@@ -7036,6 +7441,7 @@ describe('tevu CLI', () => {
           './bin/opencode',
         );
         expect(requireAgentBlock(operations).command).toBe('./bin/opencode');
+        expect(clack.state.answers).toEqual([]);
       });
     });
 
@@ -7068,6 +7474,7 @@ describe('tevu CLI', () => {
           { command: 'opencode', secrets: ['ACME_KEY'], env: [], providers: [{ id: 'acme' }] },
           'acme/model-a',
         );
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('asks once for a definition with only other variables and remembers an empty answer for the next model', async () => {
@@ -7105,6 +7512,7 @@ describe('tevu CLI', () => {
         const keyPrompt = timeline.indexOf('prompt:API key variable for acme');
         expect(keyPrompt).toBeGreaterThan(timeline.indexOf('operation:inspectModelProvider:end'));
         expect(keyPrompt).toBeLessThan(timeline.indexOf('operation:checkModelAccess:start'));
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('sets api_key and declares its name when the answer names a variable', async () => {
@@ -7219,6 +7627,7 @@ describe('tevu CLI', () => {
         expect(requireAgentBlock(operations).providers).toEqual([
           { id: 'acme', api_key: 'ACME_KEY' },
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
     });
 
@@ -7261,6 +7670,7 @@ describe('tevu CLI', () => {
           providers: [{ id: 'acme' }],
         });
         expect(requireCreateTaskCall(operations).bootstrap?.models[0]?.model).toBe('acme/model-a');
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('asks for a variable after a not-listed result for an undefined provider and checks again with the answer', async () => {
@@ -7292,6 +7702,7 @@ describe('tevu CLI', () => {
           secrets: ['BUILTIN_KEY'],
           env: [],
         });
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('refuses the model and asks it again when the variable answer for an undefined provider is empty', async () => {
@@ -7320,6 +7731,7 @@ describe('tevu CLI', () => {
         expect(requireCreateTaskCall(operations).bootstrap?.models[0]?.model).toBe(
           'builtin/model-y',
         );
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('keeps a not-listed model of an undefined provider while a declared variable is unset, without asking for a key variable', async () => {
@@ -7351,6 +7763,7 @@ describe('tevu CLI', () => {
           requireCreateTaskCall(operations).bootstrap?.models.map((model) => model.model),
         ).toEqual(['builtin/model-z', 'builtin/model-y']);
         expect(requireAgentBlock(operations).secrets).toEqual(['BUILTIN_KEY']);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('declares the variable named after a not-listed result and keeps the model unchecked when that variable is unset', async () => {
@@ -7375,6 +7788,7 @@ describe('tevu CLI', () => {
         expect(
           requireCreateTaskCall(operations).bootstrap?.models.map((model) => model.model),
         ).toEqual(['builtin/model-z', 'builtin/model-y']);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('prints each unset variable once across the models of one run', async () => {
@@ -7611,6 +8025,7 @@ describe('tevu CLI', () => {
           expect(requireCreateTaskCall(operations).bootstrap?.models[0]?.model).toBe(
             'provider/model-c',
           );
+          expect(clack.state.answers).toEqual([]);
         },
       );
     });
@@ -7637,6 +8052,7 @@ describe('tevu CLI', () => {
           secrets: ['EXTRA_KEY', 'ACME_BASE', 'ACME_KEY'],
           providers: [{ id: 'acme', api_key: 'ACME_KEY' }],
         });
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('lists the copied providers and their key variables on the review line', async () => {
@@ -7710,7 +8126,7 @@ describe('tevu CLI', () => {
             value: buildResolvedCommitReference(),
           })),
         });
-        scriptAnswers(...READY_ANSWERS, ...taskInterviewAnswers('repo-1').slice(10), true);
+        scriptAnswers(...READY_ANSWERS, ...taskInterviewAnswers('repo-1').slice(9), true);
 
         const { code } = await runCli(['task', 'add'], { operations });
 
@@ -7723,6 +8139,7 @@ describe('tevu CLI', () => {
         expect(clack.state.spinners).not.toContainEqual(
           expect.objectContaining({ label: 'Drafting criteria' }),
         );
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('hands draftCriteria the same captured bootstrap answers createTask writes when no configuration exists yet', async () => {
@@ -7753,7 +8170,6 @@ describe('tevu CLI', () => {
           'alpha',
           'HEAD~3',
           '',
-          'task-2',
           'Add an export button',
           'Export the current view as CSV.',
           'Implement CSV export for the current view.',
@@ -7775,6 +8191,7 @@ describe('tevu CLI', () => {
             configuration: { kind: 'bootstrap', answers: call.bootstrap },
           }),
         );
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('calls draftCriteria exactly once and saves an unchanged draft as acceptance-<n>/done-<n> checks in reply order (P2, P4, E4)', async () => {
@@ -7817,6 +8234,7 @@ describe('tevu CLI', () => {
         expect(task.checks.done).toEqual([
           { id: 'done-1', description: 'The change is documented for users.' },
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('prints one result line after the draft and names no model, effort, or configuration key', async () => {
@@ -7925,12 +8343,10 @@ describe('tevu CLI', () => {
         scriptAnswers(
           ...READY_ANSWERS,
           false,
-          'acc-1',
           'manual',
           'Export produces a CSV',
           true,
           false,
-          'dod-1',
           'manual',
           'README documents the button',
           true,
@@ -7954,11 +8370,12 @@ describe('tevu CLI', () => {
         });
         const task = requireCreateTaskCall(operations).task;
         expect(task.checks.acceptance).toEqual([
-          { id: 'acc-1', description: 'Export produces a CSV', manual: true },
+          { id: 'acceptance-1', description: 'Export produces a CSV', manual: true },
         ]);
         expect(task.checks.done).toEqual([
-          { id: 'dod-1', description: 'README documents the button', manual: true },
+          { id: 'done-1', description: 'README documents the button', manual: true },
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it.each(DRAFT_FAILURE_CASES)(
@@ -7979,7 +8396,7 @@ describe('tevu CLI', () => {
           scriptAnswers(
             ...READY_ANSWERS,
             ...(retryable ? [false] : []),
-            ...taskInterviewAnswers('repo-1').slice(10),
+            ...taskInterviewAnswers('repo-1').slice(9),
             true,
           );
 
@@ -7991,12 +8408,13 @@ describe('tevu CLI', () => {
             { kind: 'warn', message: draftFailureMessage(lines, retryable) },
           ]);
           const messages = clack.state.prompts.map((prompt) => prompt.message);
-          expect(messages.slice(messages.indexOf('Acceptance check ID'))).toContain(
-            'Definition of Done check ID',
+          expect(messages.slice(messages.indexOf('Check type'))).toContain(
+            'Add another Definition of Done check?',
           );
           expect(requireCreateTaskCall(operations).task.checks.acceptance).toEqual([
-            { id: 'acc-1', description: 'Export produces a CSV', manual: true },
+            { id: 'acceptance-1', description: 'Export produces a CSV', manual: true },
           ]);
+          expect(clack.state.answers).toEqual([]);
         },
       );
 
@@ -8089,7 +8507,7 @@ describe('tevu CLI', () => {
               retainedDirectories: ['/tmp/listing-dir'],
             })),
           });
-          scriptAnswers(...READY_ANSWERS, ...taskInterviewAnswers('repo-1').slice(10), true);
+          scriptAnswers(...READY_ANSWERS, ...taskInterviewAnswers('repo-1').slice(9), true);
 
           await runCli(['task', 'add'], { operations });
 
@@ -8231,12 +8649,10 @@ describe('tevu CLI', () => {
         scriptAnswers(
           ...READY_ANSWERS,
           'by-hand',
-          'acc-1',
           'manual',
           'Export produces a CSV',
           true,
           false,
-          'dod-1',
           'manual',
           'README documents the button',
           true,
@@ -8249,11 +8665,12 @@ describe('tevu CLI', () => {
         expect(code).toBe(0);
         const task = requireCreateTaskCall(operations).task;
         expect(task.checks.acceptance).toEqual([
-          { id: 'acc-1', description: 'Export produces a CSV', manual: true },
+          { id: 'acceptance-1', description: 'Export produces a CSV', manual: true },
         ]);
         expect(task.checks.done).toEqual([
-          { id: 'dod-1', description: 'README documents the button', manual: true },
+          { id: 'done-1', description: 'README documents the button', manual: true },
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('exits 130 without calling createTask when the operator cancels at the draft review (P3)', async () => {
@@ -8326,6 +8743,7 @@ describe('tevu CLI', () => {
         expect(task.checks.acceptance).toEqual([
           { id: 'acceptance-1', description: 'The export button appears on the page.' },
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('edits an item in place through the review', async () => {
@@ -8362,6 +8780,7 @@ describe('tevu CLI', () => {
         expect(task.checks.acceptance).toEqual([
           { id: 'acceptance-1', description: 'Edited wording that is clearer.' },
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('rejects an edited item that names the reference solution, then accepts the corrected text (R9)', async () => {
@@ -8404,6 +8823,7 @@ describe('tevu CLI', () => {
         expect(task.checks.acceptance).toEqual([
           { id: 'acceptance-1', description: 'Corrected wording without the identity.' },
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('blocks accept with a plural hint when more than one item names the reference solution', async () => {
@@ -8455,6 +8875,7 @@ describe('tevu CLI', () => {
           { id: 'acceptance-1', description: 'First item rewritten.' },
           { id: 'acceptance-2', description: 'Second item rewritten.' },
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('blocks accept once a list empties, and "Back to the review" leaves both lists unchanged (E7)', async () => {
@@ -8508,9 +8929,10 @@ describe('tevu CLI', () => {
         expect(task.checks.done).toEqual([
           { id: 'done-1', description: 'The change is documented.' },
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
-      it('stores checks added through the follow-on questions after the drafted checks, rejecting an ID that collides with a drafted one (P15, AC-17)', async () => {
+      it('numbers checks added through the follow-on questions after the drafted checks', async () => {
         const config = buildCriteriaConfig();
         const draftCriteria = vi.fn(async () => ({
           status: 'drafted' as const,
@@ -8533,8 +8955,6 @@ describe('tevu CLI', () => {
           ...READY_ANSWERS,
           'accept',
           true,
-          { invalid: 'acceptance-1' },
-          'acceptance-extra',
           'command',
           'The test suite passes',
           true,
@@ -8544,7 +8964,6 @@ describe('tevu CLI', () => {
           '',
           false,
           true,
-          'done-extra',
           'manual',
           'Manually verified',
           false,
@@ -8555,25 +8974,22 @@ describe('tevu CLI', () => {
         const { code } = await runCli(['task', 'add'], { operations });
 
         expect(code).toBe(0);
-        expect(clack.state.rejections).toContainEqual({
-          kind: 'text',
-          message: 'Acceptance check ID',
-          reason: '"acceptance-1" is already used',
-        });
+        expect(clack.state.rejections).toEqual([]);
         const task = requireCreateTaskCall(operations).task;
         expect(task.checks.acceptance).toEqual([
           { id: 'acceptance-1', description: 'The export button appears on the table view.' },
-          { id: 'acceptance-extra', description: 'The test suite passes', run: 'npm test' },
+          { id: 'acceptance-2', description: 'The test suite passes', run: 'npm test' },
         ]);
         expect(task.checks.done).toEqual([
           { id: 'done-1', description: 'The change is documented for users.' },
-          { id: 'done-extra', description: 'Manually verified', manual: true, required: false },
+          { id: 'done-2', description: 'Manually verified', manual: true, required: false },
         ]);
         const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
         expect(reviewNote?.message).toContain('acceptance-1');
-        expect(reviewNote?.message).toContain('acceptance-extra');
+        expect(reviewNote?.message).toContain('acceptance-2');
         expect(reviewNote?.message).toContain('done-1');
-        expect(reviewNote?.message).toContain('done-extra');
+        expect(reviewNote?.message).toContain('done-2');
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('lets an empty drafted Definition of Done list through Accept and asks for one required check', async () => {
@@ -8582,7 +8998,6 @@ describe('tevu CLI', () => {
           ...READY_ANSWERS,
           'accept',
           false,
-          'dod-1',
           'manual',
           'README documents the button',
           true,
@@ -8601,14 +9016,15 @@ describe('tevu CLI', () => {
           disabled: false,
         });
         const messages = clack.state.prompts.map((prompt) => prompt.message);
-        expect(messages[messages.indexOf('Definition of Done check ID') - 1]).toBe(
+        expect(messages[messages.lastIndexOf('Check type') - 1]).toBe(
           'Add another acceptance check?',
         );
         const task = requireCreateTaskCall(operations).task;
         expect(task.checks.acceptance).toEqual([{ id: 'acceptance-1', description: 'A1' }]);
         expect(task.checks.done).toEqual([
-          { id: 'dod-1', description: 'README documents the button', manual: true },
+          { id: 'done-1', description: 'README documents the button', manual: true },
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('asks Item to edit and Item to remove through the sectioned select with headed sections and back to the review', async () => {
@@ -8664,7 +9080,6 @@ describe('tevu CLI', () => {
           'done:0',
           'accept',
           false,
-          'dod-1',
           'manual',
           'README documents the button',
           true,
@@ -8681,8 +9096,9 @@ describe('tevu CLI', () => {
           { id: 'acceptance-2', description: 'A2 edited' },
         ]);
         expect(task.checks.done).toEqual([
-          { id: 'dod-1', description: 'README documents the button', manual: true },
+          { id: 'done-1', description: 'README documents the button', manual: true },
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('cancels the wizard when the item select is cancelled with Ctrl-C at Item to edit', async () => {
@@ -8740,6 +9156,7 @@ describe('tevu CLI', () => {
           { id: 'acceptance-2', description: 'A2' },
         ]);
         expect(task.checks.done).toEqual([{ id: 'done-1', description: 'D1' }]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('Ctrl-C at Item to remove cancels', async () => {
@@ -8828,6 +9245,7 @@ describe('tevu CLI', () => {
           { id: 'done-1', description: 'D1' },
           { id: 'done-2', description: 'D2' },
         ]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('Escape at Add to returns to the review', async () => {
@@ -8847,6 +9265,7 @@ describe('tevu CLI', () => {
         const task = requireCreateTaskCall(operations).task;
         expect(task.checks.acceptance).toEqual([{ id: 'acceptance-1', description: 'A1' }]);
         expect(task.checks.done).toEqual([{ id: 'done-1', description: 'D1' }]);
+        expect(clack.state.answers).toEqual([]);
       });
 
       it('Ctrl-C at Add to cancels', async () => {
@@ -8869,18 +9288,15 @@ describe('tevu CLI', () => {
         repositoryChoice,
         '',
         'abc123',
-        'task-2',
         'Add an export button',
         'Export the current view as CSV.',
         'Implement CSV export for the current view.',
         'Repository is readable',
         false,
-        'acc-1',
         'graded',
         'Export produces a CSV',
         true,
         false,
-        'dod-1',
         'graded',
         'README documents the button',
         true,
@@ -8888,7 +9304,7 @@ describe('tevu CLI', () => {
       ];
     }
 
-    it('asks only the ID, type, criterion, and required questions for a graded check, with no command sub-questions', async () => {
+    it('asks only the type, criterion, and required questions for a graded check, with no command sub-questions', async () => {
       const operations = createOperations();
       scriptAnswers(...gradedTaskInterviewAnswers('repo-1'), true);
 
@@ -8896,9 +9312,8 @@ describe('tevu CLI', () => {
 
       expect(code).toBe(0);
       const messages = clack.state.prompts.map((prompt) => prompt.message);
-      const checkStart = messages.indexOf('Acceptance check ID');
-      expect(messages.slice(checkStart, checkStart + 5)).toEqual([
-        'Acceptance check ID',
+      const checkStart = messages.indexOf('Check type');
+      expect(messages.slice(checkStart, checkStart + 4)).toEqual([
         'Check type',
         'Criterion',
         'Required?',
@@ -8907,7 +9322,7 @@ describe('tevu CLI', () => {
       expect(messages).not.toContain('Command');
       expect(vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task).toMatchObject({
         checks: {
-          acceptance: [{ id: 'acc-1', description: 'Export produces a CSV' }],
+          acceptance: [{ id: 'acceptance-1', description: 'Export produces a CSV' }],
         },
       });
       expect(
@@ -8916,6 +9331,7 @@ describe('tevu CLI', () => {
       expect(
         vi.mocked(operations.createTask).mock.calls[0]?.[0]?.task.checks.acceptance[0],
       ).not.toHaveProperty('manual');
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('shows the roles.grader warning line exactly when a graded check is declared and no source declares the role', async () => {
@@ -8927,6 +9343,7 @@ describe('tevu CLI', () => {
       expect(reviewWithoutRoles?.message).toContain(
         'warning: roles.grader is not declared; tevu validate and tevu run refuse this task until it is',
       );
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('shows no roles.grader warning line when the existing configuration already declares the role', async () => {
@@ -8943,6 +9360,7 @@ describe('tevu CLI', () => {
 
       const reviewWithRoles = clack.state.notes.find((note) => note.title === 'Review');
       expect(reviewWithRoles?.message).not.toContain('warning: roles.grader is not declared');
+      expect(clack.state.answers).toEqual([]);
     });
 
     it('shows no roles.grader warning line when the task declares no graded check', async () => {
@@ -8953,6 +9371,7 @@ describe('tevu CLI', () => {
 
       const reviewNote = clack.state.notes.find((note) => note.title === 'Review');
       expect(reviewNote?.message).not.toContain('warning: roles.grader is not declared');
+      expect(clack.state.answers).toEqual([]);
     });
   });
 
