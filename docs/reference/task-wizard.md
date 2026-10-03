@@ -105,14 +105,14 @@ The wizard asks for no ID. It derives the ID of every repository, model entry, t
 | Collection | Rule | Example |
 | --- | --- | --- |
 | Repository, GitHub | The owner and repository name. The host is not part of the ID | `octo/App.js` gives `octo-app-js` |
-| Repository, local path | The last two path parts of the `origin` remote's URL, or the directory name when the repository has no `origin` or its URL has fewer than two parts | `git@github.com:Acme/Web_App.git` gives `acme-web-app` |
+| Repository, local path | The last two path parts of the `origin` remote's URL, or the directory name when tevu cannot use that URL (see below) | `git@github.com:Acme/Web_App.git` gives `acme-web-app` |
 | Model entry | The last `/` segment of the model, then the reasoning effort | `acme/vendor/model-5.6` at `high` gives `model-5-6-high` |
 | Task | `task-{n}`, where `n` is the smallest positive number no task in the file uses | `task-2` when the file holds `task-1` and `task-3` |
 | Check | `acceptance-{n}` or `done-{n}`, numbered from 1 within each list and continuing after any drafted checks | `acceptance-3` for a third acceptance check |
 
 Each repository and model entry ID is lowercased, and every run of characters other than letters and digits becomes one hyphen. Hyphens at either end are dropped. An ID that would start with a digit gets `repo-` or `model-` in front, and an empty one becomes `repo` or `model`. An ID holds at most 64 characters. When the ID is already taken, the wizard adds `-2`, then `-3`, and so on. Taken IDs include the entries already in the file and the ones you entered earlier in the same run.
 
-For a local path, tevu reads the `origin` URL from the repository's own Git configuration. It uses only the last two path parts of the URL, and it never prints or saves the URL.
+For a local path, tevu reads the `origin` URL from the repository's own Git configuration. It uses only the last two path parts of the URL, and it never prints or saves the URL. The URL must be a network URL such as `https://host/owner/name.git` or the `git@host:owner/name.git` form. tevu uses the directory name instead when the repository has no `origin`, when `origin` is a local path such as `/srv/git/app.git` or a `file://` URL, when the URL has fewer than two path parts, or when either part holds a character other than a letter, digit, `.`, `_`, or `-`.
 
 A repository's ID follows its final answers: if you change its location, or fill in a refused repository again, the ID is derived again. The review lists every ID the save writes, and IDs already in the file never change. To use other names, edit the file after saving, and rename a repository ID in every task's `repo` too.
 
