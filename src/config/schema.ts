@@ -25,11 +25,14 @@ import type {
   TevuConfig,
 } from '@/domain/types';
 
+/** ID_MAX_LENGTH reports the most characters a configuration ID may hold. */
+export const ID_MAX_LENGTH = 64;
+
 /** ID grammar shared by every configuration collection. */
-const ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
+const ID_PATTERN = new RegExp(`^[a-z][a-z0-9-]{0,${String(ID_MAX_LENGTH - 1)}}$`);
 
 /** Configuration identifier: lowercase letters, digits, and hyphens, starting with a letter. */
-const IdSchema = z.string().regex(ID_PATTERN, 'id must match ^[a-z][a-z0-9-]{0,63}$');
+const IdSchema = z.string().regex(ID_PATTERN, `id must match ${ID_PATTERN.source}`);
 
 const nonWhitespaceTextSchema = z
   .string()

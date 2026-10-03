@@ -18,6 +18,7 @@ import { renderTevuError } from './render-error';
 import { createStatusLine } from './status-line';
 import { runAssessmentWizard, runTaskWizard } from './task-wizard';
 
+import type { LocalRepositoryNaming } from './derived-identifiers';
 import type { WaitInterrupt } from './wait-interrupt';
 import type { AssessedCase, AssessmentCaseContext, RebuiltReport } from '@/application/assess';
 import type { CreateTaskErrorKind, TaskWizardInput } from '@/application/create-task';
@@ -123,6 +124,11 @@ export type ProgramOperations = {
   ): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>>;
   /** Reports whether `repositoryPath`, resolved against the configuration file's directory, lies in a Git repository. */
   isGitRepository(configPath: string, repositoryPath: string): Promise<boolean>;
+  /** Reads the directory name and `origin` remote URL of `repositoryPath`, resolved against the configuration file's directory. */
+  readLocalRepositoryNaming(
+    configPath: string,
+    repositoryPath: string,
+  ): Promise<LocalRepositoryNaming>;
   /** The names in `names` that are not set in tevu's own environment. */
   unsetVariables(names: readonly string[]): string[];
   /** Drafts acceptance criteria and a Definition of Done from a resolved reference solution. */
@@ -610,6 +616,8 @@ async function runTaskAdd(
         operations.ensureManagedLfsObjects({ repository, revision }, onProgress),
       checkGitHubRepository: operations.checkGitHubRepository,
       isGitRepository: (repositoryPath) => operations.isGitRepository(loaderPath, repositoryPath),
+      readLocalRepositoryNaming: (repositoryPath) =>
+        operations.readLocalRepositoryNaming(loaderPath, repositoryPath),
       isVariableSet: (name) => operations.unsetVariables([name]).length === 0,
       draftCriteria: (request) => operations.draftCriteria({ configPath: loaderPath, ...request }),
       probeAgent: (command) => operations.probeAgent(loaderPath, command),

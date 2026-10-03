@@ -92,6 +92,12 @@ export async function isGitRepository(directory: string): Promise<boolean> {
   return outcome.exitCode === 0;
 }
 
+/** Reports the first fetch URL of the `origin` remote of the repository holding `directory`. */
+export async function readOriginRemoteUrl(directory: string): Promise<string | undefined> {
+  const outcome = await runGit(directory, ['remote', 'get-url', 'origin']);
+  return outcome.exitCode === 0 && outcome.stdout !== '' ? outcome.stdout : undefined;
+}
+
 function resolveCommitInRepository(
   repository: RepositoryDefinition,
   reference: string,
