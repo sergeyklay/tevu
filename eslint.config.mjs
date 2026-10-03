@@ -7,15 +7,6 @@ export default defineConfig([
   // ESLint does not read .gitignore or .git/info/exclude.
   globalIgnores([
     'dist/**',
-    '.claude/**',
-    'kb/**',
-    '.findings/**',
-    '.issues/**',
-    '.plans/**',
-    '.research/**',
-    '.reviews/**',
-    '.specs/**',
-    '.tasks/**',
   ]),
 
   js.configs.recommended,
