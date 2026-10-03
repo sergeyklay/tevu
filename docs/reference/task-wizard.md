@@ -25,8 +25,8 @@ Asked in this order for a new configuration. Defaults are shown dim, and an empt
 | Secret variable names | none | Names separated by commas, spaces, or both |
 | Non-secret variable names | none | Same format |
 | Import issues from Jira? | No | If Yes: Jira site URL, Jira email variable, Jira token variable |
-| Repository ID, Repository source, Local path or GitHub repository | none | Repeats while Add another repository? is Yes (default No). Source is Local path or GitHub, cloned by tevu |
-| Model entry ID, Model, Reasoning effort | none | At least two entries. Reasoning effort has no default. Add another model? (default No) is asked from the third entry on |
+| Repository source, Local path or GitHub repository | none | Repeats while Add another repository? is Yes (default No). Source is Local path or GitHub, cloned by tevu |
+| Model, Reasoning effort | none | At least two entries. Reasoning effort has no default. Add another model? (default No) is asked from the third entry on |
 | Grade checks with a model? | Yes | If Yes: Grader model, Grader effort (default `medium`) |
 | Draft criteria with a model? | Yes | If Yes: Criteria model, Criteria effort (default `high`) |
 
@@ -52,7 +52,7 @@ Asked in this order:
 | Repository | A choice of configured repositories plus Add a repository. Shown even with one repository |
 | Reference PR or commit | Optional. `OWNER/REPO#NUMBER`, a pull request URL, or a commit. Text containing `://` or in the short form is a pull request, anything else names a commit |
 | Base commit | Prefilled with the commit proposed from the reference; see [Tasks](tasks.md#proposed-base-commit). Required text when no base is proposed |
-| Task ID, Title, Description, Prompt for the models | Title is prefilled for an imported issue |
+| Title, Description, Prompt for the models | Title is prefilled for an imported issue |
 | Confirmed prerequisite | At least one. Add another prerequisite? (default No) |
 | Acceptance and Definition of Done checks | See [Checks](#checks) |
 | Review, then `Save to <path>?` | Default Yes |
@@ -73,7 +73,7 @@ Without a criteria draft, each check asks:
 
 | Question | Notes |
 | --- | --- |
-| Check ID, Check type | Graded by a model (default), Command, or Manual |
+| Check type | Graded by a model (default), Command, or Manual |
 | Criterion or Description | Criterion for a graded check. Description is optional for command and manual checks |
 | Required? | Default Yes |
 | Command, Time limit, Passing exit codes, Check variables | Command checks only. `Time limit` is optional and inherits `run.check_timeout`. Exit codes default to `0`. A command is saved as typed and runs through `/bin/sh -c` |
@@ -97,6 +97,24 @@ Accepting always needs an explicit choice, even for an unedited draft. The Defin
 Before each draft the wizard lists the models the agent resolves, as in the model checks, so an unusable model or effort fails before a model session starts. A model the agent does not list, or a `Reasoning effort` outside the variants OpenCode reports for it, falls back to writing the criteria by hand. For an effort outside the variants, the wizard prints the variants and names `roles.criteria.effort` in the configuration file. An effort tevu cannot verify, or one on a model that reports no variants, is used as requested: the draft goes ahead after a warning that gives the reason. See [Effort check](agents-and-models.md#effort-check).
 
 A failed draft names its cause. For unreadable changes, a timeout, a failed OpenCode call, or an unusable reply, the wizard asks `Draft the criteria again?` with Yes selected, and each retry starts another model session. Any other cause, and a prompt that cannot be redacted, falls back to writing the criteria by hand without the question. The draft call incurs the provider's usual charges and its model session runs until it finishes or reaches `run.timeout`. The [tool denial check](agents-and-models.md#tool-denial-check) before the session has its own 120 second limit that does not count against `run.timeout`.
+
+## Identifiers
+
+The wizard asks for no ID. It derives the ID of every repository, model entry, task, and check from your answers, lists each one in the review before you save, and writes them.
+
+| Collection | Rule | Example |
+| --- | --- | --- |
+| Repository, GitHub | The owner and repository name. The host is not part of the ID | `octo/App.js` gives `octo-app-js` |
+| Repository, local path | The last two path parts of the `origin` remote's URL, or the directory name when the repository has no `origin` or its URL has fewer than two parts | `git@github.com:Acme/Web_App.git` gives `acme-web-app` |
+| Model entry | The last `/` segment of the model, then the reasoning effort | `acme/vendor/model-5.6` at `high` gives `model-5-6-high` |
+| Task | `task-{n}`, where `n` is the smallest positive number no task in the file uses | `task-2` when the file holds `task-1` and `task-3` |
+| Check | `acceptance-{n}` or `done-{n}`, numbered from 1 within each list and continuing after any drafted checks | `acceptance-3` for a third acceptance check |
+
+Each repository and model entry ID is lowercased, and every run of characters other than letters and digits becomes one hyphen. Hyphens at either end are dropped. An ID that would start with a digit gets `repo-` or `model-` in front, and an empty one becomes `repo` or `model`. An ID holds at most 64 characters. When the ID is already taken, the wizard adds `-2`, then `-3`, and so on. Taken IDs include the entries already in the file and the ones you entered earlier in the same run.
+
+For a local path, tevu reads the `origin` URL from the repository's own Git configuration. It uses only the last two path parts of the URL, and it never prints or saves the URL.
+
+A repository's ID follows its final answers: if you change its location, or fill in a refused repository again, the ID is derived again. The review lists every ID the save writes, and IDs already in the file never change. To use other names, edit the file after saving, and rename a repository ID in every task's `repo` too.
 
 ## Failures and retries
 
