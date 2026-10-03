@@ -53,7 +53,7 @@ describe('readOriginRemoteUrl', () => {
     expect(await readOriginRemoteUrl(root)).toBeUndefined();
   });
 
-  it('returns undefined for neither a plain directory nor a missing one', async () => {
+  it('returns undefined for a plain directory and for a missing one', async () => {
     expect(await readOriginRemoteUrl(root)).toBeUndefined();
     expect(await readOriginRemoteUrl(join(root, 'missing'))).toBeUndefined();
   });
