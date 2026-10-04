@@ -17,6 +17,6 @@ Product tests are colocated with the behavior they verify, as `*.test.ts` or `*.
 
 ## Build
 
-`bun run build` bundles `src/index.ts` and the production modules it imports into `dist/index.js` with esbuild. `dist/index.js` is the `tevu` executable and the only supported way to run it. Packages in `dependencies` are not bundled and load from `node_modules` at run time. Test files and fixtures are not part of the bundle.
+`bun run build` runs `scripts/build.mjs`, which bundles `src/index.ts` and the production modules it imports into `dist/index.js` with esbuild and writes the `version` of `package.json` into the bundle. `dist/index.js` is the `tevu` executable and the only supported way to run it; `tevu --version` prints the version written at build time without reading `package.json`. Packages in `dependencies` are not bundled and load from `node_modules` at run time. Test files and fixtures are not part of the bundle.
 
 The commands that verify a change are in the [change verification guide](../guides/verify-change.md).

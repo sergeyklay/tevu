@@ -75,6 +75,9 @@ import type { ProgramDependencies, ProgramIo, ProgramOperations } from '@/interf
 import type { WaitInterrupt } from '@/interface/wait-interrupt';
 import type { Writable } from 'node:stream';
 
+/** The `version` of package.json; scripts/build.mjs defines it in the bundle, vitest.config.ts in tests. */
+declare const __TEVU_VERSION__: string;
+
 /** Optional overrides for composing the production dependency graph. */
 export type CompositionOptions = {
   io?: ProgramIo;
@@ -358,6 +361,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
   return {
     io,
     operations,
+    version: __TEVU_VERSION__,
     now: () => new Date(),
     redact: registry.redact,
     cancellation,
@@ -374,7 +378,7 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
  * signal only when no wait takes it; SIGTERM aborts at once. Repeated
  * interrupts share the same bounded process-group cancellation.
  */
-export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
+async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const controller = new AbortController();
   const waitInterrupt = createWaitInterrupt();
   const onSigint = (): void => {

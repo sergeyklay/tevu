@@ -35,7 +35,7 @@
     "tevu": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build": "rm -rf dist && esbuild src/index.ts --bundle --format=esm --platform=node --target=node24 --packages=external --outfile=dist/index.js",
+    "build": "node scripts/build.mjs",
     "prepack": "bun run build",
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",

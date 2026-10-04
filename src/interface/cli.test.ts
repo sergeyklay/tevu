@@ -309,6 +309,8 @@ vi.mock('stdin-discarder', () => ({
 
 const FIXED_NOW = new Date('2026-09-23T10:00:00.000Z');
 
+const TEST_VERSION = '9.9.9-fixture';
+
 function buildJiraTrackerSettings(
   overrides: Partial<JiraTrackerSettings> = {},
 ): JiraTrackerSettings {
@@ -844,6 +846,7 @@ function createDependencies(overrides: Partial<ProgramDependencies> = {}): Progr
   return {
     io: createIo({ stdin: true, stdout: true }),
     operations: createOperations(),
+    version: TEST_VERSION,
     now: () => FIXED_NOW,
     redact: (text) => text,
     cancellation: new AbortController().signal,
@@ -1347,8 +1350,8 @@ const USAGE_ERROR_CASES: Array<{ argv: string[]; error: string; usage: string }>
     usage: 'Usage: tevu run [options]',
   },
   {
-    argv: ['--version'],
-    error: "error: unknown option '--version'",
+    argv: ['-V'],
+    error: "error: unknown option '-V'",
     usage: 'Usage: tevu [options] [command]',
   },
   {
@@ -1555,13 +1558,69 @@ describe('tevu CLI', () => {
       ]);
       expect(assess?.registeredArguments.every((argument) => argument.required)).toBe(true);
     });
+  });
 
-    it('rejects --version as an unknown option', async () => {
-      const { code, out, err } = await runCli(['--version']);
+  describe('version', () => {
+    const VERSION_CASES: Array<{ argv: string[] }> = [
+      { argv: ['--version'] },
+      { argv: ['task', '--version'] },
+      { argv: ['task', 'add', '--version'] },
+      { argv: ['task', 'add', '--jira', 'ABC-1', '--version'] },
+      { argv: ['validate', '--version'] },
+      { argv: ['validate', '--config', 'tevu.yaml', '--version'] },
+      { argv: ['run', '--version'] },
+      { argv: ['run', '--dry-run', '--repeat', '2', '--version'] },
+      { argv: ['assess', '--version'] },
+      { argv: ['assess', 'run-1', 'case-1', '--version'] },
+      { argv: ['report', '--version'] },
+      { argv: ['report', 'run-1', '--version'] },
+      { argv: ['config', '--version'] },
+      { argv: ['config', 'example', '--version'] },
+      { argv: ['--help', '--version'] },
+      { argv: ['--version', '--help'] },
+    ];
 
-      expect(code).toBe(1);
-      expect(err[0]).toBe("error: unknown option '--version'");
-      expect(out).toEqual([]);
+    function expectNoOperationCalledAtAll(operations: ProgramOperations): void {
+      for (const [name, operation] of Object.entries(operations)) {
+        expect(operation, name).not.toHaveBeenCalled();
+      }
+    }
+
+    it.each(VERSION_CASES)(
+      'prints only the version with exit 0 and no stderr for $argv',
+      async ({ argv }) => {
+        const { code, dependencies } = await runCli(argv);
+
+        expect(code).toBe(0);
+        expect((dependencies.io.stdout as MemoryStream).text).toBe(`${TEST_VERSION}\n`);
+        expect((dependencies.io.stderr as MemoryStream).text).toBe('');
+      },
+    );
+
+    it.each(VERSION_CASES)('calls no operation for $argv', async ({ argv }) => {
+      const operations = createOperations();
+
+      const { code } = await runCli(argv, { operations });
+
+      expect(code).toBe(0);
+      expectNoOperationCalledAtAll(operations);
+    });
+
+    it('passes the version line through the injected redactor', async () => {
+      const { code, dependencies } = await runCli(['--version'], {
+        redact: (text) => text.replaceAll(TEST_VERSION, '[redacted]'),
+      });
+
+      expect(code).toBe(0);
+      expect((dependencies.io.stdout as MemoryStream).text).toBe('[redacted]\n');
+    });
+
+    it('registers --version on the root without a short flag', () => {
+      const program = createProgram(createDependencies());
+
+      const option = program.options.find((entry) => entry.long === '--version');
+
+      expect(option?.flags).toBe('--version');
     });
   });
 
@@ -1654,6 +1713,40 @@ describe('tevu CLI', () => {
 
       expect(commands?.split('\n').map((line) => line.trimStart().split(/\s{2,}/)[0])).toEqual(
         names,
+      );
+    });
+
+    describe('version option', () => {
+      function optionRows(help: string): string[][] {
+        const section = help.split('\nOptions:\n')[1]?.split('\n\n')[0] ?? '';
+        return section.split('\n').map((line) => line.trimStart().split(/\s{2,}/));
+      }
+
+      it('lists --version before -h, --help in the root help', async () => {
+        const { dependencies } = await runCli(['--help']);
+
+        expect(optionRows((dependencies.io.stdout as MemoryStream).text)).toEqual([
+          ['--version', 'Show the version'],
+          ['-h, --help', 'Show help'],
+        ]);
+      });
+
+      it('lists --version before -h, --help in the help a bare invocation prints', async () => {
+        const { dependencies } = await runCli([]);
+
+        expect(optionRows((dependencies.io.stderr as MemoryStream).text)).toEqual([
+          ['--version', 'Show the version'],
+          ['-h, --help', 'Show help'],
+        ]);
+      });
+
+      it.each(HELP_CASES.filter(({ argv }) => argv.length > 0))(
+        'leaves --version out of the help for $description',
+        async ({ argv }) => {
+          const { dependencies } = await runCli([...argv, '--help']);
+
+          expect((dependencies.io.stdout as MemoryStream).text).not.toContain('--version');
+        },
       );
     });
 

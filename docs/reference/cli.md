@@ -1,6 +1,6 @@
 # CLI reference
 
-The `tevu` commands, their options, exit codes, and network use. Every command supports `--help`. There is no `--version` option and no `help` command.
+The `tevu` commands, their options, exit codes, and network use. Every command supports `--help`. `tevu --version` prints the version of the package tevu was built from and exits `0`; it reads no configuration file, needs no credentials, starts no other process, and uses no network. There is no `help` command.
 
 See [Installation](../getting-started/installation.md) for how to build the executable.
 
