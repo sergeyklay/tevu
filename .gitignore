@@ -13,3 +13,6 @@
 
 # App configuration.
 tevu.yaml
+
+# Build artefacts
+*.tgz

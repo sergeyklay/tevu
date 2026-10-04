@@ -5,9 +5,7 @@ import tseslint from 'typescript-eslint';
 
 export default defineConfig([
   // ESLint does not read .gitignore or .git/info/exclude.
-  globalIgnores([
-    'dist/**',
-  ]),
+  globalIgnores(['dist/**']),
 
   js.configs.recommended,
   tseslint.configs.recommended,
