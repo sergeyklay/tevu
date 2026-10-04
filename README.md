@@ -24,7 +24,7 @@ tevu runs that comparison on tasks from your own task tracker.
 
 ## Install
 
-From a checkout, with Node.js 24 and Bun installed:
+From a checkout, with Node.js 24, Git, and the Bun version declared by `packageManager` in [package.json](package.json):
 
 ```sh
 bun install --frozen-lockfile
@@ -35,6 +35,8 @@ tevu --help
 ```
 
 `~/.local/bin` must be on `PATH`; any directory on `PATH` works. The link points into the checkout, which must stay in place.
+
+Bun is needed to install dependencies and build from source. The built CLI runs on Node.js 24 and doesn't require Bun.
 
 Without `--config`, tevu reads `tevu.yaml` from the current directory, or otherwise the configuration file in the user configuration directory; see the [CLI reference](docs/reference/cli.md) for the search order.
 

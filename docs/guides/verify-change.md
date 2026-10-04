@@ -6,6 +6,8 @@ Run the same gates CI runs before you send a change for review.
 
 Node.js 24, Bun, and Git from the repository checkout. The synthetic-repository integration tests use Git.
 
+Use the Bun version declared by `packageManager` in [package.json](../../package.json). Check it with `bun --version` before installing dependencies. CI reads the same field through `setup-bun`; it no longer selects `latest`.
+
 ```sh
 bun install --frozen-lockfile
 ```

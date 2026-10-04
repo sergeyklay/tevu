@@ -4,6 +4,8 @@ Build tevu from a checkout and put the `tevu` command on your `PATH`.
 
 You need Linux or macOS with Node.js 24, Bun, and Git. The benchmarks in the next tutorial also need OpenCode installed.
 
+Install the Bun version declared by `packageManager` in [package.json](../../package.json). Check your installed version with `bun --version`; the field doesn't switch your local Bun installation automatically.
+
 ## 1. Build the executable
 
 From your tevu checkout:
@@ -13,7 +15,7 @@ bun install --frozen-lockfile
 bun run build
 ```
 
-The build writes `dist/index.js`, the only supported way to run tevu.
+The build writes `dist/index.js`, the only supported way to run tevu. Bun is a source-build tool; the built CLI runs on Node.js 24 and doesn't require Bun.
 
 ## 2. Link the command
 
