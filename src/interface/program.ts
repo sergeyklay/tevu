@@ -232,6 +232,8 @@ export type ProgramOperations = {
 export type ProgramDependencies = {
   io: ProgramIo;
   operations: ProgramOperations;
+  /** Version of the package this executable was built from; `--version` prints it. */
+  version: string;
   now(): Date;
   redact(text: string): string;
   cancellation: AbortSignal;
@@ -338,6 +340,7 @@ export async function runProgram(
 function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command {
   const program = new Command('tevu');
   program.description('Compare coding models on your tasks');
+  program.version(dependencies.version, '--version', 'Show the version');
 
   const task = program.command('task').description('Manage benchmark tasks');
   task

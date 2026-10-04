@@ -129,3 +129,6 @@ jobs:
         run: |
           node dist/index.js --help
           ./dist/index.js run --help
+          expected="$(node -p "require('./package.json').version")"
+          actual="$(node dist/index.js --version)"
+          test "$actual" = "$expected"

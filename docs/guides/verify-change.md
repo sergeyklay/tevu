@@ -45,8 +45,10 @@ Check the executable:
 bun run build
 ./dist/index.js --help
 ./dist/index.js run --help
+./dist/index.js --version
+npm pkg get version
 ```
 
-Confirm that help renders and exits successfully without starting a benchmark.
+Confirm that help renders and exits successfully without starting a benchmark, and that `--version` prints the version `npm pkg get version` shows, without the quotes.
 
 The [source layout reference](../reference/source-layout.md) lists what each module holds.
