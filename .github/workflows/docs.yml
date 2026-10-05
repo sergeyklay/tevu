@@ -1,0 +1,66 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.md'
+      - package.json
+      - .github/workflows/docs.yml
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**.md'
+      - package.json
+      - .github/workflows/docs.yml
+  # External pages change without a commit here.
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  links:
+    name: Links
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # npm ships README.md without docs/, so its links must be absolute and
+      # point at the tag of the version being published.
+      - name: Check README links target this version
+        run: |
+          version="$(jq -r .version package.json)"
+          status=0
+          if grep -nP '\]\((?!https?://|#)' README.md; then
+            echo "::error file=README.md::Use absolute GitHub URLs; npm does not ship the linked files."
+            status=1
+          fi
+          if grep -noE 'github\.com/sergeyklay/tevu/(blob|tree)/[^/)#]+' README.md | grep -vE "/(blob|tree)/v${version//./\\.}$"; then
+            echo "::error file=README.md::Repository links must use the tag v${version}."
+            status=1
+          fi
+          exit "$status"
+
+      - name: Check links and anchors
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          lycheeVersion: v0.24.2
+          jobSummary: true
+          args: >-
+            --no-progress
+            --include-fragments
+            --remap 'https://github\.com/sergeyklay/tevu/(blob|tree)/v[^/]+/(.*) file://${{ github.workspace }}/$2'
+            README.md CONTRIBUTING.md SECURITY.md 'docs/**/*.md'
