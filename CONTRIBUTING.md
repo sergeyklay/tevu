@@ -61,10 +61,10 @@ node dist/index.js --help
 test "$(node dist/index.js --version)" = "$(node -p "require('./package.json').version")"
 ```
 
-The Docs workflow checks links and fragment anchors in `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `docs/` on pull requests that change Markdown or the version, and weekly for external pages. Run it locally with [lychee](https://github.com/lycheeverse/lychee) 0.24.2:
+The Docs workflow checks links and fragment anchors in `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `docs/`. On pull requests that change Markdown or the version, it checks only files in the repository; a weekly run also checks external URLs. Run the pull request check locally with [lychee](https://github.com/lycheeverse/lychee) 0.24.2, and drop `--offline` to include external URLs:
 
 ```sh
-lychee --include-fragments \
+lychee --offline --include-fragments \
   --remap "https://github\.com/sergeyklay/tevu/(blob|tree)/v[^/]+/(.*) file://$PWD/\$2" \
   README.md CONTRIBUTING.md SECURITY.md 'docs/**/*.md'
 ```

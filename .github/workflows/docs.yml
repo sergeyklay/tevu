@@ -14,7 +14,7 @@ on:
       - '**.md'
       - package.json
       - .github/workflows/docs.yml
-  # External pages change without a commit here.
+  # External pages change without a commit here, and only this run checks them.
   schedule:
     - cron: '17 6 * * 1'
   workflow_dispatch:
@@ -54,12 +54,15 @@ jobs:
           fi
           exit "$status"
 
+      # Pushes and pull requests check only files in the repository, so an
+      # unreachable external site or a GitHub rate limit cannot fail them.
       - name: Check links and anchors
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
           lycheeVersion: v0.24.2
           jobSummary: true
           args: >-
+            ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && '--offline' || '' }}
             --no-progress
             --include-fragments
             --remap 'https://github\.com/sergeyklay/tevu/(blob|tree)/v[^/]+/(.*) file://${{ github.workspace }}/$2'
