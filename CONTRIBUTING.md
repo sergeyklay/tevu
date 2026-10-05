@@ -45,7 +45,7 @@ Rebuild after each change; the link picks up the new file. If the npm package is
 
 ## Reproduce CI
 
-CI runs on every pull request. Run the same gates locally:
+CI runs on every pull request. It lints and type-checks once, then runs the tests and the build on Ubuntu and macOS, each with Node.js 24.0.0, the lowest version `engines` allows, and with the latest Node.js 24 release. Run the same gates locally:
 
 ```sh
 bun run check
