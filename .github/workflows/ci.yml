@@ -71,9 +71,6 @@ jobs:
       - name: Check types
         run: bun run typecheck
 
-  # Each platform job reports under its own name, but the branch ruleset
-  # requires the fixed contexts "Test" and "Build"; the summary jobs below
-  # carry those names so a failure on any platform blocks the merge.
   test-platform:
     name: Test (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
@@ -82,7 +79,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        # 24.0.0 is the lower bound of engines.node in package.json.
         node: ['24.0.0', '24.x']
 
     steps:
@@ -103,8 +99,6 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # The Git LFS suite skips itself when git-lfs is missing, so a missing
-      # install must fail here instead of passing as skipped tests.
       - name: Check Git LFS
         run: git lfs version
 
@@ -166,6 +160,12 @@ jobs:
           expected="$(node -p "require('./package.json').version")"
           actual="$(node dist/index.js --version)"
           test "$actual" = "$expected"
+
+      - name: Check npm package
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
+          node scripts/check-package.mjs "$RUNNER_TEMP/tevu-$version.tgz" "$version"
 
   build:
     name: Build
