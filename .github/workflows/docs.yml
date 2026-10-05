@@ -14,7 +14,6 @@ on:
       - '**.md'
       - package.json
       - .github/workflows/docs.yml
-  # External pages change without a commit here, and only this run checks them.
   schedule:
     - cron: '17 6 * * 1'
   workflow_dispatch:
@@ -38,8 +37,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # npm ships README.md without docs/, so its links must be absolute and
-      # point at the tag of the version being published.
       - name: Check README links target this version
         run: |
           version="$(jq -r .version package.json)"
@@ -54,8 +51,6 @@ jobs:
           fi
           exit "$status"
 
-      # Pushes and pull requests check only files in the repository, so an
-      # unreachable external site or a GitHub rate limit cannot fail them.
       - name: Check links and anchors
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
