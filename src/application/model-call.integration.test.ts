@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import process from 'node:process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { withoutPlatformVariables } from '@/adapters/__fixtures__/environment.fixtures';
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
 import {
@@ -557,7 +558,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
       expect(record.dirEntries).toEqual(['.git']);
       expect(record.stdin).toBe(PROMPT);
       expect(record.env['OPENCODE_PERMISSION']).toBe(DENY_EVERY_TOOL);
-      expect(Object.keys(record.env).sort()).toEqual(
+      expect(withoutPlatformVariables(Object.keys(record.env)).sort()).toEqual(
         [
           'CI',
           'HOME',

@@ -1,11 +1,12 @@
 // @vitest-environment node
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { withoutPlatformVariables } from '@/adapters/__fixtures__/environment.fixtures';
 import { createArtifactStore, createConfigStore } from '@/adapters/artifact-store';
 import {
   createEnvironmentAdapter,
@@ -1219,7 +1220,7 @@ describe('evaluateChecks', () => {
   });
 
   it('executes a real acceptance command with exactly the fixed evaluator environment plus its allowlisted values', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'tevu-eval-real-env-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'tevu-eval-real-env-')));
     try {
       const environments = createEnvironmentAdapter();
       const config = rekeyToFakeAgent(buildSyntheticConfig());
@@ -1315,7 +1316,7 @@ describe('evaluateChecks', () => {
       };
       expect(reported.argv).toEqual([process.execPath, 'literal-flag', 'literal-value']);
       expect(reported.cwd).toBe(worktreeDirectory);
-      expect(Object.keys(reported.env).sort()).toEqual([
+      expect(withoutPlatformVariables(Object.keys(reported.env)).sort()).toEqual([
         'CI',
         'HOME',
         'LANG',

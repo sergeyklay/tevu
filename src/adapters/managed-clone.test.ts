@@ -1,8 +1,8 @@
 // @vitest-environment node
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createManagedCloneAdapter } from './managed-clone';
@@ -165,7 +165,7 @@ describe('createManagedCloneAdapter', () => {
     it('reports repository when git prints the real path of the directory', async () => {
       const directory = join(root, 'clone.git');
       await mkdir(directory);
-      const realDirectory = resolve(directory);
+      const realDirectory = await realpath(directory);
       const runProcess = buildRunProcess({
         absoluteGitDir: launched({
           exitCode: 0,

@@ -28,6 +28,7 @@ import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
 import { TevuConfigSchema } from '@/config/schema';
 import { buildCheckEnvironment } from '@/evaluation/checks';
 
+import { withoutPlatformVariables } from './__fixtures__/environment.fixtures';
 import {
   buildLfsExtensionLine,
   buildLfsObject,
@@ -131,7 +132,7 @@ beforeEach(async () => {
   process.env[HOST_SENTINEL_NAME] = HOST_SENTINEL_VALUE;
   process.env[UNLISTED_NAME] = UNLISTED_VALUE;
   process.env.XDG_DATA_HOME = HOST_XDG_DATA;
-  testDirectory = await mkdtemp(join(tmpdir(), 'tevu-isolation-'));
+  testDirectory = await realpath(await mkdtemp(join(tmpdir(), 'tevu-isolation-')));
 });
 
 afterEach(async () => {
@@ -2257,7 +2258,7 @@ describe('isolated case environments', () => {
     expect(reported.secret).toBe('[REDACTED]');
     expect(reported.ordinary).toBeUndefined();
     expect(reported.hostSentinel).toBeUndefined();
-    expect(reported.keys).toEqual(AGENT_ENV_KEYS);
+    expect(withoutPlatformVariables(reported.keys)).toEqual(AGENT_ENV_KEYS);
     expect(outcome.stdout.text).not.toContain(PROVIDER_VALUE);
     expect(outcome.stdout.text).not.toContain(SECRET_VALUE);
 
@@ -2277,7 +2278,9 @@ describe('isolated case environments', () => {
       ordinary: string;
       keys: string[];
     };
-    expect(evaluatorReported.keys).toEqual([...FIXED_EVALUATOR_KEYS, EVAL_NAME].sort());
+    expect(withoutPlatformVariables(evaluatorReported.keys)).toEqual(
+      [...FIXED_EVALUATOR_KEYS, EVAL_NAME].sort(),
+    );
     expect(evaluatorReported.home).toBe(environments.evaluator.homeDirectory);
     expect(evaluatorReported.ordinary).toBe(ORDINARY_VALUE);
     expect(evaluatorReported.provider).toBeUndefined();
