@@ -1,43 +1,56 @@
 # Install tevu
 
-Build tevu from a checkout and put the `tevu` command on your `PATH`.
+Install the `tevu` package from npm and check that the `tevu` command runs.
 
-You need Linux or macOS with Node.js 24, Bun, and Git. The benchmarks in the next tutorial also need OpenCode installed.
+You need Linux or macOS with Node.js 24, npm, and Git. npm ships with Node.js. The benchmarks in the next tutorial also need OpenCode installed.
 
-Install the Bun version declared by `packageManager` in [package.json](../../package.json). Check your installed version with `bun --version`; the field doesn't switch your local Bun installation automatically.
-
-## 1. Build the executable
-
-From your tevu checkout:
+## 1. Install the package
 
 ```sh
-bun install --frozen-lockfile
-bun run build
+npm install --global tevu
 ```
 
-The build writes `dist/index.js`, the only supported way to run tevu. Bun is a source-build tool; the built CLI runs on Node.js 24 and doesn't require Bun.
+npm puts the `tevu` command in the `bin` directory of its global prefix. Run `npm prefix --global` to see the prefix; its `bin` directory must be on your `PATH`.
 
-## 2. Link the command
+If npm fails with `EACCES`, your global prefix is not writable by your user. Don't rerun the command with `sudo`. Install Node.js with a Node.js version manager, or point npm at a directory you own; npm describes both in [Resolving EACCES permissions errors when installing packages globally](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally/).
 
-```sh
-mkdir -p ~/.local/bin
-ln -sf "$PWD/dist/index.js" ~/.local/bin/tevu
-```
-
-`~/.local/bin` must be on your `PATH`. Any directory on `PATH` works. The link points into the checkout, so the checkout must stay where it is.
-
-## 3. Check that it runs
+## 2. Check that it runs
 
 ```sh
+tevu --version
 tevu --help
 ```
 
-You should see the list of commands: `task`, `validate`, `run`, `assess`, `report`, and `config`. If the shell cannot find `tevu`, add the link's directory to `PATH`.
+`tevu --version` prints the installed version. `tevu --help` lists the commands: `task`, `validate`, `run`, `assess`, `report`, and `config`. If the shell cannot find `tevu`, add the `bin` directory of the npm global prefix to `PATH`.
 
 `tevu` runs with the `node` found on `PATH`, so Node.js 24 must be the `node` in every directory where you use tevu.
 
-After you update the checkout, repeat step 1. The link keeps pointing at the rebuilt file.
+## Update
+
+```sh
+npm install --global tevu@latest
+```
+
+## Try a prerelease
+
+Release candidates are published to the `next` channel. `npm install --global tevu` installs from `latest` and never picks them up, so name the channel:
+
+```sh
+npm install --global tevu@next
+```
+
+To go back to the stable release, run the update command above.
+
+## Uninstall
+
+```sh
+npm uninstall --global tevu
+```
+
+tevu leaves your configuration file and saved runs in place.
 
 ## Next
 
 [Run your first comparison](first-comparison.md).
+
+To work on tevu itself, see [CONTRIBUTING.md](../../CONTRIBUTING.md).
