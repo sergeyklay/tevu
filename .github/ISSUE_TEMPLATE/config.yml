@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/sergeyklay/tevu/security/advisories/new
+    about: Credential exposure or a broken isolation boundary. Reported privately, never as a public issue.
+  - name: Documentation
+    url: https://github.com/sergeyklay/tevu/blob/main/docs/README.md
+    about: Installation, guides, and reference.

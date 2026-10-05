@@ -1,6 +1,6 @@
 # Source layout reference
 
-The source directories of tevu, what each holds, and how the executable is built. For the dependency direction between them, see [AGENTS.md](../../AGENTS.md).
+The source directories of tevu, what each holds, how they depend on each other, and how the executable is built.
 
 | Path | Responsibility |
 | --- | --- |
@@ -15,8 +15,24 @@ The source directories of tevu, what each holds, and how the executable is built
 
 Product tests are colocated with the behavior they verify, as `*.test.ts` or `*.integration.test.ts`. Protocol fixtures sit next to the protocol adapter. TypeScript module exports are internal; the CLI is the public interface.
 
+## Dependencies between directories
+
+Imports point one way:
+
+```text
+domain <- config <- evaluation <- application <- interface
+```
+
+A directory imports only from directories to its left. `src/adapters` implements contracts declared in `src/domain` and imports nothing else from `src`. `src/index.ts` is the only module that wires concrete adapters.
+
+## Code rules
+
+- Errors cross module boundaries as `TevuResult` values, never as thrown exceptions.
+- Pure modules read time only through the injected clock, never through `Date.now()` or `new Date()`.
+- `tevu report` reproduces byte-identical JSON and Markdown from unchanged artifacts, so derived output never depends on wall-clock time, randomness, or unordered iteration.
+
 ## Build
 
 `bun run build` runs `scripts/build.mjs`, which bundles `src/index.ts` and the production modules it imports into `dist/index.js` with esbuild and writes the `version` of `package.json` into the bundle. `dist/index.js` is the `tevu` executable and the only supported way to run it; `tevu --version` prints the version written at build time without reading `package.json`. Packages in `dependencies` are not bundled and load from `node_modules` at run time. Test files and fixtures are not part of the bundle.
 
-The commands that verify a change are in the [change verification guide](../guides/verify-change.md).
+The commands that reproduce CI are in [CONTRIBUTING.md](../../CONTRIBUTING.md#reproduce-ci).

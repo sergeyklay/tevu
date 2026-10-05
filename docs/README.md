@@ -3,7 +3,7 @@
 New to tevu? Install it, then run your first comparison; the two Getting started pages take you from nothing to a finished report. Come back to the guides when you have a specific task, to the reference when you need an exact command, field, or file, and to the concepts when you want to know why tevu works the way it does.
 
 - **Getting started**
-  - [Install tevu](getting-started/installation.md) - build the executable and put it on your `PATH`
+  - [Install tevu](getting-started/installation.md) - install, update, or remove the npm package
   - [Run your first comparison](getting-started/first-comparison.md) - compare two model settings on a solved task and read the report
 - **Guides**
   - [Import a task from Jira Cloud](guides/import-jira-task.md) - add a Jira issue's text to a task
@@ -13,7 +13,6 @@ New to tevu? Install it, then run your first comparison; the two Getting started
   - [Make a model reachable](guides/configure-model-access.md) - declare provider credentials for the benchmarked agent
   - [Assess results](guides/assess-results.md) - record verdicts, override a grader, and rebuild the report
   - [Troubleshoot common failures](guides/troubleshoot.md) - fix errors from `task add`, `validate`, and `run`
-  - [Verify a change](guides/verify-change.md) - run the gates CI runs
 - **Reference**
   - [CLI](reference/cli.md) - commands, options, configuration search, network use, and exit codes
   - [Task wizard](reference/task-wizard.md) - questions, defaults, retries, and keys of `tevu task add`

@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose new behavior or a change to existing behavior.
+labels: ['type:feature']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Do not paste credentials, tokens, private task text, content of a private repository, session exports, or unredacted logs. Describe the shape of the input instead.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you are trying to do, and what tevu does today that stops you or makes it costly.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What tevu should do instead, as seen from the command line, the configuration file, or the report.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you use now, or other approaches you rejected and why.

@@ -6,7 +6,7 @@
 
 Find which models finish your tasks, how long they take, and what they cost.
 
-[Get started](docs/getting-started/first-comparison.md) · [Documentation](docs/README.md)
+[Get started](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/getting-started/first-comparison.md) · [Documentation](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/README.md)
 
 </div>
 
@@ -24,23 +24,20 @@ tevu runs that comparison on tasks from your own task tracker.
 
 ## Install
 
-From a checkout, with Node.js 24, Git, and the Bun version declared by `packageManager` in [package.json](package.json):
+With Node.js 24 and Git:
 
 ```sh
-bun install --frozen-lockfile
-bun run build
-mkdir -p ~/.local/bin
-ln -sf "$PWD/dist/index.js" ~/.local/bin/tevu
-tevu --help
+npm install --global tevu
+tevu --version
 ```
 
-`~/.local/bin` must be on `PATH`; any directory on `PATH` works. The link points into the checkout, which must stay in place.
+Update with `npm install --global tevu@latest` and remove with `npm uninstall --global tevu`. Release candidates are on the `next` channel: `npm install --global tevu@next`. If npm fails with `EACCES`, see [Install tevu](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/getting-started/installation.md#1-install-the-package); don't use `sudo`.
 
-Bun is needed to install dependencies and build from source. The built CLI runs on Node.js 24 and doesn't require Bun.
+To work on tevu itself, see [CONTRIBUTING.md](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/CONTRIBUTING.md).
 
-Without `--config`, tevu reads `tevu.yaml` from the current directory, or otherwise the configuration file in the user configuration directory; see the [CLI reference](docs/reference/cli.md) for the search order.
+Without `--config`, tevu reads `tevu.yaml` from the current directory, or otherwise the configuration file in the user configuration directory; see the [CLI reference](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/reference/cli.md) for the search order.
 
-[Create your first comparison](docs/getting-started/first-comparison.md). Runs locally on Linux and macOS.
+[Create your first comparison](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/getting-started/first-comparison.md). Runs locally on Linux and macOS.
 
 ## How It Works
 
@@ -52,8 +49,8 @@ Start with one task and grow your benchmark as you learn which comparisons matte
 
 ## Documentation
 
-[Guides and reference](docs/README.md) cover setup, configuration, commands, and results.
+[Guides and reference](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/README.md) cover setup, configuration, commands, and results.
 
 ## License
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/LICENSE)
