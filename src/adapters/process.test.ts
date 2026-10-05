@@ -8,6 +8,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
   rm,
   utimes,
   writeFile,
@@ -19,6 +20,7 @@ import process from 'node:process';
 import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { withoutPlatformVariables } from './__fixtures__/environment.fixtures';
 import {
   createCaseExecutableAdapter,
   createEnvironmentAdapter,
@@ -278,7 +280,7 @@ describe('createCaseExecutableAdapter', () => {
 
   beforeEach(async () => {
     savedEnvironment = { ...process.env };
-    workspace = await mkdtemp(join(tmpdir(), 'tevu-case-executable-'));
+    workspace = await realpath(await mkdtemp(join(tmpdir(), 'tevu-case-executable-')));
   });
 
   afterEach(async () => {
@@ -471,7 +473,7 @@ describe('createCaseExecutableAdapter', () => {
         keys: string[];
         home: string;
       };
-      expect(report.keys).toEqual([
+      expect(withoutPlatformVariables(report.keys)).toEqual([
         'CI',
         'EXTRA_VARIABLE',
         'HOME',

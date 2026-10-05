@@ -1,11 +1,12 @@
 // @vitest-environment node
 import { existsSync, readFileSync } from 'node:fs';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { withoutPlatformVariables } from '@/adapters/__fixtures__/environment.fixtures';
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
 import {
@@ -318,12 +319,20 @@ async function writeFakeExecutable(
   return filePath;
 }
 
+const hostTmpdir = process.env['TMPDIR'];
+
 beforeAll(async () => {
+  // A call directory under a symlinked temporary directory, such as /var on
+  // macOS, is reported by the agent through its real path; resolving it here
+  // makes the agent's working directory and its variables name the same path.
+  process.env['TMPDIR'] = await realpath(tmpdir());
   tempRoot = await mkdtemp(join(tmpdir(), 'tevu-model-call-it-'));
   process.env[SECRET_VARIABLE_NAME] = SECRET_VALUE;
 });
 
 afterAll(async () => {
+  if (hostTmpdir === undefined) delete process.env['TMPDIR'];
+  else process.env['TMPDIR'] = hostTmpdir;
   delete process.env[SECRET_VARIABLE_NAME];
   await rm(tempRoot, { recursive: true, force: true });
 });
@@ -557,7 +566,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
       expect(record.dirEntries).toEqual(['.git']);
       expect(record.stdin).toBe(PROMPT);
       expect(record.env['OPENCODE_PERMISSION']).toBe(DENY_EVERY_TOOL);
-      expect(Object.keys(record.env).sort()).toEqual(
+      expect(withoutPlatformVariables(Object.keys(record.env)).sort()).toEqual(
         [
           'CI',
           'HOME',

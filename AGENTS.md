@@ -16,6 +16,7 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 - **Errors cross module boundaries as `TevuResult`, never as thrown exceptions.**
 - **Pure modules read time only through the injected clock**, never `Date.now()` or `new Date()`.
 - **`tevu report` must reproduce byte-identical JSON and Markdown from unchanged artifacts.** Derived output may not depend on wall-clock time, randomness, or unordered iteration.
+- **CI runs the tests on Ubuntu and macOS, and macOS breaks two assumptions a Linux run hides.** Its temporary directory sits behind the `/var` -> `/private/var` symlink, so a test compares a path a child process reports against a `realpath`, never against the raw `tmpdir()`. macOS adds `__CF_USER_TEXT_ENCODING` to a child process's environment, so an exact environment check filters it with `withoutPlatformVariables` from `src/adapters/__fixtures__/environment.fixtures.ts`. To reproduce the path failures on Linux, run `bun run test` with `TMPDIR` pointing at a symlink to a directory.
 
 ## Boundaries
 

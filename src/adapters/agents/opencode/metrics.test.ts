@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -902,7 +902,7 @@ async function writeExecutable(name: string, body: string): Promise<string> {
 }
 
 beforeAll(async () => {
-  tempRoot = await mkdtemp(join(tmpdir(), 'tevu-opencode-metrics-'));
+  tempRoot = await realpath(await mkdtemp(join(tmpdir(), 'tevu-opencode-metrics-')));
   syntheticExecutable = await writeExecutable('synthetic-opencode.mjs', SYNTHETIC_OPENCODE_SCRIPT);
   missingVariantExecutable = await writeExecutable(
     'synthetic-opencode-missing-variant.mjs',

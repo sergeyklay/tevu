@@ -34,6 +34,8 @@ The evaluator runs command checks and setup commands. No other variable of the p
 
 A check's environment is this table plus the names in its `env`. A setup command's environment is this table plus `setup.env`. The evaluator's home, state, and temporary directories are separate from the agent's.
 
+On macOS, evaluator and agent processes can also see `__CF_USER_TEXT_ENCODING`, the user's text encoding setting. macOS adds it to a child process's environment; tevu does not pass it.
+
 ## Agent environment
 
 An agent process receives the same fixed variable names with its own per-case home, state, and temporary directories, plus the variables named in `agents.opencode.secrets` and `agents.opencode.env`. Host agent sessions, global configuration, caches, and login stores are not copied, except the provider definitions `agents.opencode.providers` names; see [Agents and models](agents-and-models.md#providers).
