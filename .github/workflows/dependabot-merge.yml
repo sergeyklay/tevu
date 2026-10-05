@@ -1,8 +1,9 @@
 # yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
 name: Dependabot auto-merge
 
+# The called workflow never checks out or runs code from the pull request.
 on:
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [CI]
     types:
       - completed
