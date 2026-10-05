@@ -61,6 +61,17 @@ node dist/index.js --help
 test "$(node dist/index.js --version)" = "$(node -p "require('./package.json').version")"
 ```
 
+Last, CI packs the build and checks the archive the way a user receives it. The check installs the archive with production dependencies into a temporary directory outside the checkout, runs it with a `PATH` that holds Node.js and Git but no Bun, and runs an offline benchmark with a fake agent and a synthetic repository. It needs network access to install the runtime dependencies from npm:
+
+```sh
+version="$(node -p "require('./package.json').version")"
+dir="$(mktemp -d)"
+npm pack --ignore-scripts --pack-destination "$dir"
+node scripts/check-package.mjs "$dir/tevu-$version.tgz" "$version"
+```
+
+It fails when the archive's name, version, `bin`, or file list differ from what tevu publishes, when a devDependency gets installed, or when a command fails, and prints the archive's SHA-256 and npm integrity when it passes.
+
 The Docs workflow checks links and fragment anchors in `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `docs/`. On pull requests that change Markdown or the version, it checks only files in the repository; a weekly run also checks external URLs. Run the pull request check locally with [lychee](https://github.com/lycheeverse/lychee) 0.24.2, and drop `--offline` to include external URLs:
 
 ```sh
