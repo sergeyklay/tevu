@@ -3,7 +3,7 @@
 How a maintainer publishes a tevu version to npm and GitHub, and how to recover when a release stops halfway. The procedure is the same for every version; the one-time setup runs before the first.
 
 > [!IMPORTANT]
-> `finalize-release.yml` is not in the repository yet, so [Publish the GitHub Release](#4-publish-the-github-release) cannot run. `release.yml` can stage a version only after the `npm-release` environment and the npm trusted publisher from [One-time setup](#one-time-setup) exist.
+> `release.yml` can stage a version only after the npm trusted publisher from [One-time setup](#one-time-setup) exists.
 
 ## How a release flows
 
@@ -228,7 +228,16 @@ gh workflow run finalize-release.yml --ref main -f tag=v<version> -f release_run
 gh release view v<version> --json tagName,isPrerelease,url,assets
 ```
 
-`finalize-release.yml` refuses a version that is still staged, a registry integrity that differs from the release run's tarball, and a run from another repository. It attaches the tarball, its checksums, and the SBOM, and takes the body from the changelog section.
+[finalize-release.yml](.github/workflows/finalize-release.yml) runs only from `main` and runs `scripts/check-published.mjs`. It refuses:
+
+- a release run of another workflow or repository, for another tag or commit, that did not succeed, or that did not attest and stage the package;
+- release evidence whose tarball differs from its checksums or from the staged integrity;
+- a version npm does not serve yet, because its stage is still pending;
+- a registry integrity, channel, or provenance (repository, `release.yml`, tag, commit) that differs from the release run;
+- a public package that does not install or does not pass `npm audit signatures`;
+- a version without a changelog section at the tag's commit.
+
+Then a separate job with `contents: write` creates the GitHub Release for the existing tag with the tarball, `SHA256SUMS`, `SHA512SUMS`, and the SBOM, and the changelog section as its body. A prerelease is marked as one and never as latest. When the Release already exists, the job uploads the missing assets and refuses any asset whose bytes differ, so running it again changes nothing that is already published. It reads the release run's `release-evidence` artifact, which this repository keeps for 90 days.
 
 ### 5. Confirm the result
 
@@ -286,4 +295,4 @@ Both commands need the npm owner and 2FA; check the exact version before running
 | [docs.yml](.github/workflows/docs.yml) | Changes to Markdown or `package.json` | Checks links, and that README links name the tag of the current version |
 | [security.yml](.github/workflows/security.yml) | Pull requests, pushes to `main`, and weekly | Scans commits for secrets, audits dependencies, and checks workflows; a failure blocks the release pull request |
 | [release.yml](.github/workflows/release.yml) | Push of a `v*` tag, or manual dispatch from that tag | Checks the tag and commit, builds and tests one tarball, stages it on npm |
-| `finalize-release.yml` | Manual dispatch from `main` | Checks the public npm version and creates the GitHub Release |
+| [finalize-release.yml](.github/workflows/finalize-release.yml) | Manual dispatch from `main` | Checks the public npm version and creates the GitHub Release |

@@ -1,0 +1,120 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+name: Finalize release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.1.0
+        type: string
+        required: true
+      release_run_id:
+        description: ID of the successful Release run that staged this tag
+        type: string
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: finalize-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify published package
+    if: github.repository == 'sergeyklay/tevu' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tag: ${{ inputs.tag }}
+      prerelease: ${{ steps.run.outputs.prerelease }}
+    env:
+      TAG: ${{ inputs.tag }}
+      RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+      GITHUB_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          package-manager-cache: false
+
+      - name: Check the release run
+        id: run
+        run: node scripts/check-published.mjs run
+
+      - name: Download the release run's evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-evidence
+          path: ${{ runner.temp }}/release-evidence
+          run-id: ${{ inputs.release_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Check the published package
+        env:
+          COMMIT: ${{ steps.run.outputs.commit }}
+          EVIDENCE_DIR: ${{ runner.temp }}/release-evidence
+          ASSETS_DIR: ${{ runner.temp }}/release-assets
+        run: node scripts/check-published.mjs package
+
+      - name: Upload Release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.verify.outputs.tag }}
+      PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Download Release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Create the Release or check its assets
+        working-directory: ${{ runner.temp }}/release-assets
+        run: |
+          assets=(*.tgz SHA256SUMS SHA512SUMS *.cdx.json)
+          if gh release view "$TAG" --json tagName > /dev/null 2> view.err; then
+            mkdir existing
+            for asset in "${assets[@]}"; do
+              if gh release download "$TAG" --pattern "$asset" --dir existing 2> /dev/null; then
+                cmp "$asset" "existing/$asset" || { echo "::error::Release $TAG already has a different $asset"; exit 1; }
+                echo "$asset matches the published asset"
+              else
+                gh release upload "$TAG" "$asset"
+              fi
+            done
+          elif grep -q 'release not found' view.err; then
+            flags=(--latest)
+            if [ "$PRERELEASE" = true ]; then flags=(--prerelease --latest=false); fi
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file release-notes.md "${flags[@]}" "${assets[@]}"
+          else
+            cat view.err
+            exit 1
+          fi
+          gh release view "$TAG" --json tagName,isPrerelease,url,assets
