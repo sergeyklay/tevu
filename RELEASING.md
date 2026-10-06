@@ -3,7 +3,7 @@
 How a maintainer publishes a tevu version to npm and GitHub, and how to recover when a release stops halfway. The procedure is the same for every version; the one-time setup runs before the first.
 
 > [!IMPORTANT]
-> The release automation this procedure relies on is not in the repository yet: the `release.yml` and `finalize-release.yml` workflows and the `npm-release` environment. Until they exist, only [Prepare the release pull request](#1-prepare-the-release-pull-request), [Rehearse without publishing](#rehearse-without-publishing), and the npm commands in [Recover a release](#recover-a-release) can run.
+> `finalize-release.yml` is not in the repository yet, so [Publish the GitHub Release](#4-publish-the-github-release) cannot run. `release.yml` can stage a version only after the `npm-release` environment and the npm trusted publisher from [One-time setup](#one-time-setup) exist.
 
 ## How a release flows
 
@@ -174,7 +174,13 @@ gh run watch <release-run-id> --exit-status
 
 Always pass the merge SHA; a bare `git tag -s` signs whatever `HEAD` is. Push only this tag, never `--tags`. A run started by hand does not prove the tag trigger works.
 
-`release.yml` rejects an unsigned tag, a tag signed by a key outside `.github/release-keys/`, a commit that is not on `main`, and a version that differs from the tag. It stages the tarball on `next` for a prerelease and on `latest` for a release, and writes the stage ID and the tarball digest to the job summary.
+[release.yml](.github/workflows/release.yml) runs five jobs. **Verify release tag** runs `scripts/check-release.mjs`, which rejects a branch ref, a lightweight or unsigned tag, a tag signed by a key outside `.github/release-keys/`, a commit that is not on `main`, and a `package.json` version that differs from the tag. **Build package** packs one tarball and records its SHA-256. **Check package** on Ubuntu and macOS and **Audit dependencies** check that tarball after comparing its digest. **Stage on npm** is the only job with an OIDC token and has no checkout: it installs npm 11.21.0 from a tarball with a pinned integrity, checks the package digest, name, and version, and stages it on `next` for a prerelease and on `latest` for a release. It writes the tag, commit, SHA-256, npm integrity, and stage ID to the job summary and to the `release-evidence` artifact, and fails when npm reports no stage ID or a different integrity.
+
+To check a pushed tag again without staging it, run the workflow from the tag with staging off; add `-f stage=true` to stage after a fixed failure:
+
+```sh
+gh workflow run release.yml --ref v<version>
+```
 
 ### 3. Check the staged tarball and approve it
 
@@ -248,7 +254,7 @@ Find where the release stopped, then follow that row. A published version and it
 | Where it stopped | What to do |
 | --- | --- |
 | A check failed before anything was staged | Fix it through a pull request. Delete the tag (`git push origin :refs/tags/v<version>` and `git tag -d v<version>`), sign it again on the fixed merge commit, verify it, and push it. |
-| A stage exists but is not approved | Read the stage ID from the run's job summary. Approve it if its tarball is right; otherwise `npm stage reject <stage-id>` and fix. CI cannot inspect or remove a stage, and staging the same version again fails while one is pending. |
+| A stage exists but is not approved | Read the stage ID from the run's job summary or its `release-evidence` artifact. Approve it if its tarball is right; otherwise `npm stage reject <stage-id>` and fix. CI cannot inspect or remove a stage, and staging the same version again fails while one is pending. |
 | npm has the version, GitHub has no Release | Run `finalize-release.yml` again with the same tag and release run ID. It reuses the release run's tarball and never publishes to npm. |
 | A defect is found after the release | Release a fixed patch version. Deprecate the broken one, and point `latest` back at a good version if the broken one holds it. |
 
@@ -266,5 +272,5 @@ Both commands need the npm owner and 2FA; check the exact version before running
 | [ci.yml](.github/workflows/ci.yml) | Pull requests and pushes to `main` | Gates the release pull request, and checks that the built CLI reports the `package.json` version |
 | [docs.yml](.github/workflows/docs.yml) | Changes to Markdown or `package.json` | Checks links, and that README links name the tag of the current version |
 | [security.yml](.github/workflows/security.yml) | Pull requests, pushes to `main`, and weekly | Scans commits for secrets, audits dependencies, and checks workflows; a failure blocks the release pull request |
-| `release.yml` | Push of a `v*` tag | Checks the tag and commit, builds and tests one tarball, stages it on npm |
+| [release.yml](.github/workflows/release.yml) | Push of a `v*` tag, or manual dispatch from that tag | Checks the tag and commit, builds and tests one tarball, stages it on npm |
 | `finalize-release.yml` | Manual dispatch from `main` | Checks the public npm version and creates the GitHub Release |

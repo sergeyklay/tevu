@@ -1,6 +1,6 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "includeEntryExports": true,
-  "ignoreBinaries": ["mkfifo"],
+  "ignoreBinaries": ["gpg", "mkfifo"],
   "ignoreFiles": ["src/__fixtures__/fake-opencode.mjs"]
 }
