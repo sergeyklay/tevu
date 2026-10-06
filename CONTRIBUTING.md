@@ -114,6 +114,7 @@ Tests sit next to the code they verify, as `*.test.ts` or `*.integration.test.ts
 
 1. Branch from `main`.
 2. Update every document the change makes wrong in the same pull request: `README.md` and pages under `docs/`. `docs/` follows Diátaxis; adding, moving, or splitting pages needs the maintainer's approval first. npm publishes `README.md` without `docs/`, so every link in `README.md` is an absolute GitHub URL at the tag of the version in `package.json`, such as `blob/v0.1.0/docs/README.md`. A version change updates these links in the same pull request.
-3. Write commit messages in the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) format, for example `fix: keep the agent command out of the denial reason`.
-4. Pass `bun run check` and the executable check above.
-5. Open the pull request and fill in its template.
+3. If the change alters what a user can observe, add an entry under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) that describes the outcome for a user. A release that changes behavior without one does not ship; [RELEASING.md](RELEASING.md) describes how a version is published.
+4. Write commit messages in the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) format, for example `fix: keep the agent command out of the denial reason`.
+5. Pass `bun run check` and the executable check above.
+6. Open the pull request and fill in its template.
