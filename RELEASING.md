@@ -214,6 +214,7 @@ grep -F "## [$version]" CHANGELOG.md || echo "CHANGELOG.md has no section for $v
 dir="$(mktemp -d)"
 npm pack --ignore-scripts --pack-destination "$dir"
 node scripts/check-package.mjs "$dir/tevu-$version.tgz" "$version"
+node scripts/audit.mjs "$dir/tevu-$version.tgz"
 npm stage publish "$dir/tevu-$version.tgz" --dry-run --ignore-scripts --access public --tag next
 ```
 
@@ -243,5 +244,6 @@ Both commands need the npm owner and 2FA; check the exact version before running
 | --- | --- | --- |
 | [ci.yml](.github/workflows/ci.yml) | Pull requests and pushes to `main` | Gates the release pull request, and checks that the built CLI reports the `package.json` version |
 | [docs.yml](.github/workflows/docs.yml) | Changes to Markdown or `package.json` | Checks links, and that README links name the tag of the current version |
+| [security.yml](.github/workflows/security.yml) | Pull requests, pushes to `main`, and weekly | Scans commits for secrets, audits dependencies, and checks workflows; a failure blocks the release pull request |
 | `release.yml` | Push of a `v*` tag | Checks the tag and commit, builds and tests one tarball, stages it on npm |
 | `finalize-release.yml` | Manual dispatch from `main` | Checks the public npm version and creates the GitHub Release |

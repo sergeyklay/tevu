@@ -65,4 +65,4 @@ jobs:
           fi
           lychee "${offline[@]}" --no-progress --include-fragments \
             --remap "https://github\.com/sergeyklay/tevu/(blob|tree)/v[^/]+/(.*) file://$GITHUB_WORKSPACE/\$2" \
-            README.md CONTRIBUTING.md SECURITY.md 'docs/**/*.md'
+            README.md CONTRIBUTING.md SECURITY.md RELEASING.md CHANGELOG.md 'docs/**/*.md'
