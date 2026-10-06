@@ -81,32 +81,32 @@ test -s release-notes.md
 
 | File | Owner | Primary key fingerprint | Signing subkey | Expires |
 | --- | --- | --- | --- | --- |
-| `maintainer.asc` | [@sergeyklay](https://github.com/sergeyklay) | `EDAC 8D91 F82C 0BBD 261C 1329 1E0B 5331 219B EA88` | `C6AF1016BBDEA800` | 2027-01-03 |
+| `sergeyklay.asc` | [@sergeyklay](https://github.com/sergeyklay) | `EDAC 8D91 F82C 0BBD 261C 1329 1E0B 5331 219B EA88` | `C6AF1016BBDEA800` | 2027-01-03 |
 
-The secret primary key stays offline; only the subkeys live on the signing machine, and no secret key enters the repository or GitHub Actions. A tag signed before the key expires still verifies afterwards, but an expired key signs no new tag. After extending the expiry or adding a subkey, export the public key again and open a pull request before the next release:
+The secret primary key stays offline; only the subkeys live on the signing machine, and no secret key enters the repository or GitHub Actions. A tag signed before the key expires still verifies afterwards, but an expired key signs no new tag. Each key is a file named after its owner's GitHub login. After extending the expiry or adding a subkey, the owner exports the public key again, with their primary key fingerprint, and opens a pull request before the next release:
 
 ```sh
-gpg --armor --export-options export-minimal --output .github/release-keys/maintainer.asc --export EDAC8D91F82C0BBD261C13291E0B5331219BEA88
+gpg --armor --export-options export-minimal --output .github/release-keys/<github-login>.asc --export <fingerprint>
 ```
 
 To check the file before committing it, import it into an empty keyring and verify a signed tag against it:
 
 ```sh
 keyring="$(mktemp -d)"
-gpg --homedir "$keyring" --import .github/release-keys/maintainer.asc
+gpg --homedir "$keyring" --import .github/release-keys/<github-login>.asc
 GNUPGHOME="$keyring" git verify-tag <signed-tag>
 ```
 
-To add a maintainer, commit their exported public key as a new file in the same directory and add a row to the table.
+To add a maintainer, commit their exported public key as `<github-login>.asc` in the same directory and add a row to the table.
 
 ## One-time setup
 
 These steps run once, before the first release. npm can configure a trusted publisher only for a package that already exists, and staging a new package creates it; see [npm trust](https://docs.npmjs.com/cli/v11/commands/npm-trust/) and [npm stage](https://docs.npmjs.com/cli/v11/commands/npm-stage/). So the owner stages the first candidate locally to create the package, configures trust, and rejects that local stage, so the version can be staged again from CI with provenance.
 
-1. Configure git in your checkout to sign with the key in [Signing key](#signing-key):
+1. Configure git in your checkout to sign with your signing subkey from [Signing key](#signing-key):
 
    ```sh
-   git config user.signingkey C6AF1016BBDEA800
+   git config user.signingkey <signing-subkey>
    ```
 
 2. In the repository settings, create the `npm-release` environment and a ruleset that lets only the release owner create, update, or delete `v*` tags.
