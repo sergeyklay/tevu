@@ -1,0 +1,3 @@
+cd093b385ccc8a7ecd62169ce10baa3f23992764:src/config/document.test.ts:curl-auth-header:670
+27356e77ee43836bcf288ecb34f7b19ba7fa4b8e:src/adapters/isolation.integration.test.ts:generic-api-key:66
+09fdbe92cab3534a447141593b744e60e9dd0ab9:src/adapters/isolation.integration.test.ts:generic-api-key:37

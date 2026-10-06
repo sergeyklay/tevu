@@ -51,14 +51,18 @@ jobs:
           fi
           exit "$status"
 
+      - name: Install lychee
+        uses: sortie-ai/shared-workflows/.github/actions/setup-lychee@12099056fde09c3b1ef701128316e9fb883eba90 # v1.1.0
+
       - name: Check links and anchors
-        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
-        with:
-          lycheeVersion: v0.24.2
-          jobSummary: true
-          args: >-
-            ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && '--offline' || '' }}
-            --no-progress
-            --include-fragments
-            --remap 'https://github\.com/sergeyklay/tevu/(blob|tree)/v[^/]+/(.*) file://${{ github.workspace }}/$2'
-            README.md CONTRIBUTING.md SECURITY.md 'docs/**/*.md'
+        env:
+          EVENT: ${{ github.event_name }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          offline=()
+          if [ "$EVENT" = push ] || [ "$EVENT" = pull_request ]; then
+            offline=(--offline)
+          fi
+          lychee "${offline[@]}" --no-progress --include-fragments \
+            --remap "https://github\.com/sergeyklay/tevu/(blob|tree)/v[^/]+/(.*) file://$GITHUB_WORKSPACE/\$2" \
+            README.md CONTRIBUTING.md SECURITY.md RELEASING.md CHANGELOG.md 'docs/**/*.md'

@@ -9,6 +9,8 @@ updates:
     target-branch: main
     assignees: [cicdbot]
     open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
     labels:
       - dependencies
       - npm
@@ -41,6 +43,8 @@ updates:
     target-branch: main
     assignees: [cicdbot]
     open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
     labels:
       - dependencies
       - npm

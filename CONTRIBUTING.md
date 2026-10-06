@@ -72,13 +72,47 @@ node scripts/check-package.mjs "$dir/tevu-$version.tgz" "$version"
 
 It fails when the archive's name, version, `bin`, or file list differ from what tevu publishes, when a devDependency gets installed, or when a command fails, and prints the archive's SHA-256 and npm integrity when it passes.
 
-The Docs workflow checks links and fragment anchors in `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `docs/`. On pull requests that change Markdown or the version, it checks only files in the repository; a weekly run also checks external URLs. Run the pull request check locally with [lychee](https://github.com/lycheeverse/lychee) 0.24.2, and drop `--offline` to include external URLs:
+The Docs workflow checks links and fragment anchors in `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `RELEASING.md`, `CHANGELOG.md`, and `docs/`. On pull requests that change Markdown or the version, it checks only files in the repository; a weekly run also checks external URLs. Run the pull request check locally with [lychee](https://github.com/lycheeverse/lychee) 0.24.2, and drop `--offline` to include external URLs:
 
 ```sh
 lychee --offline --include-fragments \
   --remap "https://github\.com/sergeyklay/tevu/(blob|tree)/v[^/]+/(.*) file://$PWD/\$2" \
-  README.md CONTRIBUTING.md SECURITY.md 'docs/**/*.md'
+  README.md CONTRIBUTING.md SECURITY.md RELEASING.md CHANGELOG.md 'docs/**/*.md'
 ```
+
+The Security workflow runs on pull requests, on pushes to `main`, and weekly, since new advisories and scanner rules arrive without a commit:
+
+- **Secrets:** [gitleaks](https://github.com/gitleaks/gitleaks) scans the commits of a pull request or push, and the weekly run scans the whole history. It prints a finding's rule, file, and commit, never the value.
+- **Dependencies:** `scripts/audit.mjs` audits the tree locked in `bun.lock` and the production tree npm installs from the packed archive. A high or critical advisory fails the check unless `.github/audit-exceptions.json` excuses it. A registry that cannot be reached fails the check too.
+- **Workflows:** [actionlint](https://github.com/rhysd/actionlint) and [zizmor](https://github.com/zizmorcore/zizmor) check `.github/`, including the Dependabot configuration.
+
+Run the same checks locally with gitleaks 8.30.1, actionlint 1.7.12, and zizmor 1.30.1, the versions the workflow pins. zizmor needs a GitHub token for its online audits:
+
+```sh
+gitleaks git --redact --verbose --log-opts="origin/main..HEAD" .
+actionlint
+GH_TOKEN="$(gh auth token)" zizmor .github
+version="$(node -p "require('./package.json').version")"
+dir="$(mktemp -d)"
+npm pack --ignore-scripts --pack-destination "$dir"
+node scripts/audit.mjs "$dir/tevu-$version.tgz"
+```
+
+An audit exception is an entry in `.github/audit-exceptions.json` with the advisory's GHSA identifier, the affected package, the owner who will remove it, an `expires` date in `YYYY-MM-DD` form, and the reason the advisory does not affect tevu:
+
+```json
+[
+  {
+    "advisory": "GHSA-xxxx-xxxx-xxxx",
+    "package": "example-package",
+    "owner": "@sergeyklay",
+    "expires": "2026-12-31",
+    "reason": "tevu never calls the affected function"
+  }
+]
+```
+
+An exception past its `expires` date fails the audit. When an excused advisory is no longer reported, the audit prints a warning; remove the exception then.
 
 To iterate on one gate:
 
@@ -107,6 +141,7 @@ Tests sit next to the code they verify, as `*.test.ts` or `*.integration.test.ts
 
 - No test may need provider credentials, Jira credentials, a live model session, or a private repository. Use fake executables, temporary synthetic Git repositories, and bounded local child processes.
 - Secret values in tests are synthetic strings, such as `synthetic-acme-secret-value`. A test that covers redaction asserts that the synthetic value is absent from the output.
+- A synthetic value shaped like a real credential fails the secrets scan. After checking that it is synthetic, add the `Fingerprint` line gitleaks prints to `.gitleaksignore`; never exclude a whole file or path.
 - A fixture never holds material from a real run: no real session export, task text, repository content, or credential. Write it by hand, or reduce a captured one until only synthetic content remains.
 - Pure modules read time through the injected clock, so tests control it instead of reading the wall clock.
 

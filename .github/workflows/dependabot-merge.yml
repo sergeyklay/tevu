@@ -1,8 +1,9 @@
 # yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
 name: Dependabot auto-merge
 
+# The called workflow never checks out or runs code from the pull request.
 on:
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [CI]
     types:
       - completed
@@ -14,6 +15,6 @@ permissions:
 jobs:
   dependabot:
     if: ${{ github.actor == 'dependabot[bot]' || github.actor == 'dependabot-preview[bot]' }}
-    uses: sortie-ai/shared-workflows/.github/workflows/dependabot-merge.yml@d7d3eee35a3a49856abbb780d503eee59b5d5c6a # v1.0.0
+    uses: sortie-ai/shared-workflows/.github/workflows/dependabot-merge.yml@12099056fde09c3b1ef701128316e9fb883eba90 # v1.1.0
     secrets:
       bot-token: ${{ secrets.CICDBOT_TOKEN }}
