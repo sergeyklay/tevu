@@ -8,6 +8,10 @@
 # GitHub Actions workflows - bot + human
 /.github/workflows/ @cicdbot @sergeyklay @serghei-dev
 
+# Release workflow and the scripts it runs - humans only
+/.github/workflows/release.yml @sergeyklay @serghei-dev
+/scripts/ @sergeyklay @serghei-dev
+
 # CI/CD config - humans only
 /.github/dependabot.yml @sergeyklay @serghei-dev
 /.github/CODEOWNERS @sergeyklay @serghei-dev
