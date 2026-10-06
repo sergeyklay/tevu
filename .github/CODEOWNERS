@@ -10,6 +10,7 @@
 
 # Release workflow and the scripts it runs - humans only
 /.github/workflows/release.yml @sergeyklay @serghei-dev
+/.github/workflows/finalize-release.yml @sergeyklay @serghei-dev
 /scripts/ @sergeyklay @serghei-dev
 
 # CI/CD config - humans only
