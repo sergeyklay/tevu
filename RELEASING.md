@@ -3,7 +3,7 @@
 How a maintainer publishes a tevu version to npm and GitHub, and how to recover when a release stops halfway. The procedure is the same for every version; the one-time setup runs before the first.
 
 > [!IMPORTANT]
-> The release automation this procedure relies on is not in the repository yet: the `release.yml` and `finalize-release.yml` workflows, the `npm-release` environment, and the ruleset that protects `v*` tags. Until they exist, only [Prepare the release pull request](#1-prepare-the-release-pull-request), [Rehearse without publishing](#rehearse-without-publishing), and the npm commands in [Recover a release](#recover-a-release) can run.
+> The release automation this procedure relies on is not in the repository yet: the `release.yml` and `finalize-release.yml` workflows and the `npm-release` environment. Until they exist, only [Prepare the release pull request](#1-prepare-the-release-pull-request), [Rehearse without publishing](#rehearse-without-publishing), and the npm commands in [Recover a release](#recover-a-release) can run.
 
 ## How a release flows
 
@@ -109,7 +109,7 @@ These steps run once, before the first release. npm can configure a trusted publ
    git config user.signingkey <signing-subkey>
    ```
 
-2. In the repository settings, create the `npm-release` environment and a ruleset that lets only the release owner create, update, or delete `v*` tags.
+2. In the repository settings, create the `npm-release` environment. The `Release tags` ruleset already lets only repository admins create, update, or delete `v*` tags.
 3. Merge the release pull request for the first candidate (step 1 of [Release a version](#release-a-version)), build its tarball with `npm pack --ignore-scripts` from that merge commit, and stage it from your machine. This makes the name `tevu` and a `0.0.0-stage` placeholder public; the candidate itself stays unpublished.
 
    ```sh
