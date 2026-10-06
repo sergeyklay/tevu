@@ -2,15 +2,12 @@
 
 How a maintainer publishes a tevu version to npm and GitHub, and how to recover when a release stops halfway. The procedure is the same for every version; the one-time setup runs before the first.
 
-> [!IMPORTANT]
-> `release.yml` can stage a version only after the npm trusted publisher from [One-time setup](#one-time-setup) exists.
-
 ## How a release flows
 
 A version moves through four places, and each one has its own guard:
 
 1. A reviewed pull request on `main` sets the version in `package.json` and its section in [CHANGELOG.md](CHANGELOG.md).
-2. The maintainer signs a tag on that merge commit and pushes it. The push starts `release.yml`, which checks the tag, builds one tarball, tests it, and stages it on npm. CI can stage a version but never make it public.
+2. The maintainer signs a tag on that merge commit and pushes it. The push starts `release.yml`, which checks the tag, builds one tarball, tests and attests it, and stages it on npm. CI can stage a version but never make it public.
 3. The maintainer downloads the staged tarball, checks it, and approves it with npm 2FA. Only then is the version public.
 4. `finalize-release.yml` checks the public npm version and creates the GitHub Release from the same tarball and the changelog section.
 
@@ -19,10 +16,11 @@ A version moves through four places, and each one has its own guard:
 | Who | Holds | Used for |
 | --- | --- | --- |
 | Release owner: [@sergeyklay](https://github.com/sergeyklay) | GitHub admin on `sergeyklay/tevu`; npm owner of `tevu` with 2FA; the PGP key that signs release tags | Merging the release pull request, signing tags, approving and rejecting stages, `npm deprecate` and `npm dist-tag` |
-| `release.yml` stage job | A short-lived npm OIDC token through the `npm-release` environment | `npm stage publish` only |
-| `finalize-release.yml` final job | `contents: write` on the repository | Creating the GitHub Release |
+| `release.yml` Attest package job | `id-token: write` and `attestations: write` | GitHub artifact attestations of the tarball |
+| `release.yml` Stage on npm job | A short-lived npm OIDC token through the `npm-release` environment, which accepts only `v*` tags | `npm stage publish` only |
+| `finalize-release.yml` Publish GitHub Release job | `contents: write` on the repository | Creating the GitHub Release |
 
-No npm token is stored in repository secrets, and the signing key never enters GitHub Actions. Recovery codes for GitHub and npm stay outside the repository. The release owner watches failures of the release and docs workflows and the private vulnerability reports described in [SECURITY.md](SECURITY.md).
+No npm token is stored in repository secrets, and the signing key never enters GitHub Actions. Recovery codes for GitHub and npm stay outside the repository. The release owner watches failures of the Release, Finalize release, Security, and Docs workflows and the private vulnerability reports described in [SECURITY.md](SECURITY.md).
 
 ## Tools
 
@@ -101,7 +99,9 @@ To add a maintainer, commit their exported public key as `<github-login>.asc` in
 
 ## One-time setup
 
-These steps run once, before the first release. npm can configure a trusted publisher only for a package that already exists, and staging a new package creates it; see [npm trust](https://docs.npmjs.com/cli/v11/commands/npm-trust/) and [npm stage](https://docs.npmjs.com/cli/v11/commands/npm-stage/). So the owner stages the first candidate locally to create the package, configures trust, and rejects that local stage, so the version can be staged again from CI with provenance.
+These steps run once, before the first release; until they have run, `release.yml` cannot authenticate to npm. The repository side is already in place: the `npm-release` environment accepts deployments only from `v*` tags, and the `Release tags` ruleset lets only repository admins create, update, or delete `v*` tags.
+
+npm can configure a trusted publisher only for a package that already exists, and staging a new package creates it; see [npm trust](https://docs.npmjs.com/cli/v11/commands/npm-trust/) and [npm stage](https://docs.npmjs.com/cli/v11/commands/npm-stage/). So the owner stages the first candidate locally to create the package, configures trust, and rejects that local stage, so the version can be staged again from CI with provenance.
 
 1. Configure git in your checkout to sign with your signing subkey from [Signing key](#signing-key):
 
@@ -109,10 +109,12 @@ These steps run once, before the first release. npm can configure a trusted publ
    git config user.signingkey <signing-subkey>
    ```
 
-2. In the repository settings, create the `npm-release` environment. The `Release tags` ruleset already lets only repository admins create, update, or delete `v*` tags.
-3. Merge the release pull request for the first candidate (step 1 of [Release a version](#release-a-version)), build its tarball with `npm pack --ignore-scripts` from that merge commit, and stage it from your machine. This makes the name `tevu` and a `0.0.0-stage` placeholder public; the candidate itself stays unpublished.
+2. Merge the release pull request for the first candidate (step 1 of [Release a version](#release-a-version)), build its tarball from that merge commit, and stage it from your machine. This makes the name `tevu` and a `0.0.0-stage` placeholder public; the candidate itself stays unpublished.
 
    ```sh
+   bun install --frozen-lockfile
+   bun run build
+   npm pack --ignore-scripts
    npm login --registry=https://registry.npmjs.org/
    npm whoami --registry=https://registry.npmjs.org/
    npm stage publish /absolute/path/to/tevu-<version>.tgz --ignore-scripts --access public --tag next --registry=https://registry.npmjs.org/
@@ -121,7 +123,7 @@ These steps run once, before the first release. npm can configure a trusted publ
 
    Don't approve this stage. If `tevu` already exists under your account, skip this step and the last one.
 
-4. Trust `release.yml` for staging only, and read the setting back:
+3. Trust `release.yml` for staging only, and read the setting back:
 
    ```sh
    npm trust github tevu --file release.yml --repository sergeyklay/tevu --environment npm-release --allow-stage-publish
@@ -130,7 +132,7 @@ These steps run once, before the first release. npm can configure a trusted publ
 
    In the package settings on npmjs.com, require 2FA and disallow tokens for publishing.
 
-5. Reject the local stage with `npm stage reject <stage-id>`, and check with `npm stage list tevu` that the version is free again. Don't unpublish the placeholder.
+4. Reject the local stage with `npm stage reject <stage-id>`, and check with `npm stage list tevu` that the version is free again. Don't unpublish the placeholder.
 
 The trust setting is proven only by the first real staging run in step 2 of the release.
 
@@ -294,5 +296,5 @@ Both commands need the npm owner and 2FA; check the exact version before running
 | [ci.yml](.github/workflows/ci.yml) | Pull requests and pushes to `main` | Gates the release pull request, and checks that the built CLI reports the `package.json` version |
 | [docs.yml](.github/workflows/docs.yml) | Changes to Markdown or `package.json` | Checks links, and that README links name the tag of the current version |
 | [security.yml](.github/workflows/security.yml) | Pull requests, pushes to `main`, and weekly | Scans commits for secrets, audits dependencies, and checks workflows; a failure blocks the release pull request |
-| [release.yml](.github/workflows/release.yml) | Push of a `v*` tag, or manual dispatch from that tag | Checks the tag and commit, builds and tests one tarball, stages it on npm |
+| [release.yml](.github/workflows/release.yml) | Push of a `v*` tag, or manual dispatch from that tag | Checks the tag and commit, builds, tests, and attests one tarball, stages it on npm, and keeps the evidence |
 | [finalize-release.yml](.github/workflows/finalize-release.yml) | Manual dispatch from `main` | Checks the public npm version and creates the GitHub Release |
