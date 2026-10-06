@@ -174,7 +174,20 @@ gh run watch <release-run-id> --exit-status
 
 Always pass the merge SHA; a bare `git tag -s` signs whatever `HEAD` is. Push only this tag, never `--tags`. A run started by hand does not prove the tag trigger works.
 
-[release.yml](.github/workflows/release.yml) runs five jobs. **Verify release tag** runs `scripts/check-release.mjs`, which rejects a branch ref, a lightweight or unsigned tag, a tag signed by a key outside `.github/release-keys/`, a commit that is not on `main`, and a `package.json` version that differs from the tag. **Build package** packs one tarball and records its SHA-256. **Check package** on Ubuntu and macOS and **Audit dependencies** check that tarball after comparing its digest. **Stage on npm** is the only job with an OIDC token and has no checkout: it installs npm 11.21.0 from a tarball with a pinned integrity, checks the package digest, name, and version, and stages it on `next` for a prerelease and on `latest` for a release. It writes the tag, commit, SHA-256, npm integrity, and stage ID to the job summary and to the `release-evidence` artifact, and fails when npm reports no stage ID or a different integrity.
+[release.yml](.github/workflows/release.yml) builds one tarball and checks, attests, and stages exactly those bytes; every job that receives the tarball compares its SHA-256 first.
+
+| Job | Does |
+| --- | --- |
+| Verify release tag | Runs `scripts/check-release.mjs`, which rejects a branch ref, a lightweight or unsigned tag, a tag signed by a key outside `.github/release-keys/`, a commit that is not on `main`, and a `package.json` version that differs from the tag |
+| Build package | Packs the tarball and records the pack inventory, SHA-256, SHA-512, and the versions of Node.js, npm, Bun, and the runner image |
+| Check package (Ubuntu, macOS) | Runs `scripts/check-package.mjs` and keeps its output |
+| Audit dependencies | Runs `scripts/audit.mjs` |
+| Build SBOM | Installs the tarball as a consumer would and records a CycloneDX SBOM, the consumer lockfile, and the time dependencies were resolved; fails when the SBOM misses an installed package |
+| Attest package | Creates GitHub artifact attestations of the tarball's build provenance and of the SBOM |
+| Stage on npm | The only job with an npm OIDC token, with no checkout: installs npm 11.21.0 from a tarball with a pinned integrity and stages the package on `next` for a prerelease or `latest` for a release; npm adds provenance; fails when npm reports no stage ID or a different integrity |
+| Collect evidence | Recomputes the checksums, records the tag, commit, run, and each job's result in `manifest.json`, scans everything for credentials, and uploads it all as the `release-evidence` artifact |
+
+Attestation, provenance, and SBOM tie the package to this repository, commit, and workflow and list what the checked install contained. They do not show that the package has no defects, and because dependencies use semver ranges, a later install can resolve different versions than the SBOM lists.
 
 To check a pushed tag again without staging it, run the workflow from the tag with staging off; add `-f stage=true` to stage after a fixed failure:
 
@@ -189,7 +202,7 @@ npm stage view <stage-id>
 npm stage download <stage-id>
 ```
 
-Compare the downloaded tarball's digest with the one in the job summary, and check it from a checkout of the release tag with `node scripts/check-package.mjs <tarball> <version>`. Then approve exactly that stage and enter the one-time password at the prompt, never on the command line:
+Compare the downloaded tarball's digest with the one in the job summary, confirm that the release workflow attested it with `gh attestation verify <tarball> --repo sergeyklay/tevu --signer-workflow sergeyklay/tevu/.github/workflows/release.yml`, and check it from a checkout of the release tag with `node scripts/check-package.mjs <tarball> <version>`. Then approve exactly that stage and enter the one-time password at the prompt, never on the command line:
 
 ```sh
 npm stage approve <stage-id>

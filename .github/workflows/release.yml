@@ -97,19 +97,39 @@ jobs:
         env:
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          mkdir package
-          npm pack --ignore-scripts --pack-destination package
+          mkdir package evidence
+          npm pack --ignore-scripts --json --pack-destination package > evidence/pack.json
           filename="tevu-$VERSION.tgz"
           packed="$(tar -xzOf "package/$filename" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0)).version')"
           test "$packed" = "$VERSION"
+          (cd package && sha256sum "$filename" > ../evidence/SHA256SUMS && sha512sum "$filename" > ../evidence/SHA512SUMS)
           echo "filename=$filename" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(sha256sum "package/$filename" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(cut -d' ' -f1 evidence/SHA256SUMS)" >> "$GITHUB_OUTPUT"
+
+      - name: Record build tools
+        run: |
+          BUN_VERSION="$(bun --version)"
+          NPM_VERSION="$(npm --version)"
+          OS="$(uname -sm)"
+          export BUN_VERSION NPM_VERSION OS
+          node -e '
+            const { env } = process;
+            const tools = { node: process.version, npm: env.NPM_VERSION, bun: env.BUN_VERSION, os: env.OS, image: env.ImageOS + " " + env.ImageVersion };
+            require("fs").writeFileSync("evidence/build-tools.json", JSON.stringify(tools, null, 2) + "\n");
+          '
 
       - name: Upload package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: package
           path: package/${{ steps.pack.outputs.filename }}
+          if-no-files-found: error
+
+      - name: Upload build evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-evidence
+          path: evidence/
           if-no-files-found: error
 
   package:
@@ -151,7 +171,21 @@ jobs:
           cd "$RUNNER_TEMP/package"
           printf '%s  %s\n' "$SHA256" "$FILENAME" | shasum -a 256 -c -
           cd "$GITHUB_WORKSPACE"
-          node scripts/check-package.mjs "$RUNNER_TEMP/package/$FILENAME" "$VERSION"
+          mkdir -p "$RUNNER_TEMP/smoke"
+          {
+            echo "os: $(uname -sm)"
+            echo "node: $(node --version)"
+            echo "npm: $(npm --version)"
+            node scripts/check-package.mjs "$RUNNER_TEMP/package/$FILENAME" "$VERSION"
+          } 2>&1 | tee "$RUNNER_TEMP/smoke/check-package.txt"
+
+      - name: Upload package check results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-${{ matrix.os }}
+          path: ${{ runner.temp }}/smoke/
+          if-no-files-found: warn
 
   audit:
     name: Audit dependencies
@@ -192,9 +226,142 @@ jobs:
           printf '%s  %s\n' "$SHA256" "$RUNNER_TEMP/package/$FILENAME" | sha256sum -c -
           node scripts/audit.mjs "$RUNNER_TEMP/package/$FILENAME"
 
+  sbom:
+    name: Build SBOM
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          package-manager-cache: false
+
+      - name: Download package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package
+          path: ${{ runner.temp }}/package
+
+      # A user installs without a lockfile; the SBOM describes that resolution.
+      - name: Install the package as a consumer
+        working-directory: ${{ runner.temp }}
+        env:
+          FILENAME: ${{ needs.build.outputs.filename }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        run: | # zizmor: ignore[adhoc-packages]
+          printf '%s  %s\n' "$SHA256" "package/$FILENAME" | sha256sum -c -
+          mkdir tevu-sbom-consumer sbom
+          cd tevu-sbom-consumer
+          echo '{ "name": "tevu-sbom-consumer", "version": "1.0.0", "private": true }' > package.json
+          date -u +%Y-%m-%dT%H:%M:%SZ > ../sbom/resolved-at.txt
+          npm install --omit=dev --ignore-scripts --no-audit --no-fund "../package/$FILENAME"
+          npm sbom --sbom-format=cyclonedx --omit=dev > "../sbom/tevu-$(node -p 'require("./node_modules/tevu/package.json").version').cdx.json"
+          cp package-lock.json ../sbom/consumer-package-lock.json
+          echo "node $(node --version), npm $(npm --version)" > ../sbom/tools.txt
+
+      - name: Check the SBOM
+        working-directory: ${{ runner.temp }}/sbom
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const version = process.env.VERSION;
+            const sbom = JSON.parse(fs.readFileSync("tevu-" + version + ".cdx.json", "utf8"));
+            const lock = JSON.parse(fs.readFileSync("consumer-package-lock.json", "utf8"));
+            const key = (group, name, v) => (group ? group + "/" : "") + name + "@" + v;
+            const components = new Set(sbom.components.map((c) => key(c.group, c.name, c.version)));
+            const installed = Object.entries(lock.packages).filter(([path]) => path !== "").map(([path, p]) => key("", path.replace(/.*node_modules\//, ""), p.version));
+            const missing = installed.filter((entry) => !components.has(entry));
+            if (!components.has("tevu@" + version)) throw new Error("the SBOM has no tevu@" + version);
+            if (missing.length > 0 || components.size !== installed.length) {
+              throw new Error("the SBOM lists " + components.size + " components for " + installed.length + " installed packages; missing: " + missing.join(", "));
+            }
+            console.log("SBOM lists tevu@" + version + " and all " + installed.length + " installed packages");
+          '
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: ${{ runner.temp }}/sbom/
+          if-no-files-found: error
+
+  attest:
+    name: Attest package
+    needs: [verify, build, package, audit, sbom]
+    if: github.event_name == 'push' || inputs.stage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      attestations: write
+    env:
+      FILENAME: ${{ needs.build.outputs.filename }}
+      SHA256: ${{ needs.build.outputs.sha256 }}
+      VERSION: ${{ needs.verify.outputs.version }}
+
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package
+          path: ${{ runner.temp }}/package
+
+      - name: Download SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom
+          path: ${{ runner.temp }}/sbom
+
+      - name: Check package digest
+        working-directory: ${{ runner.temp }}/package
+        run: printf '%s  %s\n' "$SHA256" "$FILENAME" | sha256sum -c -
+
+      - name: Attest build provenance
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/package/${{ env.FILENAME }}
+
+      - name: Attest SBOM
+        id: sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/package/${{ env.FILENAME }}
+          sbom-path: ${{ runner.temp }}/sbom/tevu-${{ env.VERSION }}.cdx.json
+
+      - name: Record attestations
+        env:
+          PROVENANCE_URL: ${{ steps.provenance.outputs.attestation-url }}
+          SBOM_URL: ${{ steps.sbom.outputs.attestation-url }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/attest"
+          node -e '
+            const evidence = { provenance: process.env.PROVENANCE_URL, sbom: process.env.SBOM_URL };
+            require("fs").writeFileSync(process.argv[1], JSON.stringify(evidence, null, 2) + "\n");
+          ' "$RUNNER_TEMP/attest/attestations.json"
+
+      - name: Upload attestation evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: attest-evidence
+          path: ${{ runner.temp }}/attest/
+          if-no-files-found: error
+
   stage:
     name: Stage on npm
-    needs: [verify, build, package, audit]
+    needs: [verify, build, package, audit, attest]
     if: github.event_name == 'push' || inputs.stage
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -271,7 +438,7 @@ jobs:
               tag: env.TAG, version: env.VERSION, channel: env.CHANNEL, commit: env.COMMIT, run: env.RUN_URL,
               sha256: env.SHA256, integrity: staged.integrity ?? null, stageId: staged.stageId ?? null,
             };
-            fs.writeFileSync("release-evidence.json", JSON.stringify(evidence, null, 2) + "\n");
+            fs.writeFileSync("stage-evidence.json", JSON.stringify(evidence, null, 2) + "\n");
             const rows = Object.entries(evidence).map(([key, value]) => "| " + key + " | " + value + " |");
             fs.appendFileSync(env.GITHUB_STEP_SUMMARY, ["| Field | Value |", "| --- | --- |", ...rows, ""].join("\n"));
             const local = "sha512-" + require("crypto").createHash("sha512").update(fs.readFileSync("package/" + env.FILENAME)).digest("base64");
@@ -283,8 +450,69 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-evidence
+          name: stage-evidence
           path: |
-            ${{ runner.temp }}/release-evidence.json
+            ${{ runner.temp }}/stage-evidence.json
             ${{ runner.temp }}/stage.json
           if-no-files-found: warn
+
+  evidence:
+    name: Collect evidence
+    needs: [verify, build, package, audit, sbom, attest, stage]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+    steps:
+      - name: Download every artifact of this run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: ${{ runner.temp }}/release-evidence
+
+      - name: Recompute checksums
+        working-directory: ${{ runner.temp }}/release-evidence
+        run: |
+          cp build-evidence/SHA256SUMS build-evidence/SHA512SUMS package/
+          (cd package && sha256sum -c SHA256SUMS && sha512sum -c SHA512SUMS)
+
+      - name: Record the run
+        working-directory: ${{ runner.temp }}/release-evidence
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          CHANNEL: ${{ needs.verify.outputs.channel }}
+          COMMIT: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node -e '
+            const { env } = process;
+            const jobs = Object.fromEntries(Object.entries(JSON.parse(env.RESULTS)).map(([name, job]) => [name, job.result]));
+            const manifest = { name: "tevu", tag: env.TAG, version: env.VERSION, channel: env.CHANNEL, commit: env.COMMIT, event: env.EVENT, run: env.RUN_URL, jobs };
+            require("fs").writeFileSync("manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+          '
+          cat manifest.json
+
+      - name: Install gitleaks
+        working-directory: ${{ runner.temp }}
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          printf '%s  %s\n' "$GITLEAKS_SHA256" "$archive" | sha256sum -c -
+          mkdir gitleaks-bin
+          tar -xzf "$archive" -C gitleaks-bin gitleaks
+
+      - name: Scan the evidence for credentials
+        run: '"$RUNNER_TEMP/gitleaks-bin/gitleaks" dir --redact --verbose --no-banner "$RUNNER_TEMP/release-evidence"'
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-evidence
+          path: ${{ runner.temp }}/release-evidence/
+          if-no-files-found: error
