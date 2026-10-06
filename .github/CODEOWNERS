@@ -11,3 +11,4 @@
 # CI/CD config - humans only
 /.github/dependabot.yml @sergeyklay @serghei-dev
 /.github/CODEOWNERS @sergeyklay @serghei-dev
+/.github/release-keys/ @sergeyklay @serghei-dev

@@ -3,7 +3,7 @@
 How a maintainer publishes a tevu version to npm and GitHub, and how to recover when a release stops halfway. The procedure is the same for every version; the one-time setup runs before the first.
 
 > [!IMPORTANT]
-> The release automation this procedure relies on is not in the repository yet: the `release.yml` and `finalize-release.yml` workflows, the `npm-release` environment, the ruleset that protects `v*` tags, and `.github/release-keys/`. Until they exist, only [Prepare the release pull request](#1-prepare-the-release-pull-request), [Rehearse without publishing](#rehearse-without-publishing), and the npm commands in [Recover a release](#recover-a-release) can run.
+> The release automation this procedure relies on is not in the repository yet: the `release.yml` and `finalize-release.yml` workflows, the `npm-release` environment, and the ruleset that protects `v*` tags. Until they exist, only [Prepare the release pull request](#1-prepare-the-release-pull-request), [Rehearse without publishing](#rehearse-without-publishing), and the npm commands in [Recover a release](#recover-a-release) can run.
 
 ## How a release flows
 
@@ -75,17 +75,38 @@ awk -v heading="## [$version]" '
 test -s release-notes.md
 ```
 
+## Signing key
+
+`release.yml` accepts a tag only when its signature verifies against a public key in `.github/release-keys/`. That directory is the release trust root: anyone whose key is in it can cut a release, so it changes only through a reviewed pull request.
+
+| File | Owner | Primary key fingerprint | Signing subkey | Expires |
+| --- | --- | --- | --- | --- |
+| `maintainer.asc` | [@sergeyklay](https://github.com/sergeyklay) | `EDAC 8D91 F82C 0BBD 261C 1329 1E0B 5331 219B EA88` | `C6AF1016BBDEA800` | 2027-01-03 |
+
+The secret primary key stays offline; only the subkeys live on the signing machine, and no secret key enters the repository or GitHub Actions. A tag signed before the key expires still verifies afterwards, but an expired key signs no new tag. After extending the expiry or adding a subkey, export the public key again and open a pull request before the next release:
+
+```sh
+gpg --armor --export-options export-minimal --output .github/release-keys/maintainer.asc --export EDAC8D91F82C0BBD261C13291E0B5331219BEA88
+```
+
+To check the file before committing it, import it into an empty keyring and verify a signed tag against it:
+
+```sh
+keyring="$(mktemp -d)"
+gpg --homedir "$keyring" --import .github/release-keys/maintainer.asc
+GNUPGHOME="$keyring" git verify-tag <signed-tag>
+```
+
+To add a maintainer, commit their exported public key as a new file in the same directory and add a row to the table.
+
 ## One-time setup
 
 These steps run once, before the first release. npm can configure a trusted publisher only for a package that already exists, and staging a new package creates it; see [npm trust](https://docs.npmjs.com/cli/v11/commands/npm-trust/) and [npm stage](https://docs.npmjs.com/cli/v11/commands/npm-stage/). So the owner stages the first candidate locally to create the package, configures trust, and rejects that local stage, so the version can be staged again from CI with provenance.
 
-1. Generate the signing key outside CI, keep its recovery copy apart, and commit only the public key in a reviewed pull request:
+1. Configure git in your checkout to sign with the key in [Signing key](#signing-key):
 
    ```sh
-   git config gpg.format openpgp
-   git config user.signingkey <fingerprint>
-   gpg --armor --output .github/release-keys/maintainer.asc --export <fingerprint>
-   gh gpg-key add .github/release-keys/maintainer.asc
+   git config user.signingkey C6AF1016BBDEA800
    ```
 
 2. In the repository settings, create the `npm-release` environment and a ruleset that lets only the release owner create, update, or delete `v*` tags.
