@@ -1,9 +1,9 @@
 <h1 align="center">tevu</h1>
 
+<div align="center">
+
 [![CI](https://github.com/sergeyklay/tevu/actions/workflows/ci.yml/badge.svg)](https://github.com/sergeyklay/tevu/actions/workflows/ci.yml)
 [![Security](https://github.com/sergeyklay/tevu/actions/workflows/security.yml/badge.svg)](https://github.com/sergeyklay/tevu/actions/workflows/security.yml)
-
-<div align="center">
 
 **Benchmark coding models on your real tasks.**
 
