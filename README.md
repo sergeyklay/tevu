@@ -9,7 +9,7 @@
 
 Find which models finish your tasks, how long they take, and what they cost.
 
-[Get started](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/getting-started/first-comparison.md) · [Documentation](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/README.md)
+[Get started](https://github.com/sergeyklay/tevu/blob/v0.1.0/docs/getting-started/first-comparison.md) · [Documentation](https://github.com/sergeyklay/tevu/blob/v0.1.0/docs/README.md)
 
 </div>
 
@@ -45,7 +45,7 @@ tevu task add   # describe the task and the models to compare
 tevu run
 ```
 
-[Run your first comparison](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/getting-started/first-comparison.md) walks through it on a task your team has already solved.
+[Run your first comparison](https://github.com/sergeyklay/tevu/blob/v0.1.0/docs/getting-started/first-comparison.md) walks through it on a task your team has already solved.
 
 ## How it works
 
@@ -61,8 +61,8 @@ tevu run
 
 ## Documentation
 
-[Guides and reference](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/README.md) cover setup, configuration, commands, and results. To work on tevu itself, see [CONTRIBUTING.md](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/CONTRIBUTING.md).
+[Guides and reference](https://github.com/sergeyklay/tevu/blob/v0.1.0/docs/README.md) cover setup, configuration, commands, and results. To work on tevu itself, see [CONTRIBUTING.md](https://github.com/sergeyklay/tevu/blob/v0.1.0/CONTRIBUTING.md).
 
 ## License
 
-[Apache License 2.0](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/LICENSE)
+[Apache License 2.0](https://github.com/sergeyklay/tevu/blob/v0.1.0/LICENSE)

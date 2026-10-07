@@ -251,7 +251,7 @@ The GitHub Release is the record of the release: it names the commit and the npm
 
 ### From release candidate to release
 
-After at least one clean install of the candidate by someone other than its author and no open blocking issue, repeat steps 1 to 5 with `X.Y.Z`. The release stages on `latest`, and `npm install --global @serghei/tevu` installs it.
+When the candidate has no open blocking issue, repeat steps 1 to 5 with `X.Y.Z`. The release stages on `latest`, and `npm install --global @serghei/tevu` installs it.
 
 ## Rehearse without publishing
 
