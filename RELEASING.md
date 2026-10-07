@@ -103,13 +103,15 @@ These steps run once, before the first release; until they have run, `release.ym
 
 npm can configure a trusted publisher only for a package that already exists, and staging a new package creates it; see [npm trust](https://docs.npmjs.com/cli/v11/commands/npm-trust/) and [npm stage](https://docs.npmjs.com/cli/v11/commands/npm-stage/). So the owner stages the first candidate locally to create the package, configures trust, and rejects that local stage, so the version can be staged again from CI with provenance.
 
+The package is `@serghei/tevu` and its command is `tevu`. npm rejects the unscoped name `tevu` as too similar to existing packages, and `npm stage publish` reports that rejection only as `400 Version uniqueness check failed unexpectedly`.
+
 1. Configure git in your checkout to sign with your signing subkey from [Signing key](#signing-key):
 
    ```sh
    git config user.signingkey <signing-subkey>
    ```
 
-2. Merge the release pull request for the first candidate (step 1 of [Release a version](#release-a-version)), build its tarball from that merge commit, and stage it from your machine. This makes the name `tevu` and a `0.0.0-stage` placeholder public; the candidate itself stays unpublished.
+2. Merge the release pull request for the first candidate (step 1 of [Release a version](#release-a-version)), build its tarball from that merge commit, and stage it from your machine. This makes the name `@serghei/tevu` and a `0.0.0-stage` placeholder public; the candidate itself stays unpublished.
 
    ```sh
    bun install --frozen-lockfile
@@ -117,8 +119,8 @@ npm can configure a trusted publisher only for a package that already exists, an
    npm pack --ignore-scripts
    npm login --registry=https://registry.npmjs.org/
    npm whoami --registry=https://registry.npmjs.org/
-   npm stage publish /absolute/path/to/tevu-<version>.tgz --ignore-scripts --access public --tag next --registry=https://registry.npmjs.org/
-   npm stage list tevu
+   npm stage publish /absolute/path/to/serghei-tevu-<version>.tgz --ignore-scripts --access public --tag next --registry=https://registry.npmjs.org/
+   npm stage list @serghei/tevu
    ```
 
    Don't approve this stage. If `tevu` already exists under your account, skip this step and the last one.
@@ -126,13 +128,13 @@ npm can configure a trusted publisher only for a package that already exists, an
 3. Trust `release.yml` for staging only, and read the setting back:
 
    ```sh
-   npm trust github tevu --file release.yml --repository sergeyklay/tevu --environment npm-release --allow-stage-publish
-   npm trust list tevu --json
+   npm trust github @serghei/tevu --file release.yml --repository sergeyklay/tevu --environment npm-release --allow-stage-publish
+   npm trust list @serghei/tevu --json
    ```
 
    In the package settings on npmjs.com, require 2FA and disallow tokens for publishing.
 
-4. Reject the local stage with `npm stage reject <stage-id>`, and check with `npm stage list tevu` that the version is free again. Don't unpublish the placeholder.
+4. Reject the local stage with `npm stage reject <stage-id>`, and check with `npm stage list @serghei/tevu` that the version is free again. Don't unpublish the placeholder.
 
 The trust setting is proven only by the first real staging run in step 2 of the release.
 
@@ -215,10 +217,10 @@ The channel is fixed when the version is staged. A wrong channel needs `npm stag
 Outside any tevu checkout, so `npm exec` cannot pick a local executable:
 
 ```sh
-npm view tevu@<version> name version dist.integrity dist.attestations --json
-npm view tevu dist-tags --json
-npm exec --yes --package=tevu@<version> -- tevu --version
-npm exec --yes --package=tevu@<version> -- tevu --help
+npm view @serghei/tevu@<version> name version dist.integrity dist.attestations --json
+npm view @serghei/tevu dist-tags --json
+npm exec --yes --package=@serghei/tevu@<version> -- tevu --version
+npm exec --yes --package=@serghei/tevu@<version> -- tevu --help
 ```
 
 On the package page on npmjs.com, check that provenance names this repository, commit, and workflow.
@@ -243,13 +245,13 @@ Then a separate job with `contents: write` creates the GitHub Release for the ex
 
 ### 5. Confirm the result
 
-Install the release the way a user does, `npm install --global tevu@<channel>` in a clean environment on Linux and macOS, and run `tevu --version`, `tevu --help`, and `tevu run --help`. A green workflow alone does not finish a release.
+Install the release the way a user does, `npm install --global @serghei/tevu@<channel>` in a clean environment on Linux and macOS, and run `tevu --version`, `tevu --help`, and `tevu run --help`. A green workflow alone does not finish a release.
 
 The GitHub Release is the record of the release: it names the commit and the npm version and channel, and carries the tarball digest. Check that npm provenance and the release body agree with it.
 
 ### From release candidate to release
 
-After at least one clean install of the candidate by someone other than its author and no open blocking issue, repeat steps 1 to 5 with `X.Y.Z`. The release stages on `latest`, and `npm install --global tevu` installs it.
+After at least one clean install of the candidate by someone other than its author and no open blocking issue, repeat steps 1 to 5 with `X.Y.Z`. The release stages on `latest`, and `npm install --global @serghei/tevu` installs it.
 
 ## Rehearse without publishing
 
@@ -264,9 +266,9 @@ grep -F "## [$version]" CHANGELOG.md || echo "CHANGELOG.md has no section for $v
 
 dir="$(mktemp -d)"
 npm pack --ignore-scripts --pack-destination "$dir"
-node scripts/check-package.mjs "$dir/tevu-$version.tgz" "$version"
-node scripts/audit.mjs "$dir/tevu-$version.tgz"
-npm stage publish "$dir/tevu-$version.tgz" --dry-run --ignore-scripts --access public --tag next
+node scripts/check-package.mjs "$dir/serghei-tevu-$version.tgz" "$version"
+node scripts/audit.mjs "$dir/serghei-tevu-$version.tgz"
+npm stage publish "$dir/serghei-tevu-$version.tgz" --dry-run --ignore-scripts --access public --tag next
 ```
 
 Use `--tag latest` in the last command for a release. Before the release pull request renames the changelog section, the `grep` reports a missing section; after it, the same command must find one.
@@ -283,8 +285,8 @@ Find where the release stopped, then follow that row. A published version and it
 | A defect is found after the release | Release a fixed patch version. Deprecate the broken one, and point `latest` back at a good version if the broken one holds it. |
 
 ```sh
-npm deprecate 'tevu@<bad-version>' 'Use <fixed-version>; see the release notes'
-npm dist-tag add tevu@<good-version> latest
+npm deprecate '@serghei/tevu@<bad-version>' 'Use <fixed-version>; see the release notes'
+npm dist-tag add @serghei/tevu@<good-version> latest
 ```
 
 Both commands need the npm owner and 2FA; check the exact version before running them. `npm unpublish` is not a rollback. See [npm deprecate](https://docs.npmjs.com/cli/v11/commands/npm-deprecate/) and [npm dist-tag](https://docs.npmjs.com/cli/v11/commands/npm-dist-tag/).

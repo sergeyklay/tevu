@@ -1,5 +1,5 @@
 {
-  "name": "tevu",
+  "name": "@serghei/tevu",
   "version": "0.1.0-rc.1",
   "description": "Task Evaluation & Verification Utility for AI coding agents",
   "keywords": [

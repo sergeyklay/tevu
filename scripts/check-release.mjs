@@ -89,7 +89,8 @@ async function main() {
   }
 
   const manifest = JSON.parse(gitOut(['show', `${commit}:package.json`]));
-  if (manifest.name !== 'tevu') fail(`package.json names ${manifest.name}, not tevu`);
+  if (manifest.name !== '@serghei/tevu')
+    fail(`package.json names ${manifest.name}, not @serghei/tevu`);
   if (manifest.version !== version)
     fail(`package.json has version ${manifest.version}, but the tag is ${tag}`);
 

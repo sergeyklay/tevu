@@ -107,7 +107,8 @@ async function checkArchive(tarball, expectedVersion, scratch) {
   const packageDirectory = join(extracted, 'package');
   const manifest = JSON.parse(await readFile(join(packageDirectory, 'package.json'), 'utf8'));
 
-  if (manifest.name !== 'tevu') fail(`archive name is ${manifest.name}, expected tevu`);
+  if (manifest.name !== '@serghei/tevu')
+    fail(`archive name is ${manifest.name}, expected @serghei/tevu`);
   if (manifest.version !== expectedVersion) {
     fail(`archive version is ${manifest.version}, expected ${expectedVersion}`);
   }

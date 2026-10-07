@@ -1,13 +1,13 @@
 # Install tevu
 
-Install the `tevu` package from npm and check that the `tevu` command runs.
+Install the `@serghei/tevu` package from npm and check that the `tevu` command runs.
 
 You need Linux or macOS with Node.js 24, npm, and Git. npm ships with Node.js. The benchmarks in the next tutorial also need OpenCode installed.
 
 ## 1. Install the package
 
 ```sh
-npm install --global tevu
+npm install --global @serghei/tevu
 ```
 
 npm puts the `tevu` command in the `bin` directory of its global prefix. Run `npm prefix --global` to see the prefix; its `bin` directory must be on your `PATH`.
@@ -28,15 +28,15 @@ tevu --help
 ## Update
 
 ```sh
-npm install --global tevu@latest
+npm install --global @serghei/tevu@latest
 ```
 
 ## Try a prerelease
 
-Release candidates are published to the `next` channel. `npm install --global tevu` installs from `latest` and never picks them up, so name the channel:
+Release candidates are published to the `next` channel. `npm install --global @serghei/tevu` installs from `latest` and never picks them up, so name the channel:
 
 ```sh
-npm install --global tevu@next
+npm install --global @serghei/tevu@next
 ```
 
 To go back to the stable release, run the update command above.
@@ -44,7 +44,7 @@ To go back to the stable release, run the update command above.
 ## Uninstall
 
 ```sh
-npm uninstall --global tevu
+npm uninstall --global @serghei/tevu
 ```
 
 tevu leaves your configuration file and saved runs in place.
