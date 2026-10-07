@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-07
+
+This is the first stable release of tevu. It has the same features, requirements, and known limitations as [0.1.0-rc.1](https://github.com/sergeyklay/tevu/releases/tag/v0.1.0-rc.1), and `npm install --global @serghei/tevu` now installs it.
+
 ## [0.1.0-rc.1] - 2026-10-07
 
 This is the first release of tevu.
@@ -43,5 +47,6 @@ This is the first release of tevu.
 - Model metrics cover the agent's root session only, not its child sessions.
 - Cost is what the agent reports; when it reports none, the cost is shown as unavailable, never estimated.
 
-[Unreleased]: https://github.com/sergeyklay/tevu/compare/v0.1.0-rc.1...HEAD
+[Unreleased]: https://github.com/sergeyklay/tevu/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/sergeyklay/tevu/compare/v0.1.0-rc.1...v0.1.0
 [0.1.0-rc.1]: https://github.com/sergeyklay/tevu/releases/tag/v0.1.0-rc.1
