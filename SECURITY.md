@@ -18,7 +18,7 @@ The maintainer acknowledges a report within 7 calendar days. A confirmed vulnera
 | --- | --- |
 | Latest release on the npm `latest` channel | Yes |
 | Latest prerelease on the npm `next` channel | Yes, until a newer release or prerelease replaces it |
-| Any older version | No. Upgrade with `npm install --global tevu@latest` |
+| Any older version | No. Upgrade with `npm install --global @serghei/tevu@latest` |
 
 ## Threat model
 

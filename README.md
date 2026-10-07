@@ -40,7 +40,7 @@ A full report keeps every solution, check verdict, and measurement behind these 
 You need Linux or macOS, Node.js 24, Git, and [OpenCode](https://opencode.ai) with an API key for your model provider.
 
 ```sh
-npm install --global tevu
+npm install --global @serghei/tevu
 tevu task add   # describe the task and the models to compare
 tevu run
 ```

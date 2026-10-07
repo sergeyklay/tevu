@@ -99,7 +99,7 @@ jobs:
         run: |
           mkdir package evidence
           npm pack --ignore-scripts --json --pack-destination package > evidence/pack.json
-          filename="tevu-$VERSION.tgz"
+          filename="serghei-tevu-$VERSION.tgz"
           packed="$(tar -xzOf "package/$filename" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0)).version')"
           test "$packed" = "$VERSION"
           (cd package && sha256sum "$filename" > ../evidence/SHA256SUMS && sha512sum "$filename" > ../evidence/SHA512SUMS)
@@ -265,7 +265,7 @@ jobs:
           echo '{ "name": "tevu-sbom-consumer", "version": "1.0.0", "private": true }' > package.json
           date -u +%Y-%m-%dT%H:%M:%SZ > ../sbom/resolved-at.txt
           npm install --omit=dev --ignore-scripts --no-audit --no-fund "../package/$FILENAME"
-          npm sbom --sbom-format=cyclonedx --omit=dev > "../sbom/tevu-$(node -p 'require("./node_modules/tevu/package.json").version').cdx.json"
+          npm sbom --sbom-format=cyclonedx --omit=dev > "../sbom/tevu-$(node -p 'require("./node_modules/@serghei/tevu/package.json").version').cdx.json"
           cp package-lock.json ../sbom/consumer-package-lock.json
           echo "node $(node --version), npm $(npm --version)" > ../sbom/tools.txt
 
@@ -283,11 +283,11 @@ jobs:
             const components = new Set(sbom.components.map((c) => key(c.group, c.name, c.version)));
             const installed = Object.entries(lock.packages).filter(([path]) => path !== "").map(([path, p]) => key("", path.replace(/.*node_modules\//, ""), p.version));
             const missing = installed.filter((entry) => !components.has(entry));
-            if (!components.has("tevu@" + version)) throw new Error("the SBOM has no tevu@" + version);
+            if (!components.has("@serghei/tevu@" + version)) throw new Error("the SBOM has no @serghei/tevu@" + version);
             if (missing.length > 0 || components.size !== installed.length) {
               throw new Error("the SBOM lists " + components.size + " components for " + installed.length + " installed packages; missing: " + missing.join(", "));
             }
-            console.log("SBOM lists tevu@" + version + " and all " + installed.length + " installed packages");
+            console.log("SBOM lists @serghei/tevu@" + version + " and all " + installed.length + " installed packages");
           '
 
       - name: Upload SBOM
@@ -410,8 +410,8 @@ jobs:
           printf '%s  %s\n' "$SHA256" "$FILENAME" | sha256sum -c -
           tar -xzOf "$FILENAME" package/package.json | node -e '
             const manifest = JSON.parse(require("fs").readFileSync(0));
-            if (manifest.name !== "tevu" || manifest.version !== process.env.VERSION) {
-              console.error("package is " + manifest.name + "@" + manifest.version + ", expected tevu@" + process.env.VERSION);
+            if (manifest.name !== "@serghei/tevu" || manifest.version !== process.env.VERSION) {
+              console.error("package is " + manifest.name + "@" + manifest.version + ", expected @serghei/tevu@" + process.env.VERSION);
               process.exit(1);
             }
           '
@@ -442,7 +442,7 @@ jobs:
             const rows = Object.entries(evidence).map(([key, value]) => "| " + key + " | " + value + " |");
             fs.appendFileSync(env.GITHUB_STEP_SUMMARY, ["| Field | Value |", "| --- | --- |", ...rows, ""].join("\n"));
             const local = "sha512-" + require("crypto").createHash("sha512").update(fs.readFileSync("package/" + env.FILENAME)).digest("base64");
-            if (!evidence.stageId) { console.error("npm reported no stage ID; check the Stage step and npm stage list tevu"); process.exit(1); }
+            if (!evidence.stageId) { console.error("npm reported no stage ID; check the Stage step and npm stage list @serghei/tevu"); process.exit(1); }
             if (evidence.integrity !== local) { console.error("npm staged " + evidence.integrity + ", but the checked package is " + local + "; reject the stage"); process.exit(1); }
           '
 
@@ -493,7 +493,7 @@ jobs:
           node -e '
             const { env } = process;
             const jobs = Object.fromEntries(Object.entries(JSON.parse(env.RESULTS)).map(([name, job]) => [name, job.result]));
-            const manifest = { name: "tevu", tag: env.TAG, version: env.VERSION, channel: env.CHANNEL, commit: env.COMMIT, event: env.EVENT, run: env.RUN_URL, jobs };
+            const manifest = { name: "@serghei/tevu", tag: env.TAG, version: env.VERSION, channel: env.CHANNEL, commit: env.COMMIT, event: env.EVENT, run: env.RUN_URL, jobs };
             require("fs").writeFileSync("manifest.json", JSON.stringify(manifest, null, 2) + "\n");
           '
           cat manifest.json

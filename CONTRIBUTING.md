@@ -67,7 +67,7 @@ Last, CI packs the build and checks the archive the way a user receives it. The 
 version="$(node -p "require('./package.json').version")"
 dir="$(mktemp -d)"
 npm pack --ignore-scripts --pack-destination "$dir"
-node scripts/check-package.mjs "$dir/tevu-$version.tgz" "$version"
+node scripts/check-package.mjs "$dir/serghei-tevu-$version.tgz" "$version"
 ```
 
 It fails when the archive's name, version, `bin`, or file list differ from what tevu publishes, when a devDependency gets installed, or when a command fails, and prints the archive's SHA-256 and npm integrity when it passes.
@@ -95,7 +95,7 @@ GH_TOKEN="$(gh auth token)" zizmor .github
 version="$(node -p "require('./package.json').version")"
 dir="$(mktemp -d)"
 npm pack --ignore-scripts --pack-destination "$dir"
-node scripts/audit.mjs "$dir/tevu-$version.tgz"
+node scripts/audit.mjs "$dir/serghei-tevu-$version.tgz"
 ```
 
 An audit exception is an entry in `.github/audit-exceptions.json` with the advisory's GHSA identifier, the affected package, the owner who will remove it, an `expires` date in `YYYY-MM-DD` form, and the reason the advisory does not affect tevu:

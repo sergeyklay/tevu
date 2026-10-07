@@ -201,14 +201,14 @@ async function checkPublicInstall(version) {
         '--ignore-scripts',
         '--no-audit',
         '--no-fund',
-        `tevu@${version}`,
+        `@serghei/tevu@${version}`,
       ],
       { cwd: consumer },
     );
     const printed = runOk([join(consumer, 'node_modules', '.bin', 'tevu'), '--version'], {
       cwd: consumer,
     }).trim();
-    if (printed !== version) fail(`the public tevu@${version} prints version ${printed}`);
+    if (printed !== version) fail(`the public @serghei/tevu@${version} prints version ${printed}`);
     runOk(['npm', 'audit', 'signatures'], { cwd: consumer });
   } finally {
     await rm(parent, { recursive: true, force: true });
@@ -220,7 +220,7 @@ async function checkPackage() {
   const commit = env('COMMIT');
   const evidence = env('EVIDENCE_DIR');
   const assets = env('ASSETS_DIR');
-  const filename = `tevu-${version}.tgz`;
+  const filename = `serghei-tevu-${version}.tgz`;
   const tarball = join(evidence, 'package', filename);
 
   const manifest = JSON.parse(readFileSync(join(evidence, 'manifest.json'), 'utf8'));
@@ -241,9 +241,9 @@ async function checkPackage() {
     fail(`the run staged ${staged.integrity}, not ${local.integrity}`);
   pass(`${filename} matches its checksums and the staged integrity`);
 
-  const view = run(['npm', 'view', `tevu@${version}`, 'dist', 'dist-tags', '--json']);
+  const view = run(['npm', 'view', `@serghei/tevu@${version}`, 'dist', 'dist-tags', '--json']);
   if (view.status !== 0)
-    fail(`npm does not serve tevu@${version}; approve its stage first\n${view.stderr}`);
+    fail(`npm does not serve @serghei/tevu@${version}; approve its stage first\n${view.stderr}`);
   const published = JSON.parse(view.stdout);
   if (published.dist?.integrity !== local.integrity)
     fail(`npm serves ${published.dist?.integrity}, not ${local.integrity}`);
@@ -259,7 +259,9 @@ async function checkPackage() {
   );
 
   await checkPublicInstall(version);
-  pass(`tevu@${version} installs from npm, prints its version, and passes npm audit signatures`);
+  pass(
+    `@serghei/tevu@${version} installs from npm, prints its version, and passes npm audit signatures`,
+  );
 
   mkdirSync(assets, { recursive: true });
   copyFileSync(tarball, join(assets, filename));

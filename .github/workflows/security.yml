@@ -123,4 +123,4 @@ jobs:
       - name: Audit dependencies
         run: |
           version="$(node -p "require('./package.json').version")"
-          node scripts/audit.mjs "$RUNNER_TEMP/tevu-$version.tgz"
+          node scripts/audit.mjs "$RUNNER_TEMP/serghei-tevu-$version.tgz"

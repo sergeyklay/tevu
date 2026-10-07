@@ -165,7 +165,7 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
-          node scripts/check-package.mjs "$RUNNER_TEMP/tevu-$version.tgz" "$version"
+          node scripts/check-package.mjs "$RUNNER_TEMP/serghei-tevu-$version.tgz" "$version"
 
   build:
     name: Build
