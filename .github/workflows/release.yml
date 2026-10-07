@@ -433,7 +433,7 @@ jobs:
             const fs = require("fs");
             const { env } = process;
             let staged = {};
-            try { staged = JSON.parse(fs.readFileSync("stage.json", "utf8")).tevu ?? {}; } catch {}
+            try { staged = JSON.parse(fs.readFileSync("stage.json", "utf8"))["@serghei/tevu"] ?? {}; } catch {}
             const evidence = {
               tag: env.TAG, version: env.VERSION, channel: env.CHANNEL, commit: env.COMMIT, run: env.RUN_URL,
               sha256: env.SHA256, integrity: staged.integrity ?? null, stageId: staged.stageId ?? null,
