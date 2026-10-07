@@ -13,46 +13,55 @@ Find which models finish your tasks, how long they take, and what they cost.
 
 </div>
 
-## The Problem
+## The problem
 
 Public benchmarks don't tell you which coding model can finish your team's backlog, or whether a cheaper model can do the same work. Finding out means giving models the same starting point, checking their solutions, and tracking time and cost. Doing that by hand becomes a project of its own.
 
 tevu runs that comparison on tasks from your own task tracker.
 
-## Works With
+## What you get
 
-**Issue trackers:** GitHub Issues and Jira.
+Each run ends with a short summary per task. Here, three model settings tried to fix a login redirect:
 
-**Coding agents:** OpenCode.
+| Model | Effort | Outcome | Required checks | Elapsed | Cost |
+|---|---|---|---|---|---|
+| model-a | high | passed | 6/6 passed | 6.3 min | $1.2400 |
+| model-a | low | failed | 4/6 passed, 2 failed | 2.1 min | $0.3100 |
+| model-b | high | passed | 6/6 passed | 4.8 min | $0.4100 |
 
-## Install
+- **Correctness:** 2 of 3 model settings did the task, passing all 6 required checks: model-a, high; model-b, high. The other did not: model-a, low passed 4 of 6 required checks.
+- **Cost:** Among the settings that did the task, model-b, high was cheapest: $0.4100 against $1.2400, about 3 times less.
+- **Speed:** Among the settings that did the task, model-b, high was fastest: 4.8 min against 6.3 min, 24% less time.
 
-With Node.js 24 and Git:
+A full report keeps every solution, check verdict, and measurement behind these lines.
+
+## Quick start
+
+You need Linux or macOS, Node.js 24, Git, and [OpenCode](https://opencode.ai) with an API key for your model provider.
 
 ```sh
 npm install --global tevu
-tevu --version
+tevu task add   # describe the task and the models to compare
+tevu run
 ```
 
-Update with `npm install --global tevu@latest` and remove with `npm uninstall --global tevu`. Release candidates are on the `next` channel: `npm install --global tevu@next`. If npm fails with `EACCES`, see [Install tevu](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/getting-started/installation.md#1-install-the-package); don't use `sudo`.
+[Run your first comparison](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/getting-started/first-comparison.md) walks through it on a task your team has already solved.
 
-To work on tevu itself, see [CONTRIBUTING.md](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/CONTRIBUTING.md).
+## How it works
 
-Without `--config`, tevu reads `tevu.yaml` from the current directory, or otherwise the configuration file in the user configuration directory; see the [CLI reference](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/reference/cli.md) for the search order.
+1. **Choose a task.** Import it from GitHub Issues or Jira, or describe it yourself. Then define what a correct solution must do: commands such as your test suite, and criteria a grading model checks.
+2. **Compare models.** Each model, or the same model at a different reasoning effort, starts from the same commit in its own copy of the repository. It cannot see the accepted solution or another model's work.
+3. **Read the results.** tevu runs your checks on every solution and records time and cost.
 
-[Create your first comparison](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/getting-started/first-comparison.md). Runs locally on Linux and macOS.
+## Limits
 
-## How It Works
-
-1. **Choose a task.** Describe work from your task tracker. Define what a successful solution must do.
-2. **Compare models.** Run different models, or the same model at different reasoning efforts, from the same starting commit in separate workspaces.
-3. **Inspect the results.** Compare which solutions pass your checks, their execution time, and their cost. Review qualitative criteria yourself.
-
-Start with one task and grow your benchmark as you learn which comparisons matter to your team.
+- Models run through OpenCode, the only supported coding agent so far.
+- Runs happen on your machine, and your provider bills every model call.
+- tevu computes no score and names no overall winner. It reports what happened and leaves the decision to you.
 
 ## Documentation
 
-[Guides and reference](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/README.md) cover setup, configuration, commands, and results.
+[Guides and reference](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/docs/README.md) cover setup, configuration, commands, and results. To work on tevu itself, see [CONTRIBUTING.md](https://github.com/sergeyklay/tevu/blob/v0.1.0-rc.1/CONTRIBUTING.md).
 
 ## License
 
