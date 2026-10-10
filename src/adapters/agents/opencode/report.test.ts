@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -10,7 +10,7 @@ import { createArtifactStore } from '@/adapters/artifact-store';
 import { createRedactor } from '@/adapters/process';
 import { assessCase, rebuildReport } from '@/application/assess';
 import { TevuConfigSchema } from '@/config/schema';
-import { unavailableBenchmarkMetrics } from '@/domain/types';
+import { unavailableAgentMetrics, unavailableBenchmarkMetrics } from '@/domain/types';
 import { combineCaseMetrics } from '@/evaluation/metrics';
 
 import { createOpenCodeAdapter } from './opencode';
@@ -23,16 +23,20 @@ import type {
   AgentEventRecord,
   AgentRegistry,
   AgentSessionExport,
+  ArtifactStore,
   AssessmentArtifact,
+  CaseGrading,
   CaseIdentity,
   CaseResult,
   CheckResult,
+  ConclusionsArtifact,
   ProcessResult,
   RepositoryDefinition,
   RunFinding,
   RunManifest,
   RunResult,
   TevuConfig,
+  TevuResult,
 } from '@/domain/types';
 
 const PROVIDER_SECRET = 'synthetic-provider-secret-9f2';
@@ -414,7 +418,7 @@ function buildSyntheticRecords(): SyntheticRecords {
   const alphaNormalized = requireOpenCodeAdapter().normalizeMetrics({
     caseId: 'task-1--alpha--1',
     sessionId: 'ses-root-0001',
-    sessionExport: decodedExport.value,
+    sessionExport: decodedExport.value.view,
     events,
     copiedProviders: [],
   });
@@ -528,7 +532,7 @@ function buildSyntheticRecords(): SyntheticRecords {
     findings: [
       { severity: 'warning', caseId: null, message: 'cleanup warning: retained synthetic path' },
     ],
-    exportRecord: decodedExport.value,
+    exportRecord: decodedExport.value.view,
     events,
   };
 }
@@ -1221,30 +1225,42 @@ describe('OpenCode report regeneration of copied providers', () => {
   });
 
   it.each([
-    { name: 'missing', copiedProviders: undefined },
-    { name: 'null', copiedProviders: null },
-    { name: 'a list', copiedProviders: [] },
-    { name: 'without an entry for the case agent', copiedProviders: {} },
-    { name: 'holding a non-list value', copiedProviders: { opencode: 'acme-proxy' } },
+    { name: 'missing', copiedProviders: undefined, defectPath: 'manifest.tools.copiedProviders' },
+    { name: 'null', copiedProviders: null, defectPath: 'manifest.tools.copiedProviders' },
+    { name: 'a list', copiedProviders: [], defectPath: 'manifest.tools.copiedProviders' },
+    {
+      name: 'without an entry for the case agent',
+      copiedProviders: {},
+      defectPath: 'manifest.cases.0.agent',
+    },
+    {
+      name: 'holding a non-list value',
+      copiedProviders: { opencode: 'acme-proxy' },
+      defectPath: 'manifest.tools.copiedProviders.opencode',
+    },
     {
       name: 'holding an entry without an id',
       copiedProviders: { opencode: [{ pricedModels: [] }] },
+      defectPath: 'manifest.tools.copiedProviders.opencode.0.id',
     },
     {
       name: 'holding an entry with an empty id',
       copiedProviders: { opencode: [{ id: '', pricedModels: [] }] },
+      defectPath: 'manifest.tools.copiedProviders.opencode.0.id',
     },
     {
       name: 'holding pricedModels that is not a list',
       copiedProviders: { opencode: [{ id: 'acme-proxy', pricedModels: 'acme-large' }] },
+      defectPath: 'manifest.tools.copiedProviders.opencode.0.pricedModels',
     },
     {
       name: 'holding pricedModels with a non-string model',
       copiedProviders: { opencode: [{ id: 'acme-proxy', pricedModels: ['acme-large', 7] }] },
+      defectPath: 'manifest.tools.copiedProviders.opencode.0.pricedModels.1',
     },
   ])(
     'refuses a run whose manifest has copiedProviders $name, before any write',
-    async ({ copiedProviders }) => {
+    async ({ copiedProviders, defectPath }) => {
       const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-copied-'));
       try {
         const { runId, store } = await createSyntheticRun(root);
@@ -1264,7 +1280,7 @@ describe('OpenCode report regeneration of copied providers', () => {
           ok: false,
           error: {
             kind: 'ArtifactError',
-            reason: `stored manifest for run "${runId}" has a malformed shape or mismatched identity`,
+            reason: `run result for "${runId}" has a malformed shape or mismatched identity at ${defectPath}`,
           },
         });
         expect(await readFile(runJsonPath, 'utf8')).toBe(corrupted);
@@ -1305,4 +1321,718 @@ describe('OpenCode report regeneration of copied providers', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+});
+
+const SECRET_KEY = 'synthetic-acme-secret-value';
+
+function buildGrading(): CaseGrading {
+  const grader: CaseGrading['grader'] = {
+    model: 'vendor/grader-synth',
+    effort: 'effort-high',
+    agent: 'opencode',
+  };
+  return {
+    grader,
+    call: { status: 'replied', reply: 'synthetic grader reply' },
+    calls: [
+      {
+        outcome: { status: 'replied' },
+        metrics: unavailableAgentMetrics('synthetic'),
+        events: [{ type: 'text', anything: 1 }],
+        diagnostics: 'synthetic stderr',
+        session: { info: { id: 'ses-grader' }, messages: [] },
+      },
+    ],
+    metrics: unavailableAgentMetrics('synthetic'),
+    grades: [
+      {
+        checkId: 'acc-acceptance-command',
+        category: 'acceptance',
+        status: 'graded',
+        verdict: 'passed',
+        rationale: 'synthetic rationale',
+      },
+    ],
+  };
+}
+
+function buildConclusions(runId: string): ConclusionsArtifact {
+  return {
+    schemaVersion: 1,
+    runId,
+    tasks: [
+      {
+        taskId: 'task-1',
+        facts: {
+          task: 'Synthetic welcome-route task',
+          repository: 'repo-1',
+          when: '2026-09-23',
+          repeat: 1,
+          requiredChecksPerAttempt: 1,
+          settings: [],
+          separation: null,
+          cost: { kind: 'none-did-the-task' },
+          speed: { kind: 'none-did-the-task' },
+        },
+        table: ['| setting |'],
+        conclusions: { correctness: 'c1', cost: 'c2', speed: 'c3' },
+        call: null,
+      },
+    ],
+  };
+}
+
+/** Every path under `root` with its text, so a refused write is shown to leave the tree as it was. */
+async function snapshotTree(root: string): Promise<Record<string, string | null>> {
+  const entries = await readdir(root, { recursive: true, withFileTypes: true });
+  const tree: Record<string, string | null> = {};
+  for (const entry of entries) {
+    const entryPath = join(entry.parentPath, entry.name);
+    tree[entryPath] = entry.isDirectory() ? null : await readFile(entryPath, 'utf8');
+  }
+  return tree;
+}
+
+type SyntheticStore = {
+  store: ArtifactStore;
+  records: SyntheticRecords;
+  artifactsDirectory: string;
+};
+
+function createSyntheticStore(root: string): SyntheticStore {
+  const artifactsDirectory = join(root, 'artifacts');
+  return {
+    store: createArtifactStore({ artifactsDirectory, redact: createRedactor([PROVIDER_SECRET]) }),
+    records: buildSyntheticRecords(),
+    artifactsDirectory,
+  };
+}
+
+async function startSyntheticStore(root: string): Promise<SyntheticStore> {
+  const synthetic = createSyntheticStore(root);
+  expect(await synthetic.store.startRun(synthetic.records.manifest)).toEqual({
+    ok: true,
+    value: undefined,
+  });
+  return synthetic;
+}
+
+function unwrap<T>(result: TevuResult<T, 'ArtifactError'>): T {
+  if (!result.ok) {
+    throw new Error(`expected ok, got ${JSON.stringify(result.error)}`);
+  }
+  return result.value;
+}
+
+/** Builds a finalized run that also holds a grading, an assessment, and conclusions. */
+async function createCompleteRun(root: string): Promise<SyntheticStore & { runId: string }> {
+  const synthetic = await startSyntheticStore(root);
+  const { store, records } = synthetic;
+  const [alpha, beta, gamma] = records.caseResults as [CaseResult, CaseResult, CaseResult];
+  unwrap(await store.writeChecks('task-1--alpha--1', alpha.checks));
+  unwrap(await store.writeChecks('task-1--beta--1', beta.checks));
+  unwrap(await store.writeGrading('task-1--alpha--1', buildGrading()));
+  for (const result of [alpha, beta, gamma]) {
+    unwrap(await store.finalizeCase(result));
+  }
+  unwrap(
+    await store.finalizeRun({
+      schemaVersion: 1,
+      manifest: records.manifest,
+      cases: records.caseResults,
+      findings: records.findings,
+      exitCode: 2,
+    }),
+  );
+  unwrap(await store.replaceAssessment(records.assessment));
+  unwrap(await store.writeConclusions(buildConclusions(records.runId)));
+  return { ...synthetic, runId: records.runId };
+}
+
+type WriterCase = {
+  name: string;
+  operation: string;
+  setup: (root: string) => Promise<SyntheticStore & { runId: string }>;
+  write: (
+    synthetic: SyntheticStore & { runId: string },
+  ) => Promise<TevuResult<void, 'ArtifactError'>>;
+  reason: (runId: string) => string;
+};
+
+async function createStartedRun(root: string): Promise<SyntheticStore & { runId: string }> {
+  const synthetic = await startSyntheticStore(root);
+  return { ...synthetic, runId: synthetic.records.runId };
+}
+
+async function createUnstartedRun(root: string): Promise<SyntheticStore & { runId: string }> {
+  const synthetic = createSyntheticStore(root);
+  return { ...synthetic, runId: synthetic.records.runId };
+}
+
+function withUnexpectedKey<T extends object>(value: T): T {
+  return { ...value, unexpected: 1 };
+}
+
+const WRITER_CASES: WriterCase[] = [
+  {
+    name: 'startRun',
+    operation: 'start-run',
+    setup: createUnstartedRun,
+    write: ({ store, records }) => store.startRun(withUnexpectedKey(records.manifest)),
+    reason: (runId) =>
+      `stored manifest for run "${runId}" has a malformed shape or mismatched identity at unexpected`,
+  },
+  {
+    name: 'writeChecks',
+    operation: 'write-checks',
+    setup: createStartedRun,
+    write: ({ store, records }) =>
+      store.writeChecks(
+        'task-1--alpha--1',
+        (records.caseResults[0] as CaseResult).checks.map(withUnexpectedKey),
+      ),
+    reason: (runId) =>
+      `checks artifact for "task-1--alpha--1" in run "${runId}" has a malformed shape at checks.0.unexpected`,
+  },
+  {
+    name: 'writeGrading',
+    operation: 'write-grading',
+    setup: createStartedRun,
+    write: ({ store }) => store.writeGrading('task-1--alpha--1', withUnexpectedKey(buildGrading())),
+    reason: (runId) =>
+      `grading artifact for "task-1--alpha--1" in run "${runId}" has a malformed shape at unexpected`,
+  },
+  {
+    name: 'finalizeCase',
+    operation: 'finalize-case',
+    setup: createStartedRun,
+    write: ({ store, records }) =>
+      store.finalizeCase(withUnexpectedKey(records.caseResults[0] as CaseResult)),
+    reason: (runId) =>
+      `case result for "task-1--alpha--1" in run "${runId}" has a malformed shape at unexpected`,
+  },
+  {
+    name: 'replaceCaseResult',
+    operation: 'replace-case-result',
+    setup: createCompleteRun,
+    write: ({ store, records, runId }) =>
+      store.replaceCaseResult(runId, withUnexpectedKey(records.caseResults[0] as CaseResult)),
+    reason: (runId) =>
+      `case result for "task-1--alpha--1" in run "${runId}" has a malformed shape at unexpected`,
+  },
+  {
+    name: 'finalizeRun',
+    operation: 'finalize-run',
+    setup: createStartedRun,
+    write: ({ store, records }) =>
+      store.finalizeRun(
+        withUnexpectedKey({
+          schemaVersion: 1,
+          manifest: records.manifest,
+          cases: records.caseResults,
+          findings: records.findings,
+          exitCode: 2,
+        } satisfies RunResult),
+      ),
+    reason: (runId) =>
+      `run result for "${runId}" has a malformed shape or mismatched identity at unexpected`,
+  },
+  {
+    name: 'replaceAssessment',
+    operation: 'replace-assessment',
+    setup: createCompleteRun,
+    write: ({ store, records }) => store.replaceAssessment(withUnexpectedKey(records.assessment)),
+    reason: (runId) =>
+      `assessment artifact for "task-1--alpha--1" in run "${runId}" has a malformed shape or mismatched identity at unexpected`,
+  },
+  {
+    name: 'writeConclusions',
+    operation: 'write-conclusions',
+    setup: createCompleteRun,
+    write: ({ store, runId }) => store.writeConclusions(withUnexpectedKey(buildConclusions(runId))),
+    reason: (runId) =>
+      `conclusions.json of run "${runId}" is malformed; delete it to make the summary use template sentences: it has a malformed shape or mismatched identity at unexpected`,
+  },
+];
+
+describe('OpenCode report regeneration refuses a defective run record', () => {
+  it('returns the malformed case of run.json, throws nothing, and writes no file (AC-1)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-ac1-'));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      const runJsonPath = join(root, 'artifacts', runId, 'run.json');
+      const stored = JSON.parse(await readFile(runJsonPath, 'utf8')) as {
+        cases: Array<Record<string, unknown>>;
+      };
+      delete stored.cases[0]?.['metrics'];
+      await writeFile(runJsonPath, JSON.stringify(stored, null, 2), 'utf8');
+      const before = await snapshotTree(root);
+
+      const result = await rebuildReport(runId, store, AGENTS_REGISTRY);
+
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          kind: 'ArtifactError',
+          operation: 'read-run-result',
+          reason: `run result for "${runId}" has a malformed shape or mismatched identity at cases.0.metrics`,
+        },
+      });
+      expect(await snapshotTree(root)).toEqual(before);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('returns a defective case record from assessCase without throwing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-ac1-assess-'));
+    try {
+      const { runId, store } = await createSyntheticRun(root);
+      const resultPath = caseFile(root, runId, 'task-1--alpha--1', 'result.json');
+      const stored = JSON.parse(await readFile(resultPath, 'utf8')) as Record<string, unknown>;
+      delete stored['metrics'];
+      await writeFile(resultPath, JSON.stringify(stored, null, 2), 'utf8');
+      const before = await snapshotTree(root);
+
+      const assessed = await assessCase(
+        {
+          runId,
+          caseId: 'task-1--alpha--1',
+          decisions: [
+            {
+              checkId: 'man-optional-polish',
+              verdict: 'passed',
+              assessor: 'curator',
+              note: 'unreachable: the case record read fails first',
+              replaceExisting: false,
+            },
+          ],
+          assessedAt: '2026-09-23T02:00:00.000Z',
+        },
+        store,
+        AGENTS_REGISTRY,
+      );
+
+      expect(assessed).toEqual({
+        ok: false,
+        error: {
+          kind: 'ArtifactError',
+          operation: 'read-case-result',
+          reason: `case result for "task-1--alpha--1" in run "${runId}" has a malformed shape at metrics`,
+        },
+      });
+      expect(await snapshotTree(root)).toEqual(before);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('FileArtifactStore writers parse what they write', () => {
+  it.each(WRITER_CASES)(
+    '$name refuses a value its reader refuses and leaves every file as it was',
+    async (writer) => {
+      const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-writer-'));
+      try {
+        const synthetic = await writer.setup(root);
+        const before = await snapshotTree(root);
+
+        const result = await writer.write(synthetic);
+
+        expect(result).toEqual({
+          ok: false,
+          error: {
+            kind: 'ArtifactError',
+            operation: writer.operation,
+            reason: writer.reason(synthetic.runId),
+          },
+        });
+        expect(await snapshotTree(root)).toEqual(before);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('creates no directory when startRun refuses the manifest', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-start-run-'));
+    try {
+      const { store, records, artifactsDirectory } = createSyntheticStore(root);
+
+      const result = await store.startRun(withUnexpectedKey(records.manifest));
+
+      expect(result.ok).toBe(false);
+      expect(existsSync(artifactsDirectory)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('writes files that parse back to the values it wrote', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-round-trip-'));
+    try {
+      const { store, runId } = await createCompleteRun(root);
+      const readText = async (...segments: string[]) =>
+        readFile(join(root, 'artifacts', runId, ...segments), 'utf8');
+      const caseId = 'task-1--alpha--1';
+
+      const written = {
+        run: JSON.parse(await readText('run.json')) as { manifest: unknown },
+        case: JSON.parse(await readText('cases', caseId, 'result.json')) as unknown,
+        checks: JSON.parse(await readText('cases', caseId, 'checks.json')) as { checks: unknown },
+        grading: JSON.parse(await readText('cases', caseId, 'grading.json')) as unknown,
+        assessment: JSON.parse(await readText('cases', caseId, 'assessment.json')) as unknown,
+        conclusions: JSON.parse(await readText('conclusions.json')) as unknown,
+      };
+
+      expect(unwrap(await store.readRunResult(runId))).toEqual(written.run);
+      expect(unwrap(await store.readRunManifest(runId))).toEqual(written.run.manifest);
+      expect(unwrap(await store.readCaseResult(runId, caseId))).toEqual(written.case);
+      expect(unwrap(await store.readChecks(runId, caseId))).toEqual(written.checks.checks);
+      expect(unwrap(await store.readGrading(runId, caseId))).toEqual(written.grading);
+      expect(unwrap(await store.readAssessment(runId, caseId))).toEqual(written.assessment);
+      expect(unwrap(await store.readConclusions(runId))).toEqual(written.conclusions);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+type ReaderCase = {
+  name: string;
+  operation: string;
+  file: string[];
+  read: (store: ArtifactStore, runId: string) => Promise<TevuResult<unknown, 'ArtifactError'>>;
+  /** Where the checked field sits in the stored file, and where the reader reports it. */
+  field: { stored: string[]; reported: string };
+  /** The object of the stored file that receives an unknown key, and where the reader reports it. */
+  container: { stored: string[]; reported: string };
+  sentence: (runId: string) => string;
+};
+
+const ALPHA = 'task-1--alpha--1';
+
+const READER_CASES: ReaderCase[] = [
+  {
+    name: 'readRunManifest',
+    operation: 'read-run-manifest',
+    file: ['run.json'],
+    read: (store, runId) => store.readRunManifest(runId),
+    field: { stored: ['manifest', 'execution', 'concurrency'], reported: 'execution.concurrency' },
+    container: { stored: ['manifest'], reported: '' },
+    sentence: (runId) =>
+      `stored manifest for run "${runId}" has a malformed shape or mismatched identity`,
+  },
+  {
+    name: 'readRunResult',
+    operation: 'read-run-result',
+    file: ['run.json'],
+    read: (store, runId) => store.readRunResult(runId),
+    field: {
+      stored: ['cases', '0', 'metrics', 'cost', 'value'],
+      reported: 'cases.0.metrics.cost.value',
+    },
+    container: { stored: [], reported: '' },
+    sentence: (runId) => `run result for "${runId}" has a malformed shape or mismatched identity`,
+  },
+  {
+    name: 'readCaseResult',
+    operation: 'read-case-result',
+    file: ['cases', ALPHA, 'result.json'],
+    read: (store, runId) => store.readCaseResult(runId, ALPHA),
+    field: { stored: ['identity', 'attempt'], reported: 'identity.attempt' },
+    container: { stored: [], reported: '' },
+    sentence: (runId) => `case result for "${ALPHA}" in run "${runId}" has a malformed shape`,
+  },
+  {
+    name: 'readChecks',
+    operation: 'read-checks',
+    file: ['cases', ALPHA, 'checks.json'],
+    read: (store, runId) => store.readChecks(runId, ALPHA),
+    field: { stored: ['checks', '0', 'durationMs'], reported: 'checks.0.durationMs' },
+    container: { stored: [], reported: '' },
+    sentence: (runId) => `checks artifact for "${ALPHA}" in run "${runId}" has a malformed shape`,
+  },
+  {
+    name: 'readGrading',
+    operation: 'read-grading',
+    file: ['cases', ALPHA, 'grading.json'],
+    read: (store, runId) => store.readGrading(runId, ALPHA),
+    field: { stored: ['calls', '0', 'events'], reported: 'calls.0.events' },
+    container: { stored: [], reported: '' },
+    sentence: (runId) => `grading artifact for "${ALPHA}" in run "${runId}" has a malformed shape`,
+  },
+  {
+    name: 'readAssessment',
+    operation: 'read-assessment',
+    file: ['cases', ALPHA, 'assessment.json'],
+    read: (store, runId) => store.readAssessment(runId, ALPHA),
+    field: { stored: ['revision'], reported: 'revision' },
+    container: { stored: ['current', '0'], reported: 'current.0' },
+    sentence: (runId) =>
+      `assessment artifact for "${ALPHA}" in run "${runId}" has a malformed shape or mismatched identity`,
+  },
+  {
+    name: 'readConclusions',
+    operation: 'read-conclusions',
+    file: ['conclusions.json'],
+    read: (store, runId) => store.readConclusions(runId),
+    field: { stored: ['tasks', '0', 'facts', 'repeat'], reported: 'tasks.0.facts.repeat' },
+    container: { stored: ['tasks', '0', 'conclusions'], reported: 'tasks.0.conclusions' },
+    sentence: (runId) =>
+      `conclusions.json of run "${runId}" is malformed; delete it to make the summary use template sentences: it has a malformed shape or mismatched identity`,
+  },
+];
+
+async function editStoredJson(
+  filePath: string,
+  edit: (stored: Record<string, unknown>) => void,
+): Promise<void> {
+  const stored = JSON.parse(await readFile(filePath, 'utf8')) as Record<string, unknown>;
+  edit(stored);
+  await writeFile(filePath, JSON.stringify(stored, null, 2), 'utf8');
+}
+
+function objectAt(
+  root: Record<string, unknown>,
+  segments: readonly string[],
+): Record<string, unknown> {
+  let current: unknown = root;
+  for (const segment of segments) {
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current as Record<string, unknown>;
+}
+
+describe('FileArtifactStore readers refuse what their parsers refuse', () => {
+  it.each(READER_CASES)(
+    '$name names the field that holds a value of another type',
+    async (reader) => {
+      const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-reader-'));
+      try {
+        const { store, runId } = await createCompleteRun(root);
+        const [fieldName, ...parentSegments] = [...reader.field.stored].reverse();
+        await editStoredJson(join(root, 'artifacts', runId, ...reader.file), (stored) => {
+          objectAt(stored, parentSegments.reverse())[fieldName as string] = { wrong: [true] };
+        });
+
+        const result = await reader.read(store, runId);
+
+        expect(result).toEqual({
+          ok: false,
+          error: {
+            kind: 'ArtifactError',
+            operation: reader.operation,
+            reason: `${reader.sentence(runId)} at ${reader.field.reported}`,
+          },
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(READER_CASES)(
+    '$name keeps an unknown key out of the artifact and redacts it on the terminal',
+    async (reader) => {
+      const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-reader-secret-'));
+      try {
+        const { store, runId } = await createCompleteRun(root);
+        await editStoredJson(join(root, 'artifacts', runId, ...reader.file), (stored) => {
+          objectAt(stored, reader.container.stored)[SECRET_KEY] = 'value-for-the-unknown-key';
+        });
+
+        const result = await reader.read(store, runId);
+
+        const reportedPath =
+          reader.container.reported === ''
+            ? SECRET_KEY
+            : `${reader.container.reported}.${SECRET_KEY}`;
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.reason).toBe(`${reader.sentence(runId)} at ${reportedPath}`);
+        const printed = createRedactor([SECRET_KEY])(result.error.reason);
+        expect(printed).toBe(
+          `${reader.sentence(runId)} at ${reportedPath.replace(SECRET_KEY, '[REDACTED]')}`,
+        );
+        expect(printed).not.toContain(SECRET_KEY);
+        expect(result.error.reason).not.toContain('value-for-the-unknown-key');
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(READER_CASES)(
+    '$name keeps the value of a mistyped field out of the reason',
+    async (reader) => {
+      const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-reader-value-'));
+      try {
+        const { store, runId } = await createCompleteRun(root);
+        const [fieldName, ...parentSegments] = [...reader.field.stored].reverse();
+        await editStoredJson(join(root, 'artifacts', runId, ...reader.file), (stored) => {
+          objectAt(stored, parentSegments.reverse())[fieldName as string] = SECRET_KEY;
+        });
+
+        const result = await reader.read(store, runId);
+
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error.reason).not.toContain(SECRET_KEY);
+        expect(result.error.reason).toContain(` at ${reader.field.reported}`);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe('FileArtifactStore refuses before it touches the filesystem', () => {
+  it('creates no directory when the redactor throws while startRun redacts the manifest', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-start-run-redaction-'));
+    try {
+      const artifactsDirectory = join(root, 'artifacts');
+      const store = createArtifactStore({
+        artifactsDirectory,
+        redact: () => {
+          throw new Error('synthetic redactor failure');
+        },
+      });
+
+      const result = await store.startRun(buildSyntheticRecords().manifest);
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: { kind: 'ArtifactError', operation: 'start-run' },
+      });
+      if (!result.ok) {
+        expect(result.error.reason).toMatch(/^redaction failed; write aborted: /);
+      }
+      expect(existsSync(artifactsDirectory)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves the store free to start the run after a refused manifest', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-start-run-retry-'));
+    try {
+      const { store, records } = createSyntheticStore(root);
+      expect((await store.startRun(withUnexpectedKey(records.manifest))).ok).toBe(false);
+
+      const result = await store.startRun(records.manifest);
+
+      expect(result).toEqual({ ok: true, value: undefined });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: 'replaceAssessment',
+      operation: 'replace-assessment',
+      write: (store: ArtifactStore, assessment: AssessmentArtifact) =>
+        store.replaceAssessment(withUnexpectedKey({ ...assessment, caseId: 'task-9--ghost--1' })),
+      reason: (runId: string) => `case "task-9--ghost--1" does not exist in run "${runId}"`,
+    },
+    {
+      name: 'writeConclusions',
+      operation: 'write-conclusions',
+      write: (store: ArtifactStore, assessment: AssessmentArtifact) =>
+        store.writeConclusions(withUnexpectedKey(buildConclusions(`${assessment.runId}-missing`))),
+      reason: (runId: string) => `run directory for "${runId}-missing" does not exist`,
+    },
+  ])(
+    '$name reports the missing directory before the defect of the value',
+    async ({ operation, write, reason }) => {
+      const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-precedence-'));
+      try {
+        const { store, records, runId } = await createCompleteRun(root);
+        const before = await snapshotTree(root);
+
+        const result = await write(store, records.assessment);
+
+        expect(result).toEqual({
+          ok: false,
+          error: { kind: 'ArtifactError', operation, reason: reason(runId) },
+        });
+        expect(await snapshotTree(root)).toEqual(before);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    {
+      name: 'replaceAssessment',
+      write: (store: ArtifactStore, assessment: AssessmentArtifact) =>
+        store.replaceAssessment(withUnexpectedKey({ ...assessment, runId: '../escape' })),
+      reason: 'run ID "../escape" is not a valid identifier',
+    },
+    {
+      name: 'writeConclusions',
+      write: (store: ArtifactStore) =>
+        store.writeConclusions(withUnexpectedKey(buildConclusions('../escape'))),
+      reason: 'run ID "../escape" is not a valid identifier',
+    },
+  ])('$name reports an invalid identifier before the defect of the value', async (writer) => {
+    const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-identifier-'));
+    try {
+      const { store, records } = await createCompleteRun(root);
+
+      const result = await writer.write(store, records.assessment);
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.reason).toBe(writer.reason);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('FileArtifactStore readers refuse a file stored under another identity', () => {
+  const IDENTITY_CASES = [
+    { reader: 'readRunManifest', segments: ['manifest', 'runId'], reported: 'runId' },
+    { reader: 'readRunResult', segments: ['manifest', 'runId'], reported: 'manifest.runId' },
+    { reader: 'readCaseResult', segments: ['identity', 'caseId'], reported: 'identity.caseId' },
+    { reader: 'readChecks', segments: ['runId'], reported: 'runId' },
+    { reader: 'readChecks', segments: ['caseId'], reported: 'caseId' },
+    { reader: 'readGrading', segments: ['runId'], reported: 'runId' },
+    { reader: 'readGrading', segments: ['caseId'], reported: 'caseId' },
+    { reader: 'readAssessment', segments: ['runId'], reported: 'runId' },
+    { reader: 'readAssessment', segments: ['caseId'], reported: 'caseId' },
+    { reader: 'readConclusions', segments: ['runId'], reported: 'runId' },
+  ];
+
+  it.each(IDENTITY_CASES)(
+    '$reader names $reported when the stored value belongs to another run or case',
+    async ({ reader, segments, reported }) => {
+      const root = await mkdtemp(join(tmpdir(), 'tevu-opencode-report-identity-'));
+      try {
+        const { store, runId } = await createCompleteRun(root);
+        const readerCase = READER_CASES.find((candidate) => candidate.name === reader);
+        if (readerCase === undefined) throw new Error(`no reader case named ${reader}`);
+        const [fieldName, ...parentSegments] = [...segments].reverse();
+        await editStoredJson(join(root, 'artifacts', runId, ...readerCase.file), (stored) => {
+          objectAt(stored, parentSegments.reverse())[fieldName as string] = 'another-identity';
+        });
+
+        const result = await readerCase.read(store, runId);
+
+        expect(result).toEqual({
+          ok: false,
+          error: {
+            kind: 'ArtifactError',
+            operation: readerCase.operation,
+            reason: `${readerCase.sentence(runId)} at ${reported}`,
+          },
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

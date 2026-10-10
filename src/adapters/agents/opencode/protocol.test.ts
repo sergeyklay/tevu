@@ -70,37 +70,16 @@ describe('decodeEvent', () => {
   });
 
   it.each([
-    {
-      number: 1,
-      reason: 'part identity (sessionID, messageID, id) is missing or malformed',
-    },
-    {
-      number: 2,
-      reason: 'event session identity (sessionID) is missing or malformed',
-    },
-    {
-      number: 3,
-      reason: 'part identity (sessionID, messageID, id) is missing or malformed',
-    },
-    {
-      number: 4,
-      reason: 'part identity (sessionID, messageID, id) is missing or malformed',
-    },
-    {
-      number: 5,
-      reason: 'event framing is malformed: missing type',
-    },
-    {
-      number: 6,
-      reason: 'event session identity (sessionID) is missing or malformed',
-    },
-    {
-      number: 8,
-      reason: 'part record is missing or not a JSON object',
-    },
+    { number: 1, path: 'part.id' },
+    { number: 2, path: 'sessionID' },
+    { number: 3, path: 'part.sessionID' },
+    { number: 4, path: 'part.messageID' },
+    { number: 5, path: 'type' },
+    { number: 6, path: 'sessionID' },
+    { number: 8, path: 'part' },
   ])(
     'rejects malformed fixture line $number as a required-identity protocol error',
-    ({ number, reason }) => {
+    ({ number, path }) => {
       const lines = malformedFixtureLines();
       const decoded = decodeEvent(JSON.parse(lines[number - 1]) as unknown, CASE_CONTEXT, number);
 
@@ -109,7 +88,9 @@ describe('decodeEvent', () => {
       expect(decoded.error.kind).toBe('OpenCodeProtocolError');
       expect(decoded.error.context).toEqual(CASE_CONTEXT);
       expect(decoded.error.line).toBe(number);
-      expect(decoded.error.reason).toBe(reason);
+      expect(decoded.error.reason).toBe(
+        `event record does not match the consumed event layout at ${path}`,
+      );
     },
   );
 
@@ -130,7 +111,9 @@ describe('decodeEvent', () => {
       const decoded = decodeEvent(input, CASE_CONTEXT, 1);
       expect(decoded.ok).toBe(false);
       if (decoded.ok) continue;
-      expect(decoded.error.reason).toBe('event record is not a JSON object');
+      expect(decoded.error.reason).toBe(
+        'event record does not match the consumed event layout at (root)',
+      );
     }
   });
 
@@ -145,7 +128,9 @@ describe('decodeEvent', () => {
 
     expect(decoded.ok).toBe(false);
     if (decoded.ok) return;
-    expect(decoded.error.reason).toBe('event framing is malformed: missing or malformed timestamp');
+    expect(decoded.error.reason).toBe(
+      'event record does not match the consumed event layout at timestamp',
+    );
   });
 
   it('reports probe-phase context without a line number', () => {
@@ -231,13 +216,17 @@ describe('decodeExport', () => {
 
     expect(decoded.ok).toBe(true);
     if (!decoded.ok) return;
-    expect(decoded.value.info.id).toBe('ses-root-0001');
-    expect(decoded.value.messages).toHaveLength(4);
-    const serialized = JSON.stringify(decoded.value);
-    expect(serialized).toContain('additiveTopLevelField');
-    expect(serialized).toContain('additiveInfoField');
-    expect(serialized).toContain('additiveAssistantField');
-    expect(serialized).toContain('additivePartField');
+    expect(decoded.value.view.info.id).toBe('ses-root-0001');
+    expect(decoded.value.view.messages).toHaveLength(4);
+    for (const serialized of [
+      JSON.stringify(decoded.value.record),
+      JSON.stringify(decoded.value.view),
+    ]) {
+      expect(serialized).toContain('additiveTopLevelField');
+      expect(serialized).toContain('additiveInfoField');
+      expect(serialized).toContain('additiveAssistantField');
+      expect(serialized).toContain('additivePartField');
+    }
   });
 
   it('rejects the malformed fixture export as a child session', () => {
@@ -256,7 +245,9 @@ describe('decodeExport', () => {
 
     expect(decoded.ok).toBe(false);
     if (decoded.ok) return;
-    expect(decoded.error.reason).toBe('export session identity (info.id) is missing or malformed');
+    expect(decoded.error.reason).toBe(
+      'export record does not match the consumed export layout at info.id',
+    );
   });
 
   it('rejects exports whose messages are not an array', () => {
@@ -264,7 +255,9 @@ describe('decodeExport', () => {
 
     expect(decoded.ok).toBe(false);
     if (decoded.ok) return;
-    expect(decoded.error.reason).toBe('export is malformed: messages is not an array');
+    expect(decoded.error.reason).toBe(
+      'export record does not match the consumed export layout at messages',
+    );
   });
 
   it('rejects exports with a malformed message identity', () => {
@@ -276,7 +269,7 @@ describe('decodeExport', () => {
     expect(decoded.ok).toBe(false);
     if (decoded.ok) return;
     expect(decoded.error.reason).toBe(
-      'export message identity (sessionID, id) is missing or malformed',
+      'export record does not match the consumed export layout at messages.0.info.sessionID',
     );
   });
 
@@ -291,7 +284,9 @@ describe('decodeExport', () => {
 
     expect(decoded.ok).toBe(false);
     if (decoded.ok) return;
-    expect(decoded.error.reason).toBe('export message "m1" is malformed: parts is not an array');
+    expect(decoded.error.reason).toBe(
+      'export record does not match the consumed export layout at messages.0.parts',
+    );
   });
 
   it('rejects exports with a malformed part identity', () => {
@@ -311,7 +306,7 @@ describe('decodeExport', () => {
     expect(decoded.ok).toBe(false);
     if (decoded.ok) return;
     expect(decoded.error.reason).toBe(
-      'part identity (sessionID, messageID, id) is missing or malformed',
+      'export record does not match the consumed export layout at messages.0.parts.0.messageID',
     );
   });
 
@@ -320,7 +315,9 @@ describe('decodeExport', () => {
 
     expect(decoded.ok).toBe(false);
     if (decoded.ok) return;
-    expect(decoded.error.reason).toBe('export record is not a JSON object with an info record');
+    expect(decoded.error.reason).toBe(
+      'export record does not match the consumed export layout at (root)',
+    );
   });
 });
 
@@ -329,7 +326,7 @@ describe('listMalformedOptionalMetricFields', () => {
     const decoded = decodeExport(readJsonFixture('session-valid.json'), CASE_CONTEXT);
     if (!decoded.ok) throw new Error('valid fixture must decode');
 
-    expect(listMalformedOptionalMetricFields(decoded.value)).toEqual([]);
+    expect(listMalformedOptionalMetricFields(decoded.value.view)).toEqual([]);
   });
 
   it('reports each absent or malformed optional metric field with its message identity', () => {
@@ -367,7 +364,7 @@ describe('listMalformedOptionalMetricFields', () => {
     expect(decoded.ok).toBe(true);
     if (!decoded.ok) return;
 
-    const findings = listMalformedOptionalMetricFields(decoded.value);
+    const findings = listMalformedOptionalMetricFields(decoded.value.view);
 
     expect(findings).toContain('field "cost" is absent or malformed in export message "msg-a1"');
     expect(findings).toContain(
@@ -391,7 +388,7 @@ describe('listMalformedOptionalMetricFields', () => {
 
     expect(decoded.ok).toBe(true);
     if (!decoded.ok) return;
-    expect(listMalformedOptionalMetricFields(decoded.value)).toEqual([]);
+    expect(listMalformedOptionalMetricFields(decoded.value.view)).toEqual([]);
   });
 });
 
@@ -791,3 +788,220 @@ describe('decodeToolDenial', () => {
     expect(() => decodeToolDenial(text)).not.toThrow();
   });
 });
+
+const SECRET = 'synthetic-acme-secret-value';
+
+function buildExport(messageInfo: Record<string, unknown>, part: Record<string, unknown> = {}) {
+  return {
+    info: { id: 'ses-1', additiveInfoField: 1 },
+    messages: [
+      {
+        info: { id: 'm1', sessionID: 'ses-1', ...messageInfo },
+        parts: [{ id: 'p1', sessionID: 'ses-1', messageID: 'm1', type: 'tool', ...part }],
+        additiveMessageField: 1,
+      },
+    ],
+    additiveTopLevelField: 1,
+  };
+}
+
+describe('decoders keep additive fields in the record and the view', () => {
+  it('keeps additive event and part fields at every level of a decoded event', () => {
+    const input = {
+      type: 'tool_use',
+      timestamp: 5,
+      sessionID: 'ses-1',
+      additiveEventField: 1,
+      part: { id: 'p1', sessionID: 'ses-1', messageID: 'm1', type: 'tool', additivePartField: 2 },
+    };
+
+    const decoded = decodeEvent(input, CASE_CONTEXT, 1);
+
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) return;
+    expect(decoded.value).toMatchObject({ additiveEventField: 1, part: { additivePartField: 2 } });
+  });
+
+  it('keeps additive export fields at every level in the view and returns the input as the record', () => {
+    const input = buildExport({
+      role: 'assistant',
+      additiveInfoField: 1,
+      tokens: { input: 1, additiveTokensField: 1, cache: { read: 1, additiveCacheField: 1 } },
+    });
+
+    const decoded = decodeExport(input, CASE_CONTEXT);
+
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) return;
+    expect(decoded.value.record).toBe(input);
+    const view = decoded.value.view;
+    expect(view).toMatchObject({ additiveTopLevelField: 1, info: { additiveInfoField: 1 } });
+    expect(view.messages[0]).toMatchObject({
+      additiveMessageField: 1,
+      info: {
+        additiveInfoField: 1,
+        tokens: { additiveTokensField: 1, cache: { additiveCacheField: 1 } },
+      },
+    });
+  });
+});
+
+describe('decoders never turn a lenient field into a protocol error', () => {
+  it.each([
+    { name: 'an absent cost', info: { role: 'assistant' } },
+    { name: 'a malformed cost', info: { role: 'assistant', cost: 'free' } },
+    { name: 'a malformed role', info: { role: 7 } },
+    { name: 'a malformed error', info: { role: 'assistant', error: 3 } },
+    { name: 'a malformed finish', info: { role: 'assistant', finish: false } },
+    { name: 'tokens that is not an object', info: { role: 'assistant', tokens: 5 } },
+    { name: 'tokens that is a list', info: { role: 'assistant', tokens: [1] } },
+    { name: 'a cache that is not an object', info: { role: 'assistant', tokens: { cache: 'x' } } },
+    {
+      name: 'malformed token counts',
+      info: { role: 'assistant', tokens: { input: 'a', output: null, reasoning: {}, cache: {} } },
+    },
+  ])('decodes an export with $name', ({ info }) => {
+    const decoded = decodeExport(buildExport(info), CASE_CONTEXT);
+
+    expect(decoded.ok).toBe(true);
+  });
+
+  it('reads a container that is not an object as absent in the view and keeps it in the record', () => {
+    const decoded = decodeExport(
+      buildExport({ role: 'assistant', tokens: { input: 1, cache: 'x' } }),
+      CASE_CONTEXT,
+    );
+
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) return;
+    expect(decoded.value.view.messages[0]?.info.tokens).toMatchObject({ input: 1 });
+    expect(decoded.value.view.messages[0]?.info.tokens?.cache).toBeUndefined();
+    expect(JSON.stringify(decoded.value.record)).toContain('"cache":"x"');
+  });
+
+  it.each([{ tool: 7 }, { tool: null }, {}])('decodes a tool part holding %j', (part) => {
+    const decoded = decodeExport(buildExport({ role: 'assistant' }, part), CASE_CONTEXT);
+
+    expect(decoded.ok).toBe(true);
+  });
+
+  it.each([
+    { name: 'a numeric text', part: { type: 'text', text: 5 } },
+    { name: 'a null text', part: { type: 'text', text: null } },
+    { name: 'a string synthetic flag', part: { type: 'text', synthetic: 'yes' } },
+    { name: 'a numeric ignored flag', part: { type: 'text', ignored: 0 } },
+  ])('decodes an export and an event holding a part with $name', ({ part }) => {
+    const decodedExport = decodeExport(buildExport({ role: 'assistant' }, part), CASE_CONTEXT);
+    const decodedEvent = decodeEvent(
+      {
+        type: 'text',
+        timestamp: 1,
+        sessionID: 'ses-1',
+        part: { id: 'p1', sessionID: 'ses-1', messageID: 'm1', ...part },
+      },
+      CASE_CONTEXT,
+    );
+
+    expect(decodedExport.ok).toBe(true);
+    expect(decodedEvent.ok).toBe(true);
+  });
+
+  it.each([3, 'boom', null, { message: 'x' }])(
+    'decodes an error event whose error holds %j',
+    (error) => {
+      const decoded = decodeEvent(
+        { type: 'error', timestamp: 1, sessionID: 'ses-1', error },
+        CASE_CONTEXT,
+      );
+
+      expect(decoded.ok).toBe(true);
+    },
+  );
+
+  it('decodes an error event without an error value and a tool event without a tool name', () => {
+    const errorEvent = decodeEvent(
+      { type: 'error', timestamp: 1, sessionID: 'ses-1' },
+      CASE_CONTEXT,
+    );
+    const toolEvent = decodeEvent(
+      {
+        type: 'tool_use',
+        timestamp: 1,
+        sessionID: 'ses-1',
+        part: { id: 'p1', sessionID: 'ses-1', messageID: 'm1', type: 'tool', tool: 3 },
+      },
+      CASE_CONTEXT,
+    );
+
+    expect(errorEvent.ok).toBe(true);
+    expect(toolEvent.ok).toBe(true);
+  });
+});
+
+describe('decodeExport root-session rules', () => {
+  it('rejects an export whose info holds a parentID with the child-session reason', () => {
+    const decoded = decodeExport(
+      { info: { id: 'ses-child', parentID: 'ses-root' }, messages: [] },
+      CASE_CONTEXT,
+    );
+
+    expect(decoded.ok).toBe(false);
+    if (decoded.ok) return;
+    expect(decoded.error.reason).toBe(
+      'child session export "ses-child" rejected: schema version 1 consumes only the root session',
+    );
+  });
+
+  it.each([5, ''])('names info.parentID when it holds %j', (parentID) => {
+    const decoded = decodeExport({ info: { id: 'ses-1', parentID }, messages: [] }, CASE_CONTEXT);
+
+    expect(decoded.ok).toBe(false);
+    if (decoded.ok) return;
+    expect(decoded.error.reason).toBe(
+      'export record does not match the consumed export layout at info.parentID',
+    );
+  });
+});
+
+describe('decoder reasons carry no value', () => {
+  it('keeps a secret out of an event reason when a field expecting a number holds it', () => {
+    const decoded = decodeEvent(
+      { type: 'error', timestamp: SECRET, sessionID: 'ses-1' },
+      CASE_CONTEXT,
+      4,
+    );
+
+    expect(decoded.ok).toBe(false);
+    if (decoded.ok) return;
+    expect(decoded.error.reason).toBe(
+      'event record does not match the consumed event layout at timestamp',
+    );
+    expect(JSON.stringify(decoded.error)).not.toContain(SECRET);
+  });
+
+  it.each([
+    { name: 'messages', input: { info: { id: 'ses-1' }, messages: SECRET }, path: 'messages' },
+    { name: 'info', input: { info: SECRET, messages: [] }, path: 'info' },
+    {
+      name: 'a part',
+      input: buildExportWithPart(SECRET),
+      path: 'messages.0.parts.0',
+    },
+  ])('keeps a secret out of an export reason when $name holds it', ({ input, path }) => {
+    const decoded = decodeExport(input, CASE_CONTEXT);
+
+    expect(decoded.ok).toBe(false);
+    if (decoded.ok) return;
+    expect(decoded.error.reason).toBe(
+      `export record does not match the consumed export layout at ${path}`,
+    );
+    expect(JSON.stringify(decoded.error)).not.toContain(SECRET);
+  });
+});
+
+function buildExportWithPart(part: unknown) {
+  return {
+    info: { id: 'ses-1' },
+    messages: [{ info: { id: 'm1', sessionID: 'ses-1' }, parts: [part] }],
+  };
+}

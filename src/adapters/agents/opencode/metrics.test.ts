@@ -346,6 +346,120 @@ describe('normalizeMetrics from the root session export', () => {
     });
   });
 
+  it.each([
+    {
+      name: 'tokens that is not an object',
+      tokens: 5,
+      metric: 'inputTokens',
+      reason: 'field "tokens.input" is absent',
+    },
+    {
+      name: 'tokens that is a list',
+      tokens: [1],
+      metric: 'inputTokens',
+      reason: 'field "tokens.input" is absent',
+    },
+    {
+      name: 'a cache that is not an object',
+      tokens: { input: 3, output: 4, reasoning: 0, cache: 'x' },
+      metric: 'cacheReadTokens',
+      reason: 'field "tokens.cache.read" is absent',
+    },
+    {
+      name: 'a malformed token count',
+      tokens: { input: 'many', output: 4, reasoning: 0, cache: { read: 0, write: 0 } },
+      metric: 'inputTokens',
+      reason: 'field "tokens.input" is malformed',
+    },
+  ] as const)(
+    'marks only the affected token metric unavailable for $name',
+    ({ tokens, metric, reason }) => {
+      const sessionExport = {
+        info: { id: 'ses-root-0001' },
+        messages: [
+          {
+            info: {
+              id: 'msg-a1',
+              sessionID: 'ses-root-0001',
+              role: 'assistant',
+              finish: 'stop',
+              cost: 0.5,
+              tokens,
+            },
+            parts: [],
+          },
+        ],
+      };
+
+      const normalized = normalizeMetrics({
+        caseId: CASE_ID,
+        sessionId: 'ses-root-0001',
+        sessionExport: sessionExport as never,
+        events: [],
+        copiedProviders: [],
+      });
+
+      expect(normalized.ok).toBe(true);
+      if (!normalized.ok) return;
+      expect(normalized.value[metric]).toMatchObject({
+        value: null,
+        availability: { status: 'unavailable', reason: `${reason} in export message "msg-a1"` },
+      });
+      expect(normalized.value.cost).toMatchObject({ value: 0.5 });
+      expect(normalized.value.turns).toMatchObject({ value: 1 });
+    },
+  );
+
+  it.each([{ tool: 7 }, { tool: null }, {}])(
+    'marks only skill calls unavailable for a tool part holding %j',
+    (toolField) => {
+      const sessionExport = {
+        info: { id: 'ses-root-0001' },
+        messages: [
+          {
+            info: {
+              id: 'msg-a1',
+              sessionID: 'ses-root-0001',
+              role: 'assistant',
+              finish: 'stop',
+              cost: 0.5,
+              tokens: { input: 3, output: 4, reasoning: 0, cache: { read: 0, write: 0 } },
+            },
+            parts: [
+              {
+                id: 'prt-x',
+                sessionID: 'ses-root-0001',
+                messageID: 'msg-a1',
+                type: 'tool',
+                ...toolField,
+              },
+            ],
+          },
+        ],
+      };
+
+      const normalized = normalizeMetrics({
+        caseId: CASE_ID,
+        sessionId: 'ses-root-0001',
+        sessionExport: sessionExport as never,
+        events: [],
+        copiedProviders: [],
+      });
+
+      expect(normalized.ok).toBe(true);
+      if (!normalized.ok) return;
+      expect(normalized.value.skillCalls).toMatchObject({
+        value: null,
+        availability: {
+          status: 'unavailable',
+          reason: 'tool name is absent or malformed on tool part "prt-x"',
+        },
+      });
+      expect(normalized.value.toolCalls).toMatchObject({ value: 1 });
+      expect(normalized.value.inputTokens).toMatchObject({ value: 3 });
+    },
+  );
+
   it('counts each message and part once when duplicates share identity', () => {
     const message = {
       info: {
@@ -402,12 +516,12 @@ describe('normalizeMetrics from the root session export', () => {
     {
       scenario: 'the export session identity is missing',
       info: { id: '' },
-      reason: 'export session identity (info.id) is missing or malformed',
+      reason: 'export record does not match the consumed export layout at info.id',
     },
     {
       scenario: 'a message identity is missing',
       info: { id: 'ses-root-0001' },
-      reason: 'export message identity (sessionID, id) is missing or malformed',
+      reason: 'export record does not match the consumed export layout at messages.0.info.id',
     },
   ])('returns a protocol failure when $scenario', ({ info, reason }) => {
     const sessionExport = {
@@ -452,7 +566,7 @@ describe('normalizeMetrics from the root session export', () => {
     expect(normalized.ok).toBe(false);
     if (normalized.ok) return;
     expect(normalized.error.reason).toBe(
-      'part identity (sessionID, messageID, id) is missing or malformed',
+      'export record does not match the consumed export layout at messages.0.parts.0.messageID',
     );
   });
 });
@@ -681,7 +795,7 @@ describe('normalizeMetrics event fallback', () => {
     if (normalized.ok) return;
     expect(normalized.error.context).toEqual({ phase: 'case', caseId: CASE_ID });
     expect(normalized.error.reason).toBe(
-      'event session identity (sessionID) is missing or malformed',
+      'event record does not match the consumed event layout at sessionID',
     );
   });
 });
@@ -1318,7 +1432,7 @@ describe('OpenCode adapter over a synthetic executable', () => {
     }
     expect(outcome.error.line).toBe(1);
     expect(outcome.error.reason).toBe(
-      'part identity (sessionID, messageID, id) is missing or malformed',
+      'event record does not match the consumed event layout at part.id',
     );
     expect(delivered).toEqual([]);
   });
@@ -1511,7 +1625,7 @@ describe('OpenCode adapter over a synthetic executable', () => {
       throw new Error(`expected a protocol failure, got ${JSON.stringify(exported)}`);
     }
     expect(exported.error.reason).toBe(
-      'export message identity (sessionID, id) is missing or malformed',
+      'export record does not match the consumed export layout at messages.0.info.id',
     );
   });
 
@@ -3887,6 +4001,59 @@ describe('OpenCode adapter callModel permission and evidence over an injected fa
       expect(delivered).toContain('[REDACTED]');
       expect(JSON.stringify(result.value)).not.toContain(SECRET);
       expect(requests.find((request) => request.argv[1] === 'run')?.secretValues).toContain(SECRET);
+    });
+  });
+
+  describe('evidence identity', () => {
+    const ADDITIVE_SECRET = 'sk-additive-secret';
+
+    it('delivers the redacted parsed event with its additive fields and key order', async () => {
+      const line = `{"additiveFirst":"${ADDITIVE_SECRET}","type":"step_start","timestamp":1,"sessionID":"${SESSION_ID}","part":{"zeta":1,"id":"prt-1","sessionID":"${SESSION_ID}","messageID":"msg-a1","type":"step-start","alpha":{"b":2,"a":1}},"additiveLast":true}`;
+      const { outcome, evidence } = callModelCollectingEvidence({
+        stdout: `${line}\n`,
+        exportText: REPLY_EXPORT,
+        secrets: buildSecretRedactor([ADDITIVE_SECRET]),
+      });
+
+      await outcome;
+
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]?.events).toHaveLength(1);
+      expect(JSON.stringify(evidence[0]?.events[0])).toBe(
+        line.replace(ADDITIVE_SECRET, '[REDACTED]'),
+      );
+    });
+
+    it('hands back the redacted parsed export as the session record', async () => {
+      const exportText = `{"additiveTop":"${ADDITIVE_SECRET}","info":{"id":"${SESSION_ID}","extra":{"z":1,"a":2}},"messages":[{"extraMessage":1,"info":{"tokens":{"cache":{"write":0,"read":0,"extra":1},"input":10,"output":5,"reasoning":0},"id":"msg-a1","sessionID":"${SESSION_ID}","role":"assistant","finish":"stop","cost":0.5,"unknownInfoField":[1]},"parts":[{"id":"prt-1","sessionID":"${SESSION_ID}","messageID":"msg-a1","type":"text","text":"done","extraPart":null}]}]}`;
+      const { outcome, evidence } = callModelCollectingEvidence({
+        exportText,
+        secrets: buildSecretRedactor([ADDITIVE_SECRET]),
+      });
+
+      const result = await outcome;
+
+      expect(result.ok).toBe(true);
+      expect(JSON.stringify(evidence[0]?.session?.export)).toBe(
+        exportText.replace(ADDITIVE_SECRET, '[REDACTED]'),
+      );
+    });
+
+    it('withholds the record when redaction changes a consumed field so the export no longer decodes', async () => {
+      const { outcome, evidence } = callModelCollectingEvidence({
+        exportText: REPLY_EXPORT,
+        secrets: buildSecretRedactor(['messages']),
+      });
+
+      const result = await outcome;
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: { kind: 'AgentProtocolError', reason: 'record redaction failed; record withheld' },
+      });
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]?.session).toBeNull();
+      expect(JSON.stringify(result)).not.toContain('prt-msg-a1');
     });
   });
 

@@ -12,6 +12,8 @@
 
 import { z } from 'zod';
 
+import { describePath } from '@/domain/describe-path';
+
 import type { CheckRecord, RunConfigRecord, TaskRecord, TevuResult } from '@/domain/types';
 
 const projectionSourceSchema = z.object({
@@ -66,10 +68,7 @@ export function decodeRunConfig(snapshot: unknown): TevuResult<RunConfigRecord, 
   const parsed = projectionConfigSchema.safeParse(snapshot);
   if (!parsed.success) {
     const firstIssue = parsed.error.issues[0];
-    const path =
-      firstIssue === undefined || firstIssue.path.length === 0
-        ? '(root)'
-        : firstIssue.path.map((segment) => String(segment)).join('.');
+    const path = firstIssue === undefined ? '(root)' : describePath(firstIssue.path);
     return {
       ok: false,
       error: {
