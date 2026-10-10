@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Errors about malformed OpenCode run output now name the field that does not match.
+
 ### Fixed
 
 - A damaged or hand-edited run file now makes `tevu report` and `tevu assess` name the file and the first field that does not match; damage such as a malformed case record in `run.json` made them fail with `tevu failed unexpectedly`.

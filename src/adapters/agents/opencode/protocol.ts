@@ -1,4 +1,8 @@
-import type { ModelRoleName } from '@/domain/types';
+import { z } from 'zod';
+
+import { describePath } from '@/domain/describe-path';
+
+import type { AgentSessionExport, ModelRoleName } from '@/domain/types';
 
 /** Error context for protocol failures: capability probing, one planned case, or one model call. */
 export type ProtocolContext =
@@ -12,59 +16,92 @@ export type ProtocolContext =
  */
 type DecodeResult<T> = { ok: true; value: T } | { ok: false; error: ProtocolErrorShape };
 
-/** Structural identity shared by every OpenCode message part. */
-export type OpenCodePart = {
-  id: string;
-  sessionID: string;
-  messageID: string;
-  type: string;
-};
+const nonEmptyStringSchema = z.string().min(1);
 
-/** Tool-call part carried by `tool_use` events. */
-type OpenCodeToolPart = OpenCodePart & {
-  type: 'tool';
-  callID: string;
-  tool: string;
-  state: { status: 'pending' | 'running' | 'completed' | 'error' };
-};
+// A lenient field accepts any value or none; a lenient container reads as
+// absent when it is not an object, so a malformed metric never fails a decode.
+const partSchema = z.looseObject({
+  id: nonEmptyStringSchema,
+  sessionID: nonEmptyStringSchema,
+  messageID: nonEmptyStringSchema,
+  type: nonEmptyStringSchema,
+  tool: z.unknown().optional(),
+  text: z.unknown().optional(),
+  synthetic: z.unknown().optional(),
+  ignored: z.unknown().optional(),
+});
+
+const partEventSchema = z.looseObject({
+  type: z.enum(['tool_use', 'step_start', 'step_finish', 'text', 'reasoning']),
+  timestamp: z.number(),
+  sessionID: nonEmptyStringSchema,
+  part: partSchema,
+});
+
+const errorEventSchema = z.looseObject({
+  type: z.literal('error'),
+  timestamp: z.number(),
+  sessionID: nonEmptyStringSchema,
+  error: z.unknown().optional(),
+});
+
+const consumedEventSchema = z.discriminatedUnion('type', [partEventSchema, errorEventSchema]);
+
+const eventFramingSchema = z.looseObject({ type: nonEmptyStringSchema });
+
+const cacheSchema = z
+  .looseObject({ read: z.unknown().optional(), write: z.unknown().optional() })
+  .optional()
+  .catch(undefined);
+
+const tokensSchema = z
+  .looseObject({
+    input: z.unknown().optional(),
+    output: z.unknown().optional(),
+    reasoning: z.unknown().optional(),
+    cache: cacheSchema,
+  })
+  .optional()
+  .catch(undefined);
+
+const messageInfoSchema = z.looseObject({
+  id: nonEmptyStringSchema,
+  sessionID: nonEmptyStringSchema,
+  role: z.unknown().optional(),
+  providerID: z.unknown().optional(),
+  modelID: z.unknown().optional(),
+  finish: z.unknown().optional(),
+  error: z.unknown().optional(),
+  cost: z.unknown().optional(),
+  tokens: tokensSchema,
+});
+
+const exportInfoSchema = z.looseObject({
+  id: nonEmptyStringSchema,
+  parentID: nonEmptyStringSchema.optional(),
+});
+
+const exportHeaderSchema = z.looseObject({ info: exportInfoSchema });
+
+const exportSchema = z.looseObject({
+  info: exportInfoSchema,
+  messages: z.array(z.looseObject({ info: messageInfoSchema, parts: z.array(partSchema) })),
+});
+
+/** Structural identity of one OpenCode message part, with the optional fields tevu reads left unchecked. */
+export type OpenCodePart = z.output<typeof partSchema>;
 
 /** Consumed OpenCode JSON event records streamed during `run --format json`. */
-export type OpenCodeRunEvent =
-  | { type: 'tool_use'; timestamp: number; sessionID: string; part: OpenCodeToolPart }
-  | {
-      type: 'step_start' | 'step_finish' | 'text' | 'reasoning';
-      timestamp: number;
-      sessionID: string;
-      part: OpenCodePart;
-    }
-  | { type: 'error'; timestamp: number; sessionID: string; error: unknown };
+export type OpenCodeRunEvent = z.output<typeof consumedEventSchema>;
 
-/** Consumed root-session export record; additive unknown fields are tolerated by the decoder. */
-export type OpenCodeExport = {
-  info: { id: string; parentID?: string };
-  messages: Array<{
-    info:
-      | { id: string; sessionID: string; role: 'user' }
-      | {
-          id: string;
-          sessionID: string;
-          role: 'assistant';
-          parentID: string;
-          providerID: string;
-          modelID: string;
-          finish?: string;
-          error?: unknown;
-          cost: number;
-          tokens: {
-            input: number;
-            output: number;
-            reasoning: number;
-            cache: { read: number; write: number };
-          };
-        };
-    parts: OpenCodePart[];
-  }>;
-};
+/** The info record of one message of a root-session export; metric fields are lenient. */
+export type OpenCodeMessageInfo = z.output<typeof messageInfoSchema>;
+
+/** Consumed root-session export view; additive unknown fields stay in it. */
+export type OpenCodeExport = z.output<typeof exportSchema>;
+
+/** A decoded root-session export: the raw record kept as evidence and the checked view tevu reads. */
+export type DecodedExport = { record: AgentSessionExport; view: OpenCodeExport };
 
 /** Event types whose records the version 1 decoder consumes. */
 const CONSUMED_EVENT_TYPES = new Set([
@@ -82,48 +119,28 @@ const CONSUMED_EVENT_TYPES = new Set([
  * Validates only consumed identity and framing: `type`, `timestamp`,
  * `sessionID`, and the part identity `(sessionID, messageID, id)` for
  * part-carrying events. Returns `null` for records of unconsumed additive
- * event types. The returned event is the raw input object cast after
- * validation, so additive fields and optional metric fields (such as a tool
- * name) are preserved as evidence rather than projected away; optional metric
- * defects are handled by metric normalization, never here.
+ * event types. The returned event is a view of the input: it keeps additive
+ * fields, and a lenient field such as a tool name is not checked, so optional
+ * metric defects are handled by metric normalization, never here. Evidence
+ * comes from the input, never from the view.
  */
 export function decodeEvent(
   input: unknown,
   context: ProtocolContext,
   line?: number,
 ): DecodeResult<OpenCodeRunEvent | null> {
-  if (!isRecord(input)) {
-    return protocolError(context, 'event record is not a JSON object', line);
+  const framing = eventFramingSchema.safeParse(input);
+  if (!framing.success) {
+    return protocolError(context, eventReason(framing.error), line);
   }
-  if (!isNonEmptyString(input['type'])) {
-    return protocolError(context, 'event framing is malformed: missing type', line);
-  }
-  if (!CONSUMED_EVENT_TYPES.has(input['type'])) {
+  if (!CONSUMED_EVENT_TYPES.has(framing.data.type)) {
     return { ok: true, value: null };
   }
-  if (typeof input['timestamp'] !== 'number' || !Number.isFinite(input['timestamp'])) {
-    return protocolError(
-      context,
-      'event framing is malformed: missing or malformed timestamp',
-      line,
-    );
+  const event = consumedEventSchema.safeParse(input);
+  if (!event.success) {
+    return protocolError(context, eventReason(event.error), line);
   }
-  if (!isNonEmptyString(input['sessionID'])) {
-    return protocolError(
-      context,
-      'event session identity (sessionID) is missing or malformed',
-      line,
-    );
-  }
-  if (input['type'] !== 'error') {
-    const partError = validatePartIdentity(input['part'], context, line);
-    if (partError !== null) {
-      return partError;
-    }
-  }
-  // Contract: identity and framing were validated above; the raw record is
-  // preserved (including additive and optional fields) under the domain type.
-  return { ok: true, value: input as unknown as OpenCodeRunEvent };
+  return { ok: true, value: event.data };
 }
 
 /**
@@ -133,61 +150,42 @@ export function decodeEvent(
  * (`info.parentID`), and validates every message identity
  * `(info.sessionID, info.id)` and part identity
  * `(sessionID, messageID, id)`. Roles, token, cost, finish, error, and tool
- * fields are preserved raw and left to metric normalization; additive unknown
- * fields are retained.
+ * fields stay unchecked for metric normalization. The result keeps the input
+ * as `record` and the checked, additive-tolerant projection as `view`.
  */
 export function decodeExport(
   input: unknown,
   context: ProtocolContext,
-): DecodeResult<OpenCodeExport> {
-  if (!isRecord(input) || !isRecord(input['info'])) {
-    return protocolError(context, 'export record is not a JSON object with an info record');
+): DecodeResult<DecodedExport> {
+  if (!isRecord(input)) {
+    return protocolError(context, exportReason('(root)'));
   }
-  const info = input['info'];
-  if (!isNonEmptyString(info['id'])) {
-    return protocolError(context, 'export session identity (info.id) is missing or malformed');
-  }
-  const parentID = info['parentID'];
-  if (parentID !== undefined) {
-    if (!isNonEmptyString(parentID)) {
-      return protocolError(context, 'export session identity (info.parentID) is malformed');
-    }
+  // A child session is rejected for what it is, even when its messages are also malformed.
+  const header = exportHeaderSchema.safeParse(input);
+  if (header.success && header.data.info.parentID !== undefined) {
     return protocolError(
       context,
-      `child session export "${info['id']}" rejected: schema version 1 consumes only the root session`,
+      `child session export "${header.data.info.id}" rejected: schema version 1 consumes only the root session`,
     );
   }
-  if (!Array.isArray(input['messages'])) {
-    return protocolError(context, 'export is malformed: messages is not an array');
+  const parsed = exportSchema.safeParse(input);
+  if (!parsed.success) {
+    return protocolError(context, exportReason(firstIssuePath(parsed.error)));
   }
-  for (const message of input['messages']) {
-    if (!isRecord(message) || !isRecord(message['info'])) {
-      return protocolError(context, 'export message is not a JSON object with an info record');
-    }
-    const messageInfo = message['info'];
-    if (!isNonEmptyString(messageInfo['id']) || !isNonEmptyString(messageInfo['sessionID'])) {
-      return protocolError(
-        context,
-        'export message identity (sessionID, id) is missing or malformed',
-      );
-    }
-    if (!Array.isArray(message['parts'])) {
-      return protocolError(
-        context,
-        `export message "${messageInfo['id']}" is malformed: parts is not an array`,
-      );
-    }
-    for (const part of message['parts']) {
-      const partError = validatePartIdentity(part, context);
-      if (partError !== null) {
-        return partError;
-      }
-    }
-  }
-  // Contract: identities were validated above; the raw export is preserved
-  // (roles, tokens, cost, tool names, and additive fields untouched) under the
-  // domain type. Metric normalization owns optional-field unavailability.
-  return { ok: true, value: input as unknown as OpenCodeExport };
+  return { ok: true, value: { record: input, view: parsed.data } };
+}
+
+function firstIssuePath(error: z.ZodError): string {
+  const firstIssue = error.issues[0];
+  return firstIssue === undefined ? '(root)' : describePath(firstIssue.path);
+}
+
+function eventReason(error: z.ZodError): string {
+  return `event record does not match the consumed event layout at ${firstIssuePath(error)}`;
+}
+
+function exportReason(path: string): string {
+  return `export record does not match the consumed export layout at ${path}`;
 }
 
 /**
@@ -404,37 +402,12 @@ export function listMalformedOptionalMetricFields(sessionExport: OpenCodeExport)
       }
     }
     for (const part of message.parts) {
-      if (part.type === 'tool' && typeof (part as Record<string, unknown>)['tool'] !== 'string') {
+      if (part.type === 'tool' && typeof part.tool !== 'string') {
         findings.push(`tool name is absent or malformed on tool part "${part.id}"`);
       }
     }
   }
   return findings;
-}
-
-function validatePartIdentity(
-  part: unknown,
-  context: ProtocolContext,
-  line?: number,
-): { ok: false; error: ProtocolErrorShape } | null {
-  if (!isRecord(part)) {
-    return protocolError(context, 'part record is missing or not a JSON object', line);
-  }
-  if (
-    !isNonEmptyString(part['id']) ||
-    !isNonEmptyString(part['sessionID']) ||
-    !isNonEmptyString(part['messageID'])
-  ) {
-    return protocolError(
-      context,
-      'part identity (sessionID, messageID, id) is missing or malformed',
-      line,
-    );
-  }
-  if (!isNonEmptyString(part['type'])) {
-    return protocolError(context, 'part record is malformed: missing type', line);
-  }
-  return null;
 }
 
 /** A decode-layer protocol failure, translated into `AgentProtocolError` by the wrapping `AgentAdapter`. */
@@ -461,8 +434,4 @@ function protocolError(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0;
 }
