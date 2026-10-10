@@ -1367,24 +1367,28 @@ describe('runBenchmark grading in the case flow', () => {
     it.each([
       {
         name: 'a grading without calls',
+        path: 'calls',
         mutate: (grading: Record<string, unknown>) => {
           delete grading['calls'];
         },
       },
       {
         name: 'a no-reply call without a cause',
+        path: 'call.cause',
         mutate: (grading: Record<string, unknown>) => {
           grading['call'] = { status: 'no-reply', reason: 'no cause' };
         },
       },
       {
         name: 'a no-reply call with an unknown cause',
+        path: 'call.cause',
         mutate: (grading: Record<string, unknown>) => {
           grading['call'] = { status: 'no-reply', cause: 'sleepy', reason: 'unknown cause' };
         },
       },
       {
         name: 'a call outcome without a cause',
+        path: 'calls.0.outcome.cause',
         mutate: (grading: Record<string, unknown>) => {
           const [first] = grading['calls'] as Record<string, unknown>[];
           grading['calls'] = [{ ...first, outcome: { status: 'no-reply', reason: 'no cause' } }];
@@ -1392,29 +1396,33 @@ describe('runBenchmark grading in the case flow', () => {
       },
       {
         name: 'a call whose events are not a list',
+        path: 'calls.0.events',
         mutate: (grading: Record<string, unknown>) => {
           const [first] = grading['calls'] as Record<string, unknown>[];
           grading['calls'] = [{ ...first, events: 'not a list' }];
         },
       },
-    ])('refuses $name as malformed when it reads the saved grading', async ({ mutate }) => {
-      const { run, dependencies, config } = await runWithRetries();
-      const runId = run.manifest.runId;
-      const path = gradingPath(config, runId);
-      const saved = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
-      mutate(saved);
-      await writeFile(path, JSON.stringify(saved));
+    ])(
+      'refuses $name as malformed when it reads the saved grading',
+      async ({ mutate, path: defectPath }) => {
+        const { run, dependencies, config } = await runWithRetries();
+        const runId = run.manifest.runId;
+        const path = gradingPath(config, runId);
+        const saved = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+        mutate(saved);
+        await writeFile(path, JSON.stringify(saved));
 
-      const result = await dependencies.artifacts.readGrading(runId, FIRST_CASE);
+        const result = await dependencies.artifacts.readGrading(runId, FIRST_CASE);
 
-      expect(result).toEqual({
-        ok: false,
-        error: {
-          kind: 'ArtifactError',
-          operation: 'read-grading',
-          reason: `grading artifact for "${FIRST_CASE}" in run "${runId}" has a malformed shape`,
-        },
-      });
-    });
+        expect(result).toEqual({
+          ok: false,
+          error: {
+            kind: 'ArtifactError',
+            operation: 'read-grading',
+            reason: `grading artifact for "${FIRST_CASE}" in run "${runId}" has a malformed shape at ${defectPath}`,
+          },
+        });
+      },
+    );
   });
 });
