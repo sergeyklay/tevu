@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Errors about unexpected `gh` output now name the field that does not match.
 - Errors about malformed OpenCode run output now name the field that does not match.
 
 ### Fixed

@@ -346,30 +346,71 @@ describe('createGitHubIssuesAdapter gh exit codes', () => {
       expectedDetail: 'output is not a JSON object',
     },
     {
+      description: 'a JSON null',
+      stdout: buildCapture('null'),
+      expectedDetail: 'output is not a JSON object',
+    },
+    {
+      description: 'a JSON number',
+      stdout: buildCapture('42'),
+      expectedDetail: 'output is not a JSON object',
+    },
+    {
+      description: 'a number that is not a positive integer',
+      stdout: buildCapture(
+        JSON.stringify({
+          number: 0,
+          title: 't',
+          body: 'b',
+          url: 'https://github.com/o/r/issues/1',
+        }),
+      ),
+      expectedDetail: 'field "number" is missing or invalid',
+    },
+    {
+      description: 'a title that is not a string',
+      stdout: buildCapture(
+        JSON.stringify({ number: 1, title: 5, body: 'b', url: 'https://github.com/o/r/issues/1' }),
+      ),
+      expectedDetail: 'field "title" is missing or invalid',
+    },
+    {
+      description: 'a number that holds a secret-looking string',
+      stdout: buildCapture(
+        JSON.stringify({
+          number: 'synthetic-acme-secret-value',
+          title: 't',
+          body: 'b',
+          url: 'https://github.com/o/r/issues/1',
+        }),
+      ),
+      expectedDetail: 'field "number" is missing or invalid',
+    },
+    {
       description: 'a missing number field',
       stdout: buildCapture(
         JSON.stringify({ title: 't', body: 'b', url: 'https://github.com/o/r/issues/1' }),
       ),
-      expectedDetail: 'field "number" is missing or not a positive integer',
+      expectedDetail: 'field "number" is missing or invalid',
     },
     {
       description: 'a missing title field',
       stdout: buildCapture(
         JSON.stringify({ number: 1, body: 'b', url: 'https://github.com/o/r/issues/1' }),
       ),
-      expectedDetail: 'field "title" is missing or not a string',
+      expectedDetail: 'field "title" is missing or invalid',
     },
     {
       description: 'a missing body field',
       stdout: buildCapture(
         JSON.stringify({ number: 1, title: 't', url: 'https://github.com/o/r/issues/1' }),
       ),
-      expectedDetail: 'field "body" is missing or not a string',
+      expectedDetail: 'field "body" is missing or invalid',
     },
     {
       description: 'a missing url field',
       stdout: buildCapture(JSON.stringify({ number: 1, title: 't', body: 'b' })),
-      expectedDetail: 'field "url" is missing or not a string',
+      expectedDetail: 'field "url" is missing or invalid',
     },
     {
       description: 'a url on the wrong host',
@@ -404,6 +445,7 @@ describe('createGitHubIssuesAdapter gh exit codes', () => {
       const error = expectIssueImportError(await adapter.readIssue('octo/repo#1'));
 
       expect(error.reason).toBe(`unexpected response from gh: ${expectedDetail}`);
+      expect(error.reason).not.toContain('synthetic-acme-secret-value');
     },
   );
 
@@ -806,6 +848,21 @@ describe('createGitHubPullRequestReader decoding', () => {
     expect(snapshot.mergeability).toBe('unknown');
   });
 
+  it.each([
+    { description: 'a number', mergeable: 5 },
+    { description: 'null', mergeable: null },
+    { description: 'an object', mergeable: { state: 'MERGEABLE' } },
+  ])('reports unknown mergeability when mergeable holds $description', async ({ mergeable }) => {
+    const runGh = fakeRun(
+      buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage({ mergeable })]) }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const snapshot = expectPullRequestOk(await reader.readPullRequest('octo/repo#42'));
+
+    expect(snapshot.mergeability).toBe('unknown');
+  });
+
   it('fails with E-NO-COMMITS when totalCount is 0', async () => {
     const runGh = fakeRun(
       buildLaunchedResult({
@@ -891,13 +948,40 @@ describe('createGitHubPullRequestReader decoding', () => {
   });
 
   it.each([
-    { description: 'number mismatch', overrides: { number: 43 } },
-    { description: 'an invalid state', overrides: { state: 'DRAFT' } },
-    { description: 'an invalid headRefOid', overrides: { headRefOid: 'not-a-hash' } },
-    { description: 'an empty baseRefName', overrides: { baseRefName: '' } },
-    { description: 'an invalid baseRef shape', overrides: { baseRef: { target: {} } } },
-    { description: 'an invalid mergeCommit shape', overrides: { mergeCommit: { oid: 'nope' } } },
-  ])('fails field validation for $description', async ({ overrides }) => {
+    { description: 'number mismatch', overrides: { number: 43 }, field: 'number' },
+    { description: 'an invalid state', overrides: { state: 'DRAFT' }, field: 'state' },
+    {
+      description: 'an invalid headRefOid',
+      overrides: { headRefOid: 'not-a-hash' },
+      field: 'headRefOid',
+    },
+    { description: 'an empty baseRefName', overrides: { baseRefName: '' }, field: 'baseRefName' },
+    {
+      description: 'an invalid baseRef shape',
+      overrides: { baseRef: { target: {} } },
+      field: 'baseRef.target.oid',
+    },
+    {
+      description: 'an invalid mergeCommit shape',
+      overrides: { mergeCommit: { oid: 'nope' } },
+      field: 'mergeCommit.oid',
+    },
+    {
+      description: 'a missing number',
+      overrides: { number: 'synthetic-acme-secret-value' as unknown as number },
+      field: 'number',
+    },
+    {
+      description: 'a non-numeric totalCount',
+      overrides: { totalCount: 'x' as never },
+      field: 'commits.totalCount',
+    },
+    {
+      description: 'a commits list that is not an array',
+      overrides: { nodes: 'x' as never },
+      field: 'commits.nodes',
+    },
+  ])('fails field validation for $description', async ({ overrides, field }) => {
     const runGh = fakeRun(
       buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage(overrides)]) }),
     );
@@ -905,7 +989,10 @@ describe('createGitHubPullRequestReader decoding', () => {
 
     const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
 
-    expect(error.reason).toMatch(/^unexpected response from gh: /);
+    expect(error.reason).toBe(
+      `unexpected response from gh: field "${field}" is missing or invalid`,
+    );
+    expect(error.reason).not.toContain('synthetic-acme-secret-value');
   });
 
   it('rejects a decoded url naming an issue as an issue reference, not a field-validation failure', async () => {
@@ -936,7 +1023,137 @@ describe('createGitHubPullRequestReader decoding', () => {
     const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
 
     expect(error.reason).toBe(
+      'unexpected response from gh: field "commits.nodes.0.commit.parents" is missing or invalid',
+    );
+  });
+
+  it.each([
+    {
+      description: 'a parents.totalCount that differs from the parents listed',
+      node: {
+        commit: { oid: HEAD_HASH, parents: { totalCount: 2, nodes: [{ oid: PARENT_HASH }] } },
+      },
+      field: 'commits.nodes.0.commit.parents.nodes',
+    },
+    {
+      description: 'a parent without a valid hash',
+      node: { commit: { oid: HEAD_HASH, parents: { totalCount: 1, nodes: [{ oid: 'x' }] } } },
+      field: 'commits.nodes.0.commit.parents.nodes.0.oid',
+    },
+    {
+      description: 'a commit without a valid hash',
+      node: { commit: { oid: 'x', parents: { totalCount: 0, nodes: [] } } },
+      field: 'commits.nodes.0.commit.oid',
+    },
+  ])('names the field of a commit node with $description', async ({ node, field }) => {
+    const runGh = fakeRun(
+      buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage({ nodes: [node] })]) }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe(
+      `unexpected response from gh: field "${field}" is missing or invalid`,
+    );
+  });
+
+  it.each([
+    { description: 'a number', headRefOid: 7 },
+    { description: 'an object', headRefOid: { oid: HEAD_HASH } },
+  ])(
+    'treats a later page whose headRefOid holds $description as a changed pull request',
+    async ({ headRefOid }) => {
+      const runGh = fakeRun(
+        buildLaunchedResult({
+          stdout: pagesStdout([
+            buildPullRequestPage({
+              totalCount: 2,
+              nodes: [buildCommitNode(HEAD_HASH, [PARENT_HASH])],
+            }),
+            buildPullRequestPage({
+              totalCount: 2,
+              nodes: [buildCommitNode(PARENT_HASH, [])],
+              headRefOid,
+            }),
+          ]),
+        }),
+      );
+      const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+      const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+      expect(error.reason).toBe(
+        'pull request octo/repo#42 changed while tevu read it; enter it again',
+      );
+    },
+  );
+
+  it('keeps a secret out of the reason when a later page holds it where a count belongs', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({
+        stdout: pagesStdout([
+          buildPullRequestPage({ totalCount: 2 }),
+          buildPullRequestPage({ totalCount: 'synthetic-acme-secret-value' as never }),
+        ]),
+      }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe(
+      'unexpected response from gh: field "commits.totalCount" is missing or invalid',
+    );
+  });
+
+  it('reports the page-relative path of a defective later page', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({
+        stdout: pagesStdout([
+          buildPullRequestPage({ totalCount: 2 }),
+          buildPullRequestPage({ totalCount: 2, nodes: 'x' as never }),
+        ]),
+      }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe(
       'unexpected response from gh: field "commits.nodes" is missing or invalid',
+    );
+  });
+
+  it.each([
+    { description: 'a page that is not an object', page: 'x' },
+    { description: 'a page without data', page: {} },
+    { description: 'a page without a repository', page: { data: {} } },
+    {
+      description: 'a page whose pull request is null',
+      page: { data: { repository: { pullRequest: null } } },
+    },
+  ])('names the pull request for $description', async ({ page }) => {
+    const runGh = fakeRun(buildLaunchedResult({ stdout: pagesStdout([page]) }));
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe(
+      'unexpected response from gh: field "data.repository.pullRequest" is missing or invalid',
+    );
+  });
+
+  it('names the pull request when a later page is not an object', async () => {
+    const runGh = fakeRun(
+      buildLaunchedResult({ stdout: pagesStdout([buildPullRequestPage(), null]) }),
+    );
+    const reader = createGitHubPullRequestReader(buildDependencies({ runGh }));
+
+    const error = expectReferenceResolutionError(await reader.readPullRequest('octo/repo#42'));
+
+    expect(error.reason).toBe(
+      'unexpected response from gh: field "data.repository.pullRequest" is missing or invalid',
     );
   });
 
