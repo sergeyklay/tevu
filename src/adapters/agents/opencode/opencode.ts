@@ -16,7 +16,12 @@ import {
 } from './protocol';
 import { inspectOpenCodeProvider, readOpenCodeProviders } from './providers';
 
-import type { OpenCodeExport, ProtocolContext, ProtocolErrorShape } from './protocol';
+import type {
+  DecodedExport,
+  OpenCodeExport,
+  ProtocolContext,
+  ProtocolErrorShape,
+} from './protocol';
 import type {
   AgentAdapter,
   AgentCapability,
@@ -244,7 +249,8 @@ function createRunOutputConsumer(
     if (deliveryStopped) {
       return;
     }
-    const redacted = secrets.redactValue(decoded.value);
+    // Evidence is the parsed record, never the decoded view, so additive fields and key order survive.
+    const redacted = secrets.redactValue(parsed);
     if (!redacted.ok) {
       deliveryStopped = true;
       protocolFailure ??= protocolFailureShape(context, 'record redaction failed; record withheld');
@@ -417,7 +423,7 @@ async function runCase(
 type ExportProcessOutcome =
   | { settled: 'process'; outcome: ManagedProcessResult }
   | { settled: 'protocol-error'; error: ProtocolErrorShape }
-  | { settled: 'ok'; value: OpenCodeExport };
+  | { settled: 'ok'; value: DecodedExport };
 
 /**
  * Runs one `export <sessionID>` process and, on a clean zero-exit and
@@ -479,7 +485,7 @@ async function runExportProcess(
   if (!decoded.ok) {
     return { settled: 'protocol-error', error: decoded.error };
   }
-  if (decoded.value.info.id !== sessionId) {
+  if (decoded.value.view.info.id !== sessionId) {
     return {
       settled: 'protocol-error',
       error: protocolFailureShape(
@@ -488,16 +494,17 @@ async function runExportProcess(
       ),
     };
   }
-  const redacted = dependencies.secrets.redactValue(decoded.value);
-  if (!redacted.ok) {
+  const redacted = dependencies.secrets.redactValue(decoded.value.record);
+  const redactedExport = redacted.ok ? decodeExport(redacted.value, context) : undefined;
+  // Redaction can replace a consumed field, so the redacted record is decoded
+  // again; an export that no longer decodes is withheld, never returned raw.
+  if (redactedExport === undefined || !redactedExport.ok) {
     return {
       settled: 'protocol-error',
       error: protocolFailureShape(context, 'record redaction failed; record withheld'),
     };
   }
-  // `redactValue` redacts every string of the decoded export in place, so the
-  // result still satisfies the decoded export's shape.
-  return { settled: 'ok', value: redacted.value as OpenCodeExport };
+  return { settled: 'ok', value: redactedExport.value };
 }
 
 function undecodableExportReason(stdout: RedactedCapture): string {
@@ -523,7 +530,7 @@ async function exportRootSession(
     context,
   );
   if (outcome.settled === 'ok') {
-    return { ok: true, value: outcome.value };
+    return { ok: true, value: outcome.value.record };
   }
   if (outcome.settled === 'protocol-error') {
     return { ok: false, error: toAgentProtocolError(settings.agent, outcome.error) };
@@ -659,14 +666,12 @@ function summary(record: unknown): string | undefined {
   return firstLine.length > 0 ? firstLine : undefined;
 }
 
-/** One root-session export message narrowed to its assistant-role info. */
-type AssistantMessage = OpenCodeExport['messages'][number] & {
-  info: Extract<OpenCodeExport['messages'][number]['info'], { role: 'assistant' }>;
-};
+type ExportMessage = OpenCodeExport['messages'][number];
 
-function isAssistantMessage(
-  message: OpenCodeExport['messages'][number],
-): message is AssistantMessage {
+/** One root-session export message narrowed to its assistant-role info. */
+type AssistantMessage = ExportMessage & { info: { role: 'assistant' } };
+
+function isAssistantMessage(message: ExportMessage): message is AssistantMessage {
   return message.info.role === 'assistant';
 }
 
@@ -675,9 +680,8 @@ function toolCallReason(sessionExport: OpenCodeExport): string {
   const names: string[] = [];
   for (const message of sessionExport.messages.filter(isAssistantMessage)) {
     for (const part of message.parts) {
-      const { tool } = part as Partial<{ tool: unknown }>;
-      if (part.type === 'tool' && isNonEmptyString(tool) && !names.includes(tool)) {
-        names.push(tool);
+      if (part.type === 'tool' && isNonEmptyString(part.tool) && !names.includes(part.tool)) {
+        names.push(part.tool);
       }
     }
   }
@@ -740,18 +744,17 @@ function replyText(
     if (part.type !== 'text') {
       continue;
     }
-    const additive = part as Partial<{ synthetic: boolean; ignored: boolean; text: unknown }>;
-    if (additive.synthetic === true || additive.ignored === true) {
+    if (part.synthetic === true || part.ignored === true) {
       continue;
     }
-    if (typeof additive.text !== 'string') {
+    if (typeof part.text !== 'string') {
       return agentProtocolError(
         agent,
         context,
         `text part "${part.id}" of the final assistant message carries no text string`,
       );
     }
-    texts.push(additive.text);
+    texts.push(part.text);
   }
   const joined = texts.join('\n');
   try {
@@ -936,18 +939,14 @@ async function runModelCall(
     );
   }
 
-  const metrics = normalizeFromExport(exportOutcome.value, copiedProviders);
-  evidence.session = { export: exportOutcome.value, metrics };
+  const { record, view } = exportOutcome.value;
+  const metrics = normalizeFromExport(view, copiedProviders);
+  evidence.session = { export: record, metrics };
   reportEvidence();
-  if (hasToolPart(exportOutcome.value)) {
-    return modelCallStopped(
-      input.role,
-      settings.agent,
-      'tool-call',
-      toolCallReason(exportOutcome.value),
-    );
+  if (hasToolPart(view)) {
+    return modelCallStopped(input.role, settings.agent, 'tool-call', toolCallReason(view));
   }
-  const replied = replyText(exportOutcome.value, context, settings.agent, dependencies.secrets);
+  const replied = replyText(view, context, settings.agent, dependencies.secrets);
   if (!replied.ok) {
     return replied;
   }

@@ -7,6 +7,9 @@
  * Entry points: {@link createGitHubIssuesAdapter}, {@link createGitHubPullRequestReader}.
  */
 
+import { z } from 'zod';
+
+import { describePath } from '@/domain/describe-path';
 import { authenticationReason, ghEnvironment, stderrExcerpt } from '@/domain/github-cli';
 import { parseGitHubReference } from '@/domain/github-reference';
 
@@ -18,7 +21,6 @@ import type {
   PullRequestMergeability,
   PullRequestReader,
   PullRequestSnapshot,
-  PullRequestState,
   TevuResult,
 } from '@/domain/types';
 
@@ -79,6 +81,63 @@ const PULL_REQUEST_DIFF_READ_FAILURE_REASON =
 
 /** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
 const COMMIT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+const issueResponseSchema = z.looseObject({
+  number: z.number().int().min(1),
+  title: z.string(),
+  body: z.string(),
+  url: z.string(),
+});
+
+const commitHashSchema = z.string().regex(COMMIT_HASH_PATTERN);
+
+const commitsSchema = z.looseObject({
+  totalCount: z.number().int().min(0),
+  nodes: z.array(
+    z.looseObject({
+      commit: z.looseObject({
+        oid: commitHashSchema,
+        parents: z
+          .looseObject({
+            totalCount: z.number(),
+            nodes: z.array(z.looseObject({ oid: commitHashSchema })),
+          })
+          .refine((parents) => parents.totalCount === parents.nodes.length, { path: ['nodes'] }),
+      }),
+    }),
+  ),
+});
+
+/** The pull request of one page; lenient fields stay unchecked and every other unknown field is tolerated. */
+function pageSchemaOf<T extends z.ZodType>(pullRequest: T) {
+  return z.looseObject({
+    data: z.looseObject({ repository: z.looseObject({ pullRequest }) }),
+  });
+}
+
+const firstPageSchema = pageSchemaOf(
+  z.looseObject({
+    number: z.number().int().min(1),
+    url: z.string(),
+    state: z.enum(['OPEN', 'CLOSED', 'MERGED']),
+    headRefOid: commitHashSchema,
+    baseRefName: z.string().min(1),
+    baseRef: z.looseObject({ target: z.looseObject({ oid: commitHashSchema }) }).nullable(),
+    mergeCommit: z.looseObject({ oid: commitHashSchema }).nullable(),
+    mergeable: z.unknown().optional(),
+    commits: commitsSchema,
+  }),
+);
+
+const laterPageSchema = pageSchemaOf(
+  z.looseObject({ headRefOid: z.unknown().optional(), commits: commitsSchema }),
+);
+
+const pagesSchema = z.tuple([firstPageSchema], laterPageSchema);
+
+const PULL_REQUEST_STATES = { OPEN: 'open', CLOSED: 'closed', MERGED: 'merged' } as const;
+
+const PAGE_PULL_REQUEST_PATH: readonly PropertyKey[] = ['data', 'repository', 'pullRequest'];
 
 /** Selection set the pull-request reader depends on; every page repeats the full pull request object. */
 const PULL_REQUEST_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
@@ -357,41 +416,6 @@ export function createGitHubPullRequestReader(
   };
 }
 
-/** Sentinel a private decoder returns in place of throwing when a field breaks its rule. */
-const INVALID_PULL_REQUEST_FIELD = Symbol('invalid-pull-request-field');
-
-function isCommitHash(value: unknown): value is string {
-  return typeof value === 'string' && COMMIT_HASH_PATTERN.test(value);
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-/** Reads `data.repository.pullRequest` from one decoded page, or `null` when the shape is wrong. */
-function extractPullRequestObject(page: unknown): Record<string, unknown> | null {
-  const pageRecord = asRecord(page);
-  const data = pageRecord === null ? null : asRecord(pageRecord['data']);
-  const repository = data === null ? null : asRecord(data['repository']);
-  const pullRequest = repository === null ? null : asRecord(repository['pullRequest']);
-  return pullRequest;
-}
-
-function decodePullRequestState(value: unknown): PullRequestState | null {
-  if (value === 'OPEN') {
-    return 'open';
-  }
-  if (value === 'CLOSED') {
-    return 'closed';
-  }
-  if (value === 'MERGED') {
-    return 'merged';
-  }
-  return null;
-}
-
 function decodeMergeability(value: unknown): PullRequestMergeability {
   if (value === 'MERGEABLE') {
     return 'mergeable';
@@ -402,102 +426,31 @@ function decodeMergeability(value: unknown): PullRequestMergeability {
   return 'unknown';
 }
 
-/** Decodes `baseRef.target.oid`; `null` when GitHub reports no target (the branch was deleted). */
-function decodeTargetTip(value: unknown): string | null | typeof INVALID_PULL_REQUEST_FIELD {
-  if (value === null) {
-    return null;
-  }
-  const record = asRecord(value);
-  const target = record === null ? null : asRecord(record['target']);
-  const oid = target === null ? undefined : target['oid'];
-  return isCommitHash(oid) ? oid : INVALID_PULL_REQUEST_FIELD;
-}
-
-/** Decodes `mergeCommit.oid`; kept only when `state` is `merged`, per the field contract. */
-function decodeMergeCommitOid(
-  value: unknown,
-  state: PullRequestState,
-): string | null | typeof INVALID_PULL_REQUEST_FIELD {
-  if (value === null) {
-    return null;
-  }
-  const record = asRecord(value);
-  const oid = record === null ? undefined : record['oid'];
-  if (!isCommitHash(oid)) {
-    return INVALID_PULL_REQUEST_FIELD;
-  }
-  return state === 'merged' ? oid : null;
-}
-
-/** Reads one page's `commits.totalCount` and raw `nodes` array without decoding the nodes yet. */
-function readCommitsConnection(
-  pullRequest: Record<string, unknown>,
-): { totalCount: number; nodes: unknown[] } | typeof INVALID_PULL_REQUEST_FIELD {
-  const commits = asRecord(pullRequest['commits']);
-  if (commits === null) {
-    return INVALID_PULL_REQUEST_FIELD;
-  }
-  const totalCount = commits['totalCount'];
-  const nodes = commits['nodes'];
-  if (
-    typeof totalCount !== 'number' ||
-    !Number.isSafeInteger(totalCount) ||
-    totalCount < 0 ||
-    !Array.isArray(nodes)
-  ) {
-    return INVALID_PULL_REQUEST_FIELD;
-  }
-  return { totalCount, nodes };
-}
-
-function decodeCommitNode(node: unknown): PullRequestCommit | typeof INVALID_PULL_REQUEST_FIELD {
-  const nodeRecord = asRecord(node);
-  const commit = nodeRecord === null ? null : asRecord(nodeRecord['commit']);
-  if (commit === null) {
-    return INVALID_PULL_REQUEST_FIELD;
-  }
-  const oid = commit['oid'];
-  if (!isCommitHash(oid)) {
-    return INVALID_PULL_REQUEST_FIELD;
-  }
-  const parents = asRecord(commit['parents']);
-  if (parents === null) {
-    return INVALID_PULL_REQUEST_FIELD;
-  }
-  const totalCount = parents['totalCount'];
-  const parentNodes = parents['nodes'];
-  if (
-    typeof totalCount !== 'number' ||
-    !Array.isArray(parentNodes) ||
-    parentNodes.length !== totalCount
-  ) {
-    return INVALID_PULL_REQUEST_FIELD;
-  }
-  const parentHashes: string[] = [];
-  for (const parentNode of parentNodes) {
-    const parentRecord = asRecord(parentNode);
-    const parentOid = parentRecord === null ? undefined : parentRecord['oid'];
-    if (!isCommitHash(parentOid)) {
-      return INVALID_PULL_REQUEST_FIELD;
-    }
-    parentHashes.push(parentOid);
-  }
-  return { hash: oid, parents: parentHashes };
-}
-
 function pullRequestFieldError(name: string): TevuResult<never, 'ReferenceResolutionError'> {
   return referenceFailure(`unexpected response from gh: field "${name}" is missing or invalid`);
 }
 
 /**
- * Decodes and validates gh's successful `api graphql --paginate --slurp`
- * output against the field contract of the GraphQL selection set, checking
- * E-NO-COMMITS, then E-TRUNCATED, then that the head commit is listed.
+ * Names the field of a page defect for the operator: the path inside the
+ * page's pull request, or the pull request itself when the page does not hold
+ * one.
  */
-function decodePullRequestResponse(
-  parsed: ParsedGitHubReference,
+function pullRequestField(path: readonly PropertyKey[]): string {
+  const rest = path.slice(1);
+  const isWithinPullRequestPath =
+    rest.length <= PAGE_PULL_REQUEST_PATH.length &&
+    rest.every((segment, index) => segment === PAGE_PULL_REQUEST_PATH[index]);
+  return isWithinPullRequestPath
+    ? PAGE_PULL_REQUEST_PATH.join('.')
+    : describePath(rest.slice(PAGE_PULL_REQUEST_PATH.length));
+}
+
+type PullRequestPages = z.output<typeof pagesSchema>;
+
+/** Reads gh's `api graphql --paginate --slurp` output as the pages of one pull request. */
+function readPullRequestPages(
   stdout: GhCapture,
-): TevuResult<PullRequestSnapshot, 'ReferenceResolutionError'> {
+): TevuResult<PullRequestPages, 'ReferenceResolutionError'> {
   if (stdout.truncated) {
     return referenceFailure(
       `unexpected response from gh: output exceeds ${MAX_CAPTURE_BYTES} bytes`,
@@ -514,37 +467,64 @@ function decodePullRequestResponse(
       'unexpected response from gh: output is not a non-empty JSON array of pages',
     );
   }
-
-  const pullRequestObjects: Record<string, unknown>[] = [];
-  for (const page of value) {
-    const pullRequest = extractPullRequestObject(page);
-    if (pullRequest === null) {
-      return pullRequestFieldError('data.repository.pullRequest');
-    }
-    pullRequestObjects.push(pullRequest);
-  }
-  const first = pullRequestObjects[0];
-  if (first === undefined) {
-    return referenceFailure(
-      'unexpected response from gh: output is not a non-empty JSON array of pages',
+  const pages = pagesSchema.safeParse(value);
+  if (!pages.success) {
+    const firstIssue = pages.error.issues[0];
+    return pullRequestFieldError(
+      firstIssue === undefined ? '(root)' : pullRequestField(firstIssue.path),
     );
   }
+  return { ok: true, value: pages.data };
+}
 
-  const number = first['number'];
-  if (
-    typeof number !== 'number' ||
-    !Number.isSafeInteger(number) ||
-    number <= 0 ||
-    number !== parsed.number
-  ) {
+/** Joins every page's commits and refuses a pull request that changed between pages or lists fewer commits than it has. */
+function collectCommits(
+  key: string,
+  pages: PullRequestPages,
+): TevuResult<PullRequestCommit[], 'ReferenceResolutionError'> {
+  const [firstPage, ...laterPages] = pages;
+  const first = firstPage.data.repository.pullRequest;
+  const connections = [first.commits];
+  for (const page of laterPages) {
+    const { headRefOid, commits } = page.data.repository.pullRequest;
+    if (commits.totalCount !== first.commits.totalCount || headRefOid !== first.headRefOid) {
+      return referenceFailure(`pull request ${key} changed while tevu read it; enter it again`);
+    }
+    connections.push(commits);
+  }
+  const commits = connections.flatMap((connection) =>
+    connection.nodes.map(({ commit }) => ({
+      hash: commit.oid,
+      parents: commit.parents.nodes.map((parent) => parent.oid),
+    })),
+  );
+  if (commits.length !== first.commits.totalCount) {
+    return referenceFailure(
+      `GitHub returned ${commits.length} of the ${first.commits.totalCount} commits of pull request ${key} and lists at most 250; tevu records a pull request only with its complete commit list`,
+    );
+  }
+  return { ok: true, value: commits };
+}
+
+/**
+ * Decodes and validates gh's successful `api graphql --paginate --slurp`
+ * output against the field contract of the GraphQL selection set, checking
+ * E-NO-COMMITS, then E-TRUNCATED, then that the head commit is listed.
+ */
+function decodePullRequestResponse(
+  parsed: ParsedGitHubReference,
+  stdout: GhCapture,
+): TevuResult<PullRequestSnapshot, 'ReferenceResolutionError'> {
+  const pages = readPullRequestPages(stdout);
+  if (!pages.ok) {
+    return pages;
+  }
+  const first = pages.value[0].data.repository.pullRequest;
+  if (first.number !== parsed.number) {
     return pullRequestFieldError('number');
   }
-  const url = first['url'];
-  if (typeof url !== 'string') {
-    return pullRequestFieldError('url');
-  }
-  const target = parseIssueUrlOnHost(url, parsed.host);
-  if (target === null || target.number !== number) {
+  const target = parseIssueUrlOnHost(first.url, parsed.host);
+  if (target === null || target.number !== first.number) {
     return referenceFailure(
       `unexpected response from gh: field "url" is not a pull request URL on ${parsed.host}`,
     );
@@ -553,65 +533,15 @@ function decodePullRequestResponse(
     return referenceFailure(ISSUE_REFERENCE_REASON);
   }
 
-  const state = decodePullRequestState(first['state']);
-  if (state === null) {
-    return pullRequestFieldError('state');
-  }
-  const headRefOid = first['headRefOid'];
-  if (!isCommitHash(headRefOid)) {
-    return pullRequestFieldError('headRefOid');
-  }
-  const baseRefName = first['baseRefName'];
-  if (typeof baseRefName !== 'string' || baseRefName.length === 0) {
-    return pullRequestFieldError('baseRefName');
-  }
-  const targetTip = decodeTargetTip(first['baseRef']);
-  if (targetTip === INVALID_PULL_REQUEST_FIELD) {
-    return pullRequestFieldError('baseRef');
-  }
-  const mergeCommitOid = decodeMergeCommitOid(first['mergeCommit'], state);
-  if (mergeCommitOid === INVALID_PULL_REQUEST_FIELD) {
-    return pullRequestFieldError('mergeCommit');
-  }
-  const mergeability = decodeMergeability(first['mergeable']);
-  const firstConnection = readCommitsConnection(first);
-  if (firstConnection === INVALID_PULL_REQUEST_FIELD) {
-    return pullRequestFieldError('commits.totalCount');
-  }
-  const { totalCount } = firstConnection;
-
-  const key = `${target.owner}/${target.repo}#${number}`;
-  if (totalCount === 0) {
+  const key = `${target.owner}/${target.repo}#${first.number}`;
+  if (first.commits.totalCount === 0) {
     return referenceFailure(`pull request ${key} has no commits`);
   }
-
-  const commits: PullRequestCommit[] = [];
-  for (const [pageIndex, pullRequest] of pullRequestObjects.entries()) {
-    const connection = pageIndex === 0 ? firstConnection : readCommitsConnection(pullRequest);
-    if (connection === INVALID_PULL_REQUEST_FIELD) {
-      return pullRequestFieldError('commits.totalCount');
-    }
-    if (
-      pageIndex > 0 &&
-      (connection.totalCount !== totalCount || pullRequest['headRefOid'] !== headRefOid)
-    ) {
-      return referenceFailure(`pull request ${key} changed while tevu read it; enter it again`);
-    }
-    for (const node of connection.nodes) {
-      const commit = decodeCommitNode(node);
-      if (commit === INVALID_PULL_REQUEST_FIELD) {
-        return pullRequestFieldError('commits.nodes');
-      }
-      commits.push(commit);
-    }
+  const commits = collectCommits(key, pages.value);
+  if (!commits.ok) {
+    return commits;
   }
-
-  if (commits.length !== totalCount) {
-    return referenceFailure(
-      `GitHub returned ${commits.length} of the ${totalCount} commits of pull request ${key} and lists at most 250; tevu records a pull request only with its complete commit list`,
-    );
-  }
-  if (!commits.some((commit) => commit.hash === headRefOid)) {
+  if (!commits.value.some((commit) => commit.hash === first.headRefOid)) {
     return pullRequestFieldError('headRefOid');
   }
 
@@ -619,14 +549,15 @@ function decodePullRequestResponse(
     ok: true,
     value: {
       key,
-      url,
-      state,
-      targetBranch: baseRefName,
-      targetTip,
-      headCommit: headRefOid,
-      mergeCommit: mergeCommitOid,
-      mergeability,
-      commits,
+      url: first.url,
+      state: PULL_REQUEST_STATES[first.state],
+      targetBranch: first.baseRefName,
+      targetTip: first.baseRef === null ? null : first.baseRef.target.oid,
+      headCommit: first.headRefOid,
+      mergeCommit:
+        first.state === 'MERGED' && first.mergeCommit !== null ? first.mergeCommit.oid : null,
+      mergeability: decodeMergeability(first.mergeable),
+      commits: commits.value,
     },
   };
 }
@@ -665,27 +596,14 @@ function decodeResponse(
   } catch {
     return decodeError(reference, 'output is not valid JSON');
   }
-  if (value === null || Array.isArray(value) || typeof value !== 'object') {
-    return decodeError(reference, 'output is not a JSON object');
+  const issue = issueResponseSchema.safeParse(value);
+  if (!issue.success) {
+    const firstIssue = issue.error.issues[0];
+    return firstIssue === undefined || firstIssue.path.length === 0
+      ? decodeError(reference, 'output is not a JSON object')
+      : decodeError(reference, `field "${describePath(firstIssue.path)}" is missing or invalid`);
   }
-  const record = value as Record<string, unknown>;
-
-  const number = record['number'];
-  if (typeof number !== 'number' || !Number.isSafeInteger(number) || number < 1) {
-    return decodeError(reference, 'field "number" is missing or not a positive integer');
-  }
-  const title = record['title'];
-  if (typeof title !== 'string') {
-    return decodeError(reference, 'field "title" is missing or not a string');
-  }
-  const body = record['body'];
-  if (typeof body !== 'string') {
-    return decodeError(reference, 'field "body" is missing or not a string');
-  }
-  const url = record['url'];
-  if (typeof url !== 'string') {
-    return decodeError(reference, 'field "url" is missing or not a string');
-  }
+  const { number, title, body, url } = issue.data;
 
   const target = parseIssueUrlOnHost(url, host);
   if (target === null || target.number !== number) {

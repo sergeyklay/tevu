@@ -101,13 +101,16 @@ Artifacts remain until the operator deletes the run directory. There is no autom
 
 `tevu assess` rebuilds `result.json` and `report.md` but changes neither `conclusions.json` nor `summary.md`: the summary is written once, at the end of `tevu run`. A run without `conclusions.json` renders its summary from the facts derived from the saved artifacts, with template sentences. A malformed `conclusions.json`, including one with a malformed `call`, is refused with an error that names the file; delete it to make `tevu report` use template sentences.
 
-`tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout. They refuse a run that lacks any of:
+`tevu report` and `tevu assess` read the configuration snapshot each run stored under its current layout, and refuse a run that lacks it.
 
-- the current configuration snapshot layout;
-- `tools.agentVersions`, `tools.copiedProviders` (with an entry for every case's `agent`), `execution.repeat`, a non-empty string `configPath`, or `efforts` (with a valid check for every case's model entry, and a `grader` that is a valid check when the configuration snapshot declares a grader and `null` when it does not) in the manifest;
-- `agent`, `attempt`, `timeoutMs`, or `artifacts.grading` in a case result;
-- the `source` discriminator (`operator` or `grader`) in an assessment history entry.
+They refuse a saved `run.json`, `conclusions.json`, or case `result.json`, `checks.json`, `grading.json`, or `assessment.json` whose content does not match the fields this reference and [Results](results.md) describe: a missing field, a field tevu does not write, a value of another type or outside its listed values, or a run or case ID other than the file's location. They also refuse a manifest that breaks these consistency rules:
 
-Manifest and snapshot defects are refused before anything is written. A defective case result is refused when its case is read, so `report` can rewrite the cases before it and then stop. In `assess`, a defect in another case surfaces after the assessment is already saved, during the rebuild, and the error points to `tevu report`.
+- `tools.copiedProviders` has an entry for every case's `agent`.
+- `efforts.models` has a valid check for every case's model entry.
+- `efforts.grader` is a valid check when the configuration snapshot declares a grader, and `null` when it does not.
+
+The error names the run, the case, and the path of the first field that does not match. A defect anywhere in `run.json`, including a case record it holds, and a defect in the configuration snapshot are refused before anything is written. A defective case `result.json` is refused when its case is read, so `report` can rewrite the cases before it and then stop. In `assess`, a defect in another case surfaces after the assessment is already saved, during the rebuild, and the error points to `tevu report`.
+
+tevu applies the same check before it writes each of these files, and writes none that fails it.
 
 Replacing an assessment keeps the old verdict in history, whether it replaces an operator's verdict or a grader's. Each history entry's `source` records which. Only current verdicts affect the outcome.

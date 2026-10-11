@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { z } from 'zod';
 
 import type { IssueSnapshot, IssueTrackerAdapter, TevuResult } from '@/domain/types';
 
@@ -324,27 +325,34 @@ function nodeToText(node: unknown): string {
     : text;
 }
 
+const issueResponseSchema = z.looseObject({
+  key: z.string().min(1).optional().catch(undefined),
+  fields: z.looseObject({ summary: z.string(), description: z.unknown().optional() }),
+});
+
 function decodeIssueResponse(
   requestedKey: string,
   baseUrl: string,
   status: number,
   body: unknown,
 ): TevuResult<IssueSnapshot, 'IssueImportError'> {
-  if (!isRecord(body) || !isRecord(body['fields'])) {
-    return importError(requestedKey, status, 'issue response shape is malformed');
+  const issue = issueResponseSchema.safeParse(body);
+  if (!issue.success) {
+    const [section, field] = issue.error.issues[0]?.path ?? [];
+    return importError(
+      requestedKey,
+      status,
+      section === 'fields' && field === 'summary'
+        ? 'issue response is missing a summary field'
+        : 'issue response shape is malformed',
+    );
   }
-  const fields = body['fields'];
-  const summary = fields['summary'];
-  if (typeof summary !== 'string') {
-    return importError(requestedKey, status, 'issue response is missing a summary field');
-  }
-  const rawDescription = fields['description'];
+  const { summary, description: rawDescription } = issue.data.fields;
   const description =
     rawDescription === null || rawDescription === undefined
       ? ''
       : projectRichTextToPlainText(rawDescription);
-  const issueKey =
-    typeof body['key'] === 'string' && body['key'].length > 0 ? body['key'] : requestedKey;
+  const issueKey = issue.data.key ?? requestedKey;
 
   return {
     ok: true,

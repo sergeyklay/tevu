@@ -13,6 +13,7 @@ import { decodeEvent, decodeExport, isRootSessionErrorEvent } from './protocol';
 
 import type {
   OpenCodeExport,
+  OpenCodeMessageInfo,
   OpenCodePart,
   OpenCodeRunEvent,
   ProtocolErrorShape,
@@ -77,7 +78,7 @@ export function normalizeMetrics(input: AgentMetricsInput): NormalizeMetricsResu
     }
   }
 
-  const sessionExport = exportRecord !== null && exportRecord.ok ? exportRecord.value : null;
+  const sessionExport = exportRecord !== null && exportRecord.ok ? exportRecord.value.view : null;
   const rootSessionId =
     input.sessionId ?? sessionExport?.info.id ?? decodedEvents[0]?.sessionID ?? null;
 
@@ -139,11 +140,6 @@ function sumMetric(sum: ComponentSum, unit: MetricValue['unit']): MetricValue {
     : unavailableMetric(unit, sum.malformed);
 }
 
-type ExportAssistantInfo = Extract<
-  OpenCodeExport['messages'][number]['info'],
-  { role: 'assistant' }
->;
-
 function providerModelKey(providerID: string, modelID: string): string {
   return `${providerID}\u0000${modelID}`;
 }
@@ -156,7 +152,7 @@ function providerModelKey(providerID: string, modelID: string): string {
  * definition or by a non-zero cost for the same model elsewhere in the export.
  */
 function describeUnevidencedZero(
-  zeroCostMessages: readonly ExportAssistantInfo[],
+  zeroCostMessages: readonly OpenCodeMessageInfo[],
   nonZeroModels: ReadonlySet<string>,
   copiedProviders: readonly CopiedProvider[],
 ): string | undefined {
@@ -209,7 +205,7 @@ export function normalizeFromExport(
   let toolCalls = 0;
   let skillCalls = 0;
   let skillMalformed: string | null = null;
-  const zeroCostMessages: ExportAssistantInfo[] = [];
+  const zeroCostMessages: OpenCodeMessageInfo[] = [];
   const nonZeroModels = new Set<string>();
 
   const seenMessages = new Set<string>();
@@ -242,6 +238,7 @@ export function normalizeFromExport(
       if (info.cost === 0) {
         zeroCostMessages.push(info);
       } else if (
+        typeof info.cost === 'number' &&
         Number.isFinite(info.cost) &&
         isNonEmptyString(info.providerID) &&
         isNonEmptyString(info.modelID)
@@ -260,10 +257,9 @@ export function normalizeFromExport(
         continue;
       }
       toolCalls += 1;
-      const tool = (part as Partial<{ tool: string }>).tool;
-      if (typeof tool !== 'string') {
+      if (typeof part.tool !== 'string') {
         skillMalformed = `tool name is absent or malformed on tool part "${part.id}"`;
-      } else if (tool === 'skill') {
+      } else if (part.tool === 'skill') {
         skillCalls += 1;
       }
     }

@@ -17,9 +17,19 @@ import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
+import {
+  parseAssessmentArtifact,
+  parseCaseResult,
+  parseChecksArtifact,
+  parseConclusionsArtifact,
+  parseGradingArtifact,
+  parseRunManifest,
+  parseRunResult,
+} from '@/adapters/artifact-schemas';
 import { describeCause } from '@/domain/describe-cause';
 import { redactDecodedValue } from '@/domain/redaction';
 
+import type { ChecksArtifact } from '@/adapters/artifact-schemas';
 import type {
   AgentEventRecord,
   AgentSessionExport,
@@ -312,6 +322,16 @@ class FileArtifactStore implements ArtifactStore {
         `run "${this.activeRun.runId}" is already active in this store instance`,
       );
     }
+    const redacted = redactValueForSink(this.redact, operation, manifest);
+    if (!redacted.ok) {
+      return redacted;
+    }
+    const refusal = refusalOf(parseRunManifest(redacted.value, manifest.runId), (defectPath) =>
+      manifestDefectReason(manifest.runId, defectPath),
+    );
+    if (refusal !== null) {
+      return artifactFailure(operation, refusal);
+    }
     try {
       await fs.mkdir(this.root, { recursive: true });
     } catch (cause) {
@@ -347,10 +367,6 @@ class FileArtifactStore implements ArtifactStore {
         );
       }
       caseDirectories.set(identity.caseId, caseDirectory);
-    }
-    const redacted = redactValueForSink(this.redact, operation, manifest);
-    if (!redacted.ok) {
-      return redacted;
     }
     const serialized = serializeJsonForSink(operation, redacted.value);
     if (!serialized.ok) {
@@ -501,13 +517,18 @@ class FileArtifactStore implements ArtifactStore {
     if (!active.ok) {
       return active;
     }
-    const artifact = {
-      schemaVersion: 1 as const,
-      runId: active.value.runId,
-      caseId,
-      checks,
-    };
-    return this.writeJsonSink(operation, active.value.directory, CASE_FILE.checks, artifact);
+    const { runId } = active.value;
+    const artifact: ChecksArtifact = { schemaVersion: 1, runId, caseId, checks };
+    return this.writeJsonSink(
+      operation,
+      active.value.directory,
+      CASE_FILE.checks,
+      artifact,
+      (redacted) =>
+        refusalOf(parseChecksArtifact(redacted, runId, caseId), (defectPath) =>
+          checksDefectReason(runId, caseId, defectPath),
+        ),
+    );
   }
 
   async writeGrading(
@@ -525,7 +546,17 @@ class FileArtifactStore implements ArtifactStore {
       caseId,
       ...grading,
     };
-    return this.writeJsonSink(operation, active.value.directory, CASE_FILE.grading, artifact);
+    const { runId } = active.value;
+    return this.writeJsonSink(
+      operation,
+      active.value.directory,
+      CASE_FILE.grading,
+      artifact,
+      (redacted) =>
+        refusalOf(parseGradingArtifact(redacted, runId, caseId), (defectPath) =>
+          gradingDefectReason(runId, caseId, defectPath),
+        ),
+    );
   }
 
   async finalizeCase(result: CaseResult): Promise<TevuResult<void, 'ArtifactError'>> {
@@ -543,7 +574,18 @@ class FileArtifactStore implements ArtifactStore {
         `case "${result.identity.caseId}" lifecycle "${result.lifecycle}" is not terminal`,
       );
     }
-    return this.writeJsonSink(operation, active.value.directory, CASE_FILE.result, result);
+    const { runId } = active.value;
+    const { caseId } = result.identity;
+    return this.writeJsonSink(
+      operation,
+      active.value.directory,
+      CASE_FILE.result,
+      result,
+      (redacted) =>
+        refusalOf(parseCaseResult(redacted, caseId), (defectPath) =>
+          caseResultDefectReason(runId, caseId, defectPath),
+        ),
+    );
   }
 
   async replaceCaseResult(
@@ -571,7 +613,17 @@ class FileArtifactStore implements ArtifactStore {
         `case "${result.identity.caseId}" does not exist in run "${runId}"`,
       );
     }
-    return this.writeJsonSink(operation, caseDirectory.value, CASE_FILE.result, result);
+    const { caseId } = result.identity;
+    return this.writeJsonSink(
+      operation,
+      caseDirectory.value,
+      CASE_FILE.result,
+      result,
+      (redacted) =>
+        refusalOf(parseCaseResult(redacted, caseId), (defectPath) =>
+          caseResultDefectReason(runId, caseId, defectPath),
+        ),
+    );
   }
 
   async finalizeRun(result: RunResult): Promise<TevuResult<void, 'ArtifactError'>> {
@@ -594,6 +646,12 @@ class FileArtifactStore implements ArtifactStore {
     const redacted = redactValueForSink(this.redact, operation, result);
     if (!redacted.ok) {
       return redacted;
+    }
+    const refusal = refusalOf(parseRunResult(redacted.value, runId), (defectPath) =>
+      runResultDefectReason(runId, defectPath),
+    );
+    if (refusal !== null) {
+      return artifactFailure(operation, refusal);
     }
     const serialized = serializeJsonForSink(operation, redacted.value);
     if (!serialized.ok) {
@@ -700,11 +758,11 @@ class FileArtifactStore implements ArtifactStore {
         `${describeMalformedConclusions(runId)}: it is not valid JSON`,
       );
     }
-    const defect = describeConclusionsDefect(value, runId);
-    if (defect !== null) {
-      return artifactFailure(operation, defect);
+    const parsed = parseConclusionsArtifact(value, runId);
+    if (!parsed.ok) {
+      return artifactFailure(operation, conclusionsDefectReason(runId, parsed.defectPath));
     }
-    return { ok: true, value: value as ConclusionsArtifact };
+    return { ok: true, value: parsed.value };
   }
 
   async writeConclusions(
@@ -715,15 +773,21 @@ class FileArtifactStore implements ArtifactStore {
     if (!runDirectory.ok) {
       return runDirectory;
     }
-    const defect = describeConclusionsDefect(artifact, artifact.runId);
-    if (defect !== null) {
-      return artifactFailure(operation, defect);
-    }
     const present = await directoryExists(runDirectory.value);
     if (!present) {
       return artifactFailure(operation, `run directory for "${artifact.runId}" does not exist`);
     }
-    return this.writeJsonSink(operation, runDirectory.value, CONCLUSIONS_FILE, artifact);
+    const { runId } = artifact;
+    return this.writeJsonSink(
+      operation,
+      runDirectory.value,
+      CONCLUSIONS_FILE,
+      artifact,
+      (redacted) =>
+        refusalOf(parseConclusionsArtifact(redacted, runId), (defectPath) =>
+          conclusionsDefectReason(runId, defectPath),
+        ),
+    );
   }
 
   async writeSummary(runId: string, markdown: string): Promise<TevuResult<void, 'ArtifactError'>> {
@@ -763,11 +827,11 @@ class FileArtifactStore implements ArtifactStore {
     }
     // After finalization run.json holds the full RunResult; before it, the manifest.
     const manifest = 'manifest' in value ? value['manifest'] : value;
-    const defect = describeStoredManifestDefect(manifest, runId);
-    if (defect !== null) {
-      return artifactFailure(operation, defect);
+    const manifestParsed = parseRunManifest(manifest, runId);
+    if (!manifestParsed.ok) {
+      return artifactFailure(operation, manifestDefectReason(runId, manifestParsed.defectPath));
     }
-    return { ok: true, value: manifest as RunManifest };
+    return { ok: true, value: manifestParsed.value };
   }
 
   async readRunResult(runId: string): Promise<TevuResult<RunResult, 'ArtifactError'>> {
@@ -790,18 +854,11 @@ class FileArtifactStore implements ArtifactStore {
         `run "${runId}" holds only a manifest; the run was never finalized`,
       );
     }
-    if (
-      value['schemaVersion'] !== 1 ||
-      !Array.isArray(value['cases']) ||
-      typeof value['exitCode'] !== 'number'
-    ) {
-      return artifactFailure(operation, `run result for "${runId}" has a malformed shape`);
+    const result = parseRunResult(value, runId);
+    if (!result.ok) {
+      return artifactFailure(operation, runResultDefectReason(runId, result.defectPath));
     }
-    const defect = describeStoredManifestDefect(value['manifest'], runId);
-    if (defect !== null) {
-      return artifactFailure(operation, defect);
-    }
-    return { ok: true, value: value as unknown as RunResult };
+    return { ok: true, value: result.value };
   }
 
   async readCaseResult(
@@ -817,24 +874,11 @@ class FileArtifactStore implements ArtifactStore {
     if (!parsed.ok) {
       return parsed;
     }
-    const value = parsed.value;
-    if (
-      !isRecord(value) ||
-      value['schemaVersion'] !== 1 ||
-      !isRecord(value['identity']) ||
-      value['identity']['caseId'] !== caseId ||
-      !isNonEmptyString(value['identity']['agent']) ||
-      !isPositiveSafeInteger(value['identity']['attempt']) ||
-      !isPositiveSafeInteger(value['identity']['timeoutMs']) ||
-      !isRecord(value['artifacts']) ||
-      !(value['artifacts']['grading'] === null || isNonEmptyString(value['artifacts']['grading']))
-    ) {
-      return artifactFailure(
-        operation,
-        `case result for "${caseId}" in run "${runId}" has a malformed shape`,
-      );
+    const result = parseCaseResult(parsed.value, caseId);
+    if (!result.ok) {
+      return artifactFailure(operation, caseResultDefectReason(runId, caseId, result.defectPath));
     }
-    return { ok: true, value: value as unknown as CaseResult };
+    return { ok: true, value: result.value };
   }
 
   async readEvents(
@@ -939,20 +983,11 @@ class FileArtifactStore implements ArtifactStore {
     if (!parsed.ok) {
       return parsed;
     }
-    const value = parsed.value;
-    if (
-      !isRecord(value) ||
-      value['schemaVersion'] !== 1 ||
-      value['caseId'] !== caseId ||
-      !Array.isArray(value['checks']) ||
-      !value['checks'].every((check) => isRecord(check) && isNonEmptyString(check['checkId']))
-    ) {
-      return artifactFailure(
-        operation,
-        `checks artifact for "${caseId}" in run "${runId}" has a malformed shape`,
-      );
+    const artifact = parseChecksArtifact(parsed.value, runId, caseId);
+    if (!artifact.ok) {
+      return artifactFailure(operation, checksDefectReason(runId, caseId, artifact.defectPath));
     }
-    return { ok: true, value: value['checks'] as CheckResult[] };
+    return { ok: true, value: artifact.value.checks };
   }
 
   async readGrading(
@@ -968,11 +1003,11 @@ class FileArtifactStore implements ArtifactStore {
     if (!parsed.ok) {
       return parsed;
     }
-    const defect = describeGradingDefect(parsed.value, runId, caseId);
-    if (defect !== null) {
-      return artifactFailure(operation, defect);
+    const grading = parseGradingArtifact(parsed.value, runId, caseId);
+    if (!grading.ok) {
+      return artifactFailure(operation, gradingDefectReason(runId, caseId, grading.defectPath));
     }
-    return { ok: true, value: parsed.value as GradingArtifact };
+    return { ok: true, value: grading.value };
   }
 
   async readAssessment(
@@ -1001,11 +1036,17 @@ class FileArtifactStore implements ArtifactStore {
     } catch {
       return artifactFailure(operation, `assessment artifact for "${caseId}" is not valid JSON`);
     }
-    const defect = describeAssessmentDefect(value, runId, caseId);
-    if (defect !== null) {
-      return artifactFailure(operation, defect);
+    if (!isRecord(value)) {
+      return artifactFailure(operation, `assessment artifact for "${caseId}" is not a JSON object`);
     }
-    return { ok: true, value: value as AssessmentArtifact };
+    const assessment = parseAssessmentArtifact(value, runId, caseId);
+    if (!assessment.ok) {
+      return artifactFailure(
+        operation,
+        assessmentDefectReason(runId, caseId, assessment.defectPath),
+      );
+    }
+    return { ok: true, value: assessment.value };
   }
 
   async acquireAssessmentLock(
@@ -1070,10 +1111,6 @@ class FileArtifactStore implements ArtifactStore {
     artifact: AssessmentArtifact,
   ): Promise<TevuResult<void, 'ArtifactError'>> {
     const operation = 'replace-assessment';
-    const defect = describeAssessmentDefect(artifact, artifact.runId, artifact.caseId);
-    if (defect !== null) {
-      return artifactFailure(operation, defect);
-    }
     const caseDirectory = this.resolveCaseDirectory(operation, artifact.runId, artifact.caseId);
     if (!caseDirectory.ok) {
       return caseDirectory;
@@ -1085,7 +1122,17 @@ class FileArtifactStore implements ArtifactStore {
         `case "${artifact.caseId}" does not exist in run "${artifact.runId}"`,
       );
     }
-    return this.writeJsonSink(operation, caseDirectory.value, CASE_FILE.assessment, artifact);
+    const { runId, caseId } = artifact;
+    return this.writeJsonSink(
+      operation,
+      caseDirectory.value,
+      CASE_FILE.assessment,
+      artifact,
+      (redacted) =>
+        refusalOf(parseAssessmentArtifact(redacted, runId, caseId), (defectPath) =>
+          assessmentDefectReason(runId, caseId, defectPath),
+        ),
+    );
   }
 
   private requireActiveCase(
@@ -1135,10 +1182,15 @@ class FileArtifactStore implements ArtifactStore {
     directory: string,
     fileName: string,
     value: unknown,
+    check?: (redacted: unknown) => string | null,
   ): Promise<TevuResult<void, 'ArtifactError'>> {
     const redacted = redactValueForSink(this.redact, operation, value);
     if (!redacted.ok) {
       return redacted;
+    }
+    const refusal = check?.(redacted.value) ?? null;
+    if (refusal !== null) {
+      return artifactFailure(operation, refusal);
     }
     const serialized = serializeJsonForSink(operation, redacted.value);
     if (!serialized.ok) {
@@ -1215,10 +1267,6 @@ function systemErrorCode(cause: unknown): string | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0;
 }
 
 function serializeJsonForSink(
@@ -1330,7 +1378,7 @@ async function atomicReplaceFile(
 
 /** Holds when `value` is a whole, non-negative-overflowing number of at least 1. */
 function isPositiveSafeInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 1;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
 }
 
 /** Holds for a record whose `value` passes {@link isPositiveSafeInteger} and whose `source` is `"config"` or `"cli"`. */
@@ -1374,451 +1422,40 @@ function describeManifestDefect(manifest: RunManifest): string | null {
   return null;
 }
 
-/** Holds for a decoded `RunManifest.tools.copiedProviders`: every value lists providers with a non-empty `id` and string `pricedModels`. */
-function isCopiedProvidersRecord(value: unknown): value is Record<string, unknown> {
-  return (
-    isRecord(value) &&
-    Object.values(value).every(
-      (providers) =>
-        Array.isArray(providers) &&
-        providers.every(
-          (provider) =>
-            isRecord(provider) &&
-            isNonEmptyString(provider['id']) &&
-            Array.isArray(provider['pricedModels']) &&
-            provider['pricedModels'].every((model) => typeof model === 'string'),
-        ),
-    )
-  );
-}
-
-function isStoredEffortCheck(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  if (value['status'] === 'verified') {
-    return true;
-  }
-  return (
-    (value['status'] === 'unverified' || value['status'] === 'unsupported') &&
-    isNonEmptyString(value['reason'])
-  );
-}
-
-function isStoredEfforts(value: unknown): value is {
-  models: Record<string, unknown>;
-  grader: unknown;
-} {
-  return (
-    isRecord(value) &&
-    isRecord(value['models']) &&
-    Object.values(value['models']).every(isStoredEffortCheck) &&
-    (value['grader'] === null || isStoredEffortCheck(value['grader']))
-  );
-}
-
-function snapshotDeclaresGrader(manifest: Record<string, unknown>): boolean {
-  const context = manifest['context'];
-  if (!isRecord(context) || !isRecord(context['config'])) {
-    return false;
-  }
-  const roles = context['config']['roles'];
-  return isRecord(roles) && roles['grader'] !== undefined;
-}
-
-function describeStoredManifestDefect(manifest: unknown, runId: string): string | null {
-  if (
-    !isRecord(manifest) ||
-    manifest['schemaVersion'] !== 1 ||
-    manifest['runId'] !== runId ||
-    !Array.isArray(manifest['cases']) ||
-    !isRecord(manifest['tools']) ||
-    !isRecord(manifest['tools']['agentVersions']) ||
-    !isCopiedProvidersRecord(manifest['tools']['copiedProviders']) ||
-    !isRecord(manifest['execution']) ||
-    !isRepeatSetting(manifest['execution']['repeat']) ||
-    !isNonEmptyString(manifest['configPath']) ||
-    !isStoredEfforts(manifest['efforts']) ||
-    !manifest['cases'].every(
-      (entry) => isRecord(entry) && isPositiveSafeInteger(entry['timeoutMs']),
-    )
-  ) {
-    return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
-  }
-  const copiedProviders = manifest['tools']['copiedProviders'];
-  const effortModels = manifest['efforts']['models'];
-  const hasUnlistedAgent = manifest['cases'].some(
-    (entry) =>
-      isRecord(entry) &&
-      typeof entry['agent'] === 'string' &&
-      !Object.hasOwn(copiedProviders, entry['agent']),
-  );
-  const hasUncheckedModelEntry = manifest['cases'].some(
-    (entry) =>
-      isRecord(entry) &&
-      typeof entry['modelId'] === 'string' &&
-      !Object.hasOwn(effortModels, entry['modelId']),
-  );
-  const hasMismatchedGrader =
-    (manifest['efforts']['grader'] === null) === snapshotDeclaresGrader(manifest);
-  if (hasUnlistedAgent || hasUncheckedModelEntry || hasMismatchedGrader) {
-    return `stored manifest for run "${runId}" has a malformed shape or mismatched identity`;
-  }
-  return null;
-}
-
-const METRIC_UNITS = new Set(['count', 'token', 'millisecond', 'USD']);
-const METRIC_SCOPES = new Set(['case', 'root-session', 'session-tree']);
-const GRADE_VERDICTS = new Set(['passed', 'failed', 'undetermined']);
-const AGENT_METRIC_KEYS = [
-  'inputTokens',
-  'outputTokens',
-  'reasoningTokens',
-  'cacheReadTokens',
-  'cacheWriteTokens',
-  'turns',
-  'apiCalls',
-  'apiErrors',
-  'toolCalls',
-  'skillCalls',
-  'cost',
-] as const;
-
-/** Holds for a decoded `MetricValue`: a numeric or `null` value, a declared unit and scope, and matching availability. */
-function isMetricValue(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  if (!(value['value'] === null || typeof value['value'] === 'number')) {
-    return false;
-  }
-  if (typeof value['unit'] !== 'string' || !METRIC_UNITS.has(value['unit'])) {
-    return false;
-  }
-  if (typeof value['scope'] !== 'string' || !METRIC_SCOPES.has(value['scope'])) {
-    return false;
-  }
-  const availability = value['availability'];
-  if (!isRecord(availability)) {
-    return false;
-  }
-  if (availability['status'] === 'available') {
-    return typeof availability['source'] === 'string';
-  }
-  if (availability['status'] === 'unavailable') {
-    return typeof availability['reason'] === 'string';
-  }
-  return false;
-}
-
-const GRADER_NO_REPLY_CAUSES = new Set(['unfinished', 'tool-call', 'other']);
-
-/** Holds for a decoded `AgentMetrics`: every agent metric key carries a well-formed value. */
-function isAgentMetrics(value: unknown): boolean {
-  return isRecord(value) && AGENT_METRIC_KEYS.every((key) => isMetricValue(value[key]));
-}
-
-/** Holds for a decoded no-reply grader outcome: a declared cause and a string reason. */
-function isGraderNoReply(value: Record<string, unknown>): boolean {
-  return (
-    typeof value['cause'] === 'string' &&
-    GRADER_NO_REPLY_CAUSES.has(value['cause']) &&
-    typeof value['reason'] === 'string'
-  );
-}
-
-/** Holds for a decoded `GraderCall`: an outcome, metrics, an event list, diagnostics text, and a session or `null`. */
-function isGraderCall(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const outcome = value['outcome'];
-  if (!isRecord(outcome)) {
-    return false;
-  }
-  if (
-    outcome['status'] !== 'replied' &&
-    !(outcome['status'] === 'no-reply' && isGraderNoReply(outcome))
-  ) {
-    return false;
-  }
-  const session = value['session'];
-  return (
-    isAgentMetrics(value['metrics']) &&
-    Array.isArray(value['events']) &&
-    typeof value['diagnostics'] === 'string' &&
-    (session === null || isRecord(session))
-  );
-}
-
-function describeGradingDefect(value: unknown, runId: string, caseId: string): string | null {
-  const malformed = `grading artifact for "${caseId}" in run "${runId}" has a malformed shape`;
-  if (!isRecord(value)) {
-    return malformed;
-  }
-  const grader = value['grader'];
-  if (
-    value['schemaVersion'] !== 1 ||
-    value['runId'] !== runId ||
-    value['caseId'] !== caseId ||
-    !isRecord(grader) ||
-    !isNonEmptyString(grader['model']) ||
-    !isNonEmptyString(grader['effort']) ||
-    !isNonEmptyString(grader['agent'])
-  ) {
-    return malformed;
-  }
-  const call = value['call'];
-  if (!isRecord(call)) {
-    return malformed;
-  }
-  if (call['status'] === 'replied') {
-    if (typeof call['reply'] !== 'string') {
-      return malformed;
-    }
-  } else if (call['status'] === 'no-reply') {
-    if (!isGraderNoReply(call)) {
-      return malformed;
-    }
-  } else {
-    return malformed;
-  }
-  const calls = value['calls'];
-  if (!Array.isArray(calls) || !calls.every(isGraderCall)) {
-    return malformed;
-  }
-  if (!isAgentMetrics(value['metrics'])) {
-    return malformed;
-  }
-  const grades = value['grades'];
-  if (
-    !Array.isArray(grades) ||
-    !grades.every((grade: unknown) => {
-      if (!isRecord(grade) || !isNonEmptyString(grade['checkId'])) {
-        return false;
-      }
-      if (grade['status'] === 'graded') {
-        return (
-          typeof grade['verdict'] === 'string' &&
-          GRADE_VERDICTS.has(grade['verdict']) &&
-          typeof grade['rationale'] === 'string'
-        );
-      }
-      if (grade['status'] === 'pending') {
-        return typeof grade['reason'] === 'string';
-      }
-      return false;
-    })
-  ) {
-    return malformed;
-  }
-  return null;
-}
-
 function describeMalformedConclusions(runId: string): string {
   return `${CONCLUSIONS_FILE} of run "${runId}" is malformed; delete it to make the summary use template sentences`;
 }
 
-function describeConclusionsDefect(value: unknown, runId: string): string | null {
-  if (
-    !isRecord(value) ||
-    value['schemaVersion'] !== 1 ||
-    value['runId'] !== runId ||
-    !Array.isArray(value['tasks']) ||
-    !value['tasks'].every(isTaskConclusions)
-  ) {
-    return `${describeMalformedConclusions(runId)}: it has a malformed shape or mismatched identity`;
-  }
-  return null;
+type ParseOutcome = { ok: true } | { ok: false; defectPath: string };
+
+function refusalOf(parsed: ParseOutcome, describe: (defectPath: string) => string): string | null {
+  return parsed.ok ? null : describe(parsed.defectPath);
 }
 
-/** Holds for a decoded summary call: a resolved role, one of the three outcomes, and agent metrics. */
-function isSummaryCall(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const { model, outcome } = value;
-  return (
-    isRecord(model) &&
-    isNonEmptyString(model['model']) &&
-    isNonEmptyString(model['effort']) &&
-    isNonEmptyString(model['agent']) &&
-    isRecord(outcome) &&
-    isSummaryCallOutcome(outcome) &&
-    isAgentMetrics(value['metrics'])
-  );
+function manifestDefectReason(runId: string, defectPath: string): string {
+  return `stored manifest for run "${runId}" has a malformed shape or mismatched identity at ${defectPath}`;
 }
 
-function isSummaryCallOutcome(outcome: Record<string, unknown>): boolean {
-  switch (outcome['status']) {
-    case 'accepted':
-      return typeof outcome['reply'] === 'string';
-    case 'rejected':
-      return typeof outcome['reply'] === 'string' && typeof outcome['reason'] === 'string';
-    case 'no-reply':
-      return typeof outcome['reason'] === 'string';
-    default:
-      return false;
-  }
+function runResultDefectReason(runId: string, defectPath: string): string {
+  return `run result for "${runId}" has a malformed shape or mismatched identity at ${defectPath}`;
 }
 
-function isCount(value: unknown): boolean {
-  return Number.isInteger(value) && (value as number) >= 0;
+function caseResultDefectReason(runId: string, caseId: string, defectPath: string): string {
+  return `case result for "${caseId}" in run "${runId}" has a malformed shape at ${defectPath}`;
 }
 
-function isStringArray(value: unknown): boolean {
-  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+function checksDefectReason(runId: string, caseId: string, defectPath: string): string {
+  return `checks artifact for "${caseId}" in run "${runId}" has a malformed shape at ${defectPath}`;
 }
 
-function isSummaryMeasure(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  return (
-    value['status'] === 'unknown' ||
-    (value['status'] === 'known' &&
-      typeof value['value'] === 'number' &&
-      typeof value['text'] === 'string' &&
-      isCount(value['reportedAttempts']))
-  );
+function gradingDefectReason(runId: string, caseId: string, defectPath: string): string {
+  return `grading artifact for "${caseId}" in run "${runId}" has a malformed shape at ${defectPath}`;
 }
 
-function isSummaryDropout(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    isCount(value['timedOut']) &&
-    isCount(value['failedToRun']) &&
-    isStringArray(value['failedToRunLabels']) &&
-    isCount(value['waiting'])
-  );
+function assessmentDefectReason(runId: string, caseId: string, defectPath: string): string {
+  return `assessment artifact for "${caseId}" in run "${runId}" has a malformed shape or mismatched identity at ${defectPath}`;
 }
 
-function isSummarySetting(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const { outcomes, requiredChecks } = value;
-  return (
-    typeof value['name'] === 'string' &&
-    typeof value['model'] === 'string' &&
-    typeof value['effort'] === 'string' &&
-    isCount(value['planned']) &&
-    isRecord(outcomes) &&
-    ['passed', 'failed', 'pending', 'notEvaluated'].every((key) => isCount(outcomes[key])) &&
-    isRecord(requiredChecks) &&
-    ['passed', 'failed', 'pending', 'notRun', 'total'].every((key) =>
-      isCount(requiredChecks[key]),
-    ) &&
-    typeof value['didTask'] === 'boolean' &&
-    isSummaryMeasure(value['cost']) &&
-    isSummaryMeasure(value['elapsed']) &&
-    (value['dropout'] === null || isSummaryDropout(value['dropout']))
-  );
-}
-
-function isSummaryComparison(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  switch (value['kind']) {
-    case 'none-did-the-task':
-      return true;
-    case 'only-setting':
-      return typeof value['leader'] === 'string';
-    case 'not-enough-data':
-      return isStringArray(value['unknown']);
-    case 'leader':
-    case 'tie':
-      return (
-        isStringArray(value['leaders']) &&
-        typeof value['value'] === 'string' &&
-        (value['next'] === null || isSummaryNext(value['next'])) &&
-        isStringArray(value['unknown']) &&
-        Array.isArray(value['partial']) &&
-        value['partial'].every(
-          (entry) =>
-            isRecord(entry) &&
-            typeof entry['name'] === 'string' &&
-            isCount(entry['reportedAttempts']),
-        )
-      );
-    default:
-      return false;
-  }
-}
-
-function isSummaryNext(value: unknown): boolean {
-  if (!isRecord(value) || typeof value['value'] !== 'string') {
-    return false;
-  }
-  const { margin } = value;
-  return (
-    margin === null ||
-    (isRecord(margin) &&
-      (margin['kind'] === 'times' || margin['kind'] === 'percent') &&
-      typeof margin['value'] === 'string')
-  );
-}
-
-/** Holds for decoded `SummaryFacts`: every field the report renders, so a rendering never throws on a saved artifact. */
-function isSummaryFacts(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value['task'] === 'string' &&
-    typeof value['repository'] === 'string' &&
-    typeof value['when'] === 'string' &&
-    isCount(value['repeat']) &&
-    isCount(value['requiredChecksPerAttempt']) &&
-    Array.isArray(value['settings']) &&
-    value['settings'].every(isSummarySetting) &&
-    (value['separation'] === null ||
-      value['separation'] === 'passed' ||
-      value['separation'] === 'failed') &&
-    isSummaryComparison(value['cost']) &&
-    isSummaryComparison(value['speed'])
-  );
-}
-
-/** Holds for a decoded `TaskConclusions`: a task ID, complete facts, three sentences, and a call or `null`. */
-function isTaskConclusions(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const conclusions = value['conclusions'];
-  return (
-    isNonEmptyString(value['taskId']) &&
-    isSummaryFacts(value['facts']) &&
-    isStringArray(value['table']) &&
-    isRecord(conclusions) &&
-    typeof conclusions['correctness'] === 'string' &&
-    typeof conclusions['cost'] === 'string' &&
-    typeof conclusions['speed'] === 'string' &&
-    (value['call'] === null || isSummaryCall(value['call']))
-  );
-}
-
-function describeAssessmentDefect(value: unknown, runId: string, caseId: string): string | null {
-  if (!isRecord(value)) {
-    return `assessment artifact for "${caseId}" is not a JSON object`;
-  }
-  if (
-    value['schemaVersion'] !== 1 ||
-    value['runId'] !== runId ||
-    value['caseId'] !== caseId ||
-    !Number.isInteger(value['revision']) ||
-    (value['revision'] as number) < 1 ||
-    !Array.isArray(value['current']) ||
-    !Array.isArray(value['history']) ||
-    !value['current'].every((record) => isRecord(record) && isNonEmptyString(record['checkId'])) ||
-    !value['history'].every(
-      (record) =>
-        isRecord(record) &&
-        isNonEmptyString(record['checkId']) &&
-        isNonEmptyString(record['replacedAt']) &&
-        (record['source'] === 'operator' || record['source'] === 'grader'),
-    )
-  ) {
-    return `assessment artifact for "${caseId}" in run "${runId}" has a malformed shape or mismatched identity`;
-  }
-  return null;
+function conclusionsDefectReason(runId: string, defectPath: string): string {
+  return `${describeMalformedConclusions(runId)}: it has a malformed shape or mismatched identity at ${defectPath}`;
 }
