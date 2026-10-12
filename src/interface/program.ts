@@ -1,257 +1,49 @@
 /**
  * Stable `tevu` command surface over Commander: command and option
- * registration, TTY wizard routing, deterministic non-interactive output,
- * concise usage errors, command examples, and the exit-code
- * mapping. Every side effect enters through the injected operations, so this
- * module owns no evaluation, orchestration, transport, process supervision,
- * or storage logic and imports no concrete adapter.
+ * registration, concise usage errors, command examples, and the exit-code
+ * mapping. Each command's handler lives in `./commands` and receives the
+ * operations its injected factory builds, so this module owns no evaluation,
+ * orchestration, transport, process supervision, or storage logic and imports
+ * no concrete adapter.
  */
 
-import { outro } from '@clack/prompts';
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 
-import { agentNamesInUse, MAX_REPEAT, RepeatSchema } from '@/config/schema';
+import { MAX_REPEAT, RepeatSchema } from '@/config/schema';
 import { CONFIG_TEMPLATE } from '@/config/template';
-import { effortLabel } from '@/domain/types';
 
-import { renderTevuError } from './render-error';
-import { createStatusLine } from './status-line';
-import { runAssessmentWizard, runTaskWizard } from './task-wizard';
+import { runAssess } from './commands/assess';
+import { runReport } from './commands/report';
+import { runBenchmarkCommand } from './commands/run';
+import { EXIT_COMPLETED, EXIT_FAILURE } from './commands/shared';
+import { runTaskAdd } from './commands/task-add';
+import { runValidate } from './commands/validate';
 
-import type { LocalRepositoryNaming } from './derived-identifiers';
-import type { WaitInterrupt } from './wait-interrupt';
-import type { AssessedCase, AssessmentCaseContext, RebuiltReport } from '@/application/assess';
-import type { CreateTaskErrorKind, TaskWizardInput } from '@/application/create-task';
-import type { CriteriaDraftOutcome, CriteriaDraftRequest } from '@/application/draft-criteria';
-import type {
-  ManagedCommitsOutcome,
-  ManagedCommitsRequest,
-  ManagedLfsObjectsRequest,
-} from '@/application/managed-clone';
-import type {
-  AgentDraft,
-  ModelAccessOutcome,
-  ModelProviderInspection,
-} from '@/application/model-access';
-import type {
-  ReferenceSolutionRequest,
-  ResolvedReferenceSolution,
-} from '@/application/reference-solution';
-import type { RepositoryInput } from '@/config/schema';
-import type { ParsedGitHubRepository } from '@/domain/github-reference';
-import type {
-  AgentCapabilityReport,
-  AssessmentInput,
-  BenchmarkPlan,
-  CaseLifecycle,
-  EffortChecks,
-  IssueSnapshot,
-  JiraTrackerSettings,
-  LoadConfigErrorKind,
-  RunResult,
-  TaskDefinition,
-  TaskReference,
-  TevuConfig,
-  TevuError,
-  TevuResult,
-  ValidationFinding,
-  ValidationReport,
-} from '@/domain/types';
+import type { AssessOperations } from './commands/assess';
+import type { ReportOperations } from './commands/report';
+import type { RunOperations, RunOptionValues } from './commands/run';
+import type { CommandContext, ConfigOptionValues } from './commands/shared';
+import type { TaskAddOperations, TaskAddOptionValues } from './commands/task-add';
+import type { ValidateOperations } from './commands/validate';
 import type { Help } from 'commander';
-import type { Readable, Writable } from 'node:stream';
 
-/** Standard streams the program reads and writes; wizards additionally require TTY stdin and stdout. */
-export type ProgramIo = {
-  stdin: Readable & { isTTY?: boolean };
-  stdout: Writable & { isTTY?: boolean };
-  stderr: Writable & { isTTY?: boolean };
-};
-
-/** Cancellation and observation hooks the run command hands to one benchmark execution. */
-export type BenchmarkExecutionHooks = {
-  cancellation: AbortSignal;
-  onRunId?: (runId: string) => void;
-  onLifecycle?: (caseId: string, lifecycle: CaseLifecycle) => void;
-  onRetainedGradingDirectory?: (directory: string) => void;
-};
-
-/**
- * Every effectful operation the command handlers route to. The composition
- * root binds these to the real application use cases and adapters; product
- * tests bind fakes at the same boundary.
- */
-export type ProgramOperations = {
-  configExists(configPath: string): Promise<boolean>;
-  loadConfig(configPath: string): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>>;
-  requireConfigDirectory(configPath: string): Promise<TevuResult<void, 'PrerequisiteError'>>;
-  /** Locates the configuration file per the `--config` search; see `@/config/locate`. */
-  locateConfig(
-    requestedPath: string | undefined,
-  ): Promise<TevuResult<string, 'ConfigReadError' | 'ConfigNotFoundError'>>;
-  importJiraIssue(
-    settings: JiraTrackerSettings,
-    issueKey: string,
-  ): Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>>;
-  importGitHubIssue(
-    reference: string,
-  ): Promise<TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>>;
-  resolveReference(
-    request: ReferenceSolutionRequest,
-    onProgress: (line: string) => void,
-  ): Promise<
-    TevuResult<
-      ResolvedReferenceSolution,
-      'ReferenceResolutionError' | 'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'
-    >
-  >;
-  ensureManagedCommits(
-    request: ManagedCommitsRequest,
-    onProgress: (line: string) => void,
-  ): Promise<
-    TevuResult<
-      ManagedCommitsOutcome,
-      'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'
-    >
-  >;
-  /** Ensures a GitHub entry's managed clone holds the Git LFS objects of one base commit, fetching the missing ones. */
-  ensureManagedLfsObjects(
-    request: ManagedLfsObjectsRequest,
-    onProgress: (line: string) => void,
-  ): Promise<TevuResult<void, 'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'>>;
-  /** Reads a GitHub repository's HEAD from its remote, proving it exists and is readable. */
-  checkGitHubRepository(
-    repository: ParsedGitHubRepository,
-  ): Promise<TevuResult<void, 'ManagedCloneError' | 'CancellationError'>>;
-  /** Reports whether `repositoryPath`, resolved against the configuration file's directory, lies in a Git repository. */
-  isGitRepository(configPath: string, repositoryPath: string): Promise<boolean>;
-  /** Reads the directory name and `origin` remote URL of `repositoryPath`, resolved against the configuration file's directory. */
-  readLocalRepositoryNaming(
-    configPath: string,
-    repositoryPath: string,
-  ): Promise<LocalRepositoryNaming>;
-  /** The names in `names` that are not set in tevu's own environment. */
-  unsetVariables(names: readonly string[]): string[];
-  /** Drafts acceptance criteria and a Definition of Done from a resolved reference solution. */
-  draftCriteria(request: CriteriaDraftRequest): Promise<CriteriaDraftOutcome>;
-  /** Runs the agent's capability probe for `command`, resolved against the configuration file's directory. */
-  probeAgent(
-    configPath: string,
-    command: string,
-  ): Promise<TevuResult<AgentCapabilityReport, 'PrerequisiteError' | 'AgentProtocolError'>>;
-  /** Names the provider of `model` and reads what the operator's configuration defines for it. */
-  inspectModelProvider(
-    configPath: string,
-    agent: AgentDraft,
-    model: `${string}/${string}`,
-  ): Promise<TevuResult<ModelProviderInspection, 'ConfigValidationError'>>;
-  /** Reports whether `model` resolves for `agent` in an environment built like a case agent's. */
-  checkModelAccess(
-    configPath: string,
-    agent: AgentDraft,
-    model: `${string}/${string}`,
-  ): Promise<ModelAccessOutcome>;
-  prepareRepositories(
-    config: TevuConfig,
-    onProgress: (line: string) => void,
-  ): Promise<
-    TevuResult<ValidationFinding[], 'ManagedCloneError' | 'PrerequisiteError' | 'CancellationError'>
-  >;
-  /** Inspects a base-commit answer the way `createTask` pins it, without reading the configuration. */
-  inspectBaseCommit(
-    configPath: string,
-    repository: Pick<RepositoryInput, 'id' | 'path' | 'github'>,
-    baseCommit: string,
-    reference: TaskReference | undefined,
-  ): Promise<TevuResult<void, 'SourceMaterializationError' | 'ConfigValidationError'>>;
-  /** Reports the `run.output_dir` and `repositories.*` findings a load would raise for answers as typed. */
-  checkRepositoryPlacement(
-    configPath: string,
-    outputDirectory: string,
-    repositories: readonly Pick<RepositoryInput, 'id' | 'path' | 'github'>[],
-  ): Promise<ValidationFinding[]>;
-  createTask(input: TaskWizardInput): Promise<TevuResult<TaskDefinition, CreateTaskErrorKind>>;
-  validateConfig(
-    config: TevuConfig,
-  ): Promise<
-    TevuResult<
-      ValidationReport,
-      | 'ConfigValidationError'
-      | 'PrerequisiteError'
-      | 'SourceMaterializationError'
-      | 'IsolationError'
-      | 'AgentProtocolError'
-    >
-  >;
-  planBenchmark(
-    config: TevuConfig,
-    configPath: string,
-    efforts: EffortChecks,
-    repeatOverride?: number,
-  ): BenchmarkPlan;
-  executeBenchmark(
-    plan: BenchmarkPlan,
-    hooks: BenchmarkExecutionHooks,
-  ): Promise<
-    TevuResult<
-      RunResult,
-      | 'PrerequisiteError'
-      | 'SourceMaterializationError'
-      | 'IsolationError'
-      | 'AgentProcessError'
-      | 'AgentProtocolError'
-      | 'CaseTimeoutError'
-      | 'EvaluationError'
-      | 'ArtifactError'
-      | 'CancellationError'
-      | 'CheckStateError'
-      | 'ConfigValidationError'
-    >
-  >;
-  rebuildRunReport(
-    config: TevuConfig,
-    runId: string,
-    conclusions: 'write' | 'saved',
-  ): Promise<TevuResult<RebuiltReport, 'AgentProtocolError' | 'ArtifactError'>>;
-  readAssessmentContext(
-    config: TevuConfig,
-    runId: string,
-    caseId: string,
-  ): Promise<TevuResult<AssessmentCaseContext, 'ConfigValidationError' | 'ArtifactError'>>;
-  applyAssessment(
-    config: TevuConfig,
-    input: AssessmentInput,
-  ): Promise<
-    TevuResult<
-      AssessedCase,
-      'ConfigValidationError' | 'AssessmentConflictError' | 'ArtifactError' | 'CancellationError'
-    >
-  >;
+/** One operations factory per command; the command's action calls it once, when it starts. */
+type ProgramCommands = {
+  taskAdd(): TaskAddOperations;
+  validate(): ValidateOperations;
+  run(): RunOperations;
+  assess(): AssessOperations;
+  report(): ReportOperations;
 };
 
 /** Everything the program factory needs; injected by the composition root. */
-export type ProgramDependencies = {
-  io: ProgramIo;
-  operations: ProgramOperations;
+export type ProgramDependencies = CommandContext & {
+  commands: ProgramCommands;
   /** Version of the package this executable was built from; `--version` prints it. */
   version: string;
-  now(): Date;
-  redact(text: string): string;
-  cancellation: AbortSignal;
-  /** Lets a `task add` wait take the first SIGINT before the command signal aborts. */
-  waitInterrupt: WaitInterrupt;
 };
 
-type ConfigOptionValues = { config?: string };
-type TaskAddOptionValues = ConfigOptionValues & { jira?: string; github?: string };
-type RunOptionValues = ConfigOptionValues & { dryRun?: boolean; repeat?: number };
-
 type ExitBox = { code: number };
-
-type LineWriter = (line: string) => void;
-
-const EXIT_COMPLETED = 0;
-const EXIT_FAILURE = 1;
-const EXIT_CANCELLED = 130;
 
 const CONFIG_OPTION_DESCRIPTION =
   'Configuration file path; without it, tevu searches ./tevu.yaml, then ' +
@@ -352,7 +144,7 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
       new Option('--github <reference>', 'Import a task from a GitHub issue').conflicts('jira'),
     )
     .action(async (options: TaskAddOptionValues) => {
-      exit.code = await runTaskAdd(dependencies, options);
+      exit.code = await runTaskAdd(dependencies.commands.taskAdd(), dependencies, options);
     });
 
   program
@@ -360,7 +152,7 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
     .description('Check configuration and prerequisites')
     .option('--config <path>', CONFIG_OPTION_DESCRIPTION)
     .action(async (options: ConfigOptionValues) => {
-      exit.code = await runValidate(dependencies, options);
+      exit.code = await runValidate(dependencies.commands.validate(), dependencies, options);
     });
 
   program
@@ -375,7 +167,7 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
       ).argParser(parseRepeatOption),
     )
     .action(async (options: RunOptionValues) => {
-      exit.code = await runBenchmarkCommand(dependencies, options);
+      exit.code = await runBenchmarkCommand(dependencies.commands.run(), dependencies, options);
     });
 
   program
@@ -385,7 +177,13 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
     .argument('<case-id>', 'Case to assess')
     .option('--config <path>', CONFIG_OPTION_DESCRIPTION)
     .action(async (runId: string, caseId: string, options: ConfigOptionValues) => {
-      exit.code = await runAssess(dependencies, runId, caseId, options);
+      exit.code = await runAssess(
+        dependencies.commands.assess(),
+        dependencies,
+        runId,
+        caseId,
+        options,
+      );
     });
 
   program
@@ -394,7 +192,7 @@ function buildProgram(dependencies: ProgramDependencies, exit: ExitBox): Command
     .argument('<run-id>', 'Run to report on')
     .option('--config <path>', CONFIG_OPTION_DESCRIPTION)
     .action(async (runId: string, options: ConfigOptionValues) => {
-      exit.code = await runReport(dependencies, runId, options);
+      exit.code = await runReport(dependencies.commands.report(), dependencies, runId, options);
     });
 
   const config = program.command('config').description('Work with the configuration file');
@@ -512,401 +310,7 @@ function formatCommandHelp(command: Command, helper: Help): string {
   ].join('\n');
 }
 
-function createLineWriters(dependencies: ProgramDependencies): {
-  out: LineWriter;
-  err: LineWriter;
-} {
-  return {
-    out: (line) => {
-      dependencies.io.stdout.write(`${dependencies.redact(line)}\n`);
-    },
-    err: (line) => {
-      dependencies.io.stderr.write(`${dependencies.redact(line)}\n`);
-    },
-  };
-}
-
 function runConfigExample(dependencies: ProgramDependencies): number {
   dependencies.io.stdout.write(dependencies.redact(CONFIG_TEMPLATE));
   return EXIT_COMPLETED;
-}
-
-/**
- * Locates and loads the configuration for `validate`, `run`, `assess`, and
- * `report`, printing the `Configuration:` line once the search has resolved
- * an absolute path and the load result is not a read failure.
- */
-async function loadCommandConfig(
-  dependencies: ProgramDependencies,
-  requestedPath: string | undefined,
-  out: LineWriter,
-): Promise<
-  TevuResult<
-    { config: TevuConfig; configPath: string },
-    LoadConfigErrorKind | 'ConfigNotFoundError'
-  >
-> {
-  const operations = dependencies.operations;
-  const located = await operations.locateConfig(requestedPath);
-  if (!located.ok) {
-    return located;
-  }
-  const loaded = await operations.loadConfig(requestedPath ?? located.value);
-  if (loaded.ok || loaded.error.kind !== 'ConfigReadError') {
-    out(`Configuration: ${located.value}`);
-  }
-  if (!loaded.ok) {
-    return loaded;
-  }
-  return { ok: true, value: { config: loaded.value, configPath: located.value } };
-}
-
-async function runTaskAdd(
-  dependencies: ProgramDependencies,
-  options: TaskAddOptionValues,
-): Promise<number> {
-  const { out, err } = createLineWriters(dependencies);
-  const operations = dependencies.operations;
-  const located = await operations.locateConfig(options.config);
-  let absolutePath: string;
-  if (located.ok) {
-    absolutePath = located.value;
-  } else if (located.error.kind === 'ConfigNotFoundError') {
-    absolutePath = located.error.searchedPaths[0];
-  } else {
-    return reportFailure(err, located.error, dependencies.redact);
-  }
-  const loaderPath = options.config ?? absolutePath;
-  const wizard = await runTaskWizard(
-    {
-      configPath: loaderPath,
-      jiraIssueKey: options.jira,
-      githubIssueReference: options.github,
-    },
-    {
-      io: {
-        input: dependencies.io.stdin,
-        output: dependencies.io.stdout,
-        statusLine: createStatusLine(),
-        waitInterrupt: dependencies.waitInterrupt,
-      },
-      cancellation: dependencies.cancellation,
-      readConfig: async (): Promise<
-        TevuResult<TevuConfig | null, LoadConfigErrorKind | 'PrerequisiteError'>
-      > => {
-        const exists = await operations.configExists(loaderPath);
-        if (!exists) {
-          const directory = await operations.requireConfigDirectory(loaderPath);
-          if (!directory.ok) {
-            return directory;
-          }
-          out(`Configuration: ${absolutePath}`);
-          return { ok: true, value: null };
-        }
-        const loaded = await operations.loadConfig(loaderPath);
-        if (loaded.ok || loaded.error.kind !== 'ConfigReadError') {
-          out(`Configuration: ${absolutePath}`);
-        }
-        return loaded;
-      },
-      importJiraIssue: operations.importJiraIssue,
-      importGitHubIssue: operations.importGitHubIssue,
-      resolveReference: (repository, identifier, onProgress) =>
-        operations.resolveReference({ configPath: loaderPath, repository, identifier }, onProgress),
-      ensureManagedCommits: (repository, revisions, onProgress) =>
-        operations.ensureManagedCommits({ repository, revisions }, onProgress),
-      ensureManagedLfsObjects: (repository, revision, onProgress) =>
-        operations.ensureManagedLfsObjects({ repository, revision }, onProgress),
-      checkGitHubRepository: operations.checkGitHubRepository,
-      isGitRepository: (repositoryPath) => operations.isGitRepository(loaderPath, repositoryPath),
-      readLocalRepositoryNaming: (repositoryPath) =>
-        operations.readLocalRepositoryNaming(loaderPath, repositoryPath),
-      isVariableSet: (name) => operations.unsetVariables([name]).length === 0,
-      draftCriteria: (request) => operations.draftCriteria({ configPath: loaderPath, ...request }),
-      probeAgent: (command) => operations.probeAgent(loaderPath, command),
-      inspectModelProvider: (agent, model) =>
-        operations.inspectModelProvider(loaderPath, agent, model),
-      checkModelAccess: (agent, model) => operations.checkModelAccess(loaderPath, agent, model),
-      inspectBaseCommit: (repository, baseCommit, reference) =>
-        operations.inspectBaseCommit(loaderPath, repository, baseCommit, reference),
-      checkRepositoryPlacement: (outputDirectory, repositories) =>
-        operations.checkRepositoryPlacement(loaderPath, outputDirectory, repositories),
-      createTask: operations.createTask,
-      now: dependencies.now,
-      redact: dependencies.redact,
-    },
-  );
-  if (!wizard.ok) {
-    // The wizard already printed its single cancel line.
-    return wizard.error.kind === 'CancellationError'
-      ? EXIT_CANCELLED
-      : reportFailure(err, wizard.error, dependencies.redact);
-  }
-  outro(`Task ${wizard.value.id} added to ${loaderPath}`, { output: dependencies.io.stdout });
-  return EXIT_COMPLETED;
-}
-
-async function runValidate(
-  dependencies: ProgramDependencies,
-  options: ConfigOptionValues,
-): Promise<number> {
-  const { out, err } = createLineWriters(dependencies);
-  const loaded = await loadCommandConfig(dependencies, options.config, out);
-  if (!loaded.ok) {
-    return reportFailure(err, loaded.error, dependencies.redact);
-  }
-  const report = await dependencies.operations.validateConfig(loaded.value.config);
-  if (!report.ok) {
-    return reportFailure(err, report.error, dependencies.redact);
-  }
-  printFindings(out, report.value.findings);
-  out(report.value.valid ? 'Configuration is valid.' : 'Configuration is invalid.');
-  return report.value.valid ? EXIT_COMPLETED : EXIT_FAILURE;
-}
-
-async function runBenchmarkCommand(
-  dependencies: ProgramDependencies,
-  options: RunOptionValues,
-): Promise<number> {
-  const { out, err } = createLineWriters(dependencies);
-  const operations = dependencies.operations;
-  const loaded = await loadCommandConfig(dependencies, options.config, out);
-  if (!loaded.ok) {
-    return reportFailure(err, loaded.error, dependencies.redact);
-  }
-  const prepared = await operations.prepareRepositories(loaded.value.config, out);
-  if (!prepared.ok) {
-    return reportFailure(err, prepared.error, dependencies.redact);
-  }
-  for (const warning of prepared.value) {
-    out(`warning ${warning.identifier}: ${warning.message}`);
-  }
-  const validation = await operations.validateConfig(loaded.value.config);
-  if (!validation.ok) {
-    return reportFailure(err, validation.error, dependencies.redact);
-  }
-  printFindings(out, validation.value.findings);
-  if (!validation.value.valid) {
-    out('Configuration is invalid.');
-    return EXIT_FAILURE;
-  }
-  const plan = operations.planBenchmark(
-    loaded.value.config,
-    loaded.value.configPath,
-    validation.value.efforts,
-    options.repeat,
-  );
-  if (options.dryRun === true) {
-    printDryRun(out, plan, validation.value.capabilities);
-    return EXIT_COMPLETED;
-  }
-
-  // Concurrent per-case progress is shown only on a TTY; non-TTY output stays
-  // deterministic metadata: run ID, final case summary, findings, and paths.
-  const showProgress = dependencies.io.stdout.isTTY === true;
-  const retainedGradingDirectories: string[] = [];
-  const executed = await operations.executeBenchmark(plan, {
-    cancellation: dependencies.cancellation,
-    onRunId: (runId) => {
-      out(`Run ${runId} started.`);
-    },
-    onLifecycle: showProgress
-      ? (caseId, lifecycle) => {
-          out(`[${caseId}] ${lifecycle}`);
-        }
-      : undefined,
-    onRetainedGradingDirectory: (directory) => {
-      retainedGradingDirectories.push(directory);
-    },
-  });
-  if (!executed.ok) {
-    return reportFailure(err, executed.error, dependencies.redact);
-  }
-  const run = executed.value;
-  const runId = run.manifest.runId;
-  const runDirectory = `${plan.artifactsDirectory}/${runId}`;
-  if (run.exitCode === EXIT_CANCELLED) {
-    // A cancelled run builds no report, so the report's findings cannot carry these warnings.
-    for (const directory of retainedGradingDirectories) {
-      out(
-        `Warning: tevu could not delete the temporary directory of a grading call. The results are not affected. Delete ${directory} when no tevu command uses it.`,
-      );
-    }
-    out(`Artifacts: ${runDirectory}`);
-    out(
-      `Run cancelled; partial artifacts were finalized. Regenerate the report with: tevu report ${runId}`,
-    );
-    return EXIT_CANCELLED;
-  }
-  const rebuilt = await operations.rebuildRunReport(loaded.value.config, runId, 'write');
-  if (!rebuilt.ok) {
-    out(`Artifacts: ${runDirectory}`);
-    for (const line of renderTevuError(rebuilt.error, dependencies.redact)) {
-      err(line);
-    }
-    err(`The report could not be generated; recover with: tevu report ${runId}`);
-    return EXIT_FAILURE;
-  }
-  const { report, retainedDirectories } = rebuilt.value;
-  for (const line of [
-    ...report.summary.attempts.flatMap((attempt) => attempt.lines),
-    ...report.summary.findings,
-    ...retainedDirectories.map(
-      (directory) =>
-        `Warning: tevu could not delete the temporary directory of a summary call. The results are not affected. Delete ${directory} when no tevu command uses it.`,
-    ),
-  ]) {
-    out(line);
-  }
-  out(`Artifacts: ${runDirectory}`);
-  out(`Summary: ${runDirectory}/summary.md`);
-  out(`Report: ${runDirectory}/report.md`);
-  return run.exitCode;
-}
-
-async function runAssess(
-  dependencies: ProgramDependencies,
-  runId: string,
-  caseId: string,
-  options: ConfigOptionValues,
-): Promise<number> {
-  const { out, err } = createLineWriters(dependencies);
-  const operations = dependencies.operations;
-  const loaded = await loadCommandConfig(dependencies, options.config, out);
-  if (!loaded.ok) {
-    return reportFailure(err, loaded.error, dependencies.redact);
-  }
-  const config = loaded.value.config;
-  const wizard = await runAssessmentWizard(
-    { runId, caseId },
-    {
-      io: {
-        input: dependencies.io.stdin,
-        output: dependencies.io.stdout,
-        statusLine: createStatusLine(),
-      },
-      readCaseContext: () => operations.readAssessmentContext(config, runId, caseId),
-      now: dependencies.now,
-      redact: dependencies.redact,
-    },
-  );
-  if (!wizard.ok) {
-    return reportFailure(err, wizard.error, dependencies.redact);
-  }
-  const applied = await operations.applyAssessment(config, {
-    ...wizard.value,
-    cancellation: dependencies.cancellation,
-  });
-  if (!applied.ok) {
-    return reportFailure(err, applied.error, dependencies.redact);
-  }
-  out('Assessment recorded.');
-  for (const line of applied.value.summary) {
-    out(line);
-  }
-  out(`Report: ${config.run.output_dir}/${runId}/report.md`);
-  return EXIT_COMPLETED;
-}
-
-async function runReport(
-  dependencies: ProgramDependencies,
-  runId: string,
-  options: ConfigOptionValues,
-): Promise<number> {
-  const { out, err } = createLineWriters(dependencies);
-  const loaded = await loadCommandConfig(dependencies, options.config, out);
-  if (!loaded.ok) {
-    return reportFailure(err, loaded.error, dependencies.redact);
-  }
-  const rebuilt = await dependencies.operations.rebuildRunReport(
-    loaded.value.config,
-    runId,
-    'saved',
-  );
-  if (!rebuilt.ok) {
-    return reportFailure(err, rebuilt.error, dependencies.redact);
-  }
-  out(`Summary regenerated: ${loaded.value.config.run.output_dir}/${runId}/summary.md`);
-  out(`Report regenerated: ${loaded.value.config.run.output_dir}/${runId}/report.md`);
-  return EXIT_COMPLETED;
-}
-
-function printDryRun(
-  out: LineWriter,
-  plan: BenchmarkPlan,
-  capabilities: Readonly<Record<string, AgentCapabilityReport>>,
-): void {
-  out('Dry run: no artifact, workspace, Jira call, or agent model session is created.');
-  out(`Planned cases (${plan.cases.length}, execution order):`);
-  for (const identity of plan.cases) {
-    out(
-      `  ${identity.caseId}: task ${identity.taskId}, model entry ${identity.modelId} (${identity.model}, effort ${effortLabel(identity.effort, plan.efforts.models[identity.modelId])}), commit ${identity.sourceCommit}, timeout ${identity.timeoutMs}ms`,
-    );
-  }
-  out(
-    `Manual assessments needed: ${countManualAssessments(plan)} (one tevu assess per case whose task has manual checks)`,
-  );
-  out(
-    `Limits: concurrency ${plan.concurrency}, timeout ${plan.defaultCaseTimeoutMs}ms, stop grace ${plan.terminationGraceMs}ms`,
-  );
-  out(`Artifact destination: ${plan.artifactsDirectory}`);
-  for (const name of agentNamesInUse(plan.config)) {
-    printCapabilities(out, name, capabilities[name] ?? null);
-  }
-}
-
-/** Counts `plan.cases` entries whose task declares at least one manual check in `checks.acceptance` or `checks.done`. */
-function countManualAssessments(plan: BenchmarkPlan): number {
-  const tasksById = new Map(plan.config.tasks.map((task) => [task.id, task]));
-  let count = 0;
-  for (const identity of plan.cases) {
-    const task = tasksById.get(identity.taskId);
-    if (task !== undefined && taskHasManualCheck(task)) {
-      count += 1;
-    }
-  }
-  return count;
-}
-
-/** Holds when a task declares at least one check with `manual: true`, required or optional. */
-function taskHasManualCheck(task: TaskDefinition): boolean {
-  return [...task.checks.acceptance, ...task.checks.done].some((check) => 'manual' in check);
-}
-
-function printCapabilities(
-  out: LineWriter,
-  name: string,
-  report: AgentCapabilityReport | null,
-): void {
-  if (report === null) {
-    out(`Agent "${name}" capabilities: not probed`);
-    return;
-  }
-  out(
-    `Agent "${name}" capabilities (${report.executable}, detected version: ${report.detectedVersion ?? 'not detected'}):`,
-  );
-  for (const capability of report.capabilities) {
-    out(
-      `  ${capability.name}${capability.required ? '' : ' (optional)'}: ${capability.availability}`,
-    );
-  }
-  out(`  isolation deny-outside-worktree (optional): ${report.isolation.denyOutsideWorktree}`);
-}
-
-function printFindings(out: LineWriter, findings: readonly ValidationFinding[]): void {
-  for (const finding of findings) {
-    out(`${finding.severity} ${finding.identifier}: ${finding.message}`);
-  }
-}
-
-/** Prints one typed failure and returns its mapped exit code. */
-function reportFailure(
-  err: LineWriter,
-  error: TevuError,
-  redact: (text: string) => string,
-): number {
-  for (const line of renderTevuError(error, redact)) {
-    err(line);
-  }
-  return error.kind === 'CancellationError' ? EXIT_CANCELLED : EXIT_FAILURE;
 }

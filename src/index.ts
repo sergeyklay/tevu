@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * Executable composition root: instantiates the concrete adapters, wires the
- * shared secret redactor, stable run-ID and configuration-digest generators,
- * the wall clock, the standard streams, and bounded signal cancellation into
- * the program factory, then sets the mapped process exit code. Only
- * dependency wiring and signal forwarding live here; no orchestration,
- * evaluation, transport, or persistence logic.
+ * Executable composition root: instantiates the concrete adapters, wires one
+ * host environment that backs every secret redaction sink, stable run-ID and
+ * configuration-digest generators, the wall clock, the standard streams, and
+ * bounded signal cancellation into the program factory, then sets the mapped
+ * process exit code. Each command's adapters are built by its own operations
+ * factory when the command runs. Only dependency wiring and signal forwarding
+ * live here; no orchestration, evaluation, transport, or persistence logic.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { realpathSync } from 'node:fs';
@@ -38,7 +39,11 @@ import {
 } from '@/adapters/trackers/github-issues';
 import { createJiraCloudAdapter } from '@/adapters/trackers/jira-cloud';
 import { assessCase, readAssessmentContext, rebuildReport } from '@/application/assess';
-import { createTask, inspectTaskBaseCommit } from '@/application/create-task';
+import {
+  collectBaseSecretNames,
+  createTask,
+  inspectTaskBaseCommit,
+} from '@/application/create-task';
 import { draftCriteria } from '@/application/draft-criteria';
 import {
   ensureManagedCommits,
@@ -57,6 +62,7 @@ import { GH_CREDENTIAL_ENVIRONMENT_VARIABLES } from '@/domain/github-cli';
 import { runProgram } from '@/interface/program';
 import { createWaitInterrupt } from '@/interface/wait-interrupt';
 
+import type { GitHubIssuesDependencies } from '@/adapters/trackers/github-issues';
 import type { JiraCloudSettings } from '@/adapters/trackers/jira-cloud';
 import type { ManagedLfsDependencies } from '@/application/managed-clone';
 import type { ModelAccessDependencies } from '@/application/model-access';
@@ -64,14 +70,23 @@ import type { ConclusionWriter } from '@/application/write-conclusions';
 import type {
   AgentRegistry,
   ArtifactStore,
+  CaseExecutableAdapter,
   Clock,
+  ConfigStore,
   EnvironmentAdapter,
   GitWorkspaceAdapter,
-  LoadConfigErrorKind,
+  ManagedCloneAdapter,
+  ParentEnvironmentSnapshot,
+  PrerequisiteAdapter,
   TevuConfig,
-  TevuResult,
 } from '@/domain/types';
-import type { ProgramDependencies, ProgramIo, ProgramOperations } from '@/interface/program';
+import type { AssessOperations } from '@/interface/commands/assess';
+import type { ReportOperations } from '@/interface/commands/report';
+import type { RunOperations } from '@/interface/commands/run';
+import type { ConfigOperations, ProgramIo } from '@/interface/commands/shared';
+import type { TaskAddOperations } from '@/interface/commands/task-add';
+import type { ValidateOperations } from '@/interface/commands/validate';
+import type { ProgramDependencies } from '@/interface/program';
 import type { WaitInterrupt } from '@/interface/wait-interrupt';
 import type { Writable } from 'node:stream';
 
@@ -86,17 +101,69 @@ export type CompositionOptions = {
   waitInterrupt?: WaitInterrupt;
 };
 
-/** Grows as configurations and run-level snapshots reveal secret values, so every sink redacts coherently. */
-type SecretRegistry = {
-  add(candidates: Iterable<string | undefined>): void;
-  read(): readonly string[];
+/**
+ * tevu's own environment, copied once when `composeProgramDependencies` runs.
+ * The composition root reads every variable through it: a credential only
+ * through `secret`, which registers it before returning, and through
+ * `ordinary` only `HOME`, `PATH`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, and the
+ * variable `trackers.jira.email` references.
+ */
+interface HostEnvironment {
+  /**
+   * Every variable tevu started with, passed whole to the adapters that start
+   * gh or git. No variable is read from it, because reading it registers
+   * nothing.
+   */
+  readonly parentEnvironment: Readonly<Record<string, string | undefined>>;
+  /** A credential variable's value; a non-empty value is registered before it is returned. */
+  secret(name: string): string | undefined;
+  /** A non-credential variable's value; never registered. */
+  ordinary(name: string): string | undefined;
+  /**
+   * Registers the non-empty `secretValues` of a snapshot an adapter read from
+   * the live environment. Only `wrapEnvironmentAdapter` calls it.
+   */
+  registerSnapshotSecrets(snapshot: ParentEnvironmentSnapshot): void;
+  /** Every registered value, each once. */
+  secretValues(): readonly string[];
+  /** `text` with every registered value replaced by `[REDACTED]`. */
   redact(text: string): string;
+}
+
+/** Program-wide values every command's operations factory shares. */
+type CompositionContext = {
+  host: HostEnvironment;
+  cancellation: AbortSignal;
+  configStore: ConfigStore;
+  managedCloneRoot: string | undefined;
+};
+
+type AgentsFor = (config: Pick<TevuConfig, 'agents'>) => AgentRegistry;
+
+type ValidateConfigParts = {
+  agentsFor: AgentsFor;
+  environments: EnvironmentAdapter;
+  prerequisites: PrerequisiteAdapter;
+  clones: ManagedCloneAdapter;
+  caseExecutables: CaseExecutableAdapter;
+};
+
+type ExecuteBenchmarkParts = {
+  agentsFor: AgentsFor;
+  environments: EnvironmentAdapter;
+  prerequisites: PrerequisiteAdapter;
+};
+
+type RebuildReportParts = {
+  agentsFor: AgentsFor;
+  environments: EnvironmentAdapter;
 };
 
 /**
- * Composes the production dependency graph: real adapters behind the injected
- * operation ports, one shared secret registry backing every redaction sink,
- * and the stable run-ID, digest, and clock sources.
+ * Composes the production dependency graph: one host environment backing every
+ * redaction sink, one operations factory per command that builds real
+ * adapters behind the injected operation ports when the command runs, and the
+ * stable run-ID, digest, and clock sources.
  */
 export function composeProgramDependencies(options: CompositionOptions = {}): ProgramDependencies {
   const io: ProgramIo = options.io ?? {
@@ -105,265 +172,29 @@ export function composeProgramDependencies(options: CompositionOptions = {}): Pr
     stderr: process.stderr,
   };
   const cancellation = options.cancellation ?? new AbortController().signal;
-  const registry = createSecretRegistry();
-  const clock: Clock = { now: () => new Date() };
-  const prerequisites = createPrerequisiteAdapter();
-  const caseExecutables = createCaseExecutableAdapter();
-  const configStore = createConfigStore({ redact: registry.redact });
-  const environments = wrapEnvironmentAdapter(createEnvironmentAdapter(), registry);
-  const cloneRoot = resolveManagedCloneRoot({
-    home: process.env['HOME'],
-    xdgCacheHome: process.env['XDG_CACHE_HOME'],
-  });
-
-  registry.add(GH_CREDENTIAL_ENVIRONMENT_VARIABLES.map((name) => process.env[name]));
-  const clones = createManagedCloneAdapter({
-    runProcess: runManagedProcess,
-    parentEnvironment: process.env,
-    secretValues: registry.read,
+  const host = createHostEnvironment(process.env);
+  const context: CompositionContext = {
+    host,
     cancellation,
-  });
-
-  const loadConfigAndRegisterSecrets = async (
-    configPath: string,
-  ): Promise<TevuResult<TevuConfig, LoadConfigErrorKind>> => {
-    const loaded = await loadConfig(configPath, configStore, cloneRoot);
-    if (loaded.ok) {
-      registerConfigSecrets(registry, loaded.value);
-    }
-    return loaded;
-  };
-
-  const createGit = (): GitWorkspaceAdapter =>
-    createGitWorkspaceAdapter({ workspacesDirectory: createWorkspacesRoot() });
-
-  const secrets = createSecretRedactor(registry.read, registry.redact);
-
-  const managedCloneDependencies = (
-    onProgress: (line: string) => void,
-  ): ManagedLfsDependencies => ({
-    clones,
-    git: createSourceValidator(),
-    managedCloneRoot: cloneRoot,
-    onProgress,
-  });
-
-  const pullRequests = createGitHubPullRequestReader({
-    runGh: (ghRequest) => {
-      registry.add(GH_CREDENTIAL_ENVIRONMENT_VARIABLES.map((name) => process.env[name]));
-      return runManagedProcess({
-        ...ghRequest,
-        cwd: process.cwd(),
-        secretValues: registry.read(),
-        stdoutRedaction: 'structured',
-      });
-    },
-    parentEnvironment: process.env,
-    cancellation,
-  });
-
-  /** Registers every configured agent under its own name; currently the schema declares only "opencode". */
-  const agentsFor = (config: Pick<TevuConfig, 'agents'>): AgentRegistry =>
-    new Map([
-      [
-        'opencode',
-        createOpenCodeAdapter(
-          {
-            agent: 'opencode',
-            executable: config.agents.opencode.command,
-            providers: config.agents.opencode.providers,
-            declaredVariables: {
-              secrets: config.agents.opencode.secrets,
-              env: config.agents.opencode.env,
-            },
-          },
-          {
-            runProcess: runManagedProcess,
-            secrets,
-            probeEnvironment: { PATH: process.env['PATH'] ?? '' },
-            probeDirectory: process.cwd(),
-            operatorDirectories: {
-              home: process.env['HOME'],
-              xdgConfigHome: process.env['XDG_CONFIG_HOME'],
-            },
-          },
-        ),
-      ],
-    ]);
-
-  const modelAccess = (): ModelAccessDependencies => ({
-    agentsFor,
-    environments,
-    git: createGit(),
-    cancellation,
-  });
-
-  const storeFor = (config: TevuConfig): ArtifactStore =>
-    createArtifactStore({ artifactsDirectory: config.run.output_dir, redact: registry.redact });
-
-  const operations: ProgramOperations = {
-    configExists: (configPath) => configStore.exists(configPath),
-    loadConfig: loadConfigAndRegisterSecrets,
-    requireConfigDirectory: (configPath) => configStore.requireDirectory(configPath),
-    locateConfig: (requestedPath) =>
-      locateConfig(
-        requestedPath,
-        {
-          cwd: process.cwd(),
-          home: process.env['HOME'],
-          xdgConfigHome: process.env['XDG_CONFIG_HOME'],
-        },
-        configStore,
-      ),
-    importJiraIssue: (settings, issueKey) => {
-      const jiraSettings: JiraCloudSettings = {
-        baseUrl: settings.url,
-        emailEnvironmentVariable: referencedVariableName(settings.email),
-        tokenEnvironmentVariable: referencedVariableName(settings.token),
-      };
-      registry.add([process.env[jiraSettings.tokenEnvironmentVariable]]);
-      const jira = createJiraCloudAdapter(jiraSettings, {
-        fetch: (url, init) => globalThis.fetch(url, init),
-        sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-        getEnvironmentVariable: (name) => process.env[name],
-      });
-      return jira.readIssue(issueKey);
-    },
-    importGitHubIssue: (reference) => {
-      registry.add(GH_CREDENTIAL_ENVIRONMENT_VARIABLES.map((name) => process.env[name]));
-      const github = createGitHubIssuesAdapter({
-        runGh: (request) =>
-          runManagedProcess({
-            ...request,
-            cwd: process.cwd(),
-            secretValues: registry.read(),
-            stdoutRedaction: 'structured',
-          }),
-        parentEnvironment: process.env,
-        cancellation,
-      });
-      return github.readIssue(reference);
-    },
-    resolveReference: (request, onProgress) =>
-      resolveReferenceSolution(request, { ...managedCloneDependencies(onProgress), pullRequests }),
-    ensureManagedCommits: (request, onProgress) =>
-      ensureManagedCommits(request, managedCloneDependencies(onProgress)),
-    ensureManagedLfsObjects: (request, onProgress) =>
-      ensureManagedLfsObjects(request, managedCloneDependencies(onProgress)),
-    checkGitHubRepository: (repository) => clones.checkRemote(repository),
-    isGitRepository: (configPath, repositoryPath) =>
-      isGitRepository(path.resolve(path.dirname(path.resolve(configPath)), repositoryPath)),
-    readLocalRepositoryNaming: async (configPath, repositoryPath) => {
-      const directory = path.resolve(path.dirname(path.resolve(configPath)), repositoryPath);
-      const originUrl = await readOriginRemoteUrl(directory);
-      return {
-        directoryName: path.basename(directory),
-        ...(originUrl === undefined ? {} : { originUrl }),
-      };
-    },
-    unsetVariables: (names) => environments.unsetVariables(names),
-    draftCriteria: (request) =>
-      draftCriteria(request, {
-        agentsFor,
-        environments,
-        git: createGit(),
-        pullRequests,
-        managedCloneRoot: cloneRoot,
-        registerSecrets: (names) => registry.add(names.map((name) => process.env[name])),
-        redact: registry.redact,
-        cancellation,
-      }),
-    probeAgent: (configPath, command) => probeAgent({ configPath, command }, modelAccess()),
-    inspectModelProvider: (configPath, agent, model) =>
-      inspectModelProvider({ configPath, agent, model }, modelAccess()),
-    checkModelAccess: (configPath, agent, model) =>
-      checkModelAccess({ configPath, agent, model }, modelAccess()),
-    prepareRepositories: (config, onProgress) =>
-      prepareManagedRepositories(config, managedCloneDependencies(onProgress)),
-    inspectBaseCommit: (configPath, repository, baseCommit, reference) =>
-      inspectTaskBaseCommit(
-        { configPath, repository, baseCommit, ...(reference === undefined ? {} : { reference }) },
-        { git: createSourceValidator(), managedCloneRoot: cloneRoot },
-      ),
-    checkRepositoryPlacement: (configPath, outputDirectory, repositories) =>
-      checkRepositoryPlacement({ outputDirectory, repositories }, configPath, cloneRoot),
-    createTask: (input) =>
-      createTask(input, {
-        configStore,
-        git: createSourceValidator(),
-        registerSecrets: (names) => registry.add(names.map((name) => process.env[name])),
-        redact: registry.redact,
-        managedCloneRoot: cloneRoot,
-        cancellation,
-      }),
-    validateConfig: (config) =>
-      validateConfig(config, {
-        git: createGit(),
-        agents: agentsFor(config),
-        environments,
-        prerequisites,
-        clones: { inspectClone: clones.inspectClone },
-        caseExecutables,
-      }),
-    planBenchmark,
-    executeBenchmark: async (plan, hooks) => {
-      const clearCancellationExit = scheduleBoundedCancellationExit(
-        hooks.cancellation,
-        plan.terminationGraceMs,
-      );
-      try {
-        return await runBenchmark(plan, {
-          git: createGit(),
-          agents: agentsFor(plan.config),
-          artifacts: createArtifactStore({
-            artifactsDirectory: plan.artifactsDirectory,
-            redact: registry.redact,
-          }),
-          evaluatorProcesses: createEvaluatorProcessAdapter(registry.read),
-          environments,
-          prerequisites,
-          clock,
-          generateRunId: (startedAt) => {
-            const runId = generateRunId(startedAt);
-            hooks.onRunId?.(runId);
-            return runId;
-          },
-          configDigest: (config) => sha256Hex(canonicalConfigSerialization(config)),
-          textDigest: sha256Hex,
-          redact: registry.redact,
-          cancellation: hooks.cancellation,
-          onLifecycle: hooks.onLifecycle,
-          onRetainedGradingDirectory: hooks.onRetainedGradingDirectory,
-        });
-      } finally {
-        clearCancellationExit();
-      }
-    },
-    rebuildRunReport: (config, runId, conclusions) => {
-      const agents = agentsFor(config);
-      const writer: ConclusionWriter | undefined =
-        conclusions === 'write'
-          ? {
-              write: (evidence) =>
-                writeTaskConclusions(
-                  { config, evidence, redact: registry.redact, cancellation },
-                  { agents, environments, git: createGit() },
-                ),
-            }
-          : undefined;
-      return rebuildReport(runId, storeFor(config), agents, writer);
-    },
-    readAssessmentContext: (config, runId, caseId) =>
-      readAssessmentContext(runId, caseId, storeFor(config)),
-    applyAssessment: (config, input) => assessCase(input, storeFor(config), agentsFor(config)),
+    configStore: createConfigStore({ redact: host.redact }),
+    managedCloneRoot: resolveManagedCloneRoot({
+      home: host.ordinary('HOME'),
+      xdgCacheHome: host.ordinary('XDG_CACHE_HOME'),
+    }),
   };
 
   return {
     io,
-    operations,
+    commands: {
+      taskAdd: () => composeTaskAddOperations(context),
+      validate: () => composeValidateOperations(context),
+      run: () => composeRunOperations(context),
+      assess: () => composeAssessOperations(context),
+      report: () => composeReportOperations(context),
+    },
     version: __TEVU_VERSION__,
     now: () => new Date(),
-    redact: registry.redact,
+    redact: host.redact,
     cancellation,
     waitInterrupt: options.waitInterrupt ?? createWaitInterrupt(),
   };
@@ -417,41 +248,65 @@ export function ignoreClosedReader(stream: Writable): void {
   });
 }
 
-function createSecretRegistry(): SecretRegistry {
-  const values = new Set<string>();
-  return {
-    add(candidates: Iterable<string | undefined>): void {
-      for (const candidate of candidates) {
-        if (candidate !== undefined && candidate.length > 0) {
-          values.add(candidate);
-        }
-      }
-    },
-    read: () => [...values],
-    redact: (text) => createRedactor([...values])(text),
+/**
+ * Creates the host environment over a copy of `variables` and registers the
+ * GitHub CLI credentials in it, so every sink redacts them from the start.
+ *
+ * Later writes to `variables` change no result. No method uses `this`, throws,
+ * or performs I/O, so each works when passed detached.
+ */
+export function createHostEnvironment(
+  variables: Readonly<Record<string, string | undefined>>,
+): HostEnvironment {
+  const copy = { ...variables };
+  const registered = new Set<string>();
+  const register = (value: string | undefined): void => {
+    if (value !== undefined && value.length > 0) {
+      registered.add(value);
+    }
   };
-}
-
-/** Registers every agent secret's value and the Jira token, mirroring the run-level snapshot. */
-function registerConfigSecrets(registry: SecretRegistry, config: TevuConfig): void {
-  const names = Object.values(config.agents).flatMap((settings) => settings.secrets);
-  const jira = config.trackers?.jira;
-  if (jira !== undefined) {
-    names.push(referencedVariableName(jira.token));
+  const secretValues = (): readonly string[] => [...registered];
+  const host: HostEnvironment = {
+    parentEnvironment: copy,
+    secret: (name) => {
+      const value = copy[name];
+      register(value);
+      return value;
+    },
+    ordinary: (name) => copy[name],
+    registerSnapshotSecrets: (snapshot) => {
+      snapshot.secretValues.forEach(register);
+    },
+    secretValues,
+    redact: (text) => createRedactor(secretValues())(text),
+  };
+  for (const name of GH_CREDENTIAL_ENVIRONMENT_VARIABLES) {
+    host.secret(name);
   }
-  registry.add(names.map((name) => process.env[name]));
+  return host;
 }
 
-/** Records run-level snapshot secrets in the shared registry so later sinks redact them too. */
+/** Reads each named credential variable through the host, which registers its value. */
+function registerSecretVariables(host: HostEnvironment, names: Iterable<string>): void {
+  for (const name of names) {
+    host.secret(name);
+  }
+}
+
+/**
+ * Records the secret values each successful run-level snapshot read, so later
+ * sinks redact them too. The values come from the snapshot, not from the
+ * host's copy, because they are the ones case environments receive.
+ */
 function wrapEnvironmentAdapter(
   adapter: EnvironmentAdapter,
-  registry: SecretRegistry,
+  host: HostEnvironment,
 ): EnvironmentAdapter {
   return {
     snapshotParent(names) {
       const snapshot = adapter.snapshotParent(names);
       if (snapshot.ok) {
-        registry.add(snapshot.value.secretValues);
+        host.registerSnapshotSecrets(snapshot.value);
       }
       return snapshot;
     },
@@ -460,6 +315,358 @@ function wrapEnvironmentAdapter(
       adapter.createCaseEnvironments(workspace, snapshot, names, agent, configurationFiles),
     createModelCallEnvironment: (snapshot, agentVariables, configurationFiles) =>
       adapter.createModelCallEnvironment(snapshot, agentVariables, configurationFiles),
+  };
+}
+
+function createGit(): GitWorkspaceAdapter {
+  return createGitWorkspaceAdapter({ workspacesDirectory: createWorkspacesRoot() });
+}
+
+/** Registers every configured agent under its own name; currently the schema declares only "opencode". */
+function createAgentsFor({ host }: CompositionContext): AgentsFor {
+  const secrets = createSecretRedactor(host.secretValues, host.redact);
+  return (config) =>
+    new Map([
+      [
+        'opencode',
+        createOpenCodeAdapter(
+          {
+            agent: 'opencode',
+            executable: config.agents.opencode.command,
+            providers: config.agents.opencode.providers,
+            declaredVariables: {
+              secrets: config.agents.opencode.secrets,
+              env: config.agents.opencode.env,
+            },
+          },
+          {
+            runProcess: runManagedProcess,
+            secrets,
+            probeEnvironment: { PATH: host.ordinary('PATH') ?? '' },
+            probeDirectory: process.cwd(),
+            operatorDirectories: {
+              home: host.ordinary('HOME'),
+              xdgConfigHome: host.ordinary('XDG_CONFIG_HOME'),
+            },
+          },
+        ),
+      ],
+    ]);
+}
+
+function createClones(context: CompositionContext): ManagedCloneAdapter {
+  return createManagedCloneAdapter({
+    runProcess: runManagedProcess,
+    parentEnvironment: context.host.parentEnvironment,
+    secretValues: context.host.secretValues,
+    cancellation: context.cancellation,
+  });
+}
+
+function createGitHubDependencies(context: CompositionContext): GitHubIssuesDependencies {
+  return {
+    runGh: (request) =>
+      runManagedProcess({
+        ...request,
+        cwd: process.cwd(),
+        secretValues: context.host.secretValues(),
+        stdoutRedaction: 'structured',
+      }),
+    parentEnvironment: context.host.parentEnvironment,
+    cancellation: context.cancellation,
+  };
+}
+
+function createManagedLfsDependencies(
+  context: CompositionContext,
+  clones: ManagedCloneAdapter,
+  onProgress: (line: string) => void,
+): ManagedLfsDependencies {
+  return {
+    clones,
+    git: createSourceValidator(),
+    managedCloneRoot: context.managedCloneRoot,
+    onProgress,
+  };
+}
+
+function artifactStoreFor(host: HostEnvironment, config: TevuConfig): ArtifactStore {
+  return createArtifactStore({ artifactsDirectory: config.run.output_dir, redact: host.redact });
+}
+
+function createValidateConfig(parts: ValidateConfigParts): ValidateOperations['validateConfig'] {
+  return (config) =>
+    validateConfig(config, {
+      git: createGit(),
+      agents: parts.agentsFor(config),
+      environments: parts.environments,
+      prerequisites: parts.prerequisites,
+      clones: { inspectClone: parts.clones.inspectClone },
+      caseExecutables: parts.caseExecutables,
+    });
+}
+
+function createRebuildRunReport(
+  context: CompositionContext,
+  parts: RebuildReportParts,
+): ReportOperations['rebuildRunReport'] {
+  const { host, cancellation } = context;
+  return (config, runId, conclusions) => {
+    const agents = parts.agentsFor(config);
+    const writer: ConclusionWriter | undefined =
+      conclusions === 'write'
+        ? {
+            write: (evidence) =>
+              writeTaskConclusions(
+                { config, evidence, redact: host.redact, cancellation },
+                { agents, environments: parts.environments, git: createGit() },
+              ),
+          }
+        : undefined;
+    return rebuildReport(runId, artifactStoreFor(host, config), agents, writer);
+  };
+}
+
+function createExecuteBenchmark(
+  context: CompositionContext,
+  parts: ExecuteBenchmarkParts,
+): RunOperations['executeBenchmark'] {
+  const { host } = context;
+  const clock: Clock = { now: () => new Date() };
+  return async (plan, hooks) => {
+    const clearCancellationExit = scheduleBoundedCancellationExit(
+      hooks.cancellation,
+      plan.terminationGraceMs,
+    );
+    try {
+      return await runBenchmark(plan, {
+        git: createGit(),
+        agents: parts.agentsFor(plan.config),
+        artifacts: createArtifactStore({
+          artifactsDirectory: plan.artifactsDirectory,
+          redact: host.redact,
+        }),
+        evaluatorProcesses: createEvaluatorProcessAdapter(host.secretValues),
+        environments: parts.environments,
+        prerequisites: parts.prerequisites,
+        clock,
+        generateRunId: (startedAt) => {
+          const runId = generateRunId(startedAt);
+          hooks.onRunId?.(runId);
+          return runId;
+        },
+        configDigest: (config) => sha256Hex(canonicalConfigSerialization(config)),
+        textDigest: sha256Hex,
+        redact: host.redact,
+        cancellation: hooks.cancellation,
+        onLifecycle: hooks.onLifecycle,
+        onRetainedGradingDirectory: hooks.onRetainedGradingDirectory,
+      });
+    } finally {
+      clearCancellationExit();
+    }
+  };
+}
+
+function createImportJiraIssue(host: HostEnvironment): TaskAddOperations['importJiraIssue'] {
+  return (settings, issueKey) => {
+    const jiraSettings: JiraCloudSettings = {
+      baseUrl: settings.url,
+      emailEnvironmentVariable: referencedVariableName(settings.email),
+      tokenEnvironmentVariable: referencedVariableName(settings.token),
+    };
+    host.secret(jiraSettings.tokenEnvironmentVariable);
+    const jira = createJiraCloudAdapter(jiraSettings, {
+      fetch: (url, init) => globalThis.fetch(url, init),
+      sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+      getEnvironmentVariable: (name) =>
+        name === jiraSettings.tokenEnvironmentVariable ? host.secret(name) : host.ordinary(name),
+    });
+    return jira.readIssue(issueKey);
+  };
+}
+
+function createImportGitHubIssue(
+  context: CompositionContext,
+): TaskAddOperations['importGitHubIssue'] {
+  return (reference) =>
+    createGitHubIssuesAdapter(createGitHubDependencies(context)).readIssue(reference);
+}
+
+function composeConfigOperations(context: CompositionContext): ConfigOperations {
+  const { host, configStore, managedCloneRoot } = context;
+  return {
+    locateConfig: (requestedPath) =>
+      locateConfig(
+        requestedPath,
+        {
+          cwd: process.cwd(),
+          home: host.ordinary('HOME'),
+          xdgConfigHome: host.ordinary('XDG_CONFIG_HOME'),
+        },
+        configStore,
+      ),
+    loadConfig: async (configPath) => {
+      const loaded = await loadConfig(configPath, configStore, managedCloneRoot);
+      if (loaded.ok) {
+        registerSecretVariables(host, collectBaseSecretNames(loaded.value));
+      }
+      return loaded;
+    },
+  };
+}
+
+function composeValidateOperations(context: CompositionContext): ValidateOperations {
+  const environments = wrapEnvironmentAdapter(createEnvironmentAdapter(), context.host);
+  return {
+    ...composeConfigOperations(context),
+    validateConfig: createValidateConfig({
+      agentsFor: createAgentsFor(context),
+      environments,
+      prerequisites: createPrerequisiteAdapter(),
+      clones: createClones(context),
+      caseExecutables: createCaseExecutableAdapter(),
+    }),
+  };
+}
+
+function composeReportOperations(context: CompositionContext): ReportOperations {
+  const environments = wrapEnvironmentAdapter(createEnvironmentAdapter(), context.host);
+  return {
+    ...composeConfigOperations(context),
+    rebuildRunReport: createRebuildRunReport(context, {
+      agentsFor: createAgentsFor(context),
+      environments,
+    }),
+  };
+}
+
+function composeAssessOperations(context: CompositionContext): AssessOperations {
+  const agentsFor = createAgentsFor(context);
+  return {
+    ...composeConfigOperations(context),
+    readAssessmentContext: (config, runId, caseId) =>
+      readAssessmentContext(runId, caseId, artifactStoreFor(context.host, config)),
+    applyAssessment: (config, input) =>
+      assessCase(input, artifactStoreFor(context.host, config), agentsFor(config)),
+  };
+}
+
+function composeRunOperations(context: CompositionContext): RunOperations {
+  const agentsFor = createAgentsFor(context);
+  const environments = wrapEnvironmentAdapter(createEnvironmentAdapter(), context.host);
+  const prerequisites = createPrerequisiteAdapter();
+  const clones = createClones(context);
+  return {
+    ...composeConfigOperations(context),
+    prepareRepositories: (config, onProgress) =>
+      prepareManagedRepositories(config, createManagedLfsDependencies(context, clones, onProgress)),
+    validateConfig: createValidateConfig({
+      agentsFor,
+      environments,
+      prerequisites,
+      clones,
+      caseExecutables: createCaseExecutableAdapter(),
+    }),
+    planBenchmark,
+    executeBenchmark: createExecuteBenchmark(context, { agentsFor, environments, prerequisites }),
+    rebuildRunReport: createRebuildRunReport(context, { agentsFor, environments }),
+  };
+}
+
+function composeLocalRepositoryOperations(): Pick<
+  TaskAddOperations,
+  'isGitRepository' | 'readLocalRepositoryNaming'
+> {
+  return {
+    isGitRepository: (configPath, repositoryPath) =>
+      isGitRepository(path.resolve(path.dirname(path.resolve(configPath)), repositoryPath)),
+    readLocalRepositoryNaming: async (configPath, repositoryPath) => {
+      const directory = path.resolve(path.dirname(path.resolve(configPath)), repositoryPath);
+      const originUrl = await readOriginRemoteUrl(directory);
+      return {
+        directoryName: path.basename(directory),
+        ...(originUrl === undefined ? {} : { originUrl }),
+      };
+    },
+  };
+}
+
+function composeModelAccessOperations(
+  context: CompositionContext,
+  environments: EnvironmentAdapter,
+): Pick<TaskAddOperations, 'probeAgent' | 'inspectModelProvider' | 'checkModelAccess'> {
+  const agentsFor = createAgentsFor(context);
+  const modelAccess = (): ModelAccessDependencies => ({
+    agentsFor,
+    environments,
+    git: createGit(),
+    cancellation: context.cancellation,
+  });
+  return {
+    probeAgent: (configPath, command) => probeAgent({ configPath, command }, modelAccess()),
+    inspectModelProvider: (configPath, agent, model) =>
+      inspectModelProvider({ configPath, agent, model }, modelAccess()),
+    checkModelAccess: (configPath, agent, model) =>
+      checkModelAccess({ configPath, agent, model }, modelAccess()),
+  };
+}
+
+function composeTaskAddOperations(context: CompositionContext): TaskAddOperations {
+  const { host, cancellation, configStore, managedCloneRoot } = context;
+  const clones = createClones(context);
+  const agentsFor = createAgentsFor(context);
+  const environments = wrapEnvironmentAdapter(createEnvironmentAdapter(), host);
+  const pullRequests = createGitHubPullRequestReader(createGitHubDependencies(context));
+  const registerSecrets = (names: readonly string[]): void => {
+    registerSecretVariables(host, names);
+  };
+  return {
+    ...composeConfigOperations(context),
+    ...composeLocalRepositoryOperations(),
+    ...composeModelAccessOperations(context, environments),
+    configExists: (configPath) => configStore.exists(configPath),
+    requireConfigDirectory: (configPath) => configStore.requireDirectory(configPath),
+    importJiraIssue: createImportJiraIssue(host),
+    importGitHubIssue: createImportGitHubIssue(context),
+    resolveReference: (request, onProgress) =>
+      resolveReferenceSolution(request, {
+        ...createManagedLfsDependencies(context, clones, onProgress),
+        pullRequests,
+      }),
+    ensureManagedCommits: (request, onProgress) =>
+      ensureManagedCommits(request, createManagedLfsDependencies(context, clones, onProgress)),
+    ensureManagedLfsObjects: (request, onProgress) =>
+      ensureManagedLfsObjects(request, createManagedLfsDependencies(context, clones, onProgress)),
+    checkGitHubRepository: (repository) => clones.checkRemote(repository),
+    unsetVariables: (names) => environments.unsetVariables(names),
+    draftCriteria: (request) =>
+      draftCriteria(request, {
+        agentsFor,
+        environments,
+        git: createGit(),
+        pullRequests,
+        managedCloneRoot,
+        registerSecrets,
+        redact: host.redact,
+        cancellation,
+      }),
+    inspectBaseCommit: (configPath, repository, baseCommit, reference) =>
+      inspectTaskBaseCommit(
+        { configPath, repository, baseCommit, ...(reference === undefined ? {} : { reference }) },
+        { git: createSourceValidator(), managedCloneRoot },
+      ),
+    checkRepositoryPlacement: (configPath, outputDirectory, repositories) =>
+      checkRepositoryPlacement({ outputDirectory, repositories }, configPath, managedCloneRoot),
+    createTask: (input) =>
+      createTask(input, {
+        configStore,
+        git: createSourceValidator(),
+        registerSecrets,
+        redact: host.redact,
+        managedCloneRoot,
+        cancellation,
+      }),
   };
 }
 

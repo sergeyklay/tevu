@@ -17,12 +17,7 @@ import { gradeLines } from '@/evaluation/wording';
 import { createProgram, runProgram } from './program';
 import { createWaitInterrupt } from './wait-interrupt';
 
-import type {
-  BenchmarkExecutionHooks,
-  ProgramDependencies,
-  ProgramIo,
-  ProgramOperations,
-} from './program';
+import type { ProgramDependencies } from './program';
 import type { GhRun } from '@/adapters/trackers/github-issues';
 import type {
   AssessableCheckSummary,
@@ -59,6 +54,14 @@ import type {
   ValidationFinding,
   ValidationReport,
 } from '@/domain/types';
+import type { AssessOperations } from '@/interface/commands/assess';
+import type { BenchmarkExecutionHooks, RunOperations } from '@/interface/commands/run';
+import type { ProgramIo } from '@/interface/commands/shared';
+import type { TaskAddOperations } from '@/interface/commands/task-add';
+import type { Mock } from 'vitest';
+
+/** Every command's operations, so one fake backs all five factories. */
+type ProgramOperations = TaskAddOperations & RunOperations & AssessOperations;
 
 type AskOptions = {
   message: string;
@@ -842,10 +845,26 @@ function createIo(ttys: { stdin?: boolean; stdout?: boolean } = {}): ProgramIo {
   return { stdin, stdout, stderr };
 }
 
-function createDependencies(overrides: Partial<ProgramDependencies> = {}): ProgramDependencies {
+/** Overrides for the program dependencies; `operations` backs every command's factory unless `commands` is given. */
+type DependencyOverrides = Partial<Omit<ProgramDependencies, 'commands'>> & {
+  operations?: ProgramOperations;
+  commands?: ProgramDependencies['commands'];
+};
+
+function createDependencies({
+  operations = createOperations(),
+  commands = {
+    taskAdd: () => operations,
+    validate: () => operations,
+    run: () => operations,
+    assess: () => operations,
+    report: () => operations,
+  },
+  ...overrides
+}: DependencyOverrides = {}): ProgramDependencies {
   return {
     io: createIo({ stdin: true, stdout: true }),
-    operations: createOperations(),
+    commands,
     version: TEST_VERSION,
     now: () => FIXED_NOW,
     redact: (text) => text,
@@ -857,7 +876,7 @@ function createDependencies(overrides: Partial<ProgramDependencies> = {}): Progr
 
 async function runCli(
   argv: readonly string[],
-  overrides: Partial<ProgramDependencies> = {},
+  overrides: DependencyOverrides = {},
 ): Promise<{ code: number; dependencies: ProgramDependencies; out: string[]; err: string[] }> {
   const dependencies = createDependencies(overrides);
   const code = await runProgram(argv, dependencies);
@@ -1832,6 +1851,71 @@ describe('tevu CLI', () => {
         expect(err[0]).toBe(error);
         expect(err[1]).toBe(usage);
         expect(out).toEqual([]);
+      },
+    );
+  });
+
+  describe('operations factories', () => {
+    type FactoryName = keyof ProgramDependencies['commands'];
+
+    function createFactorySpies(): Record<FactoryName, Mock<() => ProgramOperations>> {
+      const operations = createOperations();
+      return {
+        taskAdd: vi.fn(() => operations),
+        validate: vi.fn(() => operations),
+        run: vi.fn(() => operations),
+        assess: vi.fn(() => operations),
+        report: vi.fn(() => operations),
+      };
+    }
+
+    function callCounts(
+      commands: Record<FactoryName, Mock<() => ProgramOperations>>,
+    ): Record<FactoryName, number> {
+      return {
+        taskAdd: commands.taskAdd.mock.calls.length,
+        validate: commands.validate.mock.calls.length,
+        run: commands.run.mock.calls.length,
+        assess: commands.assess.mock.calls.length,
+        report: commands.report.mock.calls.length,
+      };
+    }
+
+    const NO_CALLS: Record<FactoryName, number> = {
+      taskAdd: 0,
+      validate: 0,
+      run: 0,
+      assess: 0,
+      report: 0,
+    };
+
+    it.each([
+      { label: '--help', argv: ['--help'] },
+      { label: '--version', argv: ['--version'] },
+      { label: 'a usage error', argv: ['frobnicate'] },
+      { label: 'config example', argv: ['config', 'example'] },
+    ])('calls no factory for $label', async ({ argv }) => {
+      const commands = createFactorySpies();
+
+      await runCli(argv, { commands });
+
+      expect(callCounts(commands)).toEqual(NO_CALLS);
+    });
+
+    it.each([
+      { factory: 'taskAdd', argv: ['task', 'add'] },
+      { factory: 'validate', argv: ['validate'] },
+      { factory: 'run', argv: ['run', '--dry-run'] },
+      { factory: 'assess', argv: ['assess', 'run-1', 'case-1'] },
+      { factory: 'report', argv: ['report', 'run-1'] },
+    ] satisfies Array<{ factory: FactoryName; argv: string[] }>)(
+      'calls only the $factory factory, once, for $argv',
+      async ({ factory, argv }) => {
+        const commands = createFactorySpies();
+
+        await runCli(argv, { commands, io: createIo({ stdin: false, stdout: false }) });
+
+        expect(callCounts(commands)).toEqual({ ...NO_CALLS, [factory]: 1 });
       },
     );
   });

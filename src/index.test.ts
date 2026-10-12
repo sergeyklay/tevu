@@ -9,18 +9,23 @@ import process from 'node:process';
 import { Readable, Writable } from 'node:stream';
 import { setImmediate } from 'node:timers/promises';
 import { execa } from 'execa';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { stringify } from 'yaml';
 
+import {
+  buildJiraTrackerSettings,
+  buildParentEnvironmentSnapshot,
+} from '@/__fixtures__/host.fixtures';
 import { TevuConfigSchema } from '@/config/schema';
+import { GH_CREDENTIAL_ENVIRONMENT_VARIABLES } from '@/domain/github-cli';
 import { runProgram } from '@/interface/program';
 
-import { composeProgramDependencies, ignoreClosedReader } from './index';
+import { composeProgramDependencies, createHostEnvironment, ignoreClosedReader } from './index';
 
 import type { AgentDraft } from '@/application/model-access';
 import type { TevuConfigInput } from '@/config/schema';
 import type { BenchmarkPlan, TevuConfig } from '@/domain/types';
-import type { ProgramOperations } from '@/interface/program';
+import type { RunOperations } from '@/interface/commands/run';
 
 type TevuTaskInput = NonNullable<TevuConfigInput['tasks']>[number];
 
@@ -39,7 +44,7 @@ function closedPipe(): Writable {
 
 /** Plans a run with the effort checks of the validation `tevu run` performs first. */
 async function planThroughValidation(
-  operations: ProgramOperations,
+  operations: Pick<RunOperations, 'validateConfig' | 'planBenchmark'>,
   config: TevuConfig,
   configPath: string,
 ): Promise<BenchmarkPlan> {
@@ -83,6 +88,189 @@ describe('closed output reader', () => {
     ignoreClosedReader(stdout);
 
     expect(() => stdout.emit('error', writeError('ENOSPC'))).toThrow('write ENOSPC');
+  });
+});
+
+type Host = ReturnType<typeof createHostEnvironment>;
+
+describe('createHostEnvironment', () => {
+  const TOKEN = 'synthetic-host-token-value';
+
+  it('lists and masks the value secret returns', () => {
+    const host = createHostEnvironment({ SYNTHETIC_TOKEN: TOKEN });
+
+    const value = host.secret('SYNTHETIC_TOKEN');
+
+    expect(value).toBe(TOKEN);
+    expect(host.secretValues()).toEqual([TOKEN]);
+    expect(host.redact(`Authorization: ${TOKEN}`)).toBe('Authorization: [REDACTED]');
+  });
+
+  it('registers every non-empty member of a snapshot and skips the empty ones', () => {
+    const host = createHostEnvironment({});
+
+    host.registerSnapshotSecrets(
+      buildParentEnvironmentSnapshot({
+        secretValues: ['synthetic-first-value', '', 'synthetic-second-value'],
+      }),
+    );
+
+    expect(host.secretValues()).toEqual(['synthetic-first-value', 'synthetic-second-value']);
+    expect(host.redact('synthetic-first-value and synthetic-second-value')).toBe(
+      '[REDACTED] and [REDACTED]',
+    );
+  });
+
+  it('lists a value once however many times and ways it is registered', () => {
+    const host = createHostEnvironment({ FIRST: TOKEN, SECOND: TOKEN });
+
+    host.secret('FIRST');
+    host.secret('SECOND');
+    host.secret('FIRST');
+    host.registerSnapshotSecrets(buildParentEnvironmentSnapshot({ secretValues: [TOKEN, TOKEN] }));
+
+    expect(host.secretValues()).toEqual([TOKEN]);
+  });
+
+  it.each(GH_CREDENTIAL_ENVIRONMENT_VARIABLES)('registers %s at creation', (name) => {
+    const host = createHostEnvironment({ [name]: TOKEN });
+
+    expect(host.secretValues()).toEqual([TOKEN]);
+    expect(host.redact(TOKEN)).toBe('[REDACTED]');
+  });
+
+  it.each([
+    {
+      label: 'secret of an unset variable',
+      read: (host: Host) => host.secret('MISSING'),
+    },
+    {
+      label: 'secret of an empty variable',
+      read: (host: Host) => host.secret('EMPTY'),
+    },
+    {
+      label: 'ordinary of a set variable',
+      read: (host: Host) => host.ordinary('PLAIN'),
+    },
+    {
+      label: 'ordinary of an unset variable',
+      read: (host: Host) => host.ordinary('MISSING'),
+    },
+  ])('leaves the registered values unchanged after $label', ({ read }) => {
+    const host = createHostEnvironment({ PLAIN: 'synthetic-plain-value', EMPTY: '' });
+
+    read(host);
+
+    expect(host.secretValues()).toEqual([]);
+    expect(host.redact('synthetic-plain-value')).toBe('synthetic-plain-value');
+  });
+
+  it('returns the same values from ordinary and secret as the variables hold', () => {
+    const host = createHostEnvironment({ PLAIN: 'synthetic-plain-value', EMPTY: '' });
+
+    expect(host.ordinary('PLAIN')).toBe('synthetic-plain-value');
+    expect(host.secret('EMPTY')).toBe('');
+    expect(host.secret('MISSING')).toBeUndefined();
+  });
+
+  it('ignores writes to the source map after creation', () => {
+    const source: Record<string, string | undefined> = {
+      KEPT: 'synthetic-kept-value',
+      CHANGED: 'synthetic-original-value',
+      REMOVED: 'synthetic-removed-value',
+    };
+    const host = createHostEnvironment(source);
+
+    source['CHANGED'] = 'synthetic-changed-value';
+    source['ADDED'] = 'synthetic-added-value';
+    delete source['REMOVED'];
+
+    expect(host.secret('CHANGED')).toBe('synthetic-original-value');
+    expect(host.secret('ADDED')).toBeUndefined();
+    expect(host.ordinary('REMOVED')).toBe('synthetic-removed-value');
+    expect(host.parentEnvironment).toEqual({
+      KEPT: 'synthetic-kept-value',
+      CHANGED: 'synthetic-original-value',
+      REMOVED: 'synthetic-removed-value',
+    });
+    expect(host.secretValues()).toEqual(['synthetic-original-value']);
+  });
+
+  it('works when every method is called detached from the host', () => {
+    const host = createHostEnvironment({ SYNTHETIC_TOKEN: TOKEN, PLAIN: 'synthetic-plain-value' });
+    const { secret, ordinary, registerSnapshotSecrets, secretValues, redact } = host;
+
+    const secretResult = secret('SYNTHETIC_TOKEN');
+    const ordinaryResult = ordinary('PLAIN');
+    registerSnapshotSecrets(
+      buildParentEnvironmentSnapshot({ secretValues: ['synthetic-snapshot-value'] }),
+    );
+
+    expect(secretResult).toBe(TOKEN);
+    expect(ordinaryResult).toBe('synthetic-plain-value');
+    expect(secretValues()).toEqual([TOKEN, 'synthetic-snapshot-value']);
+    expect(redact(`${TOKEN} synthetic-snapshot-value`)).toBe('[REDACTED] [REDACTED]');
+  });
+
+  it('masks a value registered after redact was taken', () => {
+    const host = createHostEnvironment({ SYNTHETIC_TOKEN: TOKEN });
+    const { redact } = host;
+
+    host.secret('SYNTHETIC_TOKEN');
+
+    expect(redact(TOKEN)).toBe('[REDACTED]');
+  });
+});
+
+describe('composeProgramDependencies credential registration', () => {
+  const EMAIL_VARIABLE = 'TEVU_TEST_JIRA_EMAIL';
+  const TOKEN_VARIABLE = 'TEVU_TEST_JIRA_TOKEN';
+  const EMAIL = 'synthetic.user@example.test';
+  const TOKEN = 'synthetic-jira-token-value';
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it.each(GH_CREDENTIAL_ENVIRONMENT_VARIABLES)(
+    'redacts the value of %s before any operations factory runs',
+    (name) => {
+      vi.stubEnv(name, 'synthetic-gh-credential-value');
+
+      const dependencies = composeProgramDependencies();
+
+      expect(dependencies.redact('token synthetic-gh-credential-value')).toBe('token [REDACTED]');
+    },
+  );
+
+  it('registers the Jira token and sends no request when the email variable is unset', async () => {
+    vi.stubEnv(EMAIL_VARIABLE, undefined);
+    vi.stubEnv(TOKEN_VARIABLE, TOKEN);
+    const fetchStub = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetchStub);
+    const dependencies = composeProgramDependencies();
+
+    const outcome = await dependencies.commands
+      .taskAdd()
+      .importJiraIssue(buildJiraTrackerSettings(), 'ABC-1');
+
+    expect(outcome).toMatchObject({ ok: false, error: { kind: 'IssueImportError' } });
+    expect(fetchStub).not.toHaveBeenCalled();
+    expect(dependencies.redact(`token ${TOKEN}`)).toBe('token [REDACTED]');
+  });
+
+  it('leaves the Jira email unredacted after the import reads it', async () => {
+    vi.stubEnv(EMAIL_VARIABLE, EMAIL);
+    vi.stubEnv(TOKEN_VARIABLE, TOKEN);
+    const fetchStub = vi.fn<typeof fetch>(async () => new Response('{}', { status: 404 }));
+    vi.stubGlobal('fetch', fetchStub);
+    const dependencies = composeProgramDependencies();
+
+    await dependencies.commands.taskAdd().importJiraIssue(buildJiraTrackerSettings(), 'ABC-1');
+
+    expect(fetchStub).toHaveBeenCalledOnce();
+    expect(dependencies.redact(`${EMAIL} ${TOKEN}`)).toBe(`${EMAIL} [REDACTED]`);
   });
 });
 
@@ -369,9 +557,9 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
         outputDirectory: join(testDirectory, 'artifacts'),
       }),
     );
-    const dependencies = composeProgramDependencies();
+    const operations = composeProgramDependencies().commands.validate();
 
-    const outcome = await dependencies.operations.validateConfig(config);
+    const outcome = await operations.validateConfig(config);
 
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
@@ -415,7 +603,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
         }),
         roles: { grader: { agent: 'opencode', model: 'acme/synthetic-model-a', effort: 'high' } },
       });
-      const outcome = await composeProgramDependencies().operations.validateConfig(config);
+      const outcome = await composeProgramDependencies().commands.validate().validateConfig(config);
       if (!outcome.ok) {
         throw new Error(`expected validateConfig to succeed: ${JSON.stringify(outcome.error)}`);
       }
@@ -515,7 +703,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
       const executable = await writeFakeExecutable();
       await writeOperatorFixture();
       const config = TevuConfigSchema.parse(await buildMisspelledConfig(executable));
-      const { operations } = composeProgramDependencies();
+      const operations = composeProgramDependencies().commands.validate();
 
       const outcome = await operations.validateConfig(config);
 
@@ -542,14 +730,14 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
           outputDirectory: join(testDirectory, 'artifacts'),
         }),
       );
-      const dependencies = composeProgramDependencies();
+      const operations = composeProgramDependencies().commands.run();
       const plan = await planThroughValidation(
-        dependencies.operations,
+        operations,
         config,
         join(testDirectory, 'tevu.yaml'),
       );
 
-      const result = await dependencies.operations.executeBenchmark(plan, {
+      const result = await operations.executeBenchmark(plan, {
         cancellation: new AbortController().signal,
       });
 
@@ -579,7 +767,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
 
     it('reports a command that starts as usable and a missing one as a prerequisite failure', async () => {
       const executable = await writeFakeExecutable();
-      const { operations } = composeProgramDependencies();
+      const operations = composeProgramDependencies().commands.taskAdd();
       const configPath = join(testDirectory, 'tevu.yaml');
 
       const good = await operations.probeAgent(configPath, executable);
@@ -592,7 +780,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     it('reads the operator directory from the environment and reports names and states only', async () => {
       const executable = await writeFakeExecutable();
       await writeOperatorFixture();
-      const { operations } = composeProgramDependencies();
+      const operations = composeProgramDependencies().commands.taskAdd();
       const configPath = join(testDirectory, 'tevu.yaml');
 
       const defined = await operations.inspectModelProvider(
@@ -624,7 +812,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     it('lists a copied provider model, refuses one the listing omits, and leaks no value', async () => {
       const executable = await writeFakeExecutable();
       await writeOperatorFixture();
-      const { operations } = composeProgramDependencies();
+      const operations = composeProgramDependencies().commands.taskAdd();
       const configPath = join(testDirectory, 'tevu.yaml');
       const agent = buildAgent(executable, {
         secrets: ['ACME_KEY'],
@@ -652,7 +840,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     it('does not list a provider the agent block leaves out', async () => {
       const executable = await writeFakeExecutable();
       await writeOperatorFixture();
-      const { operations } = composeProgramDependencies();
+      const operations = composeProgramDependencies().commands.taskAdd();
 
       const outcome = await operations.checkModelAccess(
         join(testDirectory, 'tevu.yaml'),
@@ -667,7 +855,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
       const executable = await writeFakeExecutable();
       await writeOperatorFixture();
       delete process.env[UNSET_VARIABLE];
-      const { operations } = composeProgramDependencies();
+      const operations = composeProgramDependencies().commands.taskAdd();
 
       const outcome = await operations.checkModelAccess(
         join(testDirectory, 'tevu.yaml'),
@@ -700,14 +888,10 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
         outputDirectory: join(testDirectory, 'artifacts'),
       }),
     );
-    const dependencies = composeProgramDependencies();
-    const plan = await planThroughValidation(
-      dependencies.operations,
-      config,
-      join(testDirectory, 'tevu.yaml'),
-    );
+    const operations = composeProgramDependencies().commands.run();
+    const plan = await planThroughValidation(operations, config, join(testDirectory, 'tevu.yaml'));
 
-    const result = await dependencies.operations.executeBenchmark(plan, {
+    const result = await operations.executeBenchmark(plan, {
       cancellation: new AbortController().signal,
     });
 
@@ -738,14 +922,10 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
         outputDirectory: join(testDirectory, 'artifacts'),
       }),
     );
-    const dependencies = composeProgramDependencies();
-    const plan = await planThroughValidation(
-      dependencies.operations,
-      config,
-      join(testDirectory, 'tevu.yaml'),
-    );
+    const operations = composeProgramDependencies().commands.run();
+    const plan = await planThroughValidation(operations, config, join(testDirectory, 'tevu.yaml'));
 
-    const result = await dependencies.operations.executeBenchmark(plan, {
+    const result = await operations.executeBenchmark(plan, {
       cancellation: new AbortController().signal,
     });
 
@@ -787,14 +967,10 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
         outputDirectory: join(testDirectory, 'artifacts'),
       }),
     );
-    const dependencies = composeProgramDependencies();
-    const plan = await planThroughValidation(
-      dependencies.operations,
-      config,
-      join(testDirectory, 'tevu.yaml'),
-    );
+    const operations = composeProgramDependencies().commands.run();
+    const plan = await planThroughValidation(operations, config, join(testDirectory, 'tevu.yaml'));
 
-    const result = await dependencies.operations.executeBenchmark(plan, {
+    const result = await operations.executeBenchmark(plan, {
       cancellation: new AbortController().signal,
     });
 
@@ -847,14 +1023,14 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
           checks,
         }),
       );
-      const dependencies = composeProgramDependencies();
+      const operations = composeProgramDependencies().commands.run();
       const plan = await planThroughValidation(
-        dependencies.operations,
+        operations,
         config,
         join(testDirectory, 'tevu.yaml'),
       );
 
-      return dependencies.operations.executeBenchmark(plan, {
+      return operations.executeBenchmark(plan, {
         cancellation: new AbortController().signal,
       });
     }
@@ -915,6 +1091,77 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
       };
       expect(observedCases).toEqual([expectedCase, expectedCase]);
       expect(result.value.exitCode).toBe(0);
+    });
+  });
+
+  describe('secret registration', () => {
+    const OPERATOR_FIXTURE_SECRET = 'synthetic-acme-secret-value';
+    const JIRA_TOKEN_VARIABLE = 'TEVU_TEST_JIRA_TOKEN';
+    const JIRA_TOKEN = 'synthetic-jira-token-value';
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    async function prepareRepository(): Promise<{ repositoryPath: string; baseCommit: string }> {
+      const repositoryPath = join(testDirectory, 'repo');
+      return { repositoryPath, baseCommit: await createSourceRepository(repositoryPath) };
+    }
+
+    it.each(['taskAdd', 'validate', 'run', 'assess', 'report'] as const)(
+      'redacts the agent secrets and the Jira token once the %s factory loads a configuration',
+      async (factory) => {
+        const executable = await writeFakeExecutable();
+        await writeOperatorFixture();
+        vi.stubEnv(JIRA_TOKEN_VARIABLE, JIRA_TOKEN);
+        const { repositoryPath, baseCommit } = await prepareRepository();
+        const configPath = join(testDirectory, 'tevu.yaml');
+        await writeFile(
+          configPath,
+          stringify({
+            ...buildConfigInput({
+              executable,
+              repositoryPath,
+              baseCommit,
+              outputDirectory: join(testDirectory, 'artifacts'),
+            }),
+            trackers: { jira: buildJiraTrackerSettings() },
+          }),
+        );
+        const dependencies = composeProgramDependencies();
+        const text = `${OPERATOR_FIXTURE_SECRET} ${JIRA_TOKEN}`;
+        const redactedBeforeLoad = dependencies.redact(text);
+
+        const loaded = await dependencies.commands[factory]().loadConfig(configPath);
+
+        expect(loaded.ok).toBe(true);
+        expect(redactedBeforeLoad).toBe(text);
+        expect(dependencies.redact(text)).toBe('[REDACTED] [REDACTED]');
+      },
+    );
+
+    it('redacts a secret variable first set after composition once validateConfig snapshots it', async () => {
+      const lateSecret = 'synthetic-late-secret-value';
+      const executable = await writeFakeExecutable();
+      await writeOperatorFixture();
+      const { repositoryPath, baseCommit } = await prepareRepository();
+      const config = TevuConfigSchema.parse(
+        buildConfigInput({
+          executable,
+          repositoryPath,
+          baseCommit,
+          outputDirectory: join(testDirectory, 'artifacts'),
+        }),
+      );
+      const dependencies = composeProgramDependencies();
+      vi.stubEnv('ACME_KEY', lateSecret);
+      const redactedBeforeValidation = dependencies.redact(lateSecret);
+
+      const outcome = await dependencies.commands.validate().validateConfig(config);
+
+      expect(outcome.ok).toBe(true);
+      expect(redactedBeforeValidation).toBe(lateSecret);
+      expect(dependencies.redact(lateSecret)).toBe('[REDACTED]');
     });
   });
 });
