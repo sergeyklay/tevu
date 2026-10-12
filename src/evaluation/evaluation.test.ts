@@ -980,6 +980,21 @@ describe('buildCheckEnvironment', () => {
     expect(variables[PROVIDER_ENV_NAME]).toBeUndefined();
     expect(JSON.stringify(variables)).not.toContain(PROVIDER_SECRET);
   });
+
+  it('leaves out an allowlisted fixed name that the base environment does not hold', () => {
+    const input = buildEvaluationInput({
+      snapshot: {
+        ...buildEvaluationInput().snapshot,
+        ordinaryEvaluatorValues: { XDG_RUNTIME_DIR: '/synthetic/parent-runtime' },
+      },
+    });
+
+    const variables = buildCheckEnvironment(input.environment, input.snapshot, ['XDG_RUNTIME_DIR']);
+
+    expect(input.environment.variables).not.toHaveProperty('XDG_RUNTIME_DIR');
+    expect(variables).not.toHaveProperty('XDG_RUNTIME_DIR');
+    expect(variables).toEqual(input.environment.variables);
+  });
 });
 
 describe('evaluateChecks', () => {

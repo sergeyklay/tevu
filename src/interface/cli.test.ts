@@ -4794,6 +4794,101 @@ describe('tevu CLI', () => {
       });
     });
 
+    describe('model and Jira site URL answers', () => {
+      const PADDED_JIRA_URL = '\u00A0https://example.atlassian.net ';
+      const TRIMMED_JIRA_URL = 'https://example.atlassian.net';
+
+      it('accepts a model identifier that holds a line separator and checks it as typed', async () => {
+        const model = 'acme/model\u2028x';
+        const inspectModelProvider = inspectingProviders({
+          acme: definedProvider({ keyVariables: ['ACME_KEY'], apiKey: 'reference' }),
+        });
+        const operations = operationsWithModelCheck({ inspectModelProvider });
+        scriptAnswers(...fullSetupAnswers({ firstModel: [{ invalid: model }] }));
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.rejections).toEqual([]);
+        expect(
+          vi.mocked(inspectModelProvider).mock.calls.map(([, , checked]) => checked),
+        ).toContain(model);
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      it('refuses a Jira site URL that is not https and asks the question again', async () => {
+        const operations = operationsWithModelCheck();
+        scriptAnswers(
+          ...fullSetupAnswers({
+            jira: [
+              true,
+              { invalid: 'http://jira.example.com' },
+              TRIMMED_JIRA_URL,
+              'JIRA_EMAIL',
+              'JIRA_TOKEN',
+            ],
+          }),
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.rejections).toEqual([
+          { kind: 'text', message: 'Jira site URL', reason: 'an https:// URL is required' },
+        ]);
+        expect(
+          clack.state.prompts.filter((prompt) => prompt.message === 'Jira site URL'),
+        ).toHaveLength(2);
+        expect(requireCreateTaskCall(operations).bootstrap?.trackers?.jira?.url).toBe(
+          TRIMMED_JIRA_URL,
+        );
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      it('saves a Jira site URL padded with whitespace without the padding', async () => {
+        const operations = operationsWithModelCheck();
+        scriptAnswers(
+          ...fullSetupAnswers({
+            jira: [true, { invalid: PADDED_JIRA_URL }, 'JIRA_EMAIL', 'JIRA_TOKEN'],
+          }),
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.rejections).toEqual([]);
+        expect(requireCreateTaskCall(operations).bootstrap?.trackers?.jira?.url).toBe(
+          TRIMMED_JIRA_URL,
+        );
+        expect(clack.state.answers).toEqual([]);
+      });
+
+      it('imports the Jira issue of the same run with the padding removed from the site URL', async () => {
+        const operations = operationsWithModelCheck();
+        scriptAnswers(
+          ...setupAnswers({
+            jira: [true, { invalid: PADDED_JIRA_URL }, 'JIRA_EMAIL', 'JIRA_TOKEN'],
+          }),
+          false,
+          false,
+          'jira',
+          'TEVU-42',
+          ...taskInterviewAnswers('alpha').slice(1),
+          true,
+        );
+
+        const { code } = await runCli(['task', 'add'], { operations });
+
+        expect(code).toBe(0);
+        expect(clack.state.rejections).toEqual([]);
+        expect(vi.mocked(operations.importJiraIssue)).toHaveBeenCalledExactlyOnceWith(
+          buildJiraTrackerSettings({ url: TRIMMED_JIRA_URL }),
+          'TEVU-42',
+        );
+        expect(clack.state.answers).toEqual([]);
+      });
+    });
+
     describe('cancellation and framing', () => {
       it.each([
         {
