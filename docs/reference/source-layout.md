@@ -11,6 +11,7 @@ The source directories of tevu, what each holds, how they depend on each other, 
 | `src/adapters` | Git, managed clones, trackers, process supervision, and artifact I/O |
 | `src/adapters/agents` | One directory per agent adapter: probing, case runs, session export, model calls, metric normalization, protocol decoding, provider copying, and model listing |
 | `src/interface` | Command parsing and interactive prompts |
+| `src/interface/commands` | One module per command: the operations it needs and its handler, plus the pieces the handlers share |
 | `src/index.ts` | Executable entry point and dependency wiring |
 
 Product tests are colocated with the behavior they verify, as `*.test.ts` or `*.integration.test.ts`. Protocol fixtures sit next to the protocol adapter. TypeScript module exports are internal; the CLI is the public interface.
