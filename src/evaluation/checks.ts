@@ -1,5 +1,6 @@
 import { durationMs } from '@/config/schema';
 import { describeCause } from '@/domain/describe-cause';
+import { isFixedEnvironmentName } from '@/domain/fixed-environment';
 
 import type {
   CaseWorkspace,
@@ -36,13 +37,6 @@ export type CheckEvaluationInput = {
   /** Optional cancellation; the active evaluator is interrupted and later checks do not start. */
   cancellation?: AbortSignal;
 };
-
-/** Environment names fixed by the evaluator base-environment contract. */
-const FIXED_ENVIRONMENT_NAMES = new Set(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'CI']);
-
-function isFixedEnvironmentName(name: string): boolean {
-  return FIXED_ENVIRONMENT_NAMES.has(name) || name.startsWith('XDG_');
-}
 
 /** Projects a task's checks into evaluation order: acceptance criteria, then Definition of Done. */
 export function orderTaskChecks(task: Pick<TaskDefinition, 'checks'>): OrderedCheck[] {

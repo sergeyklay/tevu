@@ -21,9 +21,12 @@ import { describeReferenceIdentityInText } from '@/application/source-commit-in-
 import {
   AGENT_NAMES,
   DurationSchema,
+  HttpsUrlSchema,
+  ModelIdentifierSchema,
   referencedVariableName,
   VariableNameSchema,
 } from '@/config/schema';
+import { FIXED_ENVIRONMENT_NAME_MESSAGE, isFixedEnvironmentName } from '@/domain/fixed-environment';
 import {
   formatGitHubRepository,
   managedCloneLocation,
@@ -239,7 +242,6 @@ export type AssessmentWizardDependencies = {
 type AssessmentWizardErrorKind =
   'ConfigValidationError' | 'ArtifactError' | 'PrerequisiteError' | 'CancellationError';
 
-const FIXED_ENVIRONMENT_NAMES = new Set(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'CI']);
 const NEW_REPOSITORY_CHOICE = '__add-new-repository__';
 const OUTPUT_DIRECTORY_CHOICE = '__change-output-directory__';
 const GITHUB_GRAMMAR_MESSAGE =
@@ -949,10 +951,11 @@ async function askCheckedModel(
 ): Promise<`${string}/${string}`> {
   let answer = await askText(io, { message, validate: validateModel });
   for (;;) {
-    if (isModelIdentifier(answer)) {
-      const failure = await checkRound(io, dependencies, state, answer);
+    const parsed = ModelIdentifierSchema.safeParse(answer);
+    if (parsed.success) {
+      const failure = await checkRound(io, dependencies, state, parsed.data);
       if (failure === undefined) {
-        return answer;
+        return parsed.data;
       }
       warnLines(io, dependencies.redact, describeModelCheckFailure(failure));
     }
@@ -1232,10 +1235,20 @@ async function interviewJiraSettings(
     }
     return isVariableSet(name) ? undefined : unsetVariableProblem(name);
   };
-  const url = await askText(io, {
-    message: 'Jira site URL',
-    validate: validateHttpsUrl,
-  });
+  let answer = await askText(io, { message: 'Jira site URL', validate: validateHttpsUrl });
+  let url: string | undefined;
+  while (url === undefined) {
+    const parsed = HttpsUrlSchema.safeParse(answer);
+    if (parsed.success) {
+      url = parsed.data;
+    } else {
+      answer = await askText(io, {
+        message: 'Jira site URL',
+        initialValue: answer,
+        validate: validateHttpsUrl,
+      });
+    }
+  }
   const email = await askText(io, {
     message: 'Jira email variable',
     validate: validateCredentialName,
@@ -3065,19 +3078,13 @@ function validateNonWhitespace(value: string | undefined): string | undefined {
 }
 
 function validateModel(value: string | undefined): string | undefined {
-  return isModelIdentifier(value ?? '') ? undefined : 'model must be "<provider>/<model>"';
-}
-
-function isModelIdentifier(value: string): value is `${string}/${string}` {
-  return /^.+\/.+$/.test(value);
+  return ModelIdentifierSchema.safeParse(value ?? '').success
+    ? undefined
+    : 'model must be "<provider>/<model>"';
 }
 
 function validateHttpsUrl(value: string | undefined): string | undefined {
-  try {
-    return new URL(value ?? '').protocol === 'https:' ? undefined : 'an https:// URL is required';
-  } catch {
-    return 'an https:// URL is required';
-  }
+  return HttpsUrlSchema.safeParse(value ?? '').success ? undefined : 'an https:// URL is required';
 }
 
 /** Reuses the schema's Duration grammar (including the E1 bound) rather than a second regex. */
@@ -3097,10 +3104,6 @@ function validateVariableNameGrammar(value: string): string | undefined {
   return result.error.issues[0]?.message ?? 'invalid variable name';
 }
 
-function isFixedEnvironmentName(name: string): boolean {
-  return FIXED_ENVIRONMENT_NAMES.has(name) || name.startsWith('XDG_');
-}
-
 function unsetVariableProblem(name: string): string {
   return `"${name}" isn't set in this terminal`;
 }
@@ -3116,7 +3119,7 @@ function validateVariableName(
       return grammar;
     }
     if (isFixedEnvironmentName(value)) {
-      return 'PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract';
+      return FIXED_ENVIRONMENT_NAME_MESSAGE;
     }
     if (takenNames.has(value)) {
       return `"${value}" is already configured`;
@@ -3138,7 +3141,7 @@ function validateCheckVariableList(
         return `"${name}": ${grammar}`;
       }
       if (isFixedEnvironmentName(name)) {
-        return 'PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract';
+        return FIXED_ENVIRONMENT_NAME_MESSAGE;
       }
       if (excludedNames.has(name)) {
         return `"${name}" is passed to the agent or Jira and cannot also be passed to a check`;

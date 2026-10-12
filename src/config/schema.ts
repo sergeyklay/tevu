@@ -7,6 +7,7 @@
 
 import { z } from 'zod';
 
+import { FIXED_ENVIRONMENT_NAME_MESSAGE, isFixedEnvironmentName } from '@/domain/fixed-environment';
 import {
   managedCloneLocation,
   parseGitHubReference,
@@ -90,15 +91,7 @@ export function durationMs(value: string): number {
 const VARIABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const VARIABLE_NAME_GRAMMAR_MESSAGE =
   'must be a letter or underscore followed by letters, digits, or underscores';
-const FIXED_NAME_MESSAGE =
-  'PATH, HOME, TMPDIR, LANG, LC_ALL, CI, and XDG_* names are fixed by the isolation contract and cannot be configured';
-
-/** Environment names fixed by the isolation contract; configuration must not redefine them. */
-const FIXED_ENVIRONMENT_NAMES = new Set(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'CI']);
-
-function isFixedEnvironmentName(name: string): boolean {
-  return FIXED_ENVIRONMENT_NAMES.has(name) || name.startsWith('XDG_');
-}
+const FIXED_NAME_MESSAGE = `${FIXED_ENVIRONMENT_NAME_MESSAGE} and cannot be configured`;
 
 /** An environment variable name: a shell-exportable identifier (E2). */
 export const VariableNameSchema = z
@@ -272,9 +265,12 @@ export function agentNamesInUse(config: TevuConfig): string[] {
   return names;
 }
 
+/** An absolute URL whose scheme is `https`. */
+export const HttpsUrlSchema = z.url({ protocol: /^https$/ });
+
 /** Jira Cloud connection settings; credentials are `$VARIABLE` references, never values. */
 const JiraTrackerSettingsSchema = z.strictObject({
-  url: z.url({ protocol: /^https$/ }),
+  url: HttpsUrlSchema,
   email: VariableReferenceSchema,
   token: VariableReferenceSchema,
 });
@@ -416,7 +412,7 @@ export function repositoryInputOf(repository: RepositoryDefinition): RepositoryI
 }
 
 /** `provider/model` grammar shared by a model entry and a model role. */
-const ModelIdentifierSchema = z.templateLiteral([z.string().min(1), '/', z.string().min(1)]);
+export const ModelIdentifierSchema = z.templateLiteral([z.string().min(1), '/', z.string().min(1)]);
 
 /** One benchmark model entry, before its `agent` default is resolved against the configured agents. */
 const ModelDefinitionSchema = z.strictObject({

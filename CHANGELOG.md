@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- `tevu task add` now accepts a Jira site URL whenever `tevu validate` does, such as one pasted with a no-break space, and saves it without the whitespace around it; a URL typed with a trailing space no longer makes that run's Jira import fail.
 - A damaged or hand-edited run file now makes `tevu report` and `tevu assess` name the file and the first field that does not match; damage such as a malformed case record in `run.json` made them fail with `tevu failed unexpectedly`.
 
 ## [0.1.0] - 2026-10-07
