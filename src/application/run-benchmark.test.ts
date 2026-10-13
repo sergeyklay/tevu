@@ -1,13 +1,16 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { durationMs, TevuConfigSchema } from '@/config/schema';
 import { unavailableBenchmarkMetrics } from '@/domain/types';
+import { evaluateChecks } from '@/evaluation/checks';
 
 import { buildVerifiedEfforts } from './__fixtures__/effort.fixtures';
+import { gradeCase } from './grade-case';
 import { planBenchmark, reduceRunExitCode, runBenchmark } from './run-benchmark';
 import { buildTaskPrompt } from './task-prompt';
 
+import type { GradeCaseOutcome } from './grade-case';
 import type { CheckInput, TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
   AgentAdapter,
@@ -17,11 +20,14 @@ import type {
   AgentRunInput,
   AgentRunResult,
   ArtifactStore,
+  BenchmarkMetrics,
   CaseEnvironments,
+  CaseGrading,
   CaseIdentity,
   CaseLifecycle,
   CaseResult,
   CaseWorkspace,
+  CheckResult,
   CheckStateRecord,
   CheckStateRequest,
   Clock,
@@ -38,6 +44,7 @@ import type {
   MetricValue,
   OverlaySnapshot,
   ParentEnvironmentSnapshot,
+  PatchBase,
   PrerequisiteAdapter,
   ProcessResult,
   RedactedCapture,
@@ -46,10 +53,20 @@ import type {
   RunFinding,
   RunManifest,
   RunResult,
+  SetupCommandRecord,
+  SetupPhase,
   TevuConfig,
   TevuError,
   TevuResult,
 } from '@/domain/types';
+import type * as ChecksModule from '@/evaluation/checks';
+
+vi.mock('./grade-case', () => ({ gradeCase: vi.fn() }));
+
+vi.mock('@/evaluation/checks', async (importOriginal) => {
+  const actual = await importOriginal<typeof ChecksModule>();
+  return { ...actual, evaluateChecks: vi.fn(actual.evaluateChecks) };
+});
 
 const COMMIT_A = 'a'.repeat(40);
 const COMMIT_B = 'b'.repeat(40);
@@ -466,6 +483,8 @@ function createHarness(config: TevuConfig) {
     disposeErrors: new Map<string, Extract<TevuError, { kind: 'ArtifactError' }>>(),
     validateSourceError: null as Extract<TevuError, { kind: 'SourceMaterializationError' }> | null,
     capturePatchError: null as Extract<TevuError, { kind: 'SourceMaterializationError' }> | null,
+    capturePatchBases: [] as Array<{ caseId: string; base: PatchBase | undefined }>,
+    snapshotPatchBaseError: null as Extract<TevuError, { kind: 'ArtifactError' }> | null,
     createIsolatedCaseError: null as Extract<
       TevuError,
       { kind: 'SourceMaterializationError' | 'IsolationError' }
@@ -480,6 +499,14 @@ function createHarness(config: TevuConfig) {
     resolveCommitResult: { kind: 'not-found' } as CommitLookup,
     isAncestorCalls: [] as Array<{ repositoryId: string; ancestor: string; descendant: string }>,
     isAncestorResult: null as boolean | null,
+  };
+
+  type AbortPoint = 'snapshotPatchBase' | 'applyCheckState' | 'writePatch' | 'writeGrading';
+  const abortDuring = new Set<AbortPoint>();
+  const abortIfRequested = (call: AbortPoint): void => {
+    if (abortDuring.has(call)) {
+      cancellationController.abort();
+    }
   };
 
   const git: GitWorkspaceAdapter = {
@@ -519,7 +546,8 @@ function createHarness(config: TevuConfig) {
       }
       return { ok: true, value: buildWorkspace(identity) };
     },
-    async capturePatch(workspace) {
+    async capturePatch(workspace, base) {
+      gitState.capturePatchBases.push({ caseId: workspace.caseId, base });
       timeline.push(`patch:${workspace.caseId}`);
       if (gitState.capturePatchError !== null) {
         return { ok: false, error: gitState.capturePatchError };
@@ -535,6 +563,10 @@ function createHarness(config: TevuConfig) {
     },
     async snapshotPatchBase(workspace) {
       timeline.push(`snapshotPatchBase:${workspace.caseId}`);
+      abortIfRequested('snapshotPatchBase');
+      if (gitState.snapshotPatchBaseError !== null) {
+        return { ok: false, error: gitState.snapshotPatchBaseError };
+      }
       return {
         ok: true,
         value: { tree: `tree-${workspace.caseId}`, objectDirectory: `objects-${workspace.caseId}` },
@@ -560,6 +592,7 @@ function createHarness(config: TevuConfig) {
     async applyCheckState(workspace, request) {
       gitState.applyCheckStateCalls.push({ caseId: workspace.caseId, request });
       timeline.push(`applyCheckState:${workspace.caseId}`);
+      abortIfRequested('applyCheckState');
       if (gitState.applyCheckStateError !== null) {
         return { ok: false, error: gitState.applyCheckStateError };
       }
@@ -730,7 +763,9 @@ function createHarness(config: TevuConfig) {
       return recordArtifactCall('writeSessionExport', caseId);
     },
     async writePatch(caseId) {
-      return recordArtifactCall('writePatch', caseId);
+      const result = recordArtifactCall('writePatch', caseId);
+      abortIfRequested('writePatch');
+      return result;
     },
     async writeSetupLog(caseId) {
       return recordArtifactCall('writeSetupLog', caseId);
@@ -739,7 +774,9 @@ function createHarness(config: TevuConfig) {
       return recordArtifactCall('writeChecks', caseId);
     },
     async writeGrading(caseId) {
-      return recordArtifactCall('writeGrading', caseId);
+      const result = recordArtifactCall('writeGrading', caseId);
+      abortIfRequested('writeGrading');
+      return result;
     },
     async finalizeCase(result) {
       artifactState.finalizedCases.push(result);
@@ -921,6 +958,8 @@ function createHarness(config: TevuConfig) {
     redact: (text) => text,
     cancellation: cancellationController.signal,
     onLifecycle: (caseId, lifecycle) => lifecycleEvents.push({ caseId, lifecycle }),
+    onRetainedGradingDirectory: (directory) =>
+      timeline.push(`retainedGradingDirectory:${directory}`),
   };
 
   const agentHarness = Object.assign(agentState, {
@@ -967,6 +1006,7 @@ function createHarness(config: TevuConfig) {
     timeline,
     lifecycleEvents,
     cancellation: cancellationController,
+    abortDuring,
     git: gitState,
     agent: agentHarness,
     artifacts: artifactState,
@@ -2942,6 +2982,1554 @@ describe('runBenchmark check-state orchestration', () => {
     expect(harness.timeline.some((entry) => entry.startsWith('startRun:'))).toBe(false);
     expect(harness.timeline.some((entry) => entry.startsWith('prepare:'))).toBe(false);
     expect(harness.agent.runCalls.size).toBe(0);
+  });
+});
+
+const FIRST_CASE_ID = 'task-1--c1--1';
+const SECOND_CASE_ID = 'task-1--c2--1';
+const FIRST_CASE_FAILURE_OCCURRED_AT = '2026-01-01T00:00:02.000Z';
+const EVENTS_PATH = `${FIRST_CASE_ID}/events.jsonl`;
+const DIAGNOSTICS_PATH = `${FIRST_CASE_ID}/stderr.log`;
+const SESSION_EXPORT_PATH = `${FIRST_CASE_ID}/session.json`;
+const PATCH_PATH = `${FIRST_CASE_ID}/solution.patch`;
+const CHECKS_PATH = `${FIRST_CASE_ID}/checks.json`;
+const GRADING_PATH = `${FIRST_CASE_ID}/grading.json`;
+const SETUP_ARGV: Record<SetupPhase, string> = {
+  before_agent: '/synthetic/setup-before-agent',
+  before_checks: '/synthetic/setup-before-checks',
+};
+const SETUP_LOG_PATH: Record<SetupPhase, string> = {
+  before_agent: `${FIRST_CASE_ID}/setup-before-agent.log`,
+  before_checks: `${FIRST_CASE_ID}/setup-before-checks.log`,
+};
+const TOOL_EVENT: FakeEventRecord = { kind: 'tool' };
+const ERROR_EVENT: FakeEventRecord = { kind: 'error' };
+const UNIDENTIFIED_SESSION_REASON = 'root session could not be identified';
+const AGENT_NOT_STARTED_BY_CANCELLATION_REASON = 'the case was cancelled before the agent started';
+const PATCH_FAILURE_WARNING =
+  'tevu could not save the changes this attempt made before its time limit ended it, so its solution patch is missing. The attempt counts as not evaluated either way. Nothing more is needed for this run. Technical detail: source materialization failed: synthetic patch failure';
+
+type CaseArtifactIndex = CaseResult['artifacts'];
+type SetupEvidence = NonNullable<CaseResult['setup']>;
+type RepositoriesOverride = Pick<TevuConfigInput, 'repositories'>;
+
+function buildSingleCaseConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
+  const config = buildTevuConfig({
+    run: buildRunSettings({ concurrency: 1 }),
+    tasks: [buildTask()],
+    ...overrides,
+  });
+  return { ...config, models: config.models.slice(0, 1) };
+}
+
+function buildTwoCaseConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
+  return buildTevuConfig({
+    run: buildRunSettings({ concurrency: 1 }),
+    tasks: [buildTask()],
+    ...overrides,
+  });
+}
+
+function buildGradedConfig(build: (overrides: Partial<TevuConfigInput>) => TevuConfig): TevuConfig {
+  const config = build({
+    tasks: [
+      buildTask({
+        checks: {
+          acceptance: [buildCheck({ id: 'acc-required' })],
+          done: [{ id: 'dod-graded', description: 'the change is explained' }],
+        },
+      }),
+    ],
+  });
+  return {
+    ...config,
+    roles: { grader: { model: 'synthetic/grader-model', effort: 'high', agent: AGENT_NAME } },
+  };
+}
+
+function declareSetup(...phases: SetupPhase[]): RepositoriesOverride {
+  return {
+    repositories: [
+      {
+        id: 'repo-1',
+        path: '/synthetic/source',
+        setup: {
+          ...(phases.includes('before_agent') ? { before_agent: [[SETUP_ARGV.before_agent]] } : {}),
+          ...(phases.includes('before_checks')
+            ? { before_checks: [[SETUP_ARGV.before_checks]] }
+            : {}),
+          timeout: '5s',
+          env: [],
+        },
+      },
+    ],
+  };
+}
+
+async function runConfigured(config: TevuConfig, harness: Harness): Promise<RunResult> {
+  return unwrapOk(
+    await runBenchmark(
+      planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config)),
+      harness.dependencies,
+    ),
+  );
+}
+
+async function runCancelledWhileCommandRuns(
+  config: TevuConfig,
+  harness: Harness,
+  command: string,
+): Promise<RunResult> {
+  harness.evaluatorProcesses.holdChecks();
+  const commandStarted = harness.evaluatorProcesses.waitForCheck(command);
+
+  const runPromise = runConfigured(config, harness);
+  await commandStarted;
+  harness.cancellation.abort();
+  harness.evaluatorProcesses.releaseChecks();
+
+  return runPromise;
+}
+
+function finalizedCaseOf(harness: Harness, caseId = FIRST_CASE_ID): CaseResult {
+  const found = harness.artifacts.finalizedCases.find((entry) => entry.identity.caseId === caseId);
+  if (found === undefined) {
+    throw new Error(`no case was finalized for ${caseId}`);
+  }
+  return found;
+}
+
+function timelineOf(harness: Harness, entries: readonly string[]): string[] {
+  return harness.timeline.filter((entry) => entries.includes(entry));
+}
+
+function timelineAfter(harness: Harness, entry: string): string[] {
+  return harness.timeline.slice(harness.timeline.indexOf(entry) + 1);
+}
+
+function buildPinnedIdentity(caseId = FIRST_CASE_ID): CaseIdentity {
+  return { ...buildCaseIdentity(caseId), sourceCommit: `pinned-${COMMIT_A}` };
+}
+
+function buildArtifactError(
+  operation: string,
+  reason: string,
+): Extract<TevuError, { kind: 'ArtifactError' }> {
+  return { kind: 'ArtifactError', operation, reason };
+}
+
+function buildAgentProcessError(
+  exitCode: number,
+): Extract<TevuError, { kind: 'AgentProcessError' }> {
+  return {
+    kind: 'AgentProcessError',
+    agent: AGENT_NAME,
+    caseId: FIRST_CASE_ID,
+    exitCode,
+    signal: null,
+  };
+}
+
+function buildPatchCaptureError(): Extract<TevuError, { kind: 'SourceMaterializationError' }> {
+  return {
+    kind: 'SourceMaterializationError',
+    taskId: 'task-1',
+    reason: 'synthetic patch failure',
+  };
+}
+
+function buildCancellationError(): Extract<TevuError, { kind: 'CancellationError' }> {
+  return { kind: 'CancellationError', activeCaseIds: [FIRST_CASE_ID] };
+}
+
+function buildTimeoutError(): Extract<TevuError, { kind: 'CaseTimeoutError' }> {
+  return { kind: 'CaseTimeoutError', caseId: FIRST_CASE_ID, timeoutMs: 60_000 };
+}
+
+function buildTimedOutProcess(): ProcessResult {
+  return buildProcessResult({
+    exitCode: null,
+    signal: 'SIGKILL',
+    durationMs: 4_321,
+    terminationStage: 'forced',
+  });
+}
+
+function buildFailedProcess(): ProcessResult {
+  return buildProcessResult({ exitCode: 3, durationMs: 4_321 });
+}
+
+function recordedFailure(error: TevuError): FailureRecord {
+  return buildFailureRecord({ error, occurredAt: FIRST_CASE_FAILURE_OCCURRED_AT });
+}
+
+function buildArtifactIndex(overrides: Partial<CaseArtifactIndex> = {}): CaseArtifactIndex {
+  return {
+    events: null,
+    diagnostics: null,
+    sessionExport: null,
+    solutionPatch: null,
+    checks: null,
+    assessment: null,
+    grading: null,
+    result: `${FIRST_CASE_ID}/result.json`,
+    ...overrides,
+  };
+}
+
+function buildMeasuredElapsed(durationMs: number): MetricValue {
+  return {
+    value: durationMs,
+    unit: 'millisecond',
+    availability: { status: 'available', source: 'process' },
+    scope: 'case',
+  };
+}
+
+function buildExportedMetrics(durationMs: number): BenchmarkMetrics {
+  return { elapsed: buildMeasuredElapsed(durationMs), ...buildFullMetrics() };
+}
+
+function buildFallbackMetrics(
+  durationMs: number,
+  reason: string,
+  events: readonly FakeEventRecord[],
+): BenchmarkMetrics {
+  return {
+    elapsed: buildMeasuredElapsed(durationMs),
+    ...buildEventFallbackMetrics(reason, events),
+  };
+}
+
+function buildPassedCheck(checkId: string, category: CheckResult['category']): CheckResult {
+  return {
+    checkId,
+    category,
+    verdict: 'passed',
+    evidence: 'exit code 0\nstdout (0 bytes)\nstderr (0 bytes)',
+    durationMs: 5,
+  };
+}
+
+function buildPassedChecks(): CheckResult[] {
+  return [
+    buildPassedCheck('acc-required', 'acceptance'),
+    buildPassedCheck('dod-required', 'definition-of-done'),
+  ];
+}
+
+function buildAwaitingGraderCheck(): CheckResult {
+  return {
+    checkId: 'dod-graded',
+    category: 'definition-of-done',
+    verdict: 'pending',
+    evidence: 'awaiting the grader',
+    durationMs: null,
+  };
+}
+
+function buildGradedCheck(): CheckResult {
+  return {
+    checkId: 'dod-graded',
+    category: 'definition-of-done',
+    verdict: 'passed',
+    evidence:
+      'graded passed by synthetic/grader-model (effort high, agent fake-agent): synthetic rationale',
+    durationMs: null,
+  };
+}
+
+function buildCaseGrading(): CaseGrading {
+  return {
+    grader: { model: 'synthetic/grader-model', effort: 'high', agent: AGENT_NAME },
+    call: { status: 'replied', reply: 'synthetic reply' },
+    calls: [],
+    metrics: buildFullMetrics(),
+    grades: [
+      {
+        checkId: 'dod-graded',
+        category: 'definition-of-done',
+        status: 'graded',
+        verdict: 'passed',
+        rationale: 'synthetic rationale',
+      },
+    ],
+  };
+}
+
+function buildGradedOutcome(retainedDirectories: readonly string[] = []): GradeCaseOutcome {
+  return { status: 'graded', grading: buildCaseGrading(), retainedDirectories };
+}
+
+function buildCheckStateRecord(overrides: Partial<CheckStateRecord> = {}): CheckStateRecord {
+  return {
+    restore: { restored: ['tests/restored.test.ts'], removed: ['tests/extra.test.ts'] },
+    overlay: null,
+    ...overrides,
+  };
+}
+
+function buildSetupCommandRecord(
+  phase: SetupPhase,
+  overrides: Partial<SetupCommandRecord> = {},
+): SetupCommandRecord {
+  return {
+    phase,
+    argv: [SETUP_ARGV[phase]],
+    exitCode: 0,
+    durationMs: 5,
+    outcome: 'passed',
+    ...overrides,
+  };
+}
+
+function buildSetupEvidence(
+  logs: Partial<SetupEvidence['logs']>,
+  commands: SetupCommandRecord[],
+): SetupEvidence {
+  return { logs: { beforeAgent: null, beforeChecks: null, ...logs }, commands };
+}
+
+function buildContext(harness: Harness): NonNullable<CaseResult['context']> {
+  const created = harness.environments.created.find((entry) => entry.caseId === FIRST_CASE_ID);
+  if (created === undefined) {
+    throw new Error(`no environments were created for ${FIRST_CASE_ID}`);
+  }
+  return {
+    sourceRepositoryPath: '/synthetic/source-task-1',
+    syntheticCommit: `synthetic-${FIRST_CASE_ID}`,
+    environment: [
+      ...created.value.agent.variableManifest,
+      ...created.value.evaluator.variableManifest,
+    ],
+  };
+}
+
+/** The default record of a first case whose agent ran, whose export and patch were written, and whose checks all passed. */
+function buildAgentRanCase(harness: Harness, overrides: Partial<CaseResult> = {}): CaseResult {
+  return {
+    schemaVersion: 1,
+    identity: buildPinnedIdentity(),
+    lifecycle: 'completed',
+    process: buildProcessResult(),
+    outcome: 'passed',
+    checks: buildPassedChecks(),
+    metrics: buildExportedMetrics(1_000),
+    artifacts: buildArtifactIndex({
+      events: EVENTS_PATH,
+      sessionExport: SESSION_EXPORT_PATH,
+      solutionPatch: PATCH_PATH,
+      checks: CHECKS_PATH,
+    }),
+    failure: null,
+    context: buildContext(harness),
+    ...overrides,
+  };
+}
+
+function buildNotEvaluatedCase(
+  harness: Harness,
+  overrides: Partial<CaseResult> & Pick<CaseResult, 'lifecycle'>,
+): CaseResult {
+  return buildAgentRanCase(harness, { outcome: 'not-evaluated', checks: [], ...overrides });
+}
+
+function buildAgentNotStartedCase(
+  lifecycle: 'infrastructure-failed' | 'cancelled',
+  failure: TevuError,
+  reason: string,
+  setup: SetupEvidence,
+): CaseResult {
+  return {
+    schemaVersion: 1,
+    identity: buildPinnedIdentity(),
+    lifecycle,
+    process: null,
+    outcome: 'not-evaluated',
+    checks: [],
+    metrics: unavailableBenchmarkMetrics(reason),
+    artifacts: buildArtifactIndex(),
+    failure: recordedFailure(failure),
+    setup,
+  };
+}
+
+function sessionlessRunScript(error?: CaseRunFailure): RunScript {
+  return async (input) => {
+    await input.onEvent(TOOL_EVENT);
+    const value = buildAgentRunResult({
+      sessionId: null,
+      ...(error === undefined ? {} : { process: buildFailedProcess() }),
+    });
+    input.onProcess?.(value);
+    return error === undefined ? { ok: true, value } : { ok: false, error };
+  };
+}
+
+function abortingRunScript(harness: Harness, script: RunScript = successfulRunScript): RunScript {
+  return async (input) => {
+    const outcome = await script(input);
+    harness.cancellation.abort();
+    return outcome;
+  };
+}
+
+describe('case lifecycle: result record shape', () => {
+  it('orders the keys of a completed case result and of its artifact index', async () => {
+    const config = buildSingleCaseConfig();
+    const harness = createHarness(config);
+
+    await runConfigured(config, harness);
+
+    const completed = finalizedCaseOf(harness);
+    expect(Object.keys(completed)).toEqual([
+      'schemaVersion',
+      'identity',
+      'lifecycle',
+      'process',
+      'outcome',
+      'checks',
+      'metrics',
+      'artifacts',
+      'failure',
+      'context',
+    ]);
+    expect(Object.keys(completed.artifacts)).toEqual([
+      'events',
+      'diagnostics',
+      'sessionExport',
+      'solutionPatch',
+      'checks',
+      'assessment',
+      'grading',
+      'result',
+    ]);
+  });
+
+  it('places checkState and setup between failure and context, with the before_agent log listed first', async () => {
+    const config = buildSingleCaseConfig({
+      ...declareSetup('before_agent', 'before_checks'),
+      tasks: [buildTask({ checks: { ...buildTask().checks, restore: ['tests/**'] } })],
+    });
+    const harness = createHarness(config);
+
+    await runConfigured(config, harness);
+
+    const completed = finalizedCaseOf(harness);
+    expect(Object.keys(completed)).toEqual([
+      'schemaVersion',
+      'identity',
+      'lifecycle',
+      'process',
+      'outcome',
+      'checks',
+      'metrics',
+      'artifacts',
+      'failure',
+      'checkState',
+      'setup',
+      'context',
+    ]);
+    expect(Object.keys(completed.setup ?? {})).toEqual(['logs', 'commands']);
+    expect(Object.keys(completed.setup?.logs ?? {})).toEqual(['beforeAgent', 'beforeChecks']);
+  });
+
+  it('orders the keys of a case result for a case whose agent never started', async () => {
+    const config = buildSingleCaseConfig(declareSetup('before_agent'));
+    const harness = createHarness(config);
+    harness.evaluatorProcesses.exitCodes.set(SETUP_ARGV.before_agent, 7);
+
+    await runConfigured(config, harness);
+
+    expect(Object.keys(finalizedCaseOf(harness))).toEqual([
+      'schemaVersion',
+      'identity',
+      'lifecycle',
+      'process',
+      'outcome',
+      'checks',
+      'metrics',
+      'artifacts',
+      'failure',
+      'setup',
+    ]);
+  });
+});
+
+describe('case lifecycle: before the agent', () => {
+  it('captures the patch without a patch base when the repository declares no before_agent', async () => {
+    const config = buildSingleCaseConfig();
+    const harness = createHarness(config);
+
+    await runConfigured(config, harness);
+
+    expect(harness.git.capturePatchBases).toEqual([{ caseId: FIRST_CASE_ID, base: undefined }]);
+    expect(harness.timeline.some((entry) => entry.startsWith('snapshotPatchBase:'))).toBe(false);
+  });
+
+  it('ends the case without starting the agent and stops scheduling when the before_agent log cannot be written', async () => {
+    const config = buildTwoCaseConfig(declareSetup('before_agent'));
+    const harness = createHarness(config);
+    const logFailure = buildArtifactError('write-setup-log', 'synthetic setup log failure');
+    harness.artifacts.failOnce.set(`writeSetupLog:${FIRST_CASE_ID}`, logFailure);
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildAgentNotStartedCase(
+        'infrastructure-failed',
+        logFailure,
+        'the setup.before_agent log could not be written; the agent did not start',
+        buildSetupEvidence({}, [buildSetupCommandRecord('before_agent')]),
+      ),
+    );
+    expect(harness.agent.runCalls.size).toBe(0);
+    expect(run.findings).toEqual([
+      { severity: 'error', caseId: SECOND_CASE_ID, message: SCHEDULING_STOPPED_MESSAGE },
+    ]);
+    expect(run.exitCode).toBe(1);
+  });
+
+  it('reports the log write failure rather than the command failure when a failing before_agent command also loses its log', async () => {
+    const config = buildTwoCaseConfig(declareSetup('before_agent'));
+    const harness = createHarness(config);
+    const logFailure = buildArtifactError('write-setup-log', 'synthetic setup log failure');
+    harness.evaluatorProcesses.exitCodes.set(SETUP_ARGV.before_agent, 7);
+    harness.artifacts.failOnce.set(`writeSetupLog:${FIRST_CASE_ID}`, logFailure);
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildAgentNotStartedCase(
+        'infrastructure-failed',
+        logFailure,
+        'the setup.before_agent log could not be written; the agent did not start',
+        buildSetupEvidence({}, [
+          buildSetupCommandRecord('before_agent', { exitCode: 7, outcome: 'failed' }),
+        ]),
+      ),
+    );
+    expect(run.findings).toEqual([
+      { severity: 'error', caseId: SECOND_CASE_ID, message: SCHEDULING_STOPPED_MESSAGE },
+    ]);
+  });
+
+  it('ends the case without starting the agent and keeps scheduling when a before_agent command fails', async () => {
+    const config = buildTwoCaseConfig(declareSetup('before_agent'));
+    const harness = createHarness(config);
+    harness.evaluatorProcesses.exitCodes.set(SETUP_ARGV.before_agent, 7);
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildAgentNotStartedCase(
+        'infrastructure-failed',
+        {
+          kind: 'SetupError',
+          phase: 'before_agent',
+          argv: [SETUP_ARGV.before_agent],
+          reason: 'exited with code 7',
+        },
+        'setup.before_agent failed; the agent did not start',
+        buildSetupEvidence({ beforeAgent: SETUP_LOG_PATH.before_agent }, [
+          buildSetupCommandRecord('before_agent', { exitCode: 7, outcome: 'failed' }),
+        ]),
+      ),
+    );
+    expect(harness.agent.runCalls.size).toBe(0);
+    expect(run.cases.map((entry) => entry.lifecycle)).toEqual([
+      'infrastructure-failed',
+      'infrastructure-failed',
+    ]);
+    expect(run.findings).toEqual([]);
+  });
+
+  it.each([
+    {
+      label: 'a command that reports its cancellation',
+      exitCode: 1,
+      command: buildSetupCommandRecord('before_agent', { exitCode: 1, outcome: 'cancelled' }),
+    },
+    {
+      label: 'a command that passes while the run is cancelled',
+      exitCode: 0,
+      command: buildSetupCommandRecord('before_agent'),
+    },
+  ])(
+    'ends the case as cancelled without starting the agent when the run is cancelled during before_agent with $label',
+    async ({ exitCode, command }) => {
+      const config = buildSingleCaseConfig(declareSetup('before_agent'));
+      const harness = createHarness(config);
+      harness.evaluatorProcesses.exitCodes.set(SETUP_ARGV.before_agent, exitCode);
+
+      const run = await runCancelledWhileCommandRuns(config, harness, SETUP_ARGV.before_agent);
+
+      expect(finalizedCaseOf(harness)).toEqual(
+        buildAgentNotStartedCase(
+          'cancelled',
+          buildCancellationError(),
+          AGENT_NOT_STARTED_BY_CANCELLATION_REASON,
+          buildSetupEvidence({ beforeAgent: SETUP_LOG_PATH.before_agent }, [command]),
+        ),
+      );
+      expect(harness.agent.runCalls.size).toBe(0);
+      expect(harness.timeline.some((entry) => entry.startsWith('snapshotPatchBase:'))).toBe(false);
+      expect(run.exitCode).toBe(130);
+    },
+  );
+
+  it('ends the case without starting the agent and keeps scheduling when the patch base cannot be recorded', async () => {
+    const config = buildTwoCaseConfig(declareSetup('before_agent'));
+    const harness = createHarness(config);
+    const baseFailure = buildArtifactError('snapshot-patch-base', 'synthetic patch base failure');
+    harness.git.snapshotPatchBaseError = baseFailure;
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildAgentNotStartedCase(
+        'infrastructure-failed',
+        baseFailure,
+        'the patch base could not be recorded; the agent did not start',
+        buildSetupEvidence({ beforeAgent: SETUP_LOG_PATH.before_agent }, [
+          buildSetupCommandRecord('before_agent'),
+        ]),
+      ),
+    );
+    expect(harness.agent.runCalls.size).toBe(0);
+    expect(run.cases.map((entry) => entry.lifecycle)).toEqual([
+      'infrastructure-failed',
+      'infrastructure-failed',
+    ]);
+    expect(run.findings).toEqual([]);
+  });
+
+  it('ends the case as cancelled without starting the agent when the run is cancelled while the patch base is recorded', async () => {
+    const config = buildSingleCaseConfig(declareSetup('before_agent'));
+    const harness = createHarness(config);
+    harness.abortDuring.add('snapshotPatchBase');
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildAgentNotStartedCase(
+        'cancelled',
+        buildCancellationError(),
+        AGENT_NOT_STARTED_BY_CANCELLATION_REASON,
+        buildSetupEvidence({ beforeAgent: SETUP_LOG_PATH.before_agent }, [
+          buildSetupCommandRecord('before_agent'),
+        ]),
+      ),
+    );
+    expect(harness.agent.runCalls.size).toBe(0);
+    expect(timelineOf(harness, [`snapshotPatchBase:${FIRST_CASE_ID}`])).toEqual([
+      `snapshotPatchBase:${FIRST_CASE_ID}`,
+    ]);
+    expect(run.exitCode).toBe(130);
+  });
+
+  it('records the before_agent evidence and hands the recorded patch base to patch capture when before_agent passes', async () => {
+    const config = buildSingleCaseConfig(declareSetup('before_agent'));
+    const harness = createHarness(config);
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildAgentRanCase(harness, {
+        setup: buildSetupEvidence({ beforeAgent: SETUP_LOG_PATH.before_agent }, [
+          buildSetupCommandRecord('before_agent'),
+        ]),
+      }),
+    );
+    expect(harness.git.capturePatchBases).toEqual([
+      {
+        caseId: FIRST_CASE_ID,
+        base: { tree: `tree-${FIRST_CASE_ID}`, objectDirectory: `objects-${FIRST_CASE_ID}` },
+      },
+    ]);
+    expect(
+      timelineOf(harness, [
+        `writeSetupLog:${FIRST_CASE_ID}`,
+        `snapshotPatchBase:${FIRST_CASE_ID}`,
+        `run:start:${FIRST_CASE_ID}`,
+      ]),
+    ).toEqual([
+      `writeSetupLog:${FIRST_CASE_ID}`,
+      `snapshotPatchBase:${FIRST_CASE_ID}`,
+      `run:start:${FIRST_CASE_ID}`,
+    ]);
+    expect(run.exitCode).toBe(0);
+  });
+
+  it.each([
+    { callback: 'onEvent', operation: 'appendEvent' },
+    { callback: 'onDiagnostic', operation: 'appendDiagnostic' },
+  ] as const)(
+    'aborts the agent run and hands the append failure back to the adapter when $callback cannot append',
+    async ({ callback, operation }) => {
+      const config = buildSingleCaseConfig();
+      const harness = createHarness(config);
+      const appendFailure = buildArtifactError(operation, 'synthetic disk full');
+      harness.artifacts.failOnce.set(`${operation}:${FIRST_CASE_ID}`, appendFailure);
+      const observed: { abortedBefore?: boolean; appended?: unknown; abortedAfter?: boolean } = {};
+      harness.agent.scripts.set(FIRST_CASE_ID, async (input) => {
+        observed.abortedBefore = input.cancellation.aborted;
+        observed.appended =
+          callback === 'onEvent'
+            ? await input.onEvent(TOOL_EVENT)
+            : await input.onDiagnostic('synthetic stderr line');
+        observed.abortedAfter = input.cancellation.aborted;
+        const value = buildAgentRunResult({ sessionId: `session-${FIRST_CASE_ID}` });
+        input.onProcess?.(value);
+        return { ok: true, value };
+      });
+
+      await runConfigured(config, harness);
+
+      expect(observed).toEqual({
+        abortedBefore: false,
+        appended: { ok: false, error: appendFailure },
+        abortedAfter: true,
+      });
+    },
+  );
+
+  it('ends the case on the first artifact failure, counts the later diagnostic, and stops scheduling the queued case', async () => {
+    const config = buildTwoCaseConfig();
+    const harness = createHarness(config);
+    const eventFailure = buildArtifactError('append-event', 'synthetic event disk full');
+    harness.artifacts.failOnce.set(`appendEvent:${FIRST_CASE_ID}`, eventFailure);
+    harness.artifacts.failOnce.set(
+      `appendDiagnostic:${FIRST_CASE_ID}`,
+      buildArtifactError('append-diagnostic', 'synthetic diagnostic disk full'),
+    );
+    harness.agent.scripts.set(FIRST_CASE_ID, async (input) => {
+      await input.onEvent(TOOL_EVENT);
+      await input.onDiagnostic('synthetic stderr line');
+      const value = buildAgentRunResult({ sessionId: `session-${FIRST_CASE_ID}` });
+      input.onProcess?.(value);
+      return { ok: true, value };
+    });
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'infrastructure-failed',
+        failure: recordedFailure(eventFailure),
+        metrics: buildFallbackMetrics(
+          1_000,
+          'an artifact failure ended the case before the root session could be exported',
+          [TOOL_EVENT],
+        ),
+        artifacts: buildArtifactIndex({ events: EVENTS_PATH, diagnostics: DIAGNOSTICS_PATH }),
+      }),
+    );
+    expect(harness.agent.exportCalls).toEqual([]);
+    expect(run.findings).toEqual([
+      { severity: 'error', caseId: SECOND_CASE_ID, message: SCHEDULING_STOPPED_MESSAGE },
+    ]);
+    expect(run.exitCode).toBe(1);
+  });
+});
+
+describe('case lifecycle: agent outcome', () => {
+  it('ends a cancelled agent run as cancelled with event metrics and no export', async () => {
+    const config = buildSingleCaseConfig();
+    const harness = createHarness(config);
+    harness.agent.scripts.set(FIRST_CASE_ID, failedRunScript(buildCancellationError()));
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'cancelled',
+        process: buildFailedProcess(),
+        failure: recordedFailure(buildCancellationError()),
+        metrics: buildFallbackMetrics(
+          4_321,
+          'the case was cancelled before the root session could be exported',
+          [TOOL_EVENT],
+        ),
+        artifacts: buildArtifactIndex({ events: EVENTS_PATH }),
+      }),
+    );
+    expect(harness.agent.exportCalls).toEqual([]);
+    expect(run.exitCode).toBe(130);
+  });
+
+  it('ends a timed-out agent run as timed-out with its solution patch and event metrics', async () => {
+    const config = buildSingleCaseConfig();
+    const harness = createHarness(config);
+    harness.agent.scripts.set(FIRST_CASE_ID, timedOutRunScript());
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'timed-out',
+        process: buildTimedOutProcess(),
+        failure: recordedFailure(buildTimeoutError()),
+        metrics: buildFallbackMetrics(
+          4_321,
+          'the case timed out before the root session could be exported',
+          [TOOL_EVENT, ERROR_EVENT],
+        ),
+        artifacts: buildArtifactIndex({ events: EVENTS_PATH, solutionPatch: PATCH_PATH }),
+      }),
+    );
+    expect(harness.agent.exportCalls).toEqual([]);
+    expect(run.exitCode).toBe(2);
+  });
+
+  it('ends a timed-out agent run as infrastructure-failed and stops scheduling when its patch cannot be written', async () => {
+    const config = buildTwoCaseConfig();
+    const harness = createHarness(config);
+    const writeFailure = buildArtifactError('write-patch', 'synthetic patch write failure');
+    harness.agent.scripts.set(FIRST_CASE_ID, timedOutRunScript());
+    harness.artifacts.failOnce.set(`writePatch:${FIRST_CASE_ID}`, writeFailure);
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'infrastructure-failed',
+        process: buildTimedOutProcess(),
+        failure: recordedFailure(writeFailure),
+        metrics: buildFallbackMetrics(
+          4_321,
+          'the case timed out before the root session could be exported',
+          [TOOL_EVENT, ERROR_EVENT],
+        ),
+        artifacts: buildArtifactIndex({ events: EVENTS_PATH }),
+      }),
+    );
+    expect(run.findings).toEqual([
+      { severity: 'error', caseId: SECOND_CASE_ID, message: SCHEDULING_STOPPED_MESSAGE },
+    ]);
+    expect(run.exitCode).toBe(1);
+  });
+
+  it('ends a timed-out agent run as timed-out and warns when its patch cannot be captured', async () => {
+    const config = buildSingleCaseConfig();
+    const harness = createHarness(config);
+    harness.agent.scripts.set(FIRST_CASE_ID, timedOutRunScript());
+    harness.git.capturePatchError = buildPatchCaptureError();
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'timed-out',
+        process: buildTimedOutProcess(),
+        failure: recordedFailure(buildTimeoutError()),
+        metrics: buildFallbackMetrics(
+          4_321,
+          'the case timed out before the root session could be exported',
+          [TOOL_EVENT, ERROR_EVENT],
+        ),
+        artifacts: buildArtifactIndex({ events: EVENTS_PATH }),
+      }),
+    );
+    expect(run.findings).toEqual([
+      { severity: 'warning', caseId: FIRST_CASE_ID, message: PATCH_FAILURE_WARNING },
+    ]);
+    expect(run.exitCode).toBe(2);
+  });
+});
+
+describe('case lifecycle: export and patch', () => {
+  it.each([
+    {
+      label: 'a clean exit',
+      script: sessionlessRunScript(),
+      process: buildProcessResult(),
+      durationMs: 1_000,
+      failure: null,
+      reason: UNIDENTIFIED_SESSION_REASON,
+      exitCode: 0,
+    },
+    {
+      label: 'a failed run',
+      script: sessionlessRunScript(buildAgentProcessError(3)),
+      process: buildFailedProcess(),
+      durationMs: 4_321,
+      failure: buildAgentProcessError(3),
+      reason: `${UNIDENTIFIED_SESSION_REASON} after the failure: agent "fake-agent" process ended with exit code 3 and signal null`,
+      exitCode: 2,
+    },
+  ])(
+    'completes the case without an export and names the missing session in the metrics after $label',
+    async ({ script, process, durationMs, failure, reason, exitCode }) => {
+      const config = buildSingleCaseConfig();
+      const harness = createHarness(config);
+      harness.agent.scripts.set(FIRST_CASE_ID, script);
+
+      const run = await runConfigured(config, harness);
+
+      expect(finalizedCaseOf(harness)).toEqual(
+        buildAgentRanCase(harness, {
+          process,
+          failure: failure === null ? null : recordedFailure(failure),
+          metrics: buildFallbackMetrics(durationMs, reason, [TOOL_EVENT]),
+          artifacts: buildArtifactIndex({
+            events: EVENTS_PATH,
+            solutionPatch: PATCH_PATH,
+            checks: CHECKS_PATH,
+          }),
+        }),
+      );
+      expect(harness.agent.exportCalls).toEqual([]);
+      expect(run.exitCode).toBe(exitCode);
+    },
+  );
+
+  it('ends the case as infrastructure-failed and stops scheduling when the session export cannot be written', async () => {
+    const config = buildTwoCaseConfig();
+    const harness = createHarness(config);
+    const writeFailure = buildArtifactError(
+      'write-session-export',
+      'synthetic export write failure',
+    );
+    harness.artifacts.failOnce.set(`writeSessionExport:${FIRST_CASE_ID}`, writeFailure);
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'infrastructure-failed',
+        failure: recordedFailure(writeFailure),
+        metrics: buildFallbackMetrics(
+          1_000,
+          'session export could not be persisted: synthetic export write failure',
+          [TOOL_EVENT],
+        ),
+        artifacts: buildArtifactIndex({ events: EVENTS_PATH }),
+      }),
+    );
+    expect(harness.agent.exportCalls).toEqual([`session-${FIRST_CASE_ID}`]);
+    expect(run.findings).toEqual([
+      { severity: 'error', caseId: SECOND_CASE_ID, message: SCHEDULING_STOPPED_MESSAGE },
+    ]);
+    expect(run.exitCode).toBe(1);
+  });
+
+  it('keeps the runtime failure of the agent run when the session export fails as well', async () => {
+    const config = buildSingleCaseConfig();
+    const harness = createHarness(config);
+    harness.agent.scripts.set(FIRST_CASE_ID, failedRunScript(buildAgentProcessError(3)));
+    harness.agent.exportFailures.set(`session-${FIRST_CASE_ID}`, buildAgentProcessError(2));
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildAgentRanCase(harness, {
+        process: buildFailedProcess(),
+        failure: recordedFailure(buildAgentProcessError(3)),
+        metrics: buildFallbackMetrics(
+          4_321,
+          'root session export failed: agent "fake-agent" process ended with exit code 2 and signal null',
+          [TOOL_EVENT],
+        ),
+        artifacts: buildArtifactIndex({
+          events: EVENTS_PATH,
+          solutionPatch: PATCH_PATH,
+          checks: CHECKS_PATH,
+        }),
+      }),
+    );
+    expect(run.exitCode).toBe(2);
+  });
+
+  it.each([
+    {
+      label: 'an unidentifiable session',
+      script: sessionlessRunScript(),
+      exportFailure: null,
+      failure: null,
+      metrics: buildFallbackMetrics(1_000, UNIDENTIFIED_SESSION_REASON, [TOOL_EVENT]),
+      artifacts: { events: EVENTS_PATH },
+    },
+    {
+      label: 'a written session export',
+      script: successfulRunScript,
+      exportFailure: null,
+      failure: null,
+      metrics: buildExportedMetrics(1_000),
+      artifacts: { events: EVENTS_PATH, sessionExport: SESSION_EXPORT_PATH },
+    },
+    {
+      label: 'a failed session export',
+      script: successfulRunScript,
+      exportFailure: buildAgentProcessError(2),
+      failure: buildAgentProcessError(2),
+      metrics: buildFallbackMetrics(
+        1_000,
+        'root session export failed: agent "fake-agent" process ended with exit code 2 and signal null',
+        [TOOL_EVENT],
+      ),
+      artifacts: { events: EVENTS_PATH },
+    },
+  ])(
+    'ends the case as cancelled before capturing the patch when the run is already cancelled after $label',
+    async ({ script, exportFailure, failure, metrics, artifacts }) => {
+      const config = buildSingleCaseConfig();
+      const harness = createHarness(config);
+      harness.agent.scripts.set(FIRST_CASE_ID, abortingRunScript(harness, script));
+      if (exportFailure !== null) {
+        harness.agent.exportFailures.set(`session-${FIRST_CASE_ID}`, exportFailure);
+      }
+
+      const run = await runConfigured(config, harness);
+
+      expect(finalizedCaseOf(harness)).toEqual(
+        buildNotEvaluatedCase(harness, {
+          lifecycle: 'cancelled',
+          failure: failure === null ? null : recordedFailure(failure),
+          metrics,
+          artifacts: buildArtifactIndex(artifacts),
+        }),
+      );
+      expect(harness.git.capturePatchBases).toEqual([]);
+      expect(run.exitCode).toBe(130);
+    },
+  );
+
+  it('ends the case as infrastructure-failed and keeps scheduling when the patch cannot be captured', async () => {
+    const config = buildTwoCaseConfig();
+    const harness = createHarness(config);
+    harness.git.capturePatchError = buildPatchCaptureError();
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'infrastructure-failed',
+        failure: recordedFailure(buildPatchCaptureError()),
+        artifacts: buildArtifactIndex({ events: EVENTS_PATH, sessionExport: SESSION_EXPORT_PATH }),
+      }),
+    );
+    expect(run.cases.map((entry) => entry.lifecycle)).toEqual([
+      'infrastructure-failed',
+      'infrastructure-failed',
+    ]);
+    expect(run.findings).toEqual([]);
+    expect(run.exitCode).toBe(1);
+  });
+
+  it('ends the case as infrastructure-failed and stops scheduling when the patch cannot be written', async () => {
+    const config = buildTwoCaseConfig();
+    const harness = createHarness(config);
+    const writeFailure = buildArtifactError('write-patch', 'synthetic patch write failure');
+    harness.artifacts.failOnce.set(`writePatch:${FIRST_CASE_ID}`, writeFailure);
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'infrastructure-failed',
+        failure: recordedFailure(writeFailure),
+        artifacts: buildArtifactIndex({ events: EVENTS_PATH, sessionExport: SESSION_EXPORT_PATH }),
+      }),
+    );
+    expect(run.findings).toEqual([
+      { severity: 'error', caseId: SECOND_CASE_ID, message: SCHEDULING_STOPPED_MESSAGE },
+    ]);
+    expect(run.exitCode).toBe(1);
+  });
+
+  it('ends the case as cancelled with its written patch when the run is cancelled while the patch is written', async () => {
+    const config = buildSingleCaseConfig();
+    const harness = createHarness(config);
+    harness.abortDuring.add('writePatch');
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'cancelled',
+        artifacts: buildArtifactIndex({
+          events: EVENTS_PATH,
+          sessionExport: SESSION_EXPORT_PATH,
+          solutionPatch: PATCH_PATH,
+        }),
+      }),
+    );
+    expect(harness.timeline.some((entry) => entry.startsWith('check:'))).toBe(false);
+    expect(run.exitCode).toBe(130);
+  });
+});
+
+describe('case lifecycle: checks', () => {
+  it('records the applied check state on the completed case', async () => {
+    const checkState = buildCheckStateRecord();
+    const config = buildSingleCaseConfig({
+      tasks: [buildTask({ checks: { ...buildTask().checks, restore: ['tests/**'] } })],
+    });
+    const harness = createHarness(config);
+    harness.git.applyCheckStateResults.set(FIRST_CASE_ID, checkState);
+
+    await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(buildAgentRanCase(harness, { checkState }));
+  });
+
+  it('ends the case as infrastructure-failed and stops scheduling when the before_checks log cannot be written', async () => {
+    const config = buildTwoCaseConfig(declareSetup('before_checks'));
+    const harness = createHarness(config);
+    const logFailure = buildArtifactError('write-setup-log', 'synthetic setup log failure');
+    harness.artifacts.failOnce.set(`writeSetupLog:${FIRST_CASE_ID}`, logFailure);
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'infrastructure-failed',
+        failure: recordedFailure(logFailure),
+        artifacts: buildArtifactIndex({
+          events: EVENTS_PATH,
+          sessionExport: SESSION_EXPORT_PATH,
+          solutionPatch: PATCH_PATH,
+        }),
+        setup: buildSetupEvidence({}, [buildSetupCommandRecord('before_checks')]),
+      }),
+    );
+    expect(run.findings).toEqual([
+      { severity: 'error', caseId: SECOND_CASE_ID, message: SCHEDULING_STOPPED_MESSAGE },
+    ]);
+    expect(run.exitCode).toBe(1);
+  });
+
+  it('ends the case as infrastructure-failed without starting a check when a before_checks command fails', async () => {
+    const config = buildTwoCaseConfig(declareSetup('before_checks'));
+    const harness = createHarness(config);
+    harness.evaluatorProcesses.exitCodes.set(SETUP_ARGV.before_checks, 9);
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'infrastructure-failed',
+        failure: recordedFailure({
+          kind: 'SetupError',
+          phase: 'before_checks',
+          argv: [SETUP_ARGV.before_checks],
+          reason: 'exited with code 9',
+        }),
+        artifacts: buildArtifactIndex({
+          events: EVENTS_PATH,
+          sessionExport: SESSION_EXPORT_PATH,
+          solutionPatch: PATCH_PATH,
+        }),
+        setup: buildSetupEvidence({ beforeChecks: SETUP_LOG_PATH.before_checks }, [
+          buildSetupCommandRecord('before_checks', { exitCode: 9, outcome: 'failed' }),
+        ]),
+      }),
+    );
+    expect(harness.evaluatorProcesses.requests.map((request) => request.argv[0])).toEqual([
+      SETUP_ARGV.before_checks,
+      SETUP_ARGV.before_checks,
+    ]);
+    expect(run.cases.map((entry) => entry.lifecycle)).toEqual([
+      'infrastructure-failed',
+      'infrastructure-failed',
+    ]);
+    expect(run.findings).toEqual([]);
+  });
+
+  it.each([
+    {
+      label: 'a command that reports its cancellation',
+      exitCode: 1,
+      command: buildSetupCommandRecord('before_checks', { exitCode: 1, outcome: 'cancelled' }),
+    },
+    {
+      label: 'a command that passes while the run is cancelled',
+      exitCode: 0,
+      command: buildSetupCommandRecord('before_checks'),
+    },
+  ])(
+    'ends the case as cancelled with its patch and no check started when the run is cancelled during before_checks with $label',
+    async ({ exitCode, command }) => {
+      const config = buildSingleCaseConfig(declareSetup('before_checks'));
+      const harness = createHarness(config);
+      harness.evaluatorProcesses.exitCodes.set(SETUP_ARGV.before_checks, exitCode);
+
+      const run = await runCancelledWhileCommandRuns(config, harness, SETUP_ARGV.before_checks);
+
+      expect(finalizedCaseOf(harness)).toEqual(
+        buildNotEvaluatedCase(harness, {
+          lifecycle: 'cancelled',
+          artifacts: buildArtifactIndex({
+            events: EVENTS_PATH,
+            sessionExport: SESSION_EXPORT_PATH,
+            solutionPatch: PATCH_PATH,
+          }),
+          setup: buildSetupEvidence({ beforeChecks: SETUP_LOG_PATH.before_checks }, [command]),
+        }),
+      );
+      expect(harness.timeline.filter((entry) => entry.startsWith('check:'))).toEqual([
+        `check:${SETUP_ARGV.before_checks}`,
+      ]);
+      expect(run.exitCode).toBe(130);
+    },
+  );
+
+  it('records the before_checks evidence and runs the checks after its log is written when before_checks passes', async () => {
+    const config = buildSingleCaseConfig(declareSetup('before_checks'));
+    const harness = createHarness(config);
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildAgentRanCase(harness, {
+        setup: buildSetupEvidence({ beforeChecks: SETUP_LOG_PATH.before_checks }, [
+          buildSetupCommandRecord('before_checks'),
+        ]),
+      }),
+    );
+    expect(
+      timelineOf(harness, [
+        `writePatch:${FIRST_CASE_ID}`,
+        `writeSetupLog:${FIRST_CASE_ID}`,
+        'check:/synthetic/acc-required',
+      ]),
+    ).toEqual([
+      `writePatch:${FIRST_CASE_ID}`,
+      `writeSetupLog:${FIRST_CASE_ID}`,
+      'check:/synthetic/acc-required',
+    ]);
+    expect(run.exitCode).toBe(0);
+  });
+
+  it('records both setup logs and both command lists, before_agent first, on the completed case', async () => {
+    const config = buildSingleCaseConfig(declareSetup('before_agent', 'before_checks'));
+    const harness = createHarness(config);
+
+    await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildAgentRanCase(harness, {
+        setup: buildSetupEvidence(
+          {
+            beforeAgent: SETUP_LOG_PATH.before_agent,
+            beforeChecks: SETUP_LOG_PATH.before_checks,
+          },
+          [buildSetupCommandRecord('before_agent'), buildSetupCommandRecord('before_checks')],
+        ),
+      }),
+    );
+  });
+
+  it('keeps the before_agent evidence and the applied check state on the record when before_checks fails', async () => {
+    const checkState = buildCheckStateRecord();
+    const config = buildSingleCaseConfig({
+      ...declareSetup('before_agent', 'before_checks'),
+      tasks: [buildTask({ checks: { ...buildTask().checks, restore: ['tests/**'] } })],
+    });
+    const harness = createHarness(config);
+    harness.git.applyCheckStateResults.set(FIRST_CASE_ID, checkState);
+    harness.evaluatorProcesses.exitCodes.set(SETUP_ARGV.before_checks, 9);
+
+    await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'infrastructure-failed',
+        failure: recordedFailure({
+          kind: 'SetupError',
+          phase: 'before_checks',
+          argv: [SETUP_ARGV.before_checks],
+          reason: 'exited with code 9',
+        }),
+        artifacts: buildArtifactIndex({
+          events: EVENTS_PATH,
+          sessionExport: SESSION_EXPORT_PATH,
+          solutionPatch: PATCH_PATH,
+        }),
+        checkState,
+        setup: buildSetupEvidence(
+          {
+            beforeAgent: SETUP_LOG_PATH.before_agent,
+            beforeChecks: SETUP_LOG_PATH.before_checks,
+          },
+          [
+            buildSetupCommandRecord('before_agent'),
+            buildSetupCommandRecord('before_checks', { exitCode: 9, outcome: 'failed' }),
+          ],
+        ),
+      }),
+    );
+  });
+
+  it('reports the log write failure rather than the command failure and stops scheduling when a failing before_checks command also loses its log', async () => {
+    const config = buildTwoCaseConfig(declareSetup('before_checks'));
+    const harness = createHarness(config);
+    const logFailure = buildArtifactError('write-setup-log', 'synthetic setup log failure');
+    harness.evaluatorProcesses.exitCodes.set(SETUP_ARGV.before_checks, 9);
+    harness.artifacts.failOnce.set(`writeSetupLog:${FIRST_CASE_ID}`, logFailure);
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'infrastructure-failed',
+        failure: recordedFailure(logFailure),
+        artifacts: buildArtifactIndex({
+          events: EVENTS_PATH,
+          sessionExport: SESSION_EXPORT_PATH,
+          solutionPatch: PATCH_PATH,
+        }),
+        setup: buildSetupEvidence({}, [
+          buildSetupCommandRecord('before_checks', { exitCode: 9, outcome: 'failed' }),
+        ]),
+      }),
+    );
+    expect(run.findings).toEqual([
+      { severity: 'error', caseId: SECOND_CASE_ID, message: SCHEDULING_STOPPED_MESSAGE },
+    ]);
+  });
+
+  it('ends the case as cancelled without a before_checks log when the run is cancelled before its first command starts', async () => {
+    const checkState = buildCheckStateRecord();
+    const config = buildSingleCaseConfig({
+      ...declareSetup('before_agent', 'before_checks'),
+      tasks: [buildTask({ checks: { ...buildTask().checks, restore: ['tests/**'] } })],
+    });
+    const harness = createHarness(config);
+    harness.git.applyCheckStateResults.set(FIRST_CASE_ID, checkState);
+    harness.abortDuring.add('applyCheckState');
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'cancelled',
+        artifacts: buildArtifactIndex({
+          events: EVENTS_PATH,
+          sessionExport: SESSION_EXPORT_PATH,
+          solutionPatch: PATCH_PATH,
+        }),
+        checkState,
+        setup: buildSetupEvidence({ beforeAgent: SETUP_LOG_PATH.before_agent }, [
+          buildSetupCommandRecord('before_agent'),
+        ]),
+      }),
+    );
+    expect(timelineOf(harness, [`writeSetupLog:${FIRST_CASE_ID}`])).toEqual([
+      `writeSetupLog:${FIRST_CASE_ID}`,
+    ]);
+    expect(harness.evaluatorProcesses.requests.map((request) => request.argv[0])).toEqual([
+      SETUP_ARGV.before_agent,
+    ]);
+    expect(run.exitCode).toBe(130);
+  });
+
+  it('records one failed check for the check an evaluation error names', async () => {
+    const config = buildSingleCaseConfig();
+    const harness = createHarness(config);
+    vi.mocked(evaluateChecks).mockResolvedValueOnce({
+      ok: false,
+      error: {
+        kind: 'EvaluationError',
+        caseId: FIRST_CASE_ID,
+        checkId: 'dod-required',
+        reason: 'synthetic evaluation failure',
+      },
+    });
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildAgentRanCase(harness, {
+        outcome: 'failed',
+        checks: [
+          {
+            checkId: 'dod-required',
+            category: 'definition-of-done',
+            verdict: 'failed',
+            evidence: 'check evaluation failed: synthetic evaluation failure',
+            durationMs: null,
+          },
+        ],
+      }),
+    );
+    expect(run.exitCode).toBe(2);
+  });
+
+  it('keeps the evaluated checks on the record, without a checks artifact, and stops scheduling when checks.json cannot be written', async () => {
+    const config = buildTwoCaseConfig();
+    const harness = createHarness(config);
+    const writeFailure = buildArtifactError('write-checks', 'synthetic checks write failure');
+    harness.artifacts.failOnce.set(`writeChecks:${FIRST_CASE_ID}`, writeFailure);
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildAgentRanCase(harness, {
+        lifecycle: 'infrastructure-failed',
+        outcome: 'not-evaluated',
+        failure: recordedFailure(writeFailure),
+        artifacts: buildArtifactIndex({
+          events: EVENTS_PATH,
+          sessionExport: SESSION_EXPORT_PATH,
+          solutionPatch: PATCH_PATH,
+        }),
+      }),
+    );
+    expect(run.findings).toEqual([
+      { severity: 'error', caseId: SECOND_CASE_ID, message: SCHEDULING_STOPPED_MESSAGE },
+    ]);
+    expect(run.exitCode).toBe(1);
+  });
+});
+
+describe('case lifecycle: grading', () => {
+  it('completes without calling the grader when the task declares no graded check', async () => {
+    const config = buildSingleCaseConfig();
+    const harness = createHarness(config);
+
+    await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(buildAgentRanCase(harness));
+    expect(vi.mocked(gradeCase)).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: 'a graded outcome',
+      outcome: buildGradedOutcome(['/synthetic/grading/call-1', '/synthetic/grading/call-2']),
+      writesGrading: true,
+    },
+    {
+      label: 'a cancelled outcome',
+      outcome: {
+        status: 'cancelled',
+        retainedDirectories: ['/synthetic/grading/call-1', '/synthetic/grading/call-2'],
+      } satisfies GradeCaseOutcome,
+      writesGrading: false,
+    },
+  ])(
+    'reports every retained grading directory in order before it acts on $label',
+    async ({ outcome, writesGrading }) => {
+      const config = buildGradedConfig(buildSingleCaseConfig);
+      const harness = createHarness(config);
+      vi.mocked(gradeCase).mockResolvedValueOnce(outcome);
+
+      const run = await runConfigured(config, harness);
+
+      const retention = (directory: string): string =>
+        `tevu could not delete the temporary directory of this attempt's grading call. The results are not affected. Delete \`${directory}\` when no tevu command uses it.`;
+      expect(run.findings).toEqual([
+        {
+          severity: 'warning',
+          caseId: FIRST_CASE_ID,
+          message: retention('/synthetic/grading/call-1'),
+        },
+        {
+          severity: 'warning',
+          caseId: FIRST_CASE_ID,
+          message: retention('/synthetic/grading/call-2'),
+        },
+      ]);
+      expect(timelineAfter(harness, `writeChecks:${FIRST_CASE_ID}`)).toEqual([
+        'retainedGradingDirectory:/synthetic/grading/call-1',
+        'retainedGradingDirectory:/synthetic/grading/call-2',
+        ...(writesGrading ? [`writeGrading:${FIRST_CASE_ID}`] : []),
+        `finalizeCase:${FIRST_CASE_ID}`,
+        `dispose:${FIRST_CASE_ID}`,
+        `finalizeRun:${RUN_ID}`,
+      ]);
+    },
+  );
+
+  it('ends the case as cancelled without writing a grading when the grader outcome is cancelled', async () => {
+    const config = buildGradedConfig(buildSingleCaseConfig);
+    const harness = createHarness(config);
+    vi.mocked(gradeCase).mockImplementationOnce(async (): Promise<GradeCaseOutcome> => {
+      harness.cancellation.abort();
+      return { status: 'cancelled', retainedDirectories: [] };
+    });
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'cancelled',
+        checks: [buildPassedCheck('acc-required', 'acceptance'), buildAwaitingGraderCheck()],
+      }),
+    );
+    expect(harness.timeline.some((entry) => entry.startsWith('writeGrading:'))).toBe(false);
+    expect(run.exitCode).toBe(130);
+  });
+
+  it('ends the case as infrastructure-failed without the grades and stops scheduling when grading.json cannot be written', async () => {
+    const config = buildGradedConfig(buildTwoCaseConfig);
+    const harness = createHarness(config);
+    const writeFailure = buildArtifactError('write-grading', 'synthetic grading write failure');
+    harness.artifacts.failOnce.set(`writeGrading:${FIRST_CASE_ID}`, writeFailure);
+    vi.mocked(gradeCase).mockResolvedValueOnce(buildGradedOutcome());
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'infrastructure-failed',
+        failure: recordedFailure(writeFailure),
+        checks: [buildPassedCheck('acc-required', 'acceptance'), buildAwaitingGraderCheck()],
+      }),
+    );
+    expect(run.findings).toEqual([
+      { severity: 'error', caseId: SECOND_CASE_ID, message: SCHEDULING_STOPPED_MESSAGE },
+    ]);
+    expect(run.exitCode).toBe(1);
+  });
+
+  it('ends the case as cancelled with its grading when the run is cancelled while grading.json is written', async () => {
+    const config = buildGradedConfig(buildSingleCaseConfig);
+    const harness = createHarness(config);
+    harness.abortDuring.add('writeGrading');
+    vi.mocked(gradeCase).mockResolvedValueOnce(buildGradedOutcome());
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildNotEvaluatedCase(harness, {
+        lifecycle: 'cancelled',
+        checks: [buildPassedCheck('acc-required', 'acceptance'), buildGradedCheck()],
+        artifacts: buildArtifactIndex({
+          events: EVENTS_PATH,
+          sessionExport: SESSION_EXPORT_PATH,
+          solutionPatch: PATCH_PATH,
+          checks: CHECKS_PATH,
+          grading: GRADING_PATH,
+        }),
+      }),
+    );
+    expect(run.exitCode).toBe(130);
+  });
+
+  it('completes the case with the written grading applied to its checks, grading the captured patch', async () => {
+    const config = buildGradedConfig(buildSingleCaseConfig);
+    const harness = createHarness(config);
+    vi.mocked(gradeCase).mockResolvedValueOnce(buildGradedOutcome());
+
+    const run = await runConfigured(config, harness);
+
+    expect(finalizedCaseOf(harness)).toEqual(
+      buildAgentRanCase(harness, {
+        checks: [buildPassedCheck('acc-required', 'acceptance'), buildGradedCheck()],
+        artifacts: buildArtifactIndex({
+          events: EVENTS_PATH,
+          sessionExport: SESSION_EXPORT_PATH,
+          solutionPatch: PATCH_PATH,
+          checks: CHECKS_PATH,
+          grading: GRADING_PATH,
+        }),
+      }),
+    );
+    expect(vi.mocked(gradeCase).mock.calls[0]?.[0].patch).toBe(`synthetic patch ${FIRST_CASE_ID}`);
+    expect(run.exitCode).toBe(0);
   });
 });
 

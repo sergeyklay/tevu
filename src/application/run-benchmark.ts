@@ -31,7 +31,6 @@ import {
 } from './source-commit-in-prompt';
 import { buildTaskPrompt } from './task-prompt';
 
-import type { SetupPhaseOutcome } from './repository-setup';
 import type {
   AgentCapabilityReport,
   AgentConfigurationFileRecord,
@@ -65,6 +64,7 @@ import type {
   RunFinding,
   RunManifest,
   RunResult,
+  SetupCommand,
   SetupCommandRecord,
   SetupPhase,
   TaskDefinition,
@@ -384,32 +384,130 @@ type RunContext = {
   state: { cancelled: boolean; stopScheduling: boolean };
 };
 
-/** Everything one started case has accumulated when it reaches a terminal state. */
-type ActiveCase = {
-  identity: CaseIdentity;
-  task: TaskDefinition;
-  workspace: CaseWorkspace;
-  environments: CaseEnvironments;
-  abort: AbortController;
-  events: AgentEventRecord[];
-  diagnostics: number;
-  evidence: AgentRunResult | null;
-  artifactFailure: TevuError | null;
-  sessionExport: AgentSessionExport | null;
-  exportUnavailableReason: string | undefined;
-  patchWritten: boolean;
-  patchContent: string | null;
-  checks: CheckResult[];
-  checksWritten: boolean;
-  grading: CaseGrading | null;
-  gradingWritten: boolean;
-  overlay: OverlaySnapshot | null;
-  checkState: CheckStateRecord | null;
-  setup: RepositorySetup | null;
-  setupCommands: SetupCommandRecord[];
-  setupLogs: { beforeAgent: string | null; beforeChecks: string | null };
-  patchBase: PatchBase | null;
+/** What a started case owns from preparation to its terminal record; built once in `executeCase`. */
+type CaseBase = {
+  readonly identity: CaseIdentity;
+  readonly task: TaskDefinition;
+  readonly workspace: CaseWorkspace;
+  readonly environments: CaseEnvironments;
+  readonly abort: AbortController;
+  /** The run's pinned snapshot of `task.checks.overlay`; `null` when the task declares none. */
+  readonly overlay: OverlaySnapshot | null;
+  /** `entry.repository.setup`; `undefined` when the repository declares no setup. */
+  readonly repositorySetup: RepositorySetup | undefined;
 };
+
+/** Started setup commands and written phase logs; becomes `CaseResult.setup`. */
+type SetupEvidence = {
+  readonly logs: { readonly beforeAgent: string | null; readonly beforeChecks: string | null };
+  readonly commands: readonly SetupCommandRecord[];
+};
+
+/** The root-session export, or the reason the case has none. */
+type SessionExportState =
+  | { readonly status: 'exported'; readonly value: AgentSessionExport }
+  | { readonly status: 'unavailable'; readonly reason: string };
+
+/** `before_agent` passed, or the repository declares none and `patchBase` is `undefined`. */
+type AgentReadyCase = CaseBase & {
+  readonly stage: 'agent-ready';
+  readonly setupEvidence: SetupEvidence;
+  readonly patchBase: PatchBase | undefined;
+};
+
+/** `adapter.run` settled; `agentResult` is what `onProcess` reported, `null` when the process never started. */
+type AgentFinishedCase = Omit<AgentReadyCase, 'stage'> & {
+  readonly stage: 'agent-finished';
+  readonly agentResult: AgentRunResult | null;
+  readonly events: readonly AgentEventRecord[];
+  readonly diagnosticCount: number;
+};
+
+/** The root-session export is settled; `preservedFailure` is what the record keeps unless a later step ends the case with its own failure. */
+type ExportSettledCase = Omit<AgentFinishedCase, 'stage'> & {
+  readonly stage: 'export-settled';
+  readonly sessionExport: SessionExportState;
+  readonly preservedFailure: TevuError | null;
+};
+
+/** `solution.patch` is written; `patch` is its content. */
+type PatchCapturedCase = Omit<ExportSettledCase, 'stage'> & {
+  readonly stage: 'patch-captured';
+  readonly patch: string;
+};
+
+/** Restore and overlay are applied; `checkState` is `undefined` when the task requests neither. */
+type CheckStateAppliedCase = Omit<PatchCapturedCase, 'stage'> & {
+  readonly stage: 'check-state-applied';
+  readonly checkState: CheckStateRecord | undefined;
+};
+
+/** `before_checks` passed or is undeclared. */
+type ChecksReadyCase = Omit<CheckStateAppliedCase, 'stage'> & { readonly stage: 'checks-ready' };
+
+/** Checks are evaluated; `checks.json` is not written yet. */
+type ChecksEvaluatedCase = Omit<ChecksReadyCase, 'stage'> & {
+  readonly stage: 'checks-evaluated';
+  readonly orderedChecks: OrderedChecks;
+  readonly checkResults: readonly CheckResult[];
+};
+
+/** `checks.json` is written. */
+type CheckedCase = Omit<ChecksEvaluatedCase, 'stage'> & { readonly stage: 'checked' };
+
+/** `grading.json` is written, or the task declares no graded check and `grading` is `undefined`. */
+type EvaluatedCase = Omit<CheckedCase, 'stage'> & {
+  readonly stage: 'evaluated';
+  readonly grading: CaseGrading | undefined;
+};
+
+/** Every stage a case that ran its agent can end from; none ends from `ChecksReadyCase`. */
+type FinishableCase =
+  | ExportSettledCase
+  | PatchCapturedCase
+  | CheckStateAppliedCase
+  | ChecksEvaluatedCase
+  | CheckedCase
+  | EvaluatedCase;
+
+/** A step's result: the next stage, or the terminal record the step ended the case with. */
+type Transition<Next> =
+  | { readonly status: 'advanced'; readonly next: Next }
+  | { readonly status: 'ended'; readonly result: CaseResult };
+
+/** How the agent step ended; the first event or diagnostic append failure overrides the adapter outcome. */
+type AgentRunEnd =
+  | {
+      readonly status: 'artifact-failed';
+      readonly error: Extract<TevuError, { kind: 'ArtifactError' }>;
+    }
+  | { readonly status: 'returned'; readonly outcome: AgentRunOutcome };
+
+/** Patch capture followed by `writePatch`. */
+type PatchCapture =
+  | { readonly status: 'written'; readonly next: PatchCapturedCase }
+  | {
+      readonly status: 'capture-failed';
+      readonly error: Extract<TevuError, { kind: 'SourceMaterializationError' | 'ArtifactError' }>;
+    }
+  | {
+      readonly status: 'store-failed';
+      readonly error: Extract<TevuError, { kind: 'ArtifactError' }>;
+    };
+
+type NotEvaluatedLifecycle = Extract<
+  CaseLifecycle,
+  'process-failed' | 'timed-out' | 'cancelled' | 'infrastructure-failed'
+>;
+
+/** How a case that ran its agent ends; only an evaluated case completes. */
+type CaseEnding =
+  | { readonly lifecycle: 'completed'; readonly reached: EvaluatedCase }
+  | {
+      readonly lifecycle: NotEvaluatedLifecycle;
+      readonly reached: FinishableCase;
+      readonly failure: TevuError | null;
+    };
 
 function cancellationFailure(): {
   ok: false;
@@ -661,200 +759,214 @@ async function executeCase(run: RunContext, entry: PlannedCase): Promise<void> {
     return;
   }
 
-  const active: ActiveCase = {
+  const base: CaseBase = {
     identity: entry.identity,
     task: entry.task,
     workspace: workspace.value,
     environments: environments.value,
     abort: new AbortController(),
-    events: [],
-    diagnostics: 0,
-    evidence: null,
-    artifactFailure: null,
-    sessionExport: null,
-    exportUnavailableReason: undefined,
-    patchWritten: false,
-    patchContent: null,
-    checks: [],
-    checksWritten: false,
-    grading: null,
-    gradingWritten: false,
     overlay: entry.overlay,
-    checkState: null,
-    setup: entry.repository.setup ?? null,
-    setupCommands: [],
-    setupLogs: { beforeAgent: null, beforeChecks: null },
-    patchBase: null,
+    repositorySetup: entry.repository.setup,
   };
-  run.activeAborts.set(caseId, active.abort);
+  run.activeAborts.set(caseId, base.abort);
   if (run.state.cancelled) {
-    active.abort.abort();
+    base.abort.abort();
   }
 
   try {
-    await runActiveCase(run, active);
+    await runCase(run, base);
   } finally {
     run.activeAborts.delete(caseId);
   }
 }
 
-async function runActiveCase(run: RunContext, active: ActiveCase): Promise<void> {
-  const caseId = active.identity.caseId;
-
-  if (active.setup?.before_agent !== undefined) {
-    const terminal = await evaluateBeforeAgentSetup(run, active);
-    if (terminal !== null) {
-      await persistAndCleanup(run, terminal, active.workspace);
-      return;
-    }
+async function runCase(run: RunContext, base: CaseBase): Promise<void> {
+  const ready = await runBeforeAgent(run, base);
+  if (ready.status === 'ended') {
+    await persistAndCleanup(run, ready.result, base.workspace);
+    return;
   }
 
-  const adapter = requireCaseAgentAdapter(run, active.identity);
-
-  emitLifecycle(run, caseId, 'running');
-  const outcome = await adapter.run({
-    identity: active.identity,
-    prompt: buildTaskPrompt(active.task),
-    worktreeDirectory: active.workspace.worktreeDirectory,
-    environment: requireCaseAgentEnvironment(active.environments),
-    timeoutMs: active.identity.timeoutMs,
-    terminationGraceMs: run.plan.terminationGraceMs,
-    cancellation: active.abort.signal,
-    onEvent: async (event) => {
-      active.events.push(event);
-      const appended = await run.dependencies.artifacts.appendEvent(caseId, event);
-      if (!appended.ok) {
-        recordArtifactFailure(run, active, appended.error);
-      }
-      return appended;
-    },
-    onDiagnostic: async (line) => {
-      active.diagnostics += 1;
-      const appended = await run.dependencies.artifacts.appendDiagnostic(caseId, line);
-      if (!appended.ok) {
-        recordArtifactFailure(run, active, appended.error);
-      }
-      return appended;
-    },
-    onProcess: (evidence) => {
-      active.evidence = evidence;
-    },
-  });
-  const result = await concludeCase(run, active, outcome);
-  await persistAndCleanup(run, result, active.workspace);
+  const { finished, end } = await runAgent(run, ready.next);
+  const result = await concludeCase(run, finished, end);
+  await persistAndCleanup(run, result, base.workspace);
 }
 
-/** Outcome of {@link runSetup}: the phase outcome, or a log write failure the phase outcome itself cannot carry. */
+/** A setup phase the repository declares; only `declaredSetupPhase` builds it, so `phase` and `commands` always match. */
+type DeclaredSetupPhase = {
+  readonly phase: SetupPhase;
+  readonly commands: readonly SetupCommand[];
+  readonly repositorySetup: RepositorySetup;
+};
+
+/** Every variant carries the setup evidence after the phase. */
 type SetupStepResult =
-  | SetupPhaseOutcome
-  | { status: 'log-failed'; error: Extract<TevuError, { kind: 'ArtifactError' }> };
+  | { readonly status: 'passed' | 'cancelled'; readonly evidence: SetupEvidence }
+  | {
+      readonly status: 'failed';
+      readonly evidence: SetupEvidence;
+      readonly error: Extract<TevuError, { kind: 'SetupError' }>;
+    }
+  | {
+      readonly status: 'log-failed';
+      readonly evidence: SetupEvidence;
+      readonly error: Extract<TevuError, { kind: 'ArtifactError' }>;
+    };
+
+/** Reports the phase the repository declares, or `undefined` when it declares none. */
+function declaredSetupPhase(
+  repositorySetup: RepositorySetup | undefined,
+  phase: SetupPhase,
+): DeclaredSetupPhase | undefined {
+  const commands = repositorySetup?.[phase];
+  if (repositorySetup === undefined || commands === undefined) {
+    return undefined;
+  }
+  return { phase, commands, repositorySetup };
+}
 
 /**
- * Runs one declared setup phase's commands, shared by step b (`before_agent`)
- * and step g (`before_checks`). Appends every started command to
- * `active.setupCommands`, and, when at least one command started, writes the
- * phase log and records its path on `active.setupLogs`. A log-write failure
- * stops further case scheduling, as {@link recordArtifactFailure} does for a
- * mid-case artifact failure.
- *
- * @throws when `active.setup` or its `phase` key is undeclared; callers only
- * invoke this after confirming the phase is declared.
+ * Runs one declared setup phase's commands, shared by `before_agent` and
+ * `before_checks`. Adds every started command to the evidence and, when at
+ * least one command started, writes the phase log and records its path. A
+ * log-write failure stops further case scheduling, as a failed event or
+ * diagnostic append does mid-case, and wins over the phase status.
  */
 async function runSetup(
   run: RunContext,
-  active: ActiveCase,
-  phase: SetupPhase,
+  base: CaseBase,
+  evidence: SetupEvidence,
+  declared: DeclaredSetupPhase,
 ): Promise<SetupStepResult> {
-  const setup = active.setup;
-  const commands = phase === 'before_agent' ? setup?.before_agent : setup?.before_checks;
-  if (setup === null || commands === undefined) {
-    throw new Error(`unreachable: runSetup is only called when active.setup.${phase} is declared`);
-  }
+  const { phase, commands, repositorySetup } = declared;
   const outcome = await runSetupPhase({
     phase,
     commands,
-    timeoutMs: durationMs(setup.timeout),
+    timeoutMs: durationMs(repositorySetup.timeout),
     terminationGraceMs: run.plan.terminationGraceMs,
-    worktreeDirectory: active.workspace.worktreeDirectory,
-    environment: buildCheckEnvironment(active.environments.evaluator, run.snapshot, setup.env),
+    worktreeDirectory: base.workspace.worktreeDirectory,
+    environment: buildCheckEnvironment(
+      base.environments.evaluator,
+      run.snapshot,
+      repositorySetup.env,
+    ),
     processes: run.dependencies.evaluatorProcesses,
-    cancellation: active.abort.signal,
+    cancellation: base.abort.signal,
   });
-  active.setupCommands.push(...outcome.commands);
+  const started = [...evidence.commands, ...outcome.commands];
+  const settle = (settled: SetupEvidence): SetupStepResult =>
+    outcome.status === 'failed'
+      ? { status: 'failed', evidence: settled, error: outcome.error }
+      : { status: outcome.status, evidence: settled };
   if (outcome.commands.length === 0) {
-    return outcome;
+    return settle({ logs: evidence.logs, commands: started });
   }
-  const caseId = active.identity.caseId;
+  const caseId = base.identity.caseId;
   const written = await run.dependencies.artifacts.writeSetupLog(caseId, phase, outcome.log);
   if (!written.ok) {
     run.state.stopScheduling = true;
-    return { status: 'log-failed', error: written.error };
+    return {
+      status: 'log-failed',
+      evidence: { logs: evidence.logs, commands: started },
+      error: written.error,
+    };
   }
   const paths = run.dependencies.artifacts.caseArtifactPaths(caseId);
-  if (phase === 'before_agent') {
-    active.setupLogs.beforeAgent = paths.setupBeforeAgent;
-  } else {
-    active.setupLogs.beforeChecks = paths.setupBeforeChecks;
-  }
-  return outcome;
+  const logs =
+    phase === 'before_agent'
+      ? { beforeAgent: paths.setupBeforeAgent, beforeChecks: evidence.logs.beforeChecks }
+      : { beforeAgent: evidence.logs.beforeAgent, beforeChecks: paths.setupBeforeChecks };
+  return settle({ logs, commands: started });
 }
 
 /**
- * Runs step b (`before_agent`) and, on success, records the patch base.
- * Returns the case's terminal result when the agent must never start, or
- * `null` when control should reach the agent call (step c).
+ * Runs `before_agent` setup when the repository declares it and, on success,
+ * records the patch base. Ends the case when the agent must never start.
  */
-async function evaluateBeforeAgentSetup(
+async function runBeforeAgent(
   run: RunContext,
-  active: ActiveCase,
-): Promise<CaseResult | null> {
-  const cancelledResult = (): CaseResult =>
-    agentNotStartedResult(
-      run,
-      active,
-      'cancelled',
-      { kind: 'CancellationError', activeCaseIds: [active.identity.caseId] },
-      'the case was cancelled before the agent started',
-    );
+  base: CaseBase,
+): Promise<Transition<AgentReadyCase>> {
+  const noEvidence: SetupEvidence = {
+    logs: { beforeAgent: null, beforeChecks: null },
+    commands: [],
+  };
+  const declared = declaredSetupPhase(base.repositorySetup, 'before_agent');
+  if (declared === undefined) {
+    return {
+      status: 'advanced',
+      next: { ...base, stage: 'agent-ready', setupEvidence: noEvidence, patchBase: undefined },
+    };
+  }
 
-  const step = await runSetup(run, active, 'before_agent');
-  if (step.status === 'log-failed') {
-    return agentNotStartedResult(
+  const step = await runSetup(run, base, noEvidence, declared);
+  const cancelled = (): Transition<AgentReadyCase> => ({
+    status: 'ended',
+    result: agentNotStartedResult(
       run,
-      active,
-      'infrastructure-failed',
-      step.error,
-      'the setup.before_agent log could not be written; the agent did not start',
-    );
+      base,
+      step.evidence,
+      'cancelled',
+      { kind: 'CancellationError', activeCaseIds: [base.identity.caseId] },
+      'the case was cancelled before the agent started',
+    ),
+  });
+  if (step.status === 'log-failed') {
+    return {
+      status: 'ended',
+      result: agentNotStartedResult(
+        run,
+        base,
+        step.evidence,
+        'infrastructure-failed',
+        step.error,
+        'the setup.before_agent log could not be written; the agent did not start',
+      ),
+    };
   }
   if (step.status === 'failed') {
-    return agentNotStartedResult(
-      run,
-      active,
-      'infrastructure-failed',
-      step.error,
-      'setup.before_agent failed; the agent did not start',
-    );
+    return {
+      status: 'ended',
+      result: agentNotStartedResult(
+        run,
+        base,
+        step.evidence,
+        'infrastructure-failed',
+        step.error,
+        'setup.before_agent failed; the agent did not start',
+      ),
+    };
   }
   if (step.status === 'cancelled' || run.state.cancelled) {
-    return cancelledResult();
+    return cancelled();
   }
 
-  const base = await run.dependencies.git.snapshotPatchBase(active.workspace);
-  if (!base.ok) {
-    return agentNotStartedResult(
-      run,
-      active,
-      'infrastructure-failed',
-      base.error,
-      'the patch base could not be recorded; the agent did not start',
-    );
+  const patchBase = await run.dependencies.git.snapshotPatchBase(base.workspace);
+  if (!patchBase.ok) {
+    return {
+      status: 'ended',
+      result: agentNotStartedResult(
+        run,
+        base,
+        step.evidence,
+        'infrastructure-failed',
+        patchBase.error,
+        'the patch base could not be recorded; the agent did not start',
+      ),
+    };
   }
   if (run.state.cancelled) {
-    return cancelledResult();
+    return cancelled();
   }
-  active.patchBase = base.value;
-  return null;
+  return {
+    status: 'advanced',
+    next: {
+      ...base,
+      stage: 'agent-ready',
+      setupEvidence: step.evidence,
+      patchBase: patchBase.value,
+    },
+  };
 }
 
 /**
@@ -865,15 +977,16 @@ async function evaluateBeforeAgentSetup(
  */
 function agentNotStartedResult(
   run: RunContext,
-  active: ActiveCase,
+  base: CaseBase,
+  evidence: SetupEvidence,
   lifecycle: Extract<CaseLifecycle, 'infrastructure-failed' | 'cancelled'>,
   failure: TevuError,
   reason: string,
 ): CaseResult {
-  const paths = run.dependencies.artifacts.caseArtifactPaths(active.identity.caseId);
+  const paths = run.dependencies.artifacts.caseArtifactPaths(base.identity.caseId);
   return {
     schemaVersion: 1,
-    identity: active.identity,
+    identity: base.identity,
     lifecycle,
     process: null,
     outcome: 'not-evaluated',
@@ -890,9 +1003,9 @@ function agentNotStartedResult(
       result: paths.result,
     },
     failure: { error: failure, occurredAt: run.dependencies.clock.now().toISOString() },
-    ...(active.setupCommands.length === 0
+    ...(evidence.commands.length === 0
       ? {}
-      : { setup: { logs: active.setupLogs, commands: active.setupCommands } }),
+      : { setup: { logs: evidence.logs, commands: [...evidence.commands] } }),
   };
 }
 
@@ -931,67 +1044,161 @@ function requireGraderProviders(run: RunContext): ProviderSnapshot {
   return providers;
 }
 
-/** `createCaseEnvironments` always populates `agent`; narrows past its still-optional shim type. */
-function requireCaseAgentEnvironment(environments: CaseEnvironments) {
-  if (environments.agent === undefined) {
-    throw new Error('unreachable: createCaseEnvironments already populates the agent environment');
-  }
-  return environments.agent;
+/**
+ * Runs the case's single agent process. A failed event or diagnostic append
+ * stops scheduling, aborts the process, and keeps the first failure, which
+ * overrides the adapter outcome.
+ */
+async function runAgent(
+  run: RunContext,
+  ready: AgentReadyCase,
+): Promise<{ finished: AgentFinishedCase; end: AgentRunEnd }> {
+  const caseId = ready.identity.caseId;
+  const adapter = requireCaseAgentAdapter(run, ready.identity);
+  const events: AgentEventRecord[] = [];
+  const observed: {
+    diagnosticCount: number;
+    agentResult: AgentRunResult | null;
+    appendFailure: Extract<TevuError, { kind: 'ArtifactError' }> | undefined;
+  } = { diagnosticCount: 0, agentResult: null, appendFailure: undefined };
+  const recordAppendFailure = (error: Extract<TevuError, { kind: 'ArtifactError' }>): void => {
+    observed.appendFailure ??= error;
+    run.state.stopScheduling = true;
+    ready.abort.abort();
+  };
+
+  emitLifecycle(run, caseId, 'running');
+  const outcome = await adapter.run({
+    identity: ready.identity,
+    prompt: buildTaskPrompt(ready.task),
+    worktreeDirectory: ready.workspace.worktreeDirectory,
+    environment: ready.environments.agent,
+    timeoutMs: ready.identity.timeoutMs,
+    terminationGraceMs: run.plan.terminationGraceMs,
+    cancellation: ready.abort.signal,
+    onEvent: async (event) => {
+      events.push(event);
+      const appended = await run.dependencies.artifacts.appendEvent(caseId, event);
+      if (!appended.ok) {
+        recordAppendFailure(appended.error);
+      }
+      return appended;
+    },
+    onDiagnostic: async (line) => {
+      observed.diagnosticCount += 1;
+      const appended = await run.dependencies.artifacts.appendDiagnostic(caseId, line);
+      if (!appended.ok) {
+        recordAppendFailure(appended.error);
+      }
+      return appended;
+    },
+    onProcess: (agentResult) => {
+      observed.agentResult = agentResult;
+    },
+  });
+
+  const finished: AgentFinishedCase = {
+    ...ready,
+    stage: 'agent-finished',
+    agentResult: observed.agentResult,
+    events,
+    diagnosticCount: observed.diagnosticCount,
+  };
+  const end: AgentRunEnd =
+    observed.appendFailure === undefined
+      ? { status: 'returned', outcome }
+      : { status: 'artifact-failed', error: observed.appendFailure };
+  return { finished, end };
 }
 
-/** Records a mid-case artifact-store failure, terminates the case, and stops scheduling. */
-function recordArtifactFailure(run: RunContext, active: ActiveCase, error: TevuError): void {
-  active.artifactFailure ??= error;
-  run.state.stopScheduling = true;
-  active.abort.abort();
+/** Settles the export step with no root-session export, keeping `preservedFailure` for the record. */
+function settleWithoutExport(
+  finished: AgentFinishedCase,
+  reason: string,
+  preservedFailure: TevuError | null,
+): ExportSettledCase {
+  return {
+    ...finished,
+    stage: 'export-settled',
+    sessionExport: { status: 'unavailable', reason },
+    preservedFailure,
+  };
 }
 
 /** Maps one finished agent run to the case's terminal result. */
 async function concludeCase(
   run: RunContext,
-  active: ActiveCase,
-  outcome: AgentRunOutcome,
+  finished: AgentFinishedCase,
+  end: AgentRunEnd,
 ): Promise<CaseResult> {
-  if (active.artifactFailure !== null) {
-    active.exportUnavailableReason =
-      'an artifact failure ended the case before the root session could be exported';
-    return finishCase(run, active, 'infrastructure-failed', active.artifactFailure);
+  if (end.status === 'artifact-failed') {
+    return finishCase(run, {
+      lifecycle: 'infrastructure-failed',
+      reached: settleWithoutExport(
+        finished,
+        'an artifact failure ended the case before the root session could be exported',
+        end.error,
+      ),
+      failure: end.error,
+    });
   }
+  const outcome = end.outcome;
   if (outcome.ok) {
-    return evaluateReadableCase(run, active, null);
+    return evaluateReadableCase(run, finished, null);
   }
   const error = outcome.error;
   switch (error.kind) {
     case 'CancellationError':
-      active.exportUnavailableReason =
-        'the case was cancelled before the root session could be exported';
-      return finishCase(run, active, 'cancelled', error);
+      return finishCase(run, {
+        lifecycle: 'cancelled',
+        reached: settleWithoutExport(
+          finished,
+          'the case was cancelled before the root session could be exported',
+          error,
+        ),
+        failure: error,
+      });
     case 'CaseTimeoutError': {
-      active.exportUnavailableReason =
-        'the case timed out before the root session could be exported';
-      const patch = await capturePatch(run, active);
-      if (patch.storeFailure && patch.failure !== null) {
-        return finishCase(run, active, 'infrastructure-failed', patch.failure);
+      const settled = settleWithoutExport(
+        finished,
+        'the case timed out before the root session could be exported',
+        error,
+      );
+      const patch = await capturePatch(run, settled);
+      if (patch.status === 'written') {
+        return finishCase(run, { lifecycle: 'timed-out', reached: patch.next, failure: error });
       }
-      if (patch.failure !== null) {
-        run.findings.push({
-          severity: 'warning',
-          caseId: active.identity.caseId,
-          message: `tevu could not save the changes this attempt made before its time limit ended it, so its solution patch is missing. The attempt counts as not evaluated either way. Nothing more is needed for this run. Technical detail: ${describeError(patch.failure)}`,
+      if (patch.status === 'store-failed') {
+        return finishCase(run, {
+          lifecycle: 'infrastructure-failed',
+          reached: settled,
+          failure: patch.error,
         });
       }
-      return finishCase(run, active, 'timed-out', error);
+      run.findings.push({
+        severity: 'warning',
+        caseId: finished.identity.caseId,
+        message: `tevu could not save the changes this attempt made before its time limit ended it, so its solution patch is missing. The attempt counts as not evaluated either way. Nothing more is needed for this run. Technical detail: ${describeError(patch.error)}`,
+      });
+      return finishCase(run, { lifecycle: 'timed-out', reached: settled, failure: error });
     }
     default: {
       const readable =
         run.dependencies.git.isReadable === undefined
           ? true
-          : await run.dependencies.git.isReadable(active.workspace);
+          : await run.dependencies.git.isReadable(finished.workspace);
       if (readable) {
-        return evaluateReadableCase(run, active, error);
+        return evaluateReadableCase(run, finished, error);
       }
-      active.exportUnavailableReason = `the workspace was unreadable after the failure: ${describeError(error)}`;
-      return finishCase(run, active, 'process-failed', error);
+      return finishCase(run, {
+        lifecycle: 'process-failed',
+        reached: settleWithoutExport(
+          finished,
+          `the workspace was unreadable after the failure: ${describeError(error)}`,
+          error,
+        ),
+        failure: error,
+      });
     }
   }
 }
@@ -1004,169 +1211,355 @@ async function concludeCase(
  */
 async function evaluateReadableCase(
   run: RunContext,
-  active: ActiveCase,
-  preservedFailure: TevuError | null,
+  finished: AgentFinishedCase,
+  runtimeFailure: TevuError | null,
 ): Promise<CaseResult> {
-  const caseId = active.identity.caseId;
-  emitLifecycle(run, caseId, 'evaluating');
+  emitLifecycle(run, finished.identity.caseId, 'evaluating');
 
-  const sessionId = active.evidence?.sessionId ?? null;
+  const settled = await exportRootSession(run, finished, runtimeFailure);
+  if (settled.status === 'ended') {
+    return settled.result;
+  }
+  const captured = await captureSolutionPatch(run, settled.next);
+  if (captured.status === 'ended') {
+    return captured.result;
+  }
+  const applied = await applyCaseCheckState(run, captured.next);
+  if (applied.status === 'ended') {
+    return applied.result;
+  }
+  const ready = await runBeforeChecks(run, applied.next);
+  if (ready.status === 'ended') {
+    return ready.result;
+  }
+  const checked = await runChecks(run, ready.next);
+  if (checked.status === 'ended') {
+    return checked.result;
+  }
+  const evaluated = await gradeChecks(run, checked.next);
+  if (evaluated.status === 'ended') {
+    return evaluated.result;
+  }
+  return finishCase(run, { lifecycle: 'completed', reached: evaluated.next });
+}
+
+/**
+ * Exports the root session when it is identifiable and writes the export. A
+ * cancelled run ends the case here with the export already settled.
+ */
+async function exportRootSession(
+  run: RunContext,
+  finished: AgentFinishedCase,
+  runtimeFailure: TevuError | null,
+): Promise<Transition<ExportSettledCase>> {
+  const sessionId = finished.agentResult?.sessionId ?? null;
+  let settled: ExportSettledCase;
   if (sessionId === null) {
-    active.exportUnavailableReason =
-      preservedFailure === null
+    settled = settleWithoutExport(
+      finished,
+      runtimeFailure === null
         ? 'root session could not be identified'
-        : `root session could not be identified after the failure: ${describeError(preservedFailure)}`;
-  } else {
-    const adapter = requireCaseAgentAdapter(run, active.identity);
-    const exported = await adapter.exportSession(
-      sessionId,
-      requireCaseAgentEnvironment(active.environments),
+        : `root session could not be identified after the failure: ${describeError(runtimeFailure)}`,
+      runtimeFailure,
     );
+  } else {
+    const adapter = requireCaseAgentAdapter(run, finished.identity);
+    const exported = await adapter.exportSession(sessionId, finished.environments.agent);
     if (exported.ok) {
-      const written = await run.dependencies.artifacts.writeSessionExport(caseId, exported.value);
+      const written = await run.dependencies.artifacts.writeSessionExport(
+        finished.identity.caseId,
+        exported.value,
+      );
       if (!written.ok) {
         run.state.stopScheduling = true;
-        active.exportUnavailableReason = `session export could not be persisted: ${written.error.reason}`;
-        return finishCase(run, active, 'infrastructure-failed', written.error);
+        return {
+          status: 'ended',
+          result: finishCase(run, {
+            lifecycle: 'infrastructure-failed',
+            reached: settleWithoutExport(
+              finished,
+              `session export could not be persisted: ${written.error.reason}`,
+              runtimeFailure,
+            ),
+            failure: written.error,
+          }),
+        };
       }
-      active.sessionExport = exported.value;
+      settled = {
+        ...finished,
+        stage: 'export-settled',
+        sessionExport: { status: 'exported', value: exported.value },
+        preservedFailure: runtimeFailure,
+      };
     } else {
-      active.exportUnavailableReason = `root session export failed: ${describeError(exported.error)}`;
-      preservedFailure ??= exported.error;
-    }
-  }
-  if (run.state.cancelled) {
-    return finishCase(run, active, 'cancelled', preservedFailure);
-  }
-
-  const patch = await capturePatch(run, active);
-  if (patch.failure !== null) {
-    return finishCase(run, active, 'infrastructure-failed', patch.failure);
-  }
-  if (run.state.cancelled) {
-    return finishCase(run, active, 'cancelled', preservedFailure);
-  }
-
-  const request = checkStateRequest(active.task, active.overlay);
-  if (request !== null) {
-    const applied = await run.dependencies.git.applyCheckState(active.workspace, request);
-    if (!applied.ok) {
-      return finishCase(run, active, 'infrastructure-failed', applied.error);
-    }
-    active.checkState = applied.value;
-  }
-
-  if (active.setup?.before_checks !== undefined) {
-    const step = await runSetup(run, active, 'before_checks');
-    if (step.status === 'log-failed') {
-      return finishCase(run, active, 'infrastructure-failed', step.error);
-    }
-    if (step.status === 'failed') {
-      return finishCase(run, active, 'infrastructure-failed', step.error);
-    }
-    if (step.status === 'cancelled' || run.state.cancelled) {
-      return finishCase(run, active, 'cancelled', preservedFailure);
-    }
-  }
-
-  const ordered = orderTaskChecks(active.task);
-  const evaluated = await evaluateChecks({
-    caseId,
-    checks: ordered,
-    workspace: active.workspace,
-    environment: active.environments.evaluator,
-    snapshot: run.snapshot,
-    terminationGraceMs: run.plan.terminationGraceMs,
-    processes: run.dependencies.evaluatorProcesses,
-    redact: run.dependencies.redact,
-    cancellation: active.abort.signal,
-  });
-  active.checks = evaluated.ok
-    ? evaluated.value
-    : [evaluationFailureCheck(run, ordered, evaluated.error)];
-  const written = await run.dependencies.artifacts.writeChecks(caseId, active.checks);
-  if (!written.ok) {
-    run.state.stopScheduling = true;
-    return finishCase(run, active, 'infrastructure-failed', written.error);
-  }
-  active.checksWritten = true;
-  if (run.state.cancelled) {
-    return finishCase(run, active, 'cancelled', preservedFailure);
-  }
-
-  const graded = gradedChecksOf(active.task);
-  if (graded.length > 0) {
-    const patchContent = active.patchContent;
-    if (patchContent === null) {
-      throw new Error(
-        'unreachable: capturePatch already recorded active.patchContent before the grading step',
+      settled = settleWithoutExport(
+        finished,
+        `root session export failed: ${describeError(exported.error)}`,
+        runtimeFailure ?? exported.error,
       );
     }
-    const outcome = await gradeCase(
-      {
-        config: run.plan.config,
-        task: active.task,
-        patch: patchContent,
-        timeoutMs: run.plan.defaultCaseTimeoutMs,
-        redact: run.dependencies.redact,
-        cancellation: active.abort.signal,
-        providers: requireGraderProviders(run),
-      },
-      {
-        agents: run.agents,
-        environments: run.dependencies.environments,
-        git: run.dependencies.git,
-      },
-    );
-    for (const directory of outcome.retainedDirectories) {
-      run.dependencies.onRetainedGradingDirectory?.(directory);
-      run.findings.push({
-        severity: 'warning',
-        caseId,
-        message: `tevu could not delete the temporary directory of this attempt's grading call. The results are not affected. Delete \`${directory}\` when no tevu command uses it.`,
-      });
-    }
-    if (outcome.status === 'cancelled') {
-      return finishCase(run, active, 'cancelled', preservedFailure);
-    }
-    const written = await run.dependencies.artifacts.writeGrading(caseId, outcome.grading);
-    if (!written.ok) {
-      run.state.stopScheduling = true;
-      return finishCase(run, active, 'infrastructure-failed', written.error);
-    }
-    active.grading = outcome.grading;
-    active.gradingWritten = true;
-    if (run.state.cancelled) {
-      return finishCase(run, active, 'cancelled', preservedFailure);
-    }
   }
-
-  return finishCase(run, active, 'completed', preservedFailure, ordered);
+  if (run.state.cancelled) {
+    return {
+      status: 'ended',
+      result: finishCase(run, {
+        lifecycle: 'cancelled',
+        reached: settled,
+        failure: settled.preservedFailure,
+      }),
+    };
+  }
+  return { status: 'advanced', next: settled };
 }
 
 /** Patch capture and persistence; a store failure stops scheduling new cases. */
-async function capturePatch(
-  run: RunContext,
-  active: ActiveCase,
-): Promise<{ failure: TevuError | null; storeFailure: boolean }> {
-  const captured = await run.dependencies.git.capturePatch(
-    active.workspace,
-    active.patchBase ?? undefined,
-  );
+async function capturePatch(run: RunContext, settled: ExportSettledCase): Promise<PatchCapture> {
+  const captured = await run.dependencies.git.capturePatch(settled.workspace, settled.patchBase);
   if (!captured.ok) {
-    return { failure: captured.error, storeFailure: false };
+    return { status: 'capture-failed', error: captured.error };
   }
   const written = await run.dependencies.artifacts.writePatch(
-    active.identity.caseId,
+    settled.identity.caseId,
     captured.value,
   );
   if (!written.ok) {
     run.state.stopScheduling = true;
-    return { failure: written.error, storeFailure: true };
+    return { status: 'store-failed', error: written.error };
   }
-  active.patchWritten = true;
-  active.patchContent = captured.value.content;
-  return { failure: null, storeFailure: false };
+  return {
+    status: 'written',
+    next: { ...settled, stage: 'patch-captured', patch: captured.value.content },
+  };
+}
+
+/**
+ * Captures and writes the solution patch before any step that applies check
+ * state or runs a check; a cancelled run ends the case with the patch written.
+ */
+async function captureSolutionPatch(
+  run: RunContext,
+  settled: ExportSettledCase,
+): Promise<Transition<PatchCapturedCase>> {
+  const capture = await capturePatch(run, settled);
+  if (capture.status !== 'written') {
+    return {
+      status: 'ended',
+      result: finishCase(run, {
+        lifecycle: 'infrastructure-failed',
+        reached: settled,
+        failure: capture.error,
+      }),
+    };
+  }
+  if (run.state.cancelled) {
+    return {
+      status: 'ended',
+      result: finishCase(run, {
+        lifecycle: 'cancelled',
+        reached: capture.next,
+        failure: capture.next.preservedFailure,
+      }),
+    };
+  }
+  return { status: 'advanced', next: capture.next };
+}
+
+/**
+ * Applies restore and overlay to the worktree. Accepts only a case whose
+ * solution patch is already written, so no check state can reach the patch.
+ */
+async function applyCaseCheckState(
+  run: RunContext,
+  captured: PatchCapturedCase,
+): Promise<Transition<CheckStateAppliedCase>> {
+  const request = checkStateRequest(captured.task, captured.overlay);
+  if (request === null) {
+    return {
+      status: 'advanced',
+      next: { ...captured, stage: 'check-state-applied', checkState: undefined },
+    };
+  }
+  const applied = await run.dependencies.git.applyCheckState(captured.workspace, request);
+  if (!applied.ok) {
+    return {
+      status: 'ended',
+      result: finishCase(run, {
+        lifecycle: 'infrastructure-failed',
+        reached: captured,
+        failure: applied.error,
+      }),
+    };
+  }
+  return {
+    status: 'advanced',
+    next: { ...captured, stage: 'check-state-applied', checkState: applied.value },
+  };
+}
+
+/**
+ * Runs `before_checks` setup when the repository declares it. The phase
+ * evidence reaches the record whether the phase passes or ends the case.
+ */
+async function runBeforeChecks(
+  run: RunContext,
+  applied: CheckStateAppliedCase,
+): Promise<Transition<ChecksReadyCase>> {
+  const declared = declaredSetupPhase(applied.repositorySetup, 'before_checks');
+  if (declared === undefined) {
+    return { status: 'advanced', next: { ...applied, stage: 'checks-ready' } };
+  }
+  const step = await runSetup(run, applied, applied.setupEvidence, declared);
+  const withPhaseEvidence: CheckStateAppliedCase = { ...applied, setupEvidence: step.evidence };
+  if (step.status === 'log-failed' || step.status === 'failed') {
+    return {
+      status: 'ended',
+      result: finishCase(run, {
+        lifecycle: 'infrastructure-failed',
+        reached: withPhaseEvidence,
+        failure: step.error,
+      }),
+    };
+  }
+  if (step.status === 'cancelled' || run.state.cancelled) {
+    return {
+      status: 'ended',
+      result: finishCase(run, {
+        lifecycle: 'cancelled',
+        reached: withPhaseEvidence,
+        failure: withPhaseEvidence.preservedFailure,
+      }),
+    };
+  }
+  return { status: 'advanced', next: { ...withPhaseEvidence, stage: 'checks-ready' } };
+}
+
+/**
+ * Evaluates the task's checks and writes `checks.json`. A check evaluation
+ * that fails as a whole is recorded as one failed check.
+ */
+async function runChecks(
+  run: RunContext,
+  ready: ChecksReadyCase,
+): Promise<Transition<CheckedCase>> {
+  const caseId = ready.identity.caseId;
+  const orderedChecks = orderTaskChecks(ready.task);
+  const evaluated = await evaluateChecks({
+    caseId,
+    checks: orderedChecks,
+    workspace: ready.workspace,
+    environment: ready.environments.evaluator,
+    snapshot: run.snapshot,
+    terminationGraceMs: run.plan.terminationGraceMs,
+    processes: run.dependencies.evaluatorProcesses,
+    redact: run.dependencies.redact,
+    cancellation: ready.abort.signal,
+  });
+  const checkResults = evaluated.ok
+    ? evaluated.value
+    : [evaluationFailureCheck(run, orderedChecks, evaluated.error)];
+  const evaluatedCase: ChecksEvaluatedCase = {
+    ...ready,
+    stage: 'checks-evaluated',
+    orderedChecks,
+    checkResults,
+  };
+  const written = await run.dependencies.artifacts.writeChecks(caseId, [...checkResults]);
+  if (!written.ok) {
+    run.state.stopScheduling = true;
+    return {
+      status: 'ended',
+      result: finishCase(run, {
+        lifecycle: 'infrastructure-failed',
+        reached: evaluatedCase,
+        failure: written.error,
+      }),
+    };
+  }
+  const checked: CheckedCase = { ...evaluatedCase, stage: 'checked' };
+  if (run.state.cancelled) {
+    return {
+      status: 'ended',
+      result: finishCase(run, {
+        lifecycle: 'cancelled',
+        reached: checked,
+        failure: checked.preservedFailure,
+      }),
+    };
+  }
+  return { status: 'advanced', next: checked };
+}
+
+/**
+ * Grades the task's graded checks from the solution patch and writes
+ * `grading.json`; a task without a graded check passes through unchanged.
+ * Every grading directory the grader could not delete becomes a warning.
+ */
+async function gradeChecks(
+  run: RunContext,
+  checked: CheckedCase,
+): Promise<Transition<EvaluatedCase>> {
+  if (gradedChecksOf(checked.task).length === 0) {
+    return { status: 'advanced', next: { ...checked, stage: 'evaluated', grading: undefined } };
+  }
+  const caseId = checked.identity.caseId;
+  const outcome = await gradeCase(
+    {
+      config: run.plan.config,
+      task: checked.task,
+      patch: checked.patch,
+      timeoutMs: run.plan.defaultCaseTimeoutMs,
+      redact: run.dependencies.redact,
+      cancellation: checked.abort.signal,
+      providers: requireGraderProviders(run),
+    },
+    {
+      agents: run.agents,
+      environments: run.dependencies.environments,
+      git: run.dependencies.git,
+    },
+  );
+  for (const directory of outcome.retainedDirectories) {
+    run.dependencies.onRetainedGradingDirectory?.(directory);
+    run.findings.push({
+      severity: 'warning',
+      caseId,
+      message: `tevu could not delete the temporary directory of this attempt's grading call. The results are not affected. Delete \`${directory}\` when no tevu command uses it.`,
+    });
+  }
+  if (outcome.status === 'cancelled') {
+    return {
+      status: 'ended',
+      result: finishCase(run, {
+        lifecycle: 'cancelled',
+        reached: checked,
+        failure: checked.preservedFailure,
+      }),
+    };
+  }
+  const written = await run.dependencies.artifacts.writeGrading(caseId, outcome.grading);
+  if (!written.ok) {
+    run.state.stopScheduling = true;
+    return {
+      status: 'ended',
+      result: finishCase(run, {
+        lifecycle: 'infrastructure-failed',
+        reached: checked,
+        failure: written.error,
+      }),
+    };
+  }
+  const evaluated: EvaluatedCase = { ...checked, stage: 'evaluated', grading: outcome.grading };
+  if (run.state.cancelled) {
+    return {
+      status: 'ended',
+      result: finishCase(run, {
+        lifecycle: 'cancelled',
+        reached: evaluated,
+        failure: evaluated.preservedFailure,
+      }),
+    };
+  }
+  return { status: 'advanced', next: evaluated };
 }
 
 /** Converts the module-level evaluation error into one failed check with evidence. */
@@ -1186,35 +1579,38 @@ function evaluationFailureCheck(
 }
 
 /**
- * Builds the final case record from the accumulated evidence: terminal
+ * Builds the final case record from the stage the case reached: terminal
  * lifecycle, outcome from the terminal-lifecycle contract, truthful metrics
  * with the export fallback, the artifact index, and the preserved runtime
  * failure kept distinct from the check-derived outcome.
  */
-function finishCase(
-  run: RunContext,
-  active: ActiveCase,
-  lifecycle: Extract<
-    CaseLifecycle,
-    'completed' | 'process-failed' | 'timed-out' | 'cancelled' | 'infrastructure-failed'
-  >,
-  failure: TevuError | null,
-  ordered?: OrderedChecks,
-): CaseResult {
-  const caseId = active.identity.caseId;
-  const { metrics, protocolFailure } = computeCaseMetrics(run, active);
-  const preserved = failure ?? protocolFailure;
+function finishCase(run: RunContext, ending: CaseEnding): CaseResult {
+  const { reached } = ending;
+  const caseId = reached.identity.caseId;
+  const { metrics, protocolFailure } = computeCaseMetrics(run, reached);
+  const recordedFailure =
+    (ending.lifecycle === 'completed' ? reached.preservedFailure : ending.failure) ??
+    protocolFailure;
   const paths = run.dependencies.artifacts.caseArtifactPaths(caseId);
-  const gradedChecks = applyGrades(active.checks, active.grading);
+  const hasCheckResults =
+    reached.stage === 'checks-evaluated' ||
+    reached.stage === 'checked' ||
+    reached.stage === 'evaluated';
+  const grading = reached.stage === 'evaluated' ? reached.grading : undefined;
+  const gradedChecks = applyGrades(hasCheckResults ? reached.checkResults : [], grading ?? null);
+  const checkState =
+    reached.stage === 'export-settled' || reached.stage === 'patch-captured'
+      ? undefined
+      : reached.checkState;
   return {
     schemaVersion: 1,
-    identity: active.identity,
-    lifecycle,
-    process: active.evidence?.process ?? null,
+    identity: reached.identity,
+    lifecycle: ending.lifecycle,
+    process: reached.agentResult?.process ?? null,
     outcome:
-      lifecycle === 'completed'
+      ending.lifecycle === 'completed'
         ? reduceRequiredOutcome(
-            (ordered ?? orderTaskChecks(active.task)).map((check) => ({
+            ending.reached.orderedChecks.map((check) => ({
               id: check.definition.id,
               required: check.definition.required,
             })),
@@ -1224,29 +1620,34 @@ function finishCase(
     checks: gradedChecks,
     metrics,
     artifacts: {
-      events: active.events.length > 0 ? paths.events : null,
-      diagnostics: active.diagnostics > 0 ? paths.diagnostics : null,
-      sessionExport: active.sessionExport !== null ? paths.sessionExport : null,
-      solutionPatch: active.patchWritten ? paths.solutionPatch : null,
-      checks: active.checksWritten ? paths.checks : null,
+      events: reached.events.length > 0 ? paths.events : null,
+      diagnostics: reached.diagnosticCount > 0 ? paths.diagnostics : null,
+      sessionExport: reached.sessionExport.status === 'exported' ? paths.sessionExport : null,
+      solutionPatch: reached.stage === 'export-settled' ? null : paths.solutionPatch,
+      checks: reached.stage === 'checked' || reached.stage === 'evaluated' ? paths.checks : null,
       assessment: null,
-      grading: active.gradingWritten ? paths.grading : null,
+      grading: grading === undefined ? null : paths.grading,
       result: paths.result,
     },
     failure:
-      preserved === null
+      recordedFailure === null
         ? null
-        : { error: preserved, occurredAt: run.dependencies.clock.now().toISOString() },
-    ...(active.checkState === null ? {} : { checkState: active.checkState }),
-    ...(active.setupCommands.length === 0
+        : { error: recordedFailure, occurredAt: run.dependencies.clock.now().toISOString() },
+    ...(checkState === undefined ? {} : { checkState }),
+    ...(reached.setupEvidence.commands.length === 0
       ? {}
-      : { setup: { logs: active.setupLogs, commands: active.setupCommands } }),
+      : {
+          setup: {
+            logs: reached.setupEvidence.logs,
+            commands: [...reached.setupEvidence.commands],
+          },
+        }),
     context: {
-      sourceRepositoryPath: active.workspace.sourceRepositoryPath,
-      syntheticCommit: active.workspace.syntheticCommit,
+      sourceRepositoryPath: reached.workspace.sourceRepositoryPath,
+      syntheticCommit: reached.workspace.syntheticCommit,
       environment: [
-        ...requireCaseAgentEnvironment(active.environments).variableManifest,
-        ...active.environments.evaluator.variableManifest,
+        ...reached.environments.agent.variableManifest,
+        ...reached.environments.evaluator.variableManifest,
       ],
     },
   };
@@ -1255,20 +1656,21 @@ function finishCase(
 /** Normalizes metrics through the case's own adapter; a decoding failure stays truthful and preserved. */
 function computeCaseMetrics(
   run: RunContext,
-  active: ActiveCase,
+  reached: FinishableCase,
 ): {
   metrics: BenchmarkMetrics;
   protocolFailure: Extract<TevuError, { kind: 'AgentProtocolError' }> | null;
 } {
-  const adapter = requireCaseAgentAdapter(run, active.identity);
-  const durationMs = active.evidence?.process.durationMs ?? null;
+  const adapter = requireCaseAgentAdapter(run, reached.identity);
+  const durationMs = reached.agentResult?.process.durationMs ?? null;
   const normalized = adapter.normalizeMetrics({
-    caseId: active.identity.caseId,
-    sessionId: active.evidence?.sessionId ?? null,
-    sessionExport: active.sessionExport,
-    events: active.events,
-    exportUnavailableReason: active.exportUnavailableReason,
-    copiedProviders: requireCaseAgentProviders(run, active.identity).copiedProviders,
+    caseId: reached.identity.caseId,
+    sessionId: reached.agentResult?.sessionId ?? null,
+    sessionExport: reached.sessionExport.status === 'exported' ? reached.sessionExport.value : null,
+    events: reached.events,
+    exportUnavailableReason:
+      reached.sessionExport.status === 'unavailable' ? reached.sessionExport.reason : undefined,
+    copiedProviders: requireCaseAgentProviders(run, reached.identity).copiedProviders,
   });
   return combineCaseMetrics({
     durationMs,
