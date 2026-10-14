@@ -202,9 +202,9 @@ function countRunStarts(logPath: string): number {
 
 async function writeFakeGraderExecutable(options: {
   run: RunBehavior;
-  replyText?: string;
-  withCost?: boolean;
-  recordPath?: string;
+  replyText?: string | undefined;
+  withCost?: boolean | undefined;
+  recordPath?: string | undefined;
 }): Promise<string> {
   const recordPath = options.recordPath ?? nextRecordPath();
   const body =
@@ -317,7 +317,7 @@ type CallOptions = {
   executable?: string;
   replyText?: string;
   withCost?: boolean;
-  timeoutMs?: number;
+  timeoutMs?: number | undefined;
   redact?: Redactor;
   task?: TaskDefinition;
   patch?: string;

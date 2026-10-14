@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { execa } from 'execa';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, assert, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createArtifactStore } from '@/adapters/artifact-store';
@@ -264,6 +264,7 @@ function buildConfig(options: {
   };
   const config = TevuConfigSchema.parse(input);
   const { opencode } = config.agents;
+  assert.isDefined(opencode, 'agents.opencode block');
   return {
     ...config,
     agents: { ...config.agents, [FAKE_AGENT_NAME]: opencode },

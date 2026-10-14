@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, assert, beforeAll, describe, expect, it } from 'vitest';
 
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
@@ -138,6 +138,7 @@ function buildDependencies(options: DependencyOptions = {}): ModelAccessDependen
   return {
     agentsFor: (config) => {
       const block = config.agents.opencode;
+      assert.isDefined(block, 'agents.opencode block');
       options.blocks?.push(block);
       const adapter = createOpenCodeAdapter(
         {

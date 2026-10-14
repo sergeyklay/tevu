@@ -144,7 +144,12 @@ describe('decodeRunConfig', () => {
     const task = buildSnapshotTask({
       checks: {
         acceptance: [
-          buildSnapshotCheck({ id: 'acc-command', manual: undefined, run: ['npm', 'test'] }),
+          {
+            id: 'acc-command',
+            description: 'the thing works',
+            required: true,
+            run: ['npm', 'test'],
+          },
           buildSnapshotCheck({ id: 'acc-manual' }),
         ],
         done: [buildSnapshotCheck({ id: 'dod-manual', required: false })],
@@ -182,7 +187,7 @@ describe('decodeRunConfig', () => {
     const decodeWith = (run: string | readonly string[]): CheckRecord[] | undefined => {
       const task = buildSnapshotTask({
         checks: {
-          acceptance: [buildSnapshotCheck({ id: 'acc-command', manual: undefined, run })],
+          acceptance: [{ id: 'acc-command', description: 'the thing works', required: true, run }],
           done: [],
         },
       });

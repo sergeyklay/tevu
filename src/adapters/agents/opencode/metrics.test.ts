@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, assert, beforeAll, describe, expect, it } from 'vitest';
 
 import { createRedactor, createSecretRedactor, runManagedProcess } from '@/adapters/process';
 
@@ -1758,6 +1758,7 @@ describe('OpenCode adapter run request over an injected fake process', () => {
 
     expect(requests).toHaveLength(1);
     const request = requests[0];
+    assert.isDefined(request, 'recorded process request');
     expect(request.argv).toEqual([
       'fake-opencode',
       'run',

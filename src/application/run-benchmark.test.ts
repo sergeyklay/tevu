@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { describe, expect, it, vi } from 'vitest';
+import { assert, describe, expect, it, vi } from 'vitest';
 
 import { durationMs, TevuConfigSchema } from '@/config/schema';
 import { unavailableBenchmarkMetrics } from '@/domain/types';
@@ -192,6 +192,7 @@ function buildRunSettings(overrides: Partial<TevuConfigInput['run']> = {}): Tevu
  */
 function rekeyToFakeAgent(config: TevuConfig): TevuConfig {
   const { opencode, ...otherAgents } = config.agents;
+  assert.isDefined(opencode, 'agents.opencode block');
   return {
     ...config,
     agents: { ...otherAgents, [AGENT_NAME]: opencode },

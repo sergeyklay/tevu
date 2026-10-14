@@ -121,6 +121,9 @@ export async function callModelRole(
   }
 
   const agentBlock = request.config.agents[role.agent];
+  if (agentBlock === undefined) {
+    throw new Error('unreachable: the configuration schema requires every agent block');
+  }
   const agentVariables = { secrets: agentBlock.secrets, env: agentBlock.env };
   const names: EnvironmentVariableNames = {
     agents: { [role.agent]: agentVariables },

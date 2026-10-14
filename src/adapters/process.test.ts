@@ -99,7 +99,7 @@ function readerRequest(stdinText: string | undefined) {
     environment: {},
     timeoutMs: 10_000,
     terminationGraceMs: 250,
-    stdinText,
+    ...(stdinText === undefined ? {} : { stdinText }),
   };
 }
 

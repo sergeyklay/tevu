@@ -619,7 +619,11 @@ async function rebuildCaseResult(
       `case "${caseId}" names agent "${String(agentName)}", which has no registered adapter`,
     );
   }
-  if (agentName === undefined || !Object.hasOwn(copiedProviders, agentName)) {
+  const providers =
+    agentName !== undefined && Object.hasOwn(copiedProviders, agentName)
+      ? copiedProviders[agentName]
+      : undefined;
+  if (providers === undefined) {
     return artifactFailure(
       'rebuild-report',
       `case "${caseId}" names agent "${String(agentName)}", which has no tools.copiedProviders entry in run.json`,
@@ -676,7 +680,7 @@ async function rebuildCaseResult(
     events,
     sessionExport,
     exportUnavailableReason: EXPORT_ABSENT_REASON,
-    copiedProviders: copiedProviders[agentName],
+    copiedProviders: providers,
   });
   if (!normalized.ok) {
     return normalized;

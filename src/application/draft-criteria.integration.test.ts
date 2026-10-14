@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, assert, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
@@ -611,7 +611,9 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
 
   function buildConfigWithVariables(secrets: string[], env: string[] = []): TevuConfig {
     const config = buildConfig();
-    return { ...config, agents: { opencode: { ...config.agents.opencode, secrets, env } } };
+    const opencode = config.agents['opencode'];
+    assert.isDefined(opencode, 'agents.opencode block');
+    return { ...config, agents: { opencode: { ...opencode, secrets, env } } };
   }
 
   async function readInvocations(path: string): Promise<string[]> {

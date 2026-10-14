@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { execa } from 'execa';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, assert, beforeEach, describe, expect, it } from 'vitest';
 
 import { createArtifactStore } from '@/adapters/artifact-store';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
@@ -190,6 +190,7 @@ function buildConfig(options: {
  */
 function rekeyToFakeAgent(config: TevuConfig): TevuConfig {
   const { opencode, ...otherAgents } = config.agents;
+  assert.isDefined(opencode, 'agents.opencode block');
   return {
     ...config,
     agents: { ...otherAgents, [FAKE_AGENT_NAME]: opencode },
@@ -627,14 +628,16 @@ describe('runBenchmark grading in the case flow', () => {
    */
   function rekeyGradedConfigToFakeAgent(config: TevuConfig): TevuConfig {
     const { opencode, ...otherAgents } = config.agents;
+    assert.isDefined(opencode, 'agents.opencode block');
     return {
       ...config,
       agents: { ...otherAgents, [FAKE_AGENT_NAME]: opencode },
       models: config.models.map((model) => ({ ...model, agent: FAKE_AGENT_NAME })),
-      roles:
-        config.roles?.grader === undefined
-          ? config.roles
-          : { ...config.roles, grader: { ...config.roles.grader, agent: FAKE_AGENT_NAME } },
+      ...(config.roles?.grader === undefined
+        ? {}
+        : {
+            roles: { ...config.roles, grader: { ...config.roles.grader, agent: FAKE_AGENT_NAME } },
+          }),
     };
   }
 

@@ -222,7 +222,7 @@ function noProposedBaseReason(result: FirstCommitParentResult, key: string): str
 type ProposedBaseOutcome = {
   proposedBase?: { commit: string; basis: ProposedBaseBasis };
   warning?: PullRequestWarning;
-  noProposedBase?: string;
+  noProposedBase?: string | undefined;
 };
 
 /** Selects the proposed base, its basis, and any warning, per the ordered proposed-base rule table. */

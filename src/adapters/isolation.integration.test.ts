@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import process from 'node:process';
 import { execa } from 'execa';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, assert, beforeEach, describe, expect, it } from 'vitest';
 
 import { buildEnvironmentVariableNames } from '@/application/environment-variable-names';
 import { planBenchmark, runBenchmark } from '@/application/run-benchmark';
@@ -2119,17 +2119,21 @@ describe('isolated case environments', () => {
     expect(JSON.stringify(agent.variables)).not.toContain(HOST_SENTINEL_VALUE);
     expect(JSON.stringify(agent.variables)).not.toContain(UNLISTED_VALUE);
 
+    const agentConfigPath = agent.variables['XDG_CONFIG_HOME'];
+    assert.isDefined(agentConfigPath, 'agent XDG_CONFIG_HOME');
+    const evaluatorStatePath = evaluator.variables['XDG_STATE_HOME'];
+    assert.isDefined(evaluatorStatePath, 'evaluator XDG_STATE_HOME');
     for (const directory of [
       agent.homeDirectory,
       agent.temporaryDirectory,
       evaluator.homeDirectory,
       evaluator.temporaryDirectory,
-      agent.variables.XDG_CONFIG_HOME,
-      evaluator.variables.XDG_STATE_HOME,
+      agentConfigPath,
+      evaluatorStatePath,
     ]) {
       await stat(directory);
     }
-    const agentConfigHome = await stat(agent.variables.XDG_CONFIG_HOME);
+    const agentConfigHome = await stat(agentConfigPath);
     expect(agentConfigHome.isDirectory()).toBe(true);
 
     expect(agent.variableManifest).toEqual(
@@ -2413,15 +2417,13 @@ describe('copied provider configuration files in case environments', () => {
       ),
     );
     const agent = requireAgentEnvironment(environments);
+    const agentConfigPath = agent.variables['XDG_CONFIG_HOME'];
+    assert.isDefined(agentConfigPath, 'agent XDG_CONFIG_HOME');
+    const evaluatorConfigPath = environments.evaluator.variables['XDG_CONFIG_HOME'];
+    assert.isDefined(evaluatorConfigPath, 'evaluator XDG_CONFIG_HOME');
 
-    expect(existsSync(join(agent.variables.XDG_CONFIG_HOME, 'opencode', 'opencode.json'))).toBe(
-      true,
-    );
-    expect(
-      existsSync(
-        join(environments.evaluator.variables.XDG_CONFIG_HOME, 'opencode', 'opencode.json'),
-      ),
-    ).toBe(false);
+    expect(existsSync(join(agentConfigPath, 'opencode', 'opencode.json'))).toBe(true);
+    expect(existsSync(join(evaluatorConfigPath, 'opencode', 'opencode.json'))).toBe(false);
   });
 });
 
