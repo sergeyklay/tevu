@@ -221,6 +221,7 @@ export function createGitHubIssuesAdapter(
           );
         case 2:
           return trackerError(reference, 'import cancelled (gh exited with code 2)');
+        case null:
         default:
           return trackerError(
             reference,
@@ -290,6 +291,7 @@ async function runPullRequestGh(
       return { kind: 'exit-one', stderrText: result.stderr.text };
     case 2:
       return { kind: 'failure', reason: 'read cancelled (gh exited with code 2)' };
+    case null:
     default:
       return {
         kind: 'failure',

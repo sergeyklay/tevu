@@ -24,6 +24,11 @@ export default defineConfig([
       '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
       '@typescript-eslint/no-deprecated': 'warn',
+      // A default clause must not count as handling a union member; the explicit false keeps a later typescript-eslint default change from weakening the gate.
+      '@typescript-eslint/switch-exhaustiveness-check': [
+        'error',
+        { considerDefaultExhaustiveForUnions: false },
+      ],
     },
   },
 

@@ -620,7 +620,7 @@ describe('countRequiredChecks and formatRequiredChecks', () => {
 });
 
 describe('failureLabel', () => {
-  it.each([
+  it.each<{ kind: TevuError['kind']; label: string }>([
     { kind: 'CaseTimeoutError', label: 'time limit reached' },
     { kind: 'CancellationError', label: 'cancelled' },
     { kind: 'AgentProcessError', label: 'agent process failed' },
@@ -632,7 +632,6 @@ describe('failureLabel', () => {
     { kind: 'IsolationError', label: 'workspace not prepared' },
     { kind: 'SourceMaterializationError', label: 'workspace not prepared' },
     { kind: 'EvaluationError', label: 'tevu error' },
-    { kind: 'SomethingNew', label: 'tevu error' },
   ])('maps $kind to "$label"', ({ kind, label }) => {
     expect(failureLabel(kind)).toBe(label);
   });

@@ -1182,7 +1182,9 @@ async function concludeCase(
       });
       return finishCase(run, { lifecycle: 'timed-out', reached: settled, failure: error });
     }
-    default: {
+    case 'AgentProcessError':
+    case 'AgentProtocolError':
+    case 'AgentSessionError': {
       const readable =
         run.dependencies.git.isReadable === undefined
           ? true
@@ -1777,7 +1779,19 @@ function describeError(error: TevuError): string {
       return `case isolation failed: ${error.reason}`;
     case 'EvaluationError':
       return `check "${error.checkId}" evaluation failed: ${error.reason}`;
-    default:
+    case 'ConfigParseError':
+    case 'ConfigValidationError':
+    case 'ConfigReadError':
+    case 'ConfigNotFoundError':
+    case 'PrerequisiteError':
+    case 'IssueImportError':
+    case 'ModelCallError':
+    case 'AssessmentConflictError':
+    case 'RedactionError':
+    case 'CheckStateError':
+    case 'SetupError':
+    case 'ReferenceResolutionError':
+    case 'ManagedCloneError':
       return error.kind;
   }
 }
