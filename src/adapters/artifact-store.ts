@@ -257,6 +257,7 @@ function classify(cause: unknown): ConfigReadCause {
       return 'permission-denied';
     case 'EISDIR':
       return 'not-a-file';
+    case null:
     default:
       return 'unreadable';
   }

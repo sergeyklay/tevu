@@ -349,13 +349,25 @@ function row(error: TevuError | undefined): ErrorRow {
     case 'IsolationError':
     case 'SourceMaterializationError':
       return WORKSPACE_ERROR_ROW;
-    default:
+    case 'ConfigParseError':
+    case 'ConfigValidationError':
+    case 'ConfigReadError':
+    case 'ConfigNotFoundError':
+    case 'PrerequisiteError':
+    case 'IssueImportError':
+    case 'ModelCallError':
+    case 'EvaluationError':
+    case 'AssessmentConflictError':
+    case 'RedactionError':
+    case 'ReferenceResolutionError':
+    case 'ManagedCloneError':
+    case undefined:
       return RAW_ERROR_ROW;
   }
 }
 
-/** Plain label of the Runtime failure column for an error kind; every unknown kind reads `tevu error`. */
-export function failureLabel(kind: string): string {
+/** Plain label of the Runtime failure column for an error kind; kinds without a label of their own read `tevu error`. */
+export function failureLabel(kind: TevuError['kind']): string {
   switch (kind) {
     case 'CaseTimeoutError':
       return 'time limit reached';
@@ -376,7 +388,18 @@ export function failureLabel(kind: string): string {
     case 'IsolationError':
     case 'SourceMaterializationError':
       return 'workspace not prepared';
-    default:
+    case 'ConfigParseError':
+    case 'ConfigValidationError':
+    case 'ConfigReadError':
+    case 'ConfigNotFoundError':
+    case 'PrerequisiteError':
+    case 'IssueImportError':
+    case 'ModelCallError':
+    case 'EvaluationError':
+    case 'AssessmentConflictError':
+    case 'RedactionError':
+    case 'ReferenceResolutionError':
+    case 'ManagedCloneError':
       return 'tevu error';
   }
 }
@@ -402,7 +425,20 @@ function kindDetail(error: TevuError): string {
       return `CheckStateError, step ${error.step}: ${error.reason}`;
     case 'ArtifactError':
       return `ArtifactError, operation ${error.operation}: ${error.reason}`;
-    default:
+    case 'ConfigParseError':
+    case 'ConfigValidationError':
+    case 'ConfigReadError':
+    case 'ConfigNotFoundError':
+    case 'PrerequisiteError':
+    case 'SourceMaterializationError':
+    case 'IsolationError':
+    case 'IssueImportError':
+    case 'ModelCallError':
+    case 'EvaluationError':
+    case 'AssessmentConflictError':
+    case 'RedactionError':
+    case 'ReferenceResolutionError':
+    case 'ManagedCloneError':
       return 'reason' in error ? `${error.kind}: ${error.reason}` : error.kind;
   }
 }
@@ -414,7 +450,13 @@ function means(lifecycle: CaseLifecycle): string {
       return 'Its solution was still checked, so the outcome comes from its checks.';
     case 'process-failed':
       return 'tevu could not read its workspace afterwards, so its checks did not run and the attempt counts as not evaluated.';
-    default:
+    case 'queued':
+    case 'preparing':
+    case 'running':
+    case 'evaluating':
+    case 'timed-out':
+    case 'cancelled':
+    case 'infrastructure-failed':
       return NOT_COMPLETED_MEANS;
   }
 }
@@ -718,7 +760,8 @@ export function effortStatement(
         next: 'Choose an effort the agent lists for the model and run the comparison again.',
         detail: check.reason,
       };
-    default:
+    case 'verified':
+    case undefined:
       return null;
   }
 }

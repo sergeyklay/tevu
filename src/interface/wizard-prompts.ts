@@ -246,7 +246,8 @@ function textFrame(
       const closing = answer.trim() ? `\n${styleText('gray', S_BAR)}` : '';
       return `${title}${styleText('gray', S_BAR)}${shown}${closing}`;
     }
-    default:
+    case 'initial':
+    case 'active':
       return `${title}${styleText('cyan', S_BAR)}  ${input}\n${styleText('cyan', S_BAR_END)}\n`;
   }
 }
@@ -258,7 +259,10 @@ function confirmFrame(state: State, title: string, answer: string, isYes: boolea
       return `${title}${guide}${styleText('dim', answer)}`;
     case 'cancel':
       return `${title}${guide}${styleText(['strikethrough', 'dim'], answer)}\n${styleText('gray', S_BAR)}`;
-    default: {
+    case 'initial':
+    case 'active':
+    case 'error':
+    case 'validating': {
       const yes = isYes
         ? `${styleText('green', S_RADIO_ACTIVE)} Yes`
         : `${styleText('dim', S_RADIO_INACTIVE)} ${styleText('dim', 'Yes')}`;
