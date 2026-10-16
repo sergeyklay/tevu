@@ -67,19 +67,16 @@ import type { JiraCloudSettings } from '@/adapters/trackers/jira-cloud';
 import type { ManagedLfsDependencies } from '@/application/managed-clone';
 import type { ModelAccessDependencies } from '@/application/model-access';
 import type { ConclusionWriter } from '@/application/write-conclusions';
-import type {
-  AgentRegistry,
-  ArtifactStore,
-  CaseExecutableAdapter,
-  Clock,
-  ConfigStore,
-  EnvironmentAdapter,
-  GitWorkspaceAdapter,
-  ManagedCloneAdapter,
-  ParentEnvironmentSnapshot,
-  PrerequisiteAdapter,
-  TevuConfig,
-} from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
+import type { AgentRegistry } from '@/domain/ports/agent';
+import type { ArtifactStore } from '@/domain/ports/artifact-store';
+import type { CaseExecutableAdapter } from '@/domain/ports/case-executable';
+import type { Clock } from '@/domain/ports/clock';
+import type { ConfigStore } from '@/domain/ports/config-store';
+import type { EnvironmentAdapter, ParentEnvironmentSnapshot } from '@/domain/ports/environment';
+import type { GitWorkspaceAdapter } from '@/domain/ports/git-workspace';
+import type { ManagedCloneAdapter } from '@/domain/ports/managed-clone';
+import type { PrerequisiteAdapter } from '@/domain/ports/prerequisite';
 import type { AssessOperations } from '@/interface/commands/assess';
 import type { ReportOperations } from '@/interface/commands/report';
 import type { RunOperations } from '@/interface/commands/run';

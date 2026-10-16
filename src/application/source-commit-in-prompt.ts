@@ -7,8 +7,8 @@
 
 import { parseGitHubReference } from '@/domain/github-reference';
 
+import type { TaskReference } from '@/domain/config';
 import type { ParsedGitHubReference } from '@/domain/github-reference';
-import type { TaskReference } from '@/domain/types';
 
 /**
  * Reports whether `prompt` contains the resolved source commit.

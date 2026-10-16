@@ -16,14 +16,10 @@ import { GIT_COMMAND_TIMEOUT_MS, ISOLATED_GIT_SETTINGS } from '@/domain/git-envi
 import { authenticationReason, ghEnvironment, stderrExcerpt } from '@/domain/github-cli';
 import { formatGitHubRepository, isPlainHost } from '@/domain/github-reference';
 
+import type { ManagedCloneOperation, TevuResult } from '@/domain/errors';
 import type { ParsedGitHubRepository } from '@/domain/github-reference';
-import type {
-  CloneState,
-  ManagedCloneAdapter,
-  ManagedCloneOperation,
-  ManagedProcessRunner,
-  TevuResult,
-} from '@/domain/types';
+import type { CloneState, ManagedCloneAdapter } from '@/domain/ports/managed-clone';
+import type { ManagedProcessRunner } from '@/domain/ports/managed-process-runner';
 
 /** Construction inputs for the managed-clone adapter. */
 export type ManagedCloneAdapterOptions = {

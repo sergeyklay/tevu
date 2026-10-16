@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { decodeRunConfig } from './run-snapshot';
 
-import type { CheckRecord, TaskRecord } from '@/domain/types';
+import type { CheckRecord, TaskRecord } from '@/domain/run-records';
 
 type SnapshotCheck = {
   id: string;

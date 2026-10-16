@@ -21,35 +21,38 @@ import { describeCause } from '@/domain/describe-cause';
 import { ISOLATED_GIT_SETTINGS } from '@/domain/git-environment';
 import { redactDecodedValue } from '@/domain/redaction';
 
+import type { TevuResult } from '@/domain/errors';
 import type {
-  AgentConfigurationFile,
-  CaseEnvironments,
   CaseExecutableAdapter,
   CaseExecutableProbe,
   CaseExecutableProbeRequest,
   CaseExecutableVerdict,
-  CaseWorkspace,
+  WorkingDirectoryChanges,
+} from '@/domain/ports/case-executable';
+import type {
+  AgentConfigurationFile,
+  CaseEnvironments,
   EnvironmentAdapter,
   EnvironmentVariableNames,
-  EnvironmentVariableRecord,
+  IsolatedEnvironment,
+  ModelCallEnvironment,
+  ParentEnvironmentSnapshot,
+} from '@/domain/ports/environment';
+import type {
   EvaluatorProcessAdapter,
   EvaluatorProcessRequest,
   EvaluatorProcessResult,
-  HostProbe,
-  IsolatedEnvironment,
+} from '@/domain/ports/evaluator-process';
+import type { CaseWorkspace } from '@/domain/ports/git-workspace';
+import type {
   ManagedProcessLaunchFailure,
   ManagedProcessRequest,
   ManagedProcessResult,
-  ModelCallEnvironment,
-  ParentEnvironmentSnapshot,
-  PrerequisiteAdapter,
   RedactedCapture,
-  Redactor,
-  SecretRedactor,
-  TerminationStage,
-  TevuResult,
-  WorkingDirectoryChanges,
-} from '@/domain/types';
+} from '@/domain/ports/managed-process-runner';
+import type { HostProbe, PrerequisiteAdapter } from '@/domain/ports/prerequisite';
+import type { Redactor, SecretRedactor } from '@/domain/ports/secret-redactor';
+import type { EnvironmentVariableRecord, TerminationStage } from '@/domain/run-records';
 import type { Options, ResultPromise } from 'execa';
 import type { FileHandle } from 'node:fs/promises';
 

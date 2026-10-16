@@ -8,6 +8,7 @@
  * for the statements of one attempt.
  */
 
+import type { TevuError } from '@/domain/errors';
 import type {
   CaseIdentity,
   CaseLifecycle,
@@ -20,8 +21,7 @@ import type {
   SummaryCall,
   SummarySetting,
   TaskRecord,
-  TevuError,
-} from '@/domain/types';
+} from '@/domain/run-records';
 
 /** A state explained in three parts, with internal text kept apart as technical detail. */
 export type Statement = { happened: string; means: string; next: string; detail: string | null };

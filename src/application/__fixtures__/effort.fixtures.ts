@@ -1,7 +1,9 @@
 import { TevuConfigSchema } from '@/config/schema';
 
 import type { ModelDefinitionInput, ModelRoleInput, TaskInput } from '@/config/schema';
-import type { EffortChecks, ModelListing, TevuConfig } from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
+import type { ModelListing } from '@/domain/ports/agent';
+import type { EffortChecks } from '@/domain/use-cases';
 
 type ListedModels = Extract<ModelListing, { outcome: 'listed' }>;
 

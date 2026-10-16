@@ -18,7 +18,7 @@ import type {
   TaskInput,
   TevuConfigInput,
 } from './schema';
-import type { TevuResult } from '@/domain/types';
+import type { TevuResult } from '@/domain/errors';
 import type { Node } from 'yaml';
 
 /** Redaction boundary applied to every decoded string before it becomes YAML. */

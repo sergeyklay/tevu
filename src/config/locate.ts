@@ -8,7 +8,8 @@
 
 import * as path from 'node:path';
 
-import type { ConfigStore, TevuResult } from '@/domain/types';
+import type { TevuResult } from '@/domain/errors';
+import type { ConfigStore } from '@/domain/ports/config-store';
 
 /**
  * Process-derived facts the search needs; callers pass an object literal so

@@ -28,21 +28,15 @@ import { writeTaskConclusions } from './write-conclusions';
 
 import type { ConclusionWriter, TaskConclusionsOutcome } from './write-conclusions';
 import type { TaskInput, TevuConfigInput } from '@/config/schema';
-import type {
-  AgentAdapter,
-  AgentMetrics,
-  AgentRunInput,
-  AgentRunResult,
-  ArtifactStore,
-  ConclusionsArtifact,
-  EnvironmentAdapter,
-  PrerequisiteAdapter,
-  Redactor,
-  RunDependencies,
-  TevuConfig,
-  TevuError,
-  TevuResult,
-} from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
+import type { TevuError, TevuResult } from '@/domain/errors';
+import type { AgentAdapter, AgentRunInput, AgentRunResult } from '@/domain/ports/agent';
+import type { ArtifactStore } from '@/domain/ports/artifact-store';
+import type { EnvironmentAdapter } from '@/domain/ports/environment';
+import type { PrerequisiteAdapter } from '@/domain/ports/prerequisite';
+import type { Redactor } from '@/domain/ports/secret-redactor';
+import type { AgentMetrics, ConclusionsArtifact } from '@/domain/run-records';
+import type { RunDependencies } from '@/domain/use-cases';
 
 const FAKE_AGENT_NAME = 'fake-agent';
 const CONFIG_PATH = '/synthetic/tevu.yaml';

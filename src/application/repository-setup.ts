@@ -9,15 +9,14 @@
 
 import { describeCause } from '@/domain/describe-cause';
 
+import type { SetupCommand, SetupPhase } from '@/domain/config';
+import type { TevuError } from '@/domain/errors';
 import type {
   EvaluatorProcessAdapter,
   EvaluatorProcessResult,
-  RedactedCapture,
-  SetupCommand,
-  SetupCommandRecord,
-  SetupPhase,
-  TevuError,
-} from '@/domain/types';
+} from '@/domain/ports/evaluator-process';
+import type { RedactedCapture } from '@/domain/ports/managed-process-runner';
+import type { SetupCommandRecord } from '@/domain/run-records';
 
 /** Everything one setup phase's commands need to run. */
 export type SetupPhaseInput = {

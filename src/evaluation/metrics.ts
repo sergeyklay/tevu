@@ -1,12 +1,7 @@
-import { unavailableBenchmarkMetrics, unavailableMetric } from '@/domain/types';
+import { unavailableBenchmarkMetrics, unavailableMetric } from '@/domain/run-records';
 
-import type {
-  AgentMetrics,
-  BenchmarkMetrics,
-  MetricValue,
-  TevuError,
-  TevuResult,
-} from '@/domain/types';
+import type { TevuError, TevuResult } from '@/domain/errors';
+import type { AgentMetrics, BenchmarkMetrics, MetricValue } from '@/domain/run-records';
 
 /**
  * Reduces one agent's decoded metrics plus process timing into the complete,

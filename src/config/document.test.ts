@@ -18,7 +18,8 @@ import type {
   TevuConfigInput,
 } from './schema';
 import type { TaskDependencies, TaskWizardInput } from '@/application/create-task';
-import type { GitWorkspaceAdapter, TevuError } from '@/domain/types';
+import type { TevuError } from '@/domain/errors';
+import type { GitWorkspaceAdapter } from '@/domain/ports/git-workspace';
 
 function buildRepository(overrides: Partial<RepositoryInput> = {}): RepositoryInput {
   return { id: 'app', path: '../app', ...overrides };

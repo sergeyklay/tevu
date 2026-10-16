@@ -31,25 +31,27 @@ import { describeCause } from '@/domain/describe-cause';
 import { GIT_COMMAND_TIMEOUT_MS, ISOLATED_GIT_SETTINGS } from '@/domain/git-environment';
 import { formatGitHubRepository, parseGitHubRepository } from '@/domain/github-reference';
 
+import type { RepositoryDefinition } from '@/domain/config';
+import type { TevuResult } from '@/domain/errors';
 import type {
-  CaseIdentity,
   CaseWorkspace,
-  CheckStateRecord,
   CheckStateRequest,
   CommitLookup,
   GitWorkspaceAdapter,
   LfsObjectInventory,
   OverlayEntry,
+  OverlaySnapshot,
+  PatchBase,
+  SourceValidation,
+} from '@/domain/ports/git-workspace';
+import type {
+  CaseIdentity,
+  CheckStateRecord,
   OverlayFileRecord,
   OverlayRecord,
-  OverlaySnapshot,
   PatchArtifact,
-  PatchBase,
-  RepositoryDefinition,
   RestoreRecord,
-  SourceValidation,
-  TevuResult,
-} from '@/domain/types';
+} from '@/domain/run-records';
 import type { Stats } from 'node:fs';
 
 /** Construction inputs for the sealed Git workspace adapter. */

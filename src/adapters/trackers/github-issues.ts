@@ -13,16 +13,15 @@ import { describePath } from '@/domain/describe-path';
 import { authenticationReason, ghEnvironment, stderrExcerpt } from '@/domain/github-cli';
 import { parseGitHubReference } from '@/domain/github-reference';
 
+import type { TevuResult } from '@/domain/errors';
 import type { ParsedGitHubReference } from '@/domain/github-reference';
+import type { IssueSnapshot, IssueTrackerAdapter } from '@/domain/ports/issue-tracker';
 import type {
-  IssueSnapshot,
-  IssueTrackerAdapter,
   PullRequestCommit,
   PullRequestMergeability,
   PullRequestReader,
   PullRequestSnapshot,
-  TevuResult,
-} from '@/domain/types';
+} from '@/domain/ports/pull-request-reader';
 
 /** Literal-argv `gh` invocation request; a subset of the process adapter's own request shape. */
 export type GhRunRequest = {

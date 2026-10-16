@@ -28,32 +28,26 @@ import type { TaskWizardInput } from '@/application/create-task';
 import type { CriteriaDraftFailure } from '@/application/draft-criteria';
 import type { ModelAccessOutcome } from '@/application/model-access';
 import type { CheckInput, ModelDefinitionInput, TaskInput, TevuConfigInput } from '@/config/schema';
+import type { JiraTrackerSettings, TaskDefinition, TevuConfig } from '@/domain/config';
+import type { ConfigReadCause, TevuError, ValidationFinding } from '@/domain/errors';
+import type { OperatorProvider } from '@/domain/ports/agent';
+import type { IssueSnapshot } from '@/domain/ports/issue-tracker';
+import type { ManagedCloneAdapter } from '@/domain/ports/managed-clone';
 import type {
   AgentCapabilityReport,
   AssessmentRecord,
   BenchmarkMetrics,
-  BenchmarkPlan,
   CaseIdentity,
   CaseResult,
-  ConfigReadCause,
   EffortCheck,
-  EffortChecks,
   GradeRecord,
   GraderIdentity,
   GradingSummary,
-  IssueSnapshot,
-  JiraTrackerSettings,
-  ManagedCloneAdapter,
-  OperatorProvider,
   ReportResult,
   RunFinding,
   RunResult,
-  TaskDefinition,
-  TevuConfig,
-  TevuError,
-  ValidationFinding,
-  ValidationReport,
-} from '@/domain/types';
+} from '@/domain/run-records';
+import type { BenchmarkPlan, EffortChecks, ValidationReport } from '@/domain/use-cases';
 import type { AssessOperations } from '@/interface/commands/assess';
 import type { BenchmarkExecutionHooks, RunOperations } from '@/interface/commands/run';
 import type { ProgramIo } from '@/interface/commands/shared';

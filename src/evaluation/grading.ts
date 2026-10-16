@@ -9,19 +9,18 @@
  * {@link applyGrades}.
  */
 
+import { checkEvaluator } from '@/domain/config';
 import { codeFenceFor, decodeReplyObject } from '@/domain/model-text';
-import { checkEvaluator } from '@/domain/types';
 
+import type { CheckCategory, TaskDefinition } from '@/domain/config';
 import type {
   AgentMetrics,
   CaseGrading,
-  CheckCategory,
   CheckResult,
   GradeRecord,
   GradeVerdict,
   MetricValue,
-  TaskDefinition,
-} from '@/domain/types';
+} from '@/domain/run-records';
 
 /** One graded check of a task, ready for the grader prompt. */
 export type GradedCheckSummary = { id: string; description: string; category: CheckCategory };

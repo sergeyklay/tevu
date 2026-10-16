@@ -1,13 +1,15 @@
 /** `tevu assess`: records verdicts for one case of a saved run through the assessment wizard. */
 
+import { runAssessmentWizard } from '@/interface/assessment-wizard';
 import { createStatusLine } from '@/interface/status-line';
-import { runAssessmentWizard } from '@/interface/task-wizard';
 
 import { createLineWriters, EXIT_COMPLETED, loadCommandConfig, reportFailure } from './shared';
 
 import type { CommandContext, ConfigOperations, ConfigOptionValues } from './shared';
 import type { AssessedCase, AssessmentCaseContext } from '@/application/assess';
-import type { AssessmentInput, TevuConfig, TevuResult } from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
+import type { TevuResult } from '@/domain/errors';
+import type { AssessmentInput } from '@/domain/use-cases';
 
 export type AssessOperations = ConfigOperations & {
   readAssessmentContext(

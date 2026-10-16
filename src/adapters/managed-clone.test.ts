@@ -13,7 +13,7 @@ import type {
   ManagedProcessRequest,
   ManagedProcessResult,
   ManagedProcessRunner,
-} from '@/domain/types';
+} from '@/domain/ports/managed-process-runner';
 
 const REPOSITORY: ParsedGitHubRepository = { host: 'github.com', owner: 'octo', repo: 'app' };
 const HELPER_ARGS = [

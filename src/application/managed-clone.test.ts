@@ -12,15 +12,10 @@ import {
 
 import type { ManagedCommitsRequest, ManagedLfsDependencies } from './managed-clone';
 import type { TaskInput, TevuConfigInput } from '@/config/schema';
-import type {
-  CommitLookup,
-  LfsObjectInventory,
-  ManagedCloneAdapter,
-  RepositoryDefinition,
-  TevuConfig,
-  TevuError,
-  TevuResult,
-} from '@/domain/types';
+import type { RepositoryDefinition, TevuConfig } from '@/domain/config';
+import type { TevuError, TevuResult } from '@/domain/errors';
+import type { CommitLookup, LfsObjectInventory } from '@/domain/ports/git-workspace';
+import type { ManagedCloneAdapter } from '@/domain/ports/managed-clone';
 
 const CLONE_DIRECTORY = '/cache/tevu/repositories/github.com/octo/app.git';
 const COMMIT_A = 'a'.repeat(40);

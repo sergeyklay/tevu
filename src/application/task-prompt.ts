@@ -1,4 +1,4 @@
-import type { TaskDefinition } from '@/domain/types';
+import type { TaskDefinition } from '@/domain/config';
 
 /**
  * Builds the contender-independent task prompt from only the task's own

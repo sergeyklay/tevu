@@ -16,18 +16,12 @@ import { AGENT_NAMES } from '@/config/schema';
 
 import { listModelsInCallEnvironment } from './model-call';
 
-import type {
-  AgentAdapter,
-  AgentCapabilityReport,
-  AgentProviderSetting,
-  AgentRegistry,
-  EnvironmentAdapter,
-  GitWorkspaceAdapter,
-  OperatorProvider,
-  TevuConfig,
-  TevuResult,
-  ValidationFinding,
-} from '@/domain/types';
+import type { AgentProviderSetting, TevuConfig } from '@/domain/config';
+import type { TevuResult, ValidationFinding } from '@/domain/errors';
+import type { AgentAdapter, AgentRegistry, OperatorProvider } from '@/domain/ports/agent';
+import type { EnvironmentAdapter } from '@/domain/ports/environment';
+import type { GitWorkspaceAdapter } from '@/domain/ports/git-workspace';
+import type { AgentCapabilityReport } from '@/domain/run-records';
 
 /** The `agents.opencode` answers of a setup interview so far; `command` as typed. */
 export type AgentDraft = {

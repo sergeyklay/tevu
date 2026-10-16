@@ -23,26 +23,28 @@ import {
 } from './model-call';
 
 import type { OpenCodeAdapterDependencies } from '@/adapters/agents/opencode/opencode';
+import type { ModelRoleName, TevuConfig } from '@/domain/config';
+import type { TevuError } from '@/domain/errors';
 import type {
   AgentAdapter,
-  CopiedProvider,
-  EnvironmentAdapter,
-  GitWorkspaceAdapter,
-  ManagedProcessRequest,
-  ManagedProcessRunner,
-  ModelCallDependencies,
-  ModelCallEnvironment,
   ModelCallEvidence,
   ModelListing,
-  ModelRoleCallRequest,
-  ModelRoleName,
-  ParentEnvironmentSnapshot,
   ProviderSnapshot,
-  SecretRedactor,
-  TevuConfig,
-  TevuError,
   ToolDenialProbe,
-} from '@/domain/types';
+} from '@/domain/ports/agent';
+import type {
+  EnvironmentAdapter,
+  ModelCallEnvironment,
+  ParentEnvironmentSnapshot,
+} from '@/domain/ports/environment';
+import type { GitWorkspaceAdapter } from '@/domain/ports/git-workspace';
+import type {
+  ManagedProcessRequest,
+  ManagedProcessRunner,
+} from '@/domain/ports/managed-process-runner';
+import type { SecretRedactor } from '@/domain/ports/secret-redactor';
+import type { CopiedProvider } from '@/domain/run-records';
+import type { ModelCallDependencies, ModelRoleCallRequest } from '@/domain/use-cases';
 
 const SECRET_VARIABLE_NAME = 'TEVU_MODEL_CALL_SECRET';
 const SECRET_VALUE = 'sk-live-modelcall-secret-000111';

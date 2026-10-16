@@ -38,22 +38,19 @@ import type {
   TevuConfigInput,
 } from './schema';
 import type { TaskDependencies, TaskWizardInput } from '@/application/create-task';
+import type { RepositoryDefinition, TaskDefinition, TevuConfig } from '@/domain/config';
+import type { TevuError, TevuResult } from '@/domain/errors';
+import type { AgentAdapter } from '@/domain/ports/agent';
 import type {
-  AgentAdapter,
-  AgentCapabilityReport,
   CaseExecutableAdapter,
   CaseExecutableProbeRequest,
-  ConfigStore,
-  EnvironmentAdapter,
-  GitWorkspaceAdapter,
-  PrerequisiteAdapter,
-  RepositoryDefinition,
-  TaskDefinition,
-  TevuConfig,
-  TevuError,
-  TevuResult,
-  ValidationDependencies,
-} from '@/domain/types';
+} from '@/domain/ports/case-executable';
+import type { ConfigStore } from '@/domain/ports/config-store';
+import type { EnvironmentAdapter } from '@/domain/ports/environment';
+import type { GitWorkspaceAdapter } from '@/domain/ports/git-workspace';
+import type { PrerequisiteAdapter } from '@/domain/ports/prerequisite';
+import type { AgentCapabilityReport } from '@/domain/run-records';
+import type { ValidationDependencies } from '@/domain/use-cases';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();

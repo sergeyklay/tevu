@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { createJiraCloudAdapter } from './jira-cloud';
 
 import type { JiraCloudDependencies, JiraCloudSettings } from './jira-cloud';
-import type { IssueSnapshot, TevuResult } from '@/domain/types';
+import type { TevuResult } from '@/domain/errors';
+import type { IssueSnapshot } from '@/domain/ports/issue-tracker';
 
 type ReadIssueResult = TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>;
 

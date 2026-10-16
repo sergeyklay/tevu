@@ -4,18 +4,16 @@ import { describeManagedCloneError } from './managed-clone';
 import { resolveReferenceSolution } from './reference-solution';
 
 import type { ReferenceSolutionDependencies, ReferenceSolutionRequest } from './reference-solution';
+import type { RepositoryDefinition } from '@/domain/config';
+import type { TevuError, TevuResult } from '@/domain/errors';
 import type { ParsedGitHubRepository } from '@/domain/github-reference';
+import type { CommitLookup, GitWorkspaceAdapter } from '@/domain/ports/git-workspace';
+import type { ManagedCloneAdapter } from '@/domain/ports/managed-clone';
 import type {
-  CommitLookup,
-  GitWorkspaceAdapter,
-  ManagedCloneAdapter,
   PullRequestCommit,
   PullRequestReader,
   PullRequestSnapshot,
-  RepositoryDefinition,
-  TevuError,
-  TevuResult,
-} from '@/domain/types';
+} from '@/domain/ports/pull-request-reader';
 
 function buildRequest(overrides: Partial<ReferenceSolutionRequest> = {}): ReferenceSolutionRequest {
   return {

@@ -14,6 +14,8 @@ import { z } from 'zod';
 
 import { describePath } from '@/domain/describe-path';
 
+import type { CheckCategory, ModelRole, ModelRoleName, SetupPhase } from '@/domain/config';
+import type { TevuError, ValidationFinding } from '@/domain/errors';
 import type {
   AgentCapabilityReport,
   AgentConfigurationFileRecord,
@@ -25,7 +27,6 @@ import type {
   CaseGrading,
   CaseIdentity,
   CaseResult,
-  CheckCategory,
   CheckResult,
   CheckStateRecord,
   ConclusionsArtifact,
@@ -36,8 +37,6 @@ import type {
   GradeRecord,
   GradingArtifact,
   MetricValue,
-  ModelRole,
-  ModelRoleName,
   ProcessResult,
   RepeatSetting,
   ReplacedGraderVerdict,
@@ -46,7 +45,6 @@ import type {
   RunManifest,
   RunResult,
   SetupCommandRecord,
-  SetupPhase,
   SummaryCall,
   SummaryComparison,
   SummaryDropout,
@@ -55,9 +53,7 @@ import type {
   SummaryMeasure,
   SummarySetting,
   TaskConclusions,
-  TevuError,
-  ValidationFinding,
-} from '@/domain/types';
+} from '@/domain/run-records';
 
 /** The layout of `cases/<case-id>/checks.json`; `ArtifactStore.writeChecks` writes it and `readChecks` parses it. */
 export type ChecksArtifact = {

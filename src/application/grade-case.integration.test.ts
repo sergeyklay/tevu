@@ -19,15 +19,12 @@ import { gradeLines } from '@/evaluation/wording';
 
 import { gradeCase } from './grade-case';
 
-import type {
-  AgentAdapter,
-  EnvironmentAdapter,
-  ModelCallDependencies,
-  Redactor,
-  TaskDefinition,
-  TevuConfig,
-  TevuError,
-} from '@/domain/types';
+import type { TaskDefinition, TevuConfig } from '@/domain/config';
+import type { TevuError } from '@/domain/errors';
+import type { AgentAdapter } from '@/domain/ports/agent';
+import type { EnvironmentAdapter } from '@/domain/ports/environment';
+import type { Redactor } from '@/domain/ports/secret-redactor';
+import type { ModelCallDependencies } from '@/domain/use-cases';
 
 const SECRET_VARIABLE_NAME = 'TEVU_GRADE_CASE_SECRET';
 const SECRET_VALUE = 'sk-live-grade-case-secret-778899';

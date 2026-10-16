@@ -25,7 +25,7 @@ import {
 } from './summary';
 
 import type { SummaryEvidence, SummaryTaskView } from './summary';
-import type { SummaryAspect, SummaryFacts } from '@/domain/types';
+import type { SummaryAspect, SummaryFacts } from '@/domain/run-records';
 
 const HIGH = 'gpt-5.6-luna, high';
 const LOW = 'gpt-5.6-luna, low';

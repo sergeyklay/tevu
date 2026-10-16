@@ -30,29 +30,26 @@ import { describeCause } from '@/domain/describe-cause';
 import { redactDecodedValue } from '@/domain/redaction';
 
 import type { ChecksArtifact } from '@/adapters/artifact-schemas';
+import type { SetupPhase } from '@/domain/config';
+import type { ConfigReadCause, TevuError, TevuResult } from '@/domain/errors';
+import type { ArtifactStore, AssessmentLock } from '@/domain/ports/artifact-store';
+import type { ConfigStore } from '@/domain/ports/config-store';
+import type { Redactor } from '@/domain/ports/secret-redactor';
 import type {
   AgentEventRecord,
   AgentSessionExport,
-  ArtifactStore,
   AssessmentArtifact,
-  AssessmentLock,
   CaseGrading,
   CaseResult,
   CheckResult,
   ConclusionsArtifact,
-  ConfigReadCause,
-  ConfigStore,
   GradingArtifact,
   PatchArtifact,
-  Redactor,
   RepeatSetting,
   ReportResult,
   RunManifest,
   RunResult,
-  SetupPhase,
-  TevuError,
-  TevuResult,
-} from '@/domain/types';
+} from '@/domain/run-records';
 
 /** Construction inputs for the file-backed artifact store. */
 export type ArtifactStoreOptions = {

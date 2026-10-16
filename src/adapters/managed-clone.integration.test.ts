@@ -17,7 +17,7 @@ import type {
   ManagedProcessRequest,
   ManagedProcessResult,
   ManagedProcessRunner,
-} from '@/domain/types';
+} from '@/domain/ports/managed-process-runner';
 
 const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 const ENTRY = { id: 'app', github: 'octo/app' };

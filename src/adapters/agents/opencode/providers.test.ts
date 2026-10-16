@@ -11,7 +11,8 @@ import {
 } from './providers';
 
 import type { OpenCodeAdapterDependencies, OpenCodeAdapterSettings } from './opencode';
-import type { AgentProviderSetting, CopiedProvider } from '@/domain/types';
+import type { AgentProviderSetting } from '@/domain/config';
+import type { CopiedProvider } from '@/domain/run-records';
 
 type OperatorDirectories = OpenCodeAdapterDependencies['operatorDirectories'];
 

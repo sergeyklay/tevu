@@ -3,14 +3,14 @@
 import { renderTevuError } from '@/interface/render-error';
 
 import type { RebuiltReport } from '@/application/assess';
+import type { TevuConfig } from '@/domain/config';
 import type {
   LoadConfigErrorKind,
-  TevuConfig,
   TevuError,
   TevuResult,
   ValidationFinding,
-  ValidationReport,
-} from '@/domain/types';
+} from '@/domain/errors';
+import type { ValidationReport } from '@/domain/use-cases';
 import type { WaitInterrupt } from '@/interface/wait-interrupt';
 import type { Readable, Writable } from 'node:stream';
 

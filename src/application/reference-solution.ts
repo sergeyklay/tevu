@@ -18,17 +18,15 @@ import { describeManagedCloneError, ensureManagedCommits } from './managed-clone
 
 import type { ManagedCloneDependencies, ManagedCommitsRequest } from './managed-clone';
 import type { RepositoryInput } from '@/config/schema';
+import type { RepositoryDefinition, TaskReference } from '@/domain/config';
+import type { TevuError, TevuResult } from '@/domain/errors';
 import type { ParsedGitHubRepository } from '@/domain/github-reference';
 import type {
   PullRequestCommit,
   PullRequestReader,
   PullRequestSnapshot,
   PullRequestState,
-  RepositoryDefinition,
-  TaskReference,
-  TevuError,
-  TevuResult,
-} from '@/domain/types';
+} from '@/domain/ports/pull-request-reader';
 
 /** Inputs to resolve one `task add` reference-solution answer. */
 export type ReferenceSolutionRequest = {

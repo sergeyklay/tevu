@@ -6,15 +6,14 @@ import { referencedVariableName } from '@/config/schema';
 
 import type { RepositoryInput, TaskInput, TevuConfigInput } from '@/config/schema';
 import type {
-  ConfigStore,
-  GitWorkspaceAdapter,
   RepositoryDefinition,
   TaskDefinition,
   TaskReference,
   TevuConfig,
-  TevuResult,
-  ValidationFinding,
-} from '@/domain/types';
+} from '@/domain/config';
+import type { TevuResult, ValidationFinding } from '@/domain/errors';
+import type { ConfigStore } from '@/domain/ports/config-store';
+import type { GitWorkspaceAdapter } from '@/domain/ports/git-workspace';
 
 /** Error kinds task creation can produce. */
 export type CreateTaskErrorKind =

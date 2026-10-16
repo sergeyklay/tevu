@@ -28,25 +28,22 @@ import {
 import { buildTaskPrompt } from './task-prompt';
 
 import type {
-  AgentAdapter,
-  AgentCapabilityReport,
-  AgentConfigurationFile,
-  CaseExecutableAdapter,
-  CaseExecutableVerdict,
-  ModelListing,
   ModelRoleName,
-  ParentEnvironmentSnapshot,
   RepositoryDefinition,
-  SourceValidation,
   TaskDefinition,
   TevuConfig,
-  TevuError,
-  TevuResult,
-  ValidationDependencies,
-  ValidationFinding,
-  ValidationReport,
+} from '@/domain/config';
+import type { TevuError, TevuResult, ValidationFinding } from '@/domain/errors';
+import type { AgentAdapter, ModelListing } from '@/domain/ports/agent';
+import type {
+  CaseExecutableAdapter,
+  CaseExecutableVerdict,
   WorkingDirectoryChanges,
-} from '@/domain/types';
+} from '@/domain/ports/case-executable';
+import type { AgentConfigurationFile, ParentEnvironmentSnapshot } from '@/domain/ports/environment';
+import type { SourceValidation } from '@/domain/ports/git-workspace';
+import type { AgentCapabilityReport } from '@/domain/run-records';
+import type { ValidationDependencies, ValidationReport } from '@/domain/use-cases';
 
 /** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
 const FULL_COMMIT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;

@@ -10,7 +10,7 @@
  */
 
 import { callModelRole, describeModelCallFailure } from '@/application/model-call';
-import { unavailableAgentMetrics } from '@/domain/types';
+import { unavailableAgentMetrics } from '@/domain/run-records';
 import {
   buildGraderPrompt,
   deriveGrades,
@@ -19,18 +19,12 @@ import {
   sumGraderCallMetrics,
 } from '@/evaluation/grading';
 
-import type {
-  AgentMetrics,
-  CaseGrading,
-  GraderIdentity,
-  ModelCallDependencies,
-  ModelCallEvidence,
-  ProviderSnapshot,
-  Redactor,
-  TaskDefinition,
-  TevuConfig,
-  TevuError,
-} from '@/domain/types';
+import type { TaskDefinition, TevuConfig } from '@/domain/config';
+import type { TevuError } from '@/domain/errors';
+import type { ModelCallEvidence, ProviderSnapshot } from '@/domain/ports/agent';
+import type { Redactor } from '@/domain/ports/secret-redactor';
+import type { AgentMetrics, CaseGrading, GraderIdentity } from '@/domain/run-records';
+import type { ModelCallDependencies } from '@/domain/use-cases';
 import type { GradedCheckSummary } from '@/evaluation/grading';
 
 /** Everything one grading call needs; `patch` is the case's captured solution patch. */

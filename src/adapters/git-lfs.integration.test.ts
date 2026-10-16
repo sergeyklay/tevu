@@ -30,15 +30,14 @@ import { createManagedCloneAdapter } from './managed-clone';
 
 import type { LfsObject } from './__fixtures__/lfs.fixtures';
 import type { ManagedLfsDependencies } from '@/application/managed-clone';
+import type { TevuError, TevuResult } from '@/domain/errors';
+import type { CaseWorkspace } from '@/domain/ports/git-workspace';
 import type {
-  CaseIdentity,
-  CaseWorkspace,
   ManagedProcessRequest,
   ManagedProcessResult,
   ManagedProcessRunner,
-  TevuError,
-  TevuResult,
-} from '@/domain/types';
+} from '@/domain/ports/managed-process-runner';
+import type { CaseIdentity } from '@/domain/run-records';
 
 const gitLfsInstalled = spawnSync('git', ['lfs', 'version']).status === 0;
 

@@ -1,5 +1,5 @@
 import { parseGitHubRepository } from '@/domain/github-reference';
-import { effortLabel } from '@/domain/types';
+import { effortLabel } from '@/domain/run-records';
 
 import { renderSummaryMarkdown, summarizeTask, templateConclusions } from './summary';
 import {
@@ -50,7 +50,7 @@ import type {
   SummaryFacts,
   SummaryMeasure,
   TaskRecord,
-} from '@/domain/types';
+} from '@/domain/run-records';
 
 /**
  * Everything report generation consumes: the versioned run record plus the

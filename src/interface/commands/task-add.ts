@@ -3,7 +3,7 @@
 import { outro } from '@clack/prompts';
 
 import { createStatusLine } from '@/interface/status-line';
-import { runTaskWizard } from '@/interface/task-wizard';
+import { runTaskWizard } from '@/interface/task-wizard/task-wizard';
 
 import { createLineWriters, EXIT_CANCELLED, EXIT_COMPLETED, reportFailure } from './shared';
 
@@ -25,18 +25,16 @@ import type {
   ResolvedReferenceSolution,
 } from '@/application/reference-solution';
 import type { RepositoryInput } from '@/config/schema';
-import type { ParsedGitHubRepository } from '@/domain/github-reference';
 import type {
-  AgentCapabilityReport,
-  IssueSnapshot,
   JiraTrackerSettings,
-  LoadConfigErrorKind,
   TaskDefinition,
   TaskReference,
   TevuConfig,
-  TevuResult,
-  ValidationFinding,
-} from '@/domain/types';
+} from '@/domain/config';
+import type { LoadConfigErrorKind, TevuResult, ValidationFinding } from '@/domain/errors';
+import type { ParsedGitHubRepository } from '@/domain/github-reference';
+import type { IssueSnapshot } from '@/domain/ports/issue-tracker';
+import type { AgentCapabilityReport } from '@/domain/run-records';
 import type { LocalRepositoryNaming } from '@/interface/derived-identifiers';
 
 export type TaskAddOptionValues = ConfigOptionValues & { jira?: string; github?: string };

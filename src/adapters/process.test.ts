@@ -28,13 +28,13 @@ import {
   runManagedProcess,
 } from './process';
 
+import type { CaseExecutableProbeRequest } from '@/domain/ports/case-executable';
 import type {
-  CaseExecutableProbeRequest,
   ManagedProcessCompletion,
   ManagedProcessLaunchFailure,
   ManagedProcessRequest,
   ManagedProcessResult,
-} from '@/domain/types';
+} from '@/domain/ports/managed-process-runner';
 
 const SYNTHETIC_GIT_SCRIPT = '#!/bin/sh\necho "git version 2.45.0-synthetic"\nexit 0\n';
 

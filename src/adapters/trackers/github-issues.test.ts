@@ -11,7 +11,9 @@ import type {
   GhRunResult,
   GitHubIssuesDependencies,
 } from './github-issues';
-import type { IssueSnapshot, PullRequestSnapshot, TevuResult } from '@/domain/types';
+import type { TevuResult } from '@/domain/errors';
+import type { IssueSnapshot } from '@/domain/ports/issue-tracker';
+import type { PullRequestSnapshot } from '@/domain/ports/pull-request-reader';
 
 type ReadIssueResult = TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>;
 

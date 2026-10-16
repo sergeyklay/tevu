@@ -1,7 +1,8 @@
 import { Buffer } from 'node:buffer';
 import { z } from 'zod';
 
-import type { IssueSnapshot, IssueTrackerAdapter, TevuResult } from '@/domain/types';
+import type { TevuResult } from '@/domain/errors';
+import type { IssueSnapshot, IssueTrackerAdapter } from '@/domain/ports/issue-tracker';
 
 /** Jira Cloud connection settings; credentials are read by environment variable name only. */
 export type JiraCloudSettings = {

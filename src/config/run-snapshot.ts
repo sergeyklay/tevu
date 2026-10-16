@@ -14,7 +14,8 @@ import { z } from 'zod';
 
 import { describePath } from '@/domain/describe-path';
 
-import type { CheckRecord, RunConfigRecord, TaskRecord, TevuResult } from '@/domain/types';
+import type { TevuResult } from '@/domain/errors';
+import type { CheckRecord, RunConfigRecord, TaskRecord } from '@/domain/run-records';
 
 const projectionSourceSchema = z.object({
   kind: z.enum(['jira', 'github']),

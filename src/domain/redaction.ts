@@ -1,6 +1,7 @@
 import { describeCause } from './describe-cause';
 
-import type { Redactor, TevuResult } from './types';
+import type { TevuResult } from './errors';
+import type { Redactor } from '@/domain/ports/secret-redactor';
 
 /**
  * Applies the redactor to every string inside a decoded JSON-like value while

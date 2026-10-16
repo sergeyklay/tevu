@@ -13,7 +13,9 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 - **Imports that leave the file's directory use `@/…`, which maps to `src/…`; same-directory imports stay `./x`. No specifier carries a `.ts` or `.js` extension.** The alias comes from `paths` in `tsconfig.json`, which `tsc`, esbuild, Vitest (`resolve.tsconfigPaths`), typescript-eslint, and knip all read; a new tool that resolves `src` imports needs the same.
 - **`src/index.ts` reads the package version from `__TEVU_VERSION__`, a constant the build writes from `package.json`.** `scripts/build.mjs` and `vitest.config.ts` define it; a new tool that evaluates `src/index.ts` needs the same. `src/` never imports `package.json` and never repeats the version as a literal.
 - **Dependencies point one way: `domain` <- `config` <- `application` <- `interface`.** `adapters` implement contracts declared in `domain` and import nothing else from `src`. `src/index.ts` is the only module that wires concrete adapters.
-- **Errors cross module boundaries as `TevuResult`, never as thrown exceptions.**
+- **Each declaration under `src/domain` lives in the module of its concept, never in a catch-all module.** A contract an adapter implements gets its own module under `src/domain/ports`, with the shapes only that contract uses; a shape a run saves goes in `src/domain/run-records.ts`. No module re-exports another module's declarations.
+- **Errors cross module boundaries as `TevuResult`, never as thrown exceptions.** `WizardCancelledError`, the cancellation sentinel of the `tevu task add` and `tevu assess` wizards, is exempt: it may cross files inside a wizard, and `runTaskWizard` and `runAssessmentWizard` turn it into a `CancellationError` result, so it never leaves a wizard.
+- **Each step of the `tevu task add` interview is its own module under `src/interface/task-wizard`.** The entry `task-wizard.ts` runs the steps in order; a new step gets a new module rather than growing an existing one.
 - **Pure modules read time only through the injected clock**, never `Date.now()` or `new Date()`.
 - **Under `src`, only test files write `process.env`.** `src/index.ts` reads every variable from a copy of tevu's environment taken at startup, while adapters read `process.env` when they run, so a later write leaves the two disagreeing about the same variable.
 - **`tevu report` must reproduce byte-identical JSON and Markdown from unchanged artifacts.** Derived output may not depend on wall-clock time, randomness, or unordered iteration.
@@ -28,6 +30,7 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 
 ### Ask first
 
+- Raising a limit of the size budget in `eslint.config.mjs` (300 lines per file, 50 per function, complexity 10), adding a file to its `oversizedFiles` list, or raising a listed file's numbers. Listed numbers only go down: a change that shrinks a listed file lowers them in the same change, and the file leaves the list once it fits the budget.
 - Any change to the configuration contract (`version: 1`, strict rejection of unknown fields) or to the layout and format of saved run artifacts. Both are public contracts with existing files on disk.
 - Restructuring `docs/`, which follows Diátaxis: getting-started, guides, reference, concepts.
 
