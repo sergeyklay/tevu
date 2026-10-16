@@ -13,6 +13,7 @@ The source directories of tevu, what each holds, how they depend on each other, 
 | `src/adapters/agents` | One directory per agent adapter: probing, case runs, session export, model calls, metric normalization, protocol decoding, provider copying, and model listing |
 | `src/interface` | Command parsing and interactive prompts |
 | `src/interface/commands` | One module per command: the operations it needs and its handler, plus the pieces the handlers share |
+| `src/interface/task-wizard` | The `tevu task add` interview: one module per interview step, the waits between questions, and the entry that runs the steps in order |
 | `src/index.ts` | Executable entry point and dependency wiring |
 
 Product tests are colocated with the behavior they verify, as `*.test.ts` or `*.integration.test.ts`. Protocol fixtures sit next to the protocol adapter. TypeScript module exports are internal; the CLI is the public interface.
@@ -29,7 +30,7 @@ A directory imports only from directories to its left. `src/adapters` implements
 
 ## Code rules
 
-- Errors cross module boundaries as `TevuResult` values, never as thrown exceptions.
+- Errors cross module boundaries as `TevuResult` values, never as thrown exceptions. `WizardCancelledError`, the cancellation sentinel of the `tevu task add` and `tevu assess` wizards, is exempt: it may cross files inside a wizard, and `runTaskWizard` and `runAssessmentWizard` turn it into a `CancellationError` result, so it never leaves a wizard.
 - Pure modules read time only through the injected clock, never through `Date.now()` or `new Date()`.
 - `tevu report` reproduces byte-identical JSON and Markdown from unchanged artifacts, so derived output never depends on wall-clock time, randomness, or unordered iteration.
 - Modules under `src/domain` stay free of boundary dependencies: no Commander.js, Clack, Execa, Git commands, Jira transport code, or Node.js process globals.

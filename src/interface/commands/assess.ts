@@ -1,7 +1,7 @@
 /** `tevu assess`: records verdicts for one case of a saved run through the assessment wizard. */
 
+import { runAssessmentWizard } from '@/interface/assessment-wizard';
 import { createStatusLine } from '@/interface/status-line';
-import { runAssessmentWizard } from '@/interface/task-wizard';
 
 import { createLineWriters, EXIT_COMPLETED, loadCommandConfig, reportFailure } from './shared';
 

@@ -3,7 +3,7 @@
 import { outro } from '@clack/prompts';
 
 import { createStatusLine } from '@/interface/status-line';
-import { runTaskWizard } from '@/interface/task-wizard';
+import { runTaskWizard } from '@/interface/task-wizard/task-wizard';
 
 import { createLineWriters, EXIT_CANCELLED, EXIT_COMPLETED, reportFailure } from './shared';
 
