@@ -30,7 +30,7 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 
 ### Ask first
 
-- Raising a threshold of the size budget in `eslint.config.mjs` (`complexity`, `max-lines-per-function`, `max-lines`) or exempting a file from it. Thresholds only go down: a change that lowers a measured maximum lowers its threshold in the same change.
+- Raising a limit of the size budget in `eslint.config.mjs` (300 lines per file, 50 per function, complexity 10), adding a file to its `oversizedFiles` list, or raising a listed file's numbers. Listed numbers only go down: a change that shrinks a listed file lowers them in the same change, and the file leaves the list once it fits the budget.
 - Any change to the configuration contract (`version: 1`, strict rejection of unknown fields) or to the layout and format of saved run artifacts. Both are public contracts with existing files on disk.
 - Restructuring `docs/`, which follows Diátaxis: getting-started, guides, reference, concepts.
 
