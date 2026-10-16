@@ -3,7 +3,12 @@ import { describe, expect, it } from 'vitest';
 
 import { unavailableAgentMetrics } from '@/domain/run-records';
 
-import { buildAgentMetrics, buildGraderCall } from './__fixtures__/report.fixtures';
+import {
+  buildAgentMetrics,
+  buildCheckResult,
+  buildGraderCall,
+  buildGraderIdentity,
+} from './__fixtures__/report.fixtures';
 import {
   applyGrades,
   buildGraderPrompt,
@@ -23,7 +28,7 @@ import type {
   MetricValue,
 } from '@/domain/run-records';
 
-function buildCommandCheck(overrides: Partial<CheckDefinition> = {}): CheckDefinition {
+function buildCommandCheckDefinition(overrides: Partial<CheckDefinition> = {}): CheckDefinition {
   return {
     id: 'command-check',
     description: 'A command check',
@@ -55,7 +60,7 @@ function buildGradedCheckDefinition(overrides: Partial<CheckDefinition> = {}): C
   } as CheckDefinition;
 }
 
-function buildTask(
+function buildChecksOnlyTask(
   overrides: Partial<TaskDefinition['checks']> = {},
 ): Pick<TaskDefinition, 'checks'> {
   return {
@@ -76,14 +81,14 @@ function buildGradedCheckSummary(overrides: Partial<GradedCheckSummary> = {}): G
   };
 }
 
-function buildGrader(overrides: Partial<GraderIdentity> = {}): GraderIdentity {
-  return { model: 'openai/grader-model', effort: 'high', agent: 'opencode', ...overrides };
+function buildOpenAiGrader(overrides: Partial<GraderIdentity> = {}): GraderIdentity {
+  return buildGraderIdentity({ model: 'openai/grader-model', effort: 'high', ...overrides });
 }
 
 function buildCaseGrading(overrides: Partial<CaseGrading> = {}): CaseGrading {
   const metrics = buildAgentMetrics();
   return {
-    grader: buildGrader(),
+    grader: buildOpenAiGrader(),
     call: { status: 'replied', reply: '{"grades":[]}' },
     calls: [buildGraderCall({ metrics })],
     metrics,
@@ -92,26 +97,25 @@ function buildCaseGrading(overrides: Partial<CaseGrading> = {}): CaseGrading {
   };
 }
 
-function buildCheckResult(overrides: Partial<CheckResult> = {}): CheckResult {
-  return {
+function buildPendingCheckResult(overrides: Partial<CheckResult> = {}): CheckResult {
+  return buildCheckResult({
     checkId: 'csv-content',
-    category: 'acceptance',
     verdict: 'pending',
     evidence: 'awaiting the grader',
     durationMs: null,
     ...overrides,
-  };
+  });
 }
 
 describe('gradedChecksOf', () => {
   it('selects acceptance graded checks before done graded checks, in configuration order', () => {
-    const task = buildTask({
+    const task = buildChecksOnlyTask({
       acceptance: [
         buildGradedCheckDefinition({
           id: 'acc-graded-1',
           description: 'first acceptance criterion',
         }),
-        buildCommandCheck({ id: 'acc-command' }),
+        buildCommandCheckDefinition({ id: 'acc-command' }),
         buildGradedCheckDefinition({
           id: 'acc-graded-2',
           description: 'second acceptance criterion',
@@ -130,8 +134,8 @@ describe('gradedChecksOf', () => {
   });
 
   it('excludes command and manual checks', () => {
-    const task = buildTask({
-      acceptance: [buildCommandCheck(), buildManualCheckDefinition()],
+    const task = buildChecksOnlyTask({
+      acceptance: [buildCommandCheckDefinition(), buildManualCheckDefinition()],
       done: [],
     });
 
@@ -421,13 +425,13 @@ describe('deriveGrades', () => {
 
 describe('applyGrades', () => {
   it('passes every check unchanged when grading is null', () => {
-    const checks = [buildCheckResult()];
+    const checks = [buildPendingCheckResult()];
 
     expect(applyGrades(checks, null)).toEqual(checks);
   });
 
   it('passes a check unchanged when grading holds no grade record for it', () => {
-    const checks = [buildCheckResult({ checkId: 'other-check' })];
+    const checks = [buildPendingCheckResult({ checkId: 'other-check' })];
     const grading = buildCaseGrading({ grades: [] });
 
     expect(applyGrades(checks, grading)).toEqual(checks);
@@ -436,9 +440,13 @@ describe('applyGrades', () => {
   it.each<{ verdict: 'passed' | 'failed' }>([{ verdict: 'passed' }, { verdict: 'failed' }])(
     'maps a $verdict grade onto the same verdict with a grader-attributed evidence line',
     ({ verdict }) => {
-      const checks = [buildCheckResult()];
+      const checks = [buildPendingCheckResult()];
       const grading = buildCaseGrading({
-        grader: buildGrader({ model: 'openai/grader-model', effort: 'high', agent: 'opencode' }),
+        grader: buildOpenAiGrader({
+          model: 'openai/grader-model',
+          effort: 'high',
+          agent: 'opencode',
+        }),
         grades: [
           {
             checkId: 'csv-content',
@@ -461,7 +469,7 @@ describe('applyGrades', () => {
   );
 
   it('maps an undetermined grade onto a pending verdict naming the rationale', () => {
-    const checks = [buildCheckResult()];
+    const checks = [buildPendingCheckResult()];
     const grading = buildCaseGrading({
       grades: [
         {
@@ -484,7 +492,7 @@ describe('applyGrades', () => {
   });
 
   it('maps a pending grade onto a pending verdict naming the reason', () => {
-    const checks = [buildCheckResult()];
+    const checks = [buildPendingCheckResult()];
     const grading = buildCaseGrading({
       grades: [
         {

@@ -15,6 +15,14 @@ import {
 } from '@/adapters/process';
 import { assessCase, readAssessmentContext, rebuildReport } from '@/application/assess';
 import { buildEnvironmentVariableNames } from '@/application/environment-variable-names';
+import {
+  buildManualCheckInput,
+  buildModelDefinitionInput,
+  buildRepositoryDefinition,
+  buildTaskInput,
+  FAKE_AGENT_NAME,
+  rekeyToFakeAgent,
+} from '@/config/__fixtures__/config.fixtures';
 import { renderConfigDocument } from '@/config/document';
 import { loadConfig } from '@/config/load';
 import { decodeRunConfig } from '@/config/run-snapshot';
@@ -26,11 +34,23 @@ import {
 } from '@/domain/run-records';
 
 import {
+  buildAgentCapabilityReport,
+  buildAgentMetrics,
+  buildCaseArtifacts,
+  buildCaseIdentity,
+  buildCaseResult,
+  buildCheckRecord,
+  buildCheckResult,
   buildGradedGrade,
   buildGraderCall,
+  buildGraderIdentity,
+  buildGradingArtifact,
   buildPendingGrade,
+  buildProcessResult,
+  buildRunManifest,
   buildSummaryCall,
   buildSummaryFacts,
+  buildTaskRecord,
 } from './__fixtures__/report.fixtures';
 import {
   buildCheckEnvironment,
@@ -76,7 +96,6 @@ import type {
   GradingArtifact,
   MetricValue,
   ModelRecord,
-  ProcessResult,
   RepositoryRecord,
   RunFinding,
   RunManifest,
@@ -98,30 +117,12 @@ const JIRA_DESCRIPTION = 'TEVU-JIRA-DESCRIPTION full imported body';
 const TRANSCRIPT_BODY = 'TEVU-TRANSCRIPT-BODY model output text';
 const PATCH_BODY = 'TEVU-PATCH-BODY diff --git a/src/welcome.ts b/src/welcome.ts';
 
-const AGENT_NAME = 'fake-agent';
-
 /** Neutral event record the fake agent emits; carries no opencode protocol shape. */
 type FakeEventRecord = { kind: 'tool' } | { kind: 'error'; message: string };
 
-/**
- * Renames the schema-required `opencode` key to `fake-agent` after parsing.
- * The strict schema accepts only the literal `opencode` key (out of scope for
- * this migration), so every agent-neutral test builds through that key and
- * relabels the materialized config instead of parsing `fake-agent` directly.
- */
-function rekeyToFakeAgent(config: TevuConfig): TevuConfig {
-  const { opencode, ...otherAgents } = config.agents;
-  assert.isDefined(opencode, 'agents.opencode block');
-  return {
-    ...config,
-    agents: { ...otherAgents, [AGENT_NAME]: opencode },
-    models: config.models.map((model) => ({ ...model, agent: AGENT_NAME })),
-  };
-}
-
 /** Sums fixed values matching a fully available root-session export; verified verbatim by the tests below. */
 function buildFullMetrics(): AgentMetrics {
-  return buildAgentMetrics();
+  return buildExportedAgentMetrics();
 }
 
 /** Counts the neutral event records the fake agent's own run emitted; mirrors a real adapter's event fallback. */
@@ -162,13 +163,18 @@ function buildEventFallbackMetrics(reason: string, events: readonly unknown[]): 
  */
 const AGENTS_REGISTRY: AgentRegistry = new Map<string, AgentAdapter>([
   [
-    AGENT_NAME,
+    FAKE_AGENT_NAME,
     {
-      probe: () => Promise.resolve({ ok: true, value: buildCapabilityReport() }),
+      probe: () => Promise.resolve({ ok: true, value: buildFakeAgentCapabilityReport() }),
       readProviders: () =>
         Promise.resolve({
           ok: true,
-          value: { agent: AGENT_NAME, configurationFiles: [], findings: [], copiedProviders: [] },
+          value: {
+            agent: FAKE_AGENT_NAME,
+            configurationFiles: [],
+            findings: [],
+            copiedProviders: [],
+          },
         }),
       inspectOperatorProvider: () => Promise.resolve({ ok: true, value: { defined: false } }),
       listModels: () => Promise.resolve({ outcome: 'listed', models: [], variants: new Map() }),
@@ -189,9 +195,9 @@ const AGENTS_REGISTRY: AgentRegistry = new Map<string, AgentAdapter>([
 ]);
 
 function requireFakeAdapter(): AgentAdapter {
-  const adapter = AGENTS_REGISTRY.get(AGENT_NAME);
+  const adapter = AGENTS_REGISTRY.get(FAKE_AGENT_NAME);
   if (adapter === undefined) {
-    throw new Error(`expected AGENTS_REGISTRY to register "${AGENT_NAME}"`);
+    throw new Error(`expected AGENTS_REGISTRY to register "${FAKE_AGENT_NAME}"`);
   }
   return adapter;
 }
@@ -208,33 +214,28 @@ function buildCheckDefinition(overrides: Partial<CheckInput> = {}): CheckInput {
   };
 }
 
-function buildTask(overrides: Partial<TaskInput> = {}): TaskInput {
-  return {
-    id: 'task-1',
+function buildWelcomeRouteTask(overrides: Partial<TaskInput> = {}): TaskInput {
+  return buildTaskInput({
     title: 'Synthetic welcome-route task',
-    repo: 'repo-1',
-    base_commit: '0123456789abcdef0123456789abcdef01234567',
     description: 'synthetic task description for the welcome route',
     prompt: TASK_PROMPT_BODY,
-    readiness: ['synthetic ready item'],
     checks: {
       acceptance: [buildCheckDefinition()],
       done: [
-        { id: 'dod-manual-review', description: 'manual Definition of Done review', manual: true },
-        {
+        buildManualCheckInput({ id: 'dod-manual-review' }),
+        buildManualCheckInput({
           id: 'man-optional-polish',
           description: 'optional manual polish review',
-          manual: true,
           required: false,
-        },
+        }),
       ],
     },
     ...overrides,
-  };
+  });
 }
 
 function buildJiraTask(overrides: Partial<TaskInput> = {}): TaskInput {
-  return buildTask({
+  return buildWelcomeRouteTask({
     id: 'task-2',
     title: 'Synthetic imported task',
     source: {
@@ -249,12 +250,19 @@ function buildJiraTask(overrides: Partial<TaskInput> = {}): TaskInput {
   });
 }
 
-function buildModel(overrides: Partial<ModelDefinitionInput> = {}): ModelDefinitionInput {
-  return { id: 'alpha', model: 'vendor/model-alpha-synth', effort: 'effort-high', ...overrides };
+function buildAlphaModel(overrides: Partial<ModelDefinitionInput> = {}): ModelDefinitionInput {
+  return buildModelDefinitionInput({
+    id: 'alpha',
+    model: 'vendor/model-alpha-synth',
+    effort: 'effort-high',
+    ...overrides,
+  });
 }
 
-function buildRepository(overrides: Partial<RepositoryDefinition> = {}): RepositoryDefinition {
-  return { id: 'repo-1', path: '/tevu-synthetic/repo-1', ...overrides };
+function buildSyntheticRepository(
+  overrides: Partial<RepositoryDefinition> = {},
+): RepositoryDefinition {
+  return buildRepositoryDefinition({ path: '/tevu-synthetic/repo-1', ...overrides });
 }
 
 function buildSyntheticConfig(outputDirectory = '/tevu-synthetic/artifacts'): TevuConfig {
@@ -262,66 +270,54 @@ function buildSyntheticConfig(outputDirectory = '/tevu-synthetic/artifacts'): Te
     version: 1,
     run: { output_dir: outputDirectory, concurrency: 2, timeout: '60s', stop_grace: '1s' },
     agents: { opencode: { command: '/synthetic/opencode', secrets: [PROVIDER_ENV_NAME], env: [] } },
-    repositories: [buildRepository()],
+    repositories: [buildSyntheticRepository()],
     models: [
-      buildModel(),
-      buildModel({ id: 'beta', effort: 'effort-low' }),
-      buildModel({ id: 'gamma', model: 'vendor/model-gamma-synth' }),
+      buildAlphaModel(),
+      buildAlphaModel({ id: 'beta', effort: 'effort-low' }),
+      buildAlphaModel({ id: 'gamma', model: 'vendor/model-gamma-synth' }),
     ],
     tasks: [
-      buildTask(),
+      buildWelcomeRouteTask(),
       buildJiraTask({ base_commit: 'fedcba9876543210fedcba9876543210fedcba98' }),
     ],
   };
   return TevuConfigSchema.parse(config);
 }
 
-function buildCaseIdentity(overrides: Partial<CaseIdentity> = {}): CaseIdentity {
-  return {
+function buildAlphaCaseIdentity(overrides: Partial<CaseIdentity> = {}): CaseIdentity {
+  return buildCaseIdentity({
     caseId: 'task-1--alpha--1',
-    taskId: 'task-1',
     modelId: 'alpha',
-    attempt: 1,
-    sourceCommit: '0123456789abcdef0123456789abcdef01234567',
     model: 'vendor/model-alpha-synth',
     effort: 'effort-high',
-    agent: AGENT_NAME,
-    timeoutMs: 60_000,
+    agent: FAKE_AGENT_NAME,
     ...overrides,
-  };
+  });
 }
 
-function buildCheckRecord(overrides: Partial<CheckRecord> & Pick<CheckRecord, 'id'>): CheckRecord {
-  return {
-    category: 'acceptance',
-    description: `synthetic check ${overrides.id}`,
-    required: true,
-    evaluator: 'command',
-    ...overrides,
-  };
+function buildSyntheticCheckRecord(
+  overrides: Partial<CheckRecord> & Pick<CheckRecord, 'id'>,
+): CheckRecord {
+  return buildCheckRecord({ description: `synthetic check ${overrides.id}`, ...overrides });
 }
 
 /** A `TaskRecord`-shaped fixture, matching what `decodeRunConfig` projects from a stored run. */
-function buildTaskRecord(overrides: Partial<TaskRecord> = {}): TaskRecord {
-  return {
-    id: 'task-1',
+function buildWelcomeRouteTaskRecord(overrides: Partial<TaskRecord> = {}): TaskRecord {
+  return buildTaskRecord({
     title: 'Synthetic welcome-route task',
-    repositoryId: 'repo-1',
-    startCommit: '0123456789abcdef0123456789abcdef01234567',
     description: 'synthetic task description for the welcome route',
-    source: { kind: 'manual' },
     checks: [
-      buildCheckRecord({
+      buildSyntheticCheckRecord({
         id: 'acc-acceptance-command',
         description: 'acceptance command exits zero',
       }),
-      buildCheckRecord({
+      buildSyntheticCheckRecord({
         id: 'dod-manual-review',
         category: 'definition-of-done',
         description: 'manual Definition of Done review',
         evaluator: 'manual',
       }),
-      buildCheckRecord({
+      buildSyntheticCheckRecord({
         id: 'man-optional-polish',
         category: 'definition-of-done',
         description: 'optional manual polish review',
@@ -330,34 +326,13 @@ function buildTaskRecord(overrides: Partial<TaskRecord> = {}): TaskRecord {
       }),
     ],
     ...overrides,
-  };
+  });
 }
 
-function buildProcessResult(overrides: Partial<ProcessResult> = {}): ProcessResult {
-  return {
-    exitCode: 0,
-    signal: null,
-    startedAt: '2026-09-23T00:00:00.000Z',
-    endedAt: '2026-09-23T00:00:01.500Z',
-    durationMs: 1500,
-    terminationStage: 'none',
-    ...overrides,
-  };
-}
-
-function buildCheckResult(
-  overrides: Partial<CheckResult> & Pick<CheckResult, 'checkId'>,
-): CheckResult {
-  return {
-    category: 'acceptance',
-    verdict: 'passed',
-    evidence: 'exit code 0',
-    durationMs: 12,
-    ...overrides,
-  };
-}
-
-function buildArtifactIndex(caseId: string, present: ReadonlySet<string>): CaseResult['artifacts'] {
+function buildPresentArtifacts(
+  caseId: string,
+  present: ReadonlySet<string>,
+): CaseResult['artifacts'] {
   const paths: Record<keyof CaseResult['artifacts'], string> = {
     events: `cases/${caseId}/events.jsonl`,
     diagnostics: `cases/${caseId}/stderr.log`,
@@ -368,7 +343,7 @@ function buildArtifactIndex(caseId: string, present: ReadonlySet<string>): CaseR
     grading: `cases/${caseId}/grading.json`,
     result: `cases/${caseId}/result.json`,
   };
-  return {
+  return buildCaseArtifacts({
     events: present.has('events') ? paths.events : null,
     diagnostics: present.has('diagnostics') ? paths.diagnostics : null,
     sessionExport: present.has('sessionExport') ? paths.sessionExport : null,
@@ -377,22 +352,17 @@ function buildArtifactIndex(caseId: string, present: ReadonlySet<string>): CaseR
     assessment: present.has('assessment') ? paths.assessment : null,
     grading: present.has('grading') ? paths.grading : null,
     result: paths.result,
-  };
+  });
 }
 
-function buildCaseResult(overrides: Partial<CaseResult> = {}): CaseResult {
-  return {
-    schemaVersion: 1,
-    identity: buildCaseIdentity(),
-    lifecycle: 'completed',
+function buildAlphaCaseResult(overrides: Partial<CaseResult> = {}): CaseResult {
+  return buildCaseResult({
+    identity: buildAlphaCaseIdentity(),
     process: buildProcessResult(),
-    outcome: 'passed',
-    checks: [],
     metrics: unavailableBenchmarkMetrics('not yet normalized'),
-    artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result'])),
-    failure: null,
+    artifacts: buildPresentArtifacts('task-1--alpha--1', new Set(['result'])),
     ...overrides,
-  };
+  });
 }
 
 function buildAssessmentArtifact(overrides: Partial<AssessmentArtifact> = {}): AssessmentArtifact {
@@ -425,16 +395,15 @@ function buildAssessmentArtifact(overrides: Partial<AssessmentArtifact> = {}): A
   };
 }
 
-function buildCapabilityReport(
+function buildFakeAgentCapabilityReport(
   overrides: Partial<AgentCapabilityReport> = {},
 ): AgentCapabilityReport {
-  return {
-    executable: `/synthetic/${AGENT_NAME}`,
-    detectedVersion: '9.9.9-synthetic',
+  return buildAgentCapabilityReport({
+    executable: `/synthetic/${FAKE_AGENT_NAME}`,
     capabilities: [{ name: 'run command', required: true, availability: 'available' }],
     isolation: { denyOutsideWorktree: 'unavailable' },
     ...overrides,
-  };
+  });
 }
 
 function buildEfforts(
@@ -447,25 +416,21 @@ function buildEfforts(
   };
 }
 
-function buildManifest(
+function buildFakeAgentManifest(
   runId: string,
   config: TevuConfig,
   capabilities: AgentCapabilityReport,
   caseIds: readonly string[],
 ): RunManifest {
-  return {
-    schemaVersion: 1,
+  return buildRunManifest({
     runId,
     configDigest: 'sha256-synthetic-digest',
-    configPath: '/synthetic/tevu.yaml',
-    startedAt: '2026-09-23T00:00:00.000Z',
-    completedAt: null,
     host: { platform: 'linux', nodeVersion: 'v24.21.0' },
     tools: {
       gitVersion: 'git version 2.45.0',
-      agentVersions: { [AGENT_NAME]: capabilities.detectedVersion },
+      agentVersions: { [FAKE_AGENT_NAME]: capabilities.detectedVersion },
       agentConfigurationFiles: {},
-      copiedProviders: { [AGENT_NAME]: [] },
+      copiedProviders: { [FAKE_AGENT_NAME]: [] },
     },
     execution: {
       concurrency: config.run.concurrency,
@@ -480,7 +445,7 @@ function buildManifest(
       const [taskId, modelId, attempt] = caseId.split('--') as [string, string, string];
       const model = config.models.find((entry) => entry.id === modelId);
       const task = config.tasks.find((entry) => entry.id === taskId);
-      return buildCaseIdentity({
+      return buildAlphaCaseIdentity({
         caseId,
         taskId,
         modelId,
@@ -490,8 +455,8 @@ function buildManifest(
         effort: model?.effort ?? 'effort-high',
       });
     }),
-    context: { config, capabilities: { [AGENT_NAME]: capabilities } },
-  };
+    context: { config, capabilities: { [FAKE_AGENT_NAME]: capabilities } },
+  });
 }
 
 type SyntheticRecords = {
@@ -508,9 +473,9 @@ type SyntheticRecords = {
 
 function buildSyntheticRecords(): SyntheticRecords {
   const config = rekeyToFakeAgent(buildSyntheticConfig());
-  const capabilities = buildCapabilityReport();
+  const capabilities = buildFakeAgentCapabilityReport();
   const runId = '20260923t000000z-synthetic';
-  const manifest = buildManifest(runId, config, capabilities, [
+  const manifest = buildFakeAgentManifest(runId, config, capabilities, [
     'task-1--alpha--1',
     'task-1--beta--1',
     'task-2--gamma--1',
@@ -548,8 +513,8 @@ function buildSyntheticRecords(): SyntheticRecords {
     normalized: alphaNormalized,
   });
 
-  const alpha = buildCaseResult({
-    identity: buildCaseIdentity({ caseId: 'task-1--alpha--1' }),
+  const alpha = buildAlphaCaseResult({
+    identity: buildAlphaCaseIdentity({ caseId: 'task-1--alpha--1' }),
     lifecycle: 'completed',
     outcome: 'pending',
     checks: [
@@ -570,14 +535,14 @@ function buildSyntheticRecords(): SyntheticRecords {
       }),
     ],
     metrics: alphaMetrics.metrics,
-    artifacts: buildArtifactIndex(
+    artifacts: buildPresentArtifacts(
       'task-1--alpha--1',
       new Set(['events', 'diagnostics', 'sessionExport', 'solutionPatch', 'checks', 'result']),
     ),
   });
 
-  const beta = buildCaseResult({
-    identity: buildCaseIdentity({
+  const beta = buildAlphaCaseResult({
+    identity: buildAlphaCaseIdentity({
       caseId: 'task-1--beta--1',
       modelId: 'beta',
       effort: 'effort-low',
@@ -597,14 +562,14 @@ function buildSyntheticRecords(): SyntheticRecords {
       }),
     ],
     metrics: unavailableBenchmarkMetrics('root session export unavailable'),
-    artifacts: buildArtifactIndex(
+    artifacts: buildPresentArtifacts(
       'task-1--beta--1',
       new Set(['events', 'diagnostics', 'checks', 'result']),
     ),
     failure: {
       error: {
         kind: 'AgentProcessError',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         caseId: 'task-1--beta--1',
         exitCode: 1,
         signal: null,
@@ -613,8 +578,8 @@ function buildSyntheticRecords(): SyntheticRecords {
     },
   });
 
-  const gamma = buildCaseResult({
-    identity: buildCaseIdentity({
+  const gamma = buildAlphaCaseResult({
+    identity: buildAlphaCaseIdentity({
       caseId: 'task-2--gamma--1',
       taskId: 'task-2',
       modelId: 'gamma',
@@ -632,7 +597,7 @@ function buildSyntheticRecords(): SyntheticRecords {
     outcome: 'not-evaluated',
     checks: [],
     metrics: unavailableBenchmarkMetrics('case timed out; checks were not run'),
-    artifacts: buildArtifactIndex('task-2--gamma--1', new Set([])),
+    artifacts: buildPresentArtifacts('task-2--gamma--1', new Set([])),
     failure: {
       error: { kind: 'CaseTimeoutError', caseId: 'task-2--gamma--1', timeoutMs: 60000 },
       occurredAt: '2026-09-23T00:00:42.100Z',
@@ -1278,7 +1243,7 @@ describe('evaluateChecks', () => {
         workspace,
         snapshot.value,
         environmentNames,
-        AGENT_NAME,
+        FAKE_AGENT_NAME,
         [],
       );
       expect(created.ok).toBe(true);
@@ -1572,7 +1537,11 @@ describe('reduceRequiredOutcome', () => {
       results: [
         buildCheckResult({ checkId: 'acc-a' }),
         buildCheckResult({ checkId: 'dod-a', category: 'definition-of-done' }),
-        buildCheckResult({ checkId: 'man-a', category: 'definition-of-done', verdict: 'failed' }),
+        buildCheckResult({
+          checkId: 'man-a',
+          category: 'definition-of-done',
+          verdict: 'failed',
+        }),
       ],
       expected: 'passed',
     },
@@ -1628,14 +1597,14 @@ describe('reduceRequiredOutcome', () => {
   });
 });
 
-function buildAgentMetrics(overrides: Partial<AgentMetrics> = {}): AgentMetrics {
+function buildExportedAgentMetrics(overrides: Partial<AgentMetrics> = {}): AgentMetrics {
   const measured = (value: number, unit: 'count' | 'token' | 'USD'): AgentMetrics['cost'] => ({
     value,
     unit,
     availability: { status: 'available', source: 'root-session export' },
     scope: 'root-session',
   });
-  return {
+  return buildAgentMetrics({
     inputTokens: measured(130, 'token'),
     outputTokens: measured(45, 'token'),
     reasoningTokens: measured(16, 'token'),
@@ -1648,7 +1617,7 @@ function buildAgentMetrics(overrides: Partial<AgentMetrics> = {}): AgentMetrics 
     skillCalls: measured(1, 'count'),
     cost: measured(0.0125, 'USD'),
     ...overrides,
-  };
+  });
 }
 
 describe('combineCaseMetrics', () => {
@@ -1656,7 +1625,7 @@ describe('combineCaseMetrics', () => {
     const combined = combineCaseMetrics({
       durationMs: 1500,
       elapsedUnavailableReason: 'unused',
-      normalized: { ok: true, value: buildAgentMetrics() },
+      normalized: { ok: true, value: buildExportedAgentMetrics() },
     });
 
     expect(combined.protocolFailure).toBeNull();
@@ -1666,7 +1635,7 @@ describe('combineCaseMetrics', () => {
       availability: { status: 'available', source: 'process' },
       scope: 'case',
     });
-    expect(combined.metrics.inputTokens).toEqual(buildAgentMetrics().inputTokens);
+    expect(combined.metrics.inputTokens).toEqual(buildExportedAgentMetrics().inputTokens);
     expect(Object.keys(combined.metrics)).toEqual([
       'elapsed',
       'inputTokens',
@@ -1687,7 +1656,7 @@ describe('combineCaseMetrics', () => {
     const combined = combineCaseMetrics({
       durationMs: null,
       elapsedUnavailableReason: 'the agent process produced no timing evidence',
-      normalized: { ok: true, value: buildAgentMetrics() },
+      normalized: { ok: true, value: buildExportedAgentMetrics() },
     });
 
     expect(combined.metrics.elapsed).toEqual({
@@ -1788,7 +1757,7 @@ describe('deterministic report regeneration', () => {
     };
     const input = {
       run: { ...run, cases: records.caseResults },
-      capabilities: { [AGENT_NAME]: records.capabilities },
+      capabilities: { [FAKE_AGENT_NAME]: records.capabilities },
       tasks: decoded.value.tasks,
       models: decoded.value.models,
       repositories: decoded.value.repositories,
@@ -1798,7 +1767,7 @@ describe('deterministic report regeneration', () => {
     };
     const reordered = {
       run,
-      capabilities: { [AGENT_NAME]: records.capabilities },
+      capabilities: { [FAKE_AGENT_NAME]: records.capabilities },
       tasks: [...decoded.value.tasks].reverse(),
       models: decoded.value.models,
       repositories: [...decoded.value.repositories].reverse(),
@@ -1830,8 +1799,8 @@ describe('deterministic report regeneration', () => {
   });
 
   it('renders manual and Jira task sources byte-identically to the pre-GitHub-import report output', () => {
-    const manualTask = buildTaskRecord();
-    const jiraTask = buildTaskRecord({
+    const manualTask = buildWelcomeRouteTaskRecord();
+    const jiraTask = buildWelcomeRouteTaskRecord({
       id: 'task-2',
       title: 'Synthetic imported task',
       source: {
@@ -1843,18 +1812,18 @@ describe('deterministic report regeneration', () => {
     // This golden fixture pins report output that predates the agent-adapter
     // migration; its identities stay literally "opencode" so the pinned
     // bytes below never change. No `AgentRegistry` is involved here.
-    const manualCase = buildCaseResult({
-      identity: buildCaseIdentity({ agent: 'opencode', timeoutMs: 1000 }),
+    const manualCase = buildAlphaCaseResult({
+      identity: buildAlphaCaseIdentity({ agent: 'opencode', timeoutMs: 1000 }),
     });
-    const jiraCase = buildCaseResult({
-      identity: buildCaseIdentity({
+    const jiraCase = buildAlphaCaseResult({
+      identity: buildAlphaCaseIdentity({
         caseId: 'task-2--alpha--1',
         taskId: 'task-2',
         sourceCommit: jiraTask.startCommit,
         agent: 'opencode',
         timeoutMs: 1000,
       }),
-      artifacts: buildArtifactIndex('task-2--alpha--1', new Set(['result'])),
+      artifacts: buildPresentArtifacts('task-2--alpha--1', new Set(['result'])),
     });
     const manifest: RunManifest = {
       schemaVersion: 1,
@@ -1892,7 +1861,7 @@ describe('deterministic report regeneration', () => {
   });
 
   it('renders the GitHub issue source line and result.json entry for a github-issue task', () => {
-    const githubTask = buildTaskRecord({
+    const githubTask = buildWelcomeRouteTaskRecord({
       id: 'task-3',
       source: {
         kind: 'github-issue',
@@ -1900,13 +1869,13 @@ describe('deterministic report regeneration', () => {
         issueUrl: 'https://github.com/octo/repo/issues/42',
       },
     });
-    const githubCase = buildCaseResult({
-      identity: buildCaseIdentity({
+    const githubCase = buildAlphaCaseResult({
+      identity: buildAlphaCaseIdentity({
         caseId: 'task-3--alpha--1',
         taskId: 'task-3',
         sourceCommit: githubTask.startCommit,
       }),
-      artifacts: buildArtifactIndex('task-3--alpha--1', new Set(['result'])),
+      artifacts: buildPresentArtifacts('task-3--alpha--1', new Set(['result'])),
     });
     const manifest: RunManifest = {
       schemaVersion: 1,
@@ -1954,15 +1923,18 @@ describe('deterministic report regeneration', () => {
   });
 
   it("computes each PairSummary's outcome counts, passedOfPlanned, and allPassed, topping up not-evaluated by the unmatched planned attempts, and renders the pair row (AC-6)", () => {
-    const passed = buildCaseResult({
-      identity: buildCaseIdentity({ caseId: 'task-1--alpha--1', attempt: 1 }),
+    const passed = buildAlphaCaseResult({
+      identity: buildAlphaCaseIdentity({ caseId: 'task-1--alpha--1', attempt: 1 }),
       outcome: 'passed',
     });
-    const failed = buildCaseResult({
-      identity: buildCaseIdentity({ caseId: 'task-1--alpha--2', attempt: 2 }),
+    const failed = buildAlphaCaseResult({
+      identity: buildAlphaCaseIdentity({ caseId: 'task-1--alpha--2', attempt: 2 }),
       outcome: 'failed',
     });
-    const notEvaluatedIdentity = buildCaseIdentity({ caseId: 'task-1--alpha--3', attempt: 3 });
+    const notEvaluatedIdentity = buildAlphaCaseIdentity({
+      caseId: 'task-1--alpha--3',
+      attempt: 3,
+    });
     const manifest: RunManifest = {
       schemaVersion: 1,
       runId: '20260101t000000z-pairs',
@@ -1984,7 +1956,7 @@ describe('deterministic report regeneration', () => {
     const input: ReportInput = {
       run: { schemaVersion: 1, manifest, cases: [passed, failed], findings: [], exitCode: 2 },
       capabilities: {},
-      tasks: [buildTaskRecord()],
+      tasks: [buildWelcomeRouteTaskRecord()],
       models: [],
       repositories: [],
       assessments: [],
@@ -2021,7 +1993,7 @@ describe('deterministic report regeneration', () => {
 
   it('orders findings and their rendered Run findings list by attempt number, not the caseId string, for repeat 10 (AC-11)', () => {
     const identities = Array.from({ length: 10 }, (_, index) =>
-      buildCaseIdentity({ caseId: `task-1--alpha--${index + 1}`, attempt: index + 1 }),
+      buildAlphaCaseIdentity({ caseId: `task-1--alpha--${index + 1}`, attempt: index + 1 }),
     );
     const manifest: RunManifest = {
       schemaVersion: 1,
@@ -2106,14 +2078,14 @@ describe('deterministic report regeneration', () => {
       conclusions: null,
     });
     const identities = [
-      buildCaseIdentity({ caseId: 'task-a--alpha--1', taskId: 'task-a', timeoutMs: 3000 }),
-      buildCaseIdentity({
+      buildAlphaCaseIdentity({ caseId: 'task-a--alpha--1', taskId: 'task-a', timeoutMs: 3000 }),
+      buildAlphaCaseIdentity({
         caseId: 'task-a--alpha--2',
         taskId: 'task-a',
         attempt: 2,
         timeoutMs: 2000,
       }),
-      buildCaseIdentity({ caseId: 'task-b--alpha--1', taskId: 'task-b', timeoutMs: 500 }),
+      buildAlphaCaseIdentity({ caseId: 'task-b--alpha--1', taskId: 'task-b', timeoutMs: 500 }),
     ];
 
     const markdown = buildReport(buildInputWithCases(identities)).markdown;
@@ -2143,8 +2115,8 @@ describe('deterministic report regeneration', () => {
       execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 1, source: 'config' } },
       efforts: buildEfforts(),
       cases: [
-        buildCaseIdentity({ caseId: 'task-a--alpha--1', taskId: 'task-a', timeoutMs: 1000 }),
-        buildCaseIdentity({ caseId: 'task-b--alpha--1', taskId: 'task-b', timeoutMs: 1000 }),
+        buildAlphaCaseIdentity({ caseId: 'task-a--alpha--1', taskId: 'task-a', timeoutMs: 1000 }),
+        buildAlphaCaseIdentity({ caseId: 'task-b--alpha--1', taskId: 'task-b', timeoutMs: 1000 }),
       ],
     };
     const input: ReportInput = {
@@ -2413,10 +2385,10 @@ describe('deterministic report regeneration', () => {
       const markdown = rebuilt.value.report.markdown;
 
       expect(markdown).toContain(
-        `Agent "${AGENT_NAME}" version (detected provenance only): 9.9.9-synthetic`,
+        `Agent "${FAKE_AGENT_NAME}" version (detected provenance only): 9.9.9-synthetic`,
       );
       expect(markdown).toContain(
-        `Agent "${AGENT_NAME}" isolation control (deny outside worktree): unavailable`,
+        `Agent "${FAKE_AGENT_NAME}" isolation control (deny outside worktree): unavailable`,
       );
       expect(markdown).toContain('Configuration digest: `sha256-synthetic-digest`');
       expect(markdown).toContain('Run exit code: 2');
@@ -2550,7 +2522,7 @@ describe('deterministic report regeneration', () => {
         },
       });
       const started = await failingStore.startRun(
-        buildManifest('20260923t010000z-redact', records.config, records.capabilities, [
+        buildFakeAgentManifest('20260923t010000z-redact', records.config, records.capabilities, [
           'task-1--alpha--1',
         ]),
       );
@@ -2575,7 +2547,7 @@ describe('deterministic report regeneration', () => {
         ) => string,
       });
       const nonStringRun = await nonStringStore.startRun(
-        buildManifest('20260923t010000z-redact2', records.config, records.capabilities, [
+        buildFakeAgentManifest('20260923t010000z-redact2', records.config, records.capabilities, [
           'task-1--alpha--1',
         ]),
       );
@@ -2725,7 +2697,7 @@ describe('comparison table in the report', () => {
   function buildFailure(kind: FailureKind, caseId: string): FailureRecord {
     const occurredAt = '2026-09-23T00:00:00.950Z';
     return kind === 'AgentProcessError'
-      ? { error: { kind, agent: AGENT_NAME, caseId, exitCode: 1, signal: null }, occurredAt }
+      ? { error: { kind, agent: FAKE_AGENT_NAME, caseId, exitCode: 1, signal: null }, occurredAt }
       : { error: { kind, caseId, timeoutMs: 60_000 }, occurredAt };
   }
 
@@ -2744,21 +2716,21 @@ describe('comparison table in the report', () => {
     const identities = taskIds.flatMap((taskId) =>
       models.flatMap((entry) =>
         Array.from({ length: repeat }, (_, index) =>
-          buildCaseIdentity({
+          buildAlphaCaseIdentity({
             caseId: `${taskId}--${entry.id}--${index + 1}`,
             taskId,
             modelId: entry.id,
             attempt: index + 1,
             model: entry.model,
             effort: entry.effort,
-            agent: options.agents?.[entry.id] ?? AGENT_NAME,
+            agent: options.agents?.[entry.id] ?? FAKE_AGENT_NAME,
           }),
         ),
       ),
     );
     const defaultMetrics: BenchmarkMetrics = {
       elapsed: reported(1500, 'millisecond'),
-      ...buildAgentMetrics(),
+      ...buildExportedAgentMetrics(),
     };
     const cases = identities.flatMap((identity) => {
       const overrides = results(identity);
@@ -2767,9 +2739,9 @@ describe('comparison table in the report', () => {
       }
       const { metrics, ...rest } = overrides;
       return [
-        buildCaseResult({
+        buildAlphaCaseResult({
           identity,
-          artifacts: buildArtifactIndex(identity.caseId, new Set(['result'])),
+          artifacts: buildPresentArtifacts(identity.caseId, new Set(['result'])),
           metrics: { ...defaultMetrics, ...metrics },
           ...rest,
         }),
@@ -2785,7 +2757,7 @@ describe('comparison table in the report', () => {
       host: { platform: 'linux', nodeVersion: 'v24.21.0' },
       tools: {
         gitVersion: 'git version 2.45.0',
-        agentVersions: { [AGENT_NAME]: null },
+        agentVersions: { [FAKE_AGENT_NAME]: null },
         agentConfigurationFiles: {},
         copiedProviders: {},
       },
@@ -2802,7 +2774,9 @@ describe('comparison table in the report', () => {
       capabilities: {},
       tasks:
         options.tasks ??
-        taskIds.map((taskId) => buildTaskRecord({ id: taskId, title: taskTitleOf(taskId) })),
+        taskIds.map((taskId) =>
+          buildWelcomeRouteTaskRecord({ id: taskId, title: taskTitleOf(taskId) }),
+        ),
       models,
       repositories: [],
       assessments: [],
@@ -3028,9 +3002,9 @@ describe('comparison table in the report', () => {
       const rows = comparisonRows(reportOf({ models }));
 
       expect(rows.map((row) => row['Model'])).toEqual([
-        `model-alpha-synth, ${AGENT_NAME} (1)`,
+        `model-alpha-synth, ${FAKE_AGENT_NAME} (1)`,
         'model-alpha-synth',
-        `model-alpha-synth, ${AGENT_NAME} (2)`,
+        `model-alpha-synth, ${FAKE_AGENT_NAME} (2)`,
       ]);
     });
 
@@ -3071,8 +3045,8 @@ describe('comparison table in the report', () => {
       );
 
       expect(rows.map((row) => row['Model'])).toEqual([
-        `model-alpha-synth, ${AGENT_NAME} (1)`,
-        `model-alpha-synth, ${AGENT_NAME} (2)`,
+        `model-alpha-synth, ${FAKE_AGENT_NAME} (1)`,
+        `model-alpha-synth, ${FAKE_AGENT_NAME} (2)`,
       ]);
     });
 
@@ -3089,8 +3063,8 @@ describe('comparison table in the report', () => {
       const rows = comparisonRows(reportOf({ models, efforts }));
 
       expect(rows.map((row) => row['Model'])).toEqual([
-        `model-alpha-synth, ${AGENT_NAME} (1)`,
-        `model-alpha-synth, ${AGENT_NAME} (2)`,
+        `model-alpha-synth, ${FAKE_AGENT_NAME} (1)`,
+        `model-alpha-synth, ${FAKE_AGENT_NAME} (2)`,
       ]);
       expect(rows.map((row) => row['Effort'])).toEqual(['effort-high', 'effort-high, unverified']);
     });
@@ -3244,7 +3218,7 @@ describe('comparison table in the report', () => {
 
       const markdown = reportOf({
         taskIds,
-        tasks: taskIds.map((id) => buildTaskRecord({ id, description })),
+        tasks: taskIds.map((id) => buildWelcomeRouteTaskRecord({ id, description })),
         results: () => ({ metrics: { cost: unavailableMetric('USD', REASON) } }),
       });
 
@@ -3403,13 +3377,13 @@ describe('comparison table in the report', () => {
 
   describe('Required checks cell', () => {
     function buildRequiredChecksTask(): TaskRecord {
-      return buildTaskRecord({
+      return buildWelcomeRouteTaskRecord({
         title: taskTitleOf('task-1'),
         checks: [
           ...['req-1', 'req-2', 'req-3', 'req-4', 'req-5', 'req-6'].map((id) =>
-            buildCheckRecord({ id }),
+            buildSyntheticCheckRecord({ id }),
           ),
-          buildCheckRecord({ id: 'opt-1', required: false }),
+          buildSyntheticCheckRecord({ id: 'opt-1', required: false }),
         ],
       });
     }
@@ -3510,7 +3484,7 @@ describe('comparison table in the report', () => {
     it('marks every measurement and the runtime failure of ten planned attempts with a shared footnote', () => {
       const markdown = reportOf({
         repeat: 10,
-        tasks: [buildTaskRecord({ title: taskTitleOf('task-1'), checks: [] })],
+        tasks: [buildWelcomeRouteTaskRecord({ title: taskTitleOf('task-1'), checks: [] })],
         results: () => null,
       });
 
@@ -3848,8 +3822,8 @@ describe('comparison table in the report', () => {
     it('keeps grader usage out of the rows and states it on the line', () => {
       const withGradings = buildComparisonInput({
         gradings: [
-          buildGradingArtifact({
-            metrics: buildAgentMetrics({ inputTokens: reported(7000, 'token') }),
+          buildAlphaGradingArtifact({
+            metrics: buildExportedAgentMetrics({ inputTokens: reported(7000, 'token') }),
           }),
         ],
       });
@@ -3864,7 +3838,7 @@ describe('comparison table in the report', () => {
     });
 
     it('keeps the strings that locate the case sections out of the part before the first task', () => {
-      const markdown = reportOf({ gradings: [buildGradingArtifact()] });
+      const markdown = reportOf({ gradings: [buildAlphaGradingArtifact()] });
 
       const beforeTasks = markdown.slice(0, markdown.indexOf('## Task: '));
 
@@ -3883,9 +3857,9 @@ describe('comparison table in the report', () => {
         results: ({ modelId }) =>
           modelId === 'alpha' ? { metrics: { cost: unavailableMetric('USD', 'row reason') } } : {},
         gradings: [
-          buildGradingArtifact({
+          buildAlphaGradingArtifact({
             caseId: 'task-1--alpha--1',
-            metrics: buildAgentMetrics({
+            metrics: buildExportedAgentMetrics({
               inputTokens: reported(1000, 'token'),
               cacheReadTokens: reported(0, 'token'),
               cacheWriteTokens: reported(0, 'token'),
@@ -3894,9 +3868,9 @@ describe('comparison table in the report', () => {
               cost: reported(0.003, 'USD'),
             }),
           }),
-          buildGradingArtifact({
+          buildAlphaGradingArtifact({
             caseId: 'task-1--beta--1',
-            metrics: buildAgentMetrics({
+            metrics: buildExportedAgentMetrics({
               inputTokens: reported(200, 'token'),
               cacheReadTokens: reported(0, 'token'),
               cacheWriteTokens: reported(0, 'token'),
@@ -3922,8 +3896,8 @@ describe('comparison table in the report', () => {
     it('names a single graded case in the singular and gives the bare reason of a missing value', () => {
       const markdown = reportOf({
         gradings: [
-          buildGradingArtifact({
-            metrics: buildAgentMetrics({
+          buildAlphaGradingArtifact({
+            metrics: buildExportedAgentMetrics({
               reasoningTokens: unavailableMetric('token', 'the grader export is missing'),
             }),
           }),
@@ -3944,10 +3918,13 @@ describe('comparison table in the report', () => {
       const markdown = reportOf({
         models,
         gradings: [
-          buildGradingArtifact({ caseId: 'task-1--alpha--1', metrics: buildAgentMetrics() }),
-          buildGradingArtifact({
+          buildAlphaGradingArtifact({
+            caseId: 'task-1--alpha--1',
+            metrics: buildExportedAgentMetrics(),
+          }),
+          buildAlphaGradingArtifact({
             caseId: 'task-1--beta--1',
-            metrics: buildAgentMetrics({
+            metrics: buildExportedAgentMetrics({
               cost: unavailableMetric('USD', 'grader cost unavailable'),
             }),
           }),
@@ -3969,12 +3946,15 @@ describe('comparison table in the report', () => {
       const markdown = reportOf({
         models,
         gradings: [
-          buildGradingArtifact({
+          buildAlphaGradingArtifact({
             caseId: 'task-1--alpha--1',
             calls: [stopped, buildGraderCall()],
-            metrics: buildAgentMetrics(),
+            metrics: buildExportedAgentMetrics(),
           }),
-          buildGradingArtifact({ caseId: 'task-1--beta--1', metrics: buildAgentMetrics() }),
+          buildAlphaGradingArtifact({
+            caseId: 'task-1--beta--1',
+            metrics: buildExportedAgentMetrics(),
+          }),
         ],
       });
 
@@ -3986,7 +3966,7 @@ describe('comparison table in the report', () => {
     it('reads 0 calls for a task whose only grading made no call', () => {
       const markdown = reportOf({
         gradings: [
-          buildGradingArtifact({
+          buildAlphaGradingArtifact({
             call: {
               status: 'no-reply',
               cause: 'other',
@@ -4004,11 +3984,13 @@ describe('comparison table in the report', () => {
     });
 
     it('leaves a metric that one call of a grading lacks out of the grader total with the grader-line footnote', () => {
-      const first = buildAgentMetrics();
-      const second = buildAgentMetrics({ cost: unavailableMetric('USD', 'the call timed out') });
+      const first = buildExportedAgentMetrics();
+      const second = buildExportedAgentMetrics({
+        cost: unavailableMetric('USD', 'the call timed out'),
+      });
       const markdown = reportOf({
         gradings: [
-          buildGradingArtifact({
+          buildAlphaGradingArtifact({
             call: { status: 'no-reply', cause: 'other', reason: 'the grader call failed' },
             calls: [
               buildGraderCall({ metrics: first }),
@@ -4035,7 +4017,7 @@ describe('comparison table in the report', () => {
     it('renders the line only in the block of the task whose case was graded', () => {
       const markdown = reportOf({
         taskIds: ['task-1', 'task-2'],
-        gradings: [buildGradingArtifact({ caseId: 'task-2--alpha--1' })],
+        gradings: [buildAlphaGradingArtifact({ caseId: 'task-2--alpha--1' })],
       });
 
       expect(graderLineOf(markdown, 'task-1')).toBeUndefined();
@@ -4045,7 +4027,7 @@ describe('comparison table in the report', () => {
     it('renders no line for a grading whose case has no case result', () => {
       const markdown = reportOf({
         results: () => null,
-        gradings: [buildGradingArtifact()],
+        gradings: [buildAlphaGradingArtifact()],
       });
 
       expect(graderLineOf(markdown, 'task-1')).toBeUndefined();
@@ -4151,9 +4133,9 @@ describe('comparison table in the report', () => {
         ...buildComparisonInput({
           models,
           gradings: [
-            buildGradingArtifact({
+            buildAlphaGradingArtifact({
               caseId: 'task-1--alpha--1',
-              metrics: buildAgentMetrics({
+              metrics: buildExportedAgentMetrics({
                 reasoningTokens: unavailableMetric('token', 'the grader reported no reasoning'),
               }),
             }),
@@ -4193,15 +4175,15 @@ describe('comparison table in the report', () => {
     });
 
     it('keeps the call out of every row, the grader line, the terminal summary, the JSON, and summary.md', () => {
-      const withoutCall = reportWith(null, { gradings: [buildGradingArtifact()] });
+      const withoutCall = reportWith(null, { gradings: [buildAlphaGradingArtifact()] });
       const expensive = buildSummaryCall({
-        metrics: buildAgentMetrics({
+        metrics: buildExportedAgentMetrics({
           inputTokens: reported(987_654, 'token'),
           cost: reported(123.4567, 'USD'),
         }),
       });
 
-      const withCall = reportWith(expensive, { gradings: [buildGradingArtifact()] });
+      const withCall = reportWith(expensive, { gradings: [buildAlphaGradingArtifact()] });
 
       expect(comparisonRows(withCall.markdown)).toEqual(comparisonRows(withoutCall.markdown));
       expect(
@@ -4255,11 +4237,11 @@ describe('comparison table in the report', () => {
       return { schemaVersion: 1, runId: CONCLUSIONS_RUN_ID, tasks };
     }
 
-    const REQUIRED_CHECK = buildCheckRecord({ id: 'redirect-check' });
-    const OPTIONAL_CHECK = buildCheckRecord({ id: 'style-check', required: false });
+    const REQUIRED_CHECK = buildSyntheticCheckRecord({ id: 'redirect-check' });
+    const OPTIONAL_CHECK = buildSyntheticCheckRecord({ id: 'style-check', required: false });
 
     function taskWithChecks(taskId: string): TaskRecord {
-      return buildTaskRecord({
+      return buildWelcomeRouteTaskRecord({
         id: taskId,
         title: taskTitleOf(taskId),
         checks: [REQUIRED_CHECK, OPTIONAL_CHECK],
@@ -4533,7 +4515,7 @@ describe('comparison table in the report', () => {
 
   describe('buildSummaryEvidence', () => {
     function checkOf(id: string, description: string): CheckRecord {
-      return buildCheckRecord({ id, description });
+      return buildSyntheticCheckRecord({ id, description });
     }
 
     it('builds one entry per task in task ID order from the facts of the comparison block', () => {
@@ -4550,7 +4532,7 @@ describe('comparison table in the report', () => {
     it('lists the graded rationales in row, attempt, and check order and leaves pending grades out', () => {
       const models = buildDistinctModels(['alpha', 'beta']);
       const tasks = [
-        buildTaskRecord({
+        buildWelcomeRouteTaskRecord({
           id: 'task-1',
           title: taskTitleOf('task-1'),
           checks: [checkOf('c-first', 'First check'), checkOf('c-second', 'Second check')],
@@ -4561,20 +4543,20 @@ describe('comparison table in the report', () => {
         tasks,
         repeat: 2,
         gradings: [
-          buildGradingArtifact({
+          buildAlphaGradingArtifact({
             caseId: 'task-1--beta--1',
             grades: [
               buildGradedGrade({ checkId: 'c-first', verdict: 'failed', rationale: 'beta one' }),
             ],
           }),
-          buildGradingArtifact({
+          buildAlphaGradingArtifact({
             caseId: 'task-1--alpha--2',
             grades: [
               buildGradedGrade({ checkId: 'c-first', rationale: 'alpha two first' }),
               buildPendingGrade({ checkId: 'c-second' }),
             ],
           }),
-          buildGradingArtifact({
+          buildAlphaGradingArtifact({
             caseId: 'task-1--alpha--1',
             grades: [
               buildGradedGrade({ checkId: 'c-first', rationale: 'alpha one first' }),
@@ -4624,7 +4606,7 @@ describe('comparison table in the report', () => {
 
     it('gives a null attempt to a rationale of a run with one attempt per setting', () => {
       const tasks = [
-        buildTaskRecord({
+        buildWelcomeRouteTaskRecord({
           id: 'task-1',
           title: taskTitleOf('task-1'),
           checks: [checkOf('c-first', 'First check')],
@@ -4632,7 +4614,9 @@ describe('comparison table in the report', () => {
       ];
       const input = buildComparisonInput({
         tasks,
-        gradings: [buildGradingArtifact({ grades: [buildGradedGrade({ checkId: 'c-first' })] })],
+        gradings: [
+          buildAlphaGradingArtifact({ grades: [buildGradedGrade({ checkId: 'c-first' })] }),
+        ],
       });
 
       const [entry] = buildSummaryEvidence(input);
@@ -4676,7 +4660,7 @@ describe('comparison table in the report', () => {
     it('lists the case, task, model entry, repository, and check IDs once each in ascending order', () => {
       const models = buildDistinctModels(['beta', 'alpha']);
       const tasks = [
-        buildTaskRecord({
+        buildWelcomeRouteTaskRecord({
           id: 'task-1',
           title: taskTitleOf('task-1'),
           checks: [checkOf('c-first', 'First check')],
@@ -4713,7 +4697,7 @@ describe('comparison table in the report', () => {
     }
 
     it('adds no call count to the header of a grading that made one call', () => {
-      const markdown = reportOf({ gradings: [buildGradingArtifact()] });
+      const markdown = reportOf({ gradings: [buildAlphaGradingArtifact()] });
 
       expect(gradingHeaderOf(markdown)).toMatch(/^Grades by openai\/grader-model \(.*\):$/);
     });
@@ -4722,7 +4706,13 @@ describe('comparison table in the report', () => {
       const calls = Array.from({ length: count }, () => buildGraderCall({ outcome: NO_REPLY }));
 
       const markdown = reportOf({
-        gradings: [buildGradingArtifact({ call: NO_REPLY, calls, metrics: buildAgentMetrics() })],
+        gradings: [
+          buildAlphaGradingArtifact({
+            call: NO_REPLY,
+            calls,
+            metrics: buildExportedAgentMetrics(),
+          }),
+        ],
       });
 
       expect(gradingHeaderOf(markdown)).toMatch(
@@ -4733,10 +4723,10 @@ describe('comparison table in the report', () => {
     it('renders the grader metrics of a grading that returned no reply', () => {
       const markdown = reportOf({
         gradings: [
-          buildGradingArtifact({
+          buildAlphaGradingArtifact({
             call: { ...NO_REPLY, cause: 'tool-call' },
             calls: [buildGraderCall({ outcome: { ...NO_REPLY, cause: 'tool-call' } })],
-            metrics: buildAgentMetrics({ cost: reported(0.0125, 'USD') }),
+            metrics: buildExportedAgentMetrics({ cost: reported(0.0125, 'USD') }),
           }),
         ],
       });
@@ -4756,7 +4746,7 @@ describe('comparison table in the report', () => {
     };
 
     function multiCallGrading(): GradingArtifact {
-      return buildGradingArtifact({
+      return buildAlphaGradingArtifact({
         calls: [
           buildGraderCall({
             outcome: { status: 'no-reply', cause: 'unfinished', reason: 'the model stopped' },
@@ -4764,7 +4754,7 @@ describe('comparison table in the report', () => {
           }),
           buildGraderCall(RECORDS),
         ],
-        metrics: buildAgentMetrics(),
+        metrics: buildExportedAgentMetrics(),
       });
     }
 
@@ -4829,7 +4819,7 @@ describe('comparison table in the report', () => {
 
     describe('headings and anchors', () => {
       const models = [buildModelRecord({ id: 'm1', model: 'vendor/model-a', effort: 'high' })];
-      const tasks = [buildTaskRecord({ id: 'task-1', title: TITLE })];
+      const tasks = [buildWelcomeRouteTaskRecord({ id: 'task-1', title: TITLE })];
 
       it('names the comparison block, the task section, and the case section by title and setting at repeat 1', () => {
         const lines = reportOf({ models, tasks }).split('\n');
@@ -4880,22 +4870,22 @@ describe('comparison table in the report', () => {
 
     /** A task with one check of each evaluator, two models, and repeat 2, covering every statement kind. */
     function buildRichInput(ids: RichIds, effortReason = 'agent listing failed'): ReportInput {
-      const task = buildTaskRecord({
+      const task = buildWelcomeRouteTaskRecord({
         id: ids.task,
         title: TITLE,
         repositoryId: ids.repository,
         checks: [
-          buildCheckRecord({
+          buildSyntheticCheckRecord({
             id: ids.acceptance,
             description: 'Redirect lands on the dashboard',
           }),
-          buildCheckRecord({
+          buildSyntheticCheckRecord({
             id: ids.graded,
             category: 'definition-of-done',
             description: 'Greeting matches the design',
             evaluator: 'grader',
           }),
-          buildCheckRecord({
+          buildSyntheticCheckRecord({
             id: ids.manual,
             category: 'definition-of-done',
             description: 'Reviewer approves the copy',
@@ -4954,7 +4944,7 @@ describe('comparison table in the report', () => {
           };
         },
         gradings: [
-          buildGradingArtifact({
+          buildAlphaGradingArtifact({
             caseId: caseId(ids.m1, 1),
             call: {
               status: 'no-reply',
@@ -5049,12 +5039,12 @@ describe('comparison table in the report', () => {
           ],
           taskIds: [OPAQUE_IDS.task],
           tasks: [
-            buildTaskRecord({
+            buildWelcomeRouteTaskRecord({
               id: OPAQUE_IDS.task,
               title: TITLE,
               repositoryId: OPAQUE_IDS.repository,
               checks: [
-                buildCheckRecord({
+                buildSyntheticCheckRecord({
                   id: OPAQUE_IDS.acceptance,
                   description: 'Redirect lands on the dashboard',
                 }),
@@ -5095,12 +5085,12 @@ describe('comparison table in the report', () => {
       const GRADED_IDS = ['g1', 'g2', 'g3', 'g4', 'g5'];
 
       function buildNoReplyInput(): ReportInput {
-        const task = buildTaskRecord({
+        const task = buildWelcomeRouteTaskRecord({
           id: ids.task,
           title: TITLE,
           checks: [
-            buildCheckRecord({ id: 'acc-command' }),
-            ...GRADED_IDS.map((id) => buildCheckRecord({ id, evaluator: 'grader' })),
+            buildSyntheticCheckRecord({ id: 'acc-command' }),
+            ...GRADED_IDS.map((id) => buildSyntheticCheckRecord({ id, evaluator: 'grader' })),
           ],
         });
         return buildComparisonInput({
@@ -5114,7 +5104,7 @@ describe('comparison table in the report', () => {
             ],
           }),
           gradings: [
-            buildGradingArtifact({
+            buildAlphaGradingArtifact({
               caseId: CASE_ID,
               call: { status: 'no-reply', cause: 'other', reason: GRADER_REASON },
               grades: GRADED_IDS.map((checkId) => ({
@@ -5251,10 +5241,10 @@ describe('comparison table in the report', () => {
 
       it('lists each kind of grade on its own line with the reply problem only in the technical detail', () => {
         const gradedIds = ['first', 'second', 'third'];
-        const task = buildTaskRecord({
+        const task = buildWelcomeRouteTaskRecord({
           title: taskTitleOf('task-1'),
           checks: gradedIds.map((id) =>
-            buildCheckRecord({ id, description: `Criterion ${id}`, evaluator: 'grader' }),
+            buildSyntheticCheckRecord({ id, description: `Criterion ${id}`, evaluator: 'grader' }),
           ),
         });
 
@@ -5262,7 +5252,7 @@ describe('comparison table in the report', () => {
           models: SECTION_MODELS,
           tasks: [task],
           gradings: [
-            buildGradingArtifact({
+            buildAlphaGradingArtifact({
               caseId: 'task-1--alpha--1',
               grades: [
                 {
@@ -5302,9 +5292,9 @@ describe('comparison table in the report', () => {
 
     describe('required checks over several attempts of a task with six required checks', () => {
       const requiredIds = ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'];
-      const task = buildTaskRecord({
+      const task = buildWelcomeRouteTaskRecord({
         title: taskTitleOf('task-1'),
-        checks: requiredIds.map((id) => buildCheckRecord({ id })),
+        checks: requiredIds.map((id) => buildSyntheticCheckRecord({ id })),
       });
 
       it('reads each class apart from the others', () => {
@@ -5454,10 +5444,10 @@ describe('comparison table in the report', () => {
         redact: (text) => text,
       });
       const config = rekeyToFakeAgent(buildSyntheticConfig());
-      const manifest = buildManifest(
+      const manifest = buildFakeAgentManifest(
         runId,
         { ...config, models: [...config.models].reverse() },
-        buildCapabilityReport(),
+        buildFakeAgentCapabilityReport(),
         ['task-1--alpha--1', 'task-1--beta--1'],
       );
       const started = await store.startRun(manifest);
@@ -5465,11 +5455,11 @@ describe('comparison table in the report', () => {
         throw new Error(`startRun failed: ${JSON.stringify(started.error)}`);
       }
       const cases = manifest.cases.map((identity) =>
-        buildCaseResult({
+        buildAlphaCaseResult({
           identity,
           outcome: 'pending',
           checks: checksOf(),
-          artifacts: buildArtifactIndex(identity.caseId, new Set(['result', 'checks'])),
+          artifacts: buildPresentArtifacts(identity.caseId, new Set(['result', 'checks'])),
         }),
       );
       for (const caseResult of cases) {
@@ -6300,7 +6290,9 @@ describe('credential-secret redaction at serialization boundaries', () => {
         redact: createRedactor([QUOTED_SECRET]),
       });
       const started = await store.startRun(
-        buildManifest(runId, buildSyntheticConfig(), buildCapabilityReport(), ['task-1--alpha--1']),
+        buildFakeAgentManifest(runId, buildSyntheticConfig(), buildFakeAgentCapabilityReport(), [
+          'task-1--alpha--1',
+        ]),
       );
       expect(started.ok).toBe(true);
       const exportWithSecret = buildRedactionExport();
@@ -6342,7 +6334,9 @@ describe('credential-secret redaction at serialization boundaries', () => {
         redact: createRedactor([TOKEN_DIGIT_SECRET]),
       });
       const started = await store.startRun(
-        buildManifest(runId, buildSyntheticConfig(), buildCapabilityReport(), ['task-1--alpha--1']),
+        buildFakeAgentManifest(runId, buildSyntheticConfig(), buildFakeAgentCapabilityReport(), [
+          'task-1--alpha--1',
+        ]),
       );
       expect(started.ok).toBe(true);
 
@@ -6392,7 +6386,9 @@ describe('credential-secret redaction at serialization boundaries', () => {
         redact: createRedactor([QUOTED_SECRET]),
       });
       const started = await store.startRun(
-        buildManifest(runId, buildSyntheticConfig(), buildCapabilityReport(), ['task-1--alpha--1']),
+        buildFakeAgentManifest(runId, buildSyntheticConfig(), buildFakeAgentCapabilityReport(), [
+          'task-1--alpha--1',
+        ]),
       );
       expect(started.ok).toBe(true);
       const secretEvent: RedactionTestEvent = {
@@ -6488,29 +6484,23 @@ describe('credential-secret redaction at serialization boundaries', () => {
   });
 });
 
-function buildGrader(overrides: Partial<GraderIdentity> = {}): GraderIdentity {
-  return { model: 'openai/grader-model', effort: 'high', agent: AGENT_NAME, ...overrides };
+function buildFakeAgentGrader(overrides: Partial<GraderIdentity> = {}): GraderIdentity {
+  return buildGraderIdentity({
+    model: 'openai/grader-model',
+    effort: 'high',
+    agent: FAKE_AGENT_NAME,
+    ...overrides,
+  });
 }
 
-function buildGradingArtifact(overrides: Partial<GradingArtifact> = {}): GradingArtifact {
-  const call = overrides.call ?? { status: 'replied', reply: '{"grades":[]}' };
-  const metrics = overrides.metrics ?? unavailableAgentMetrics('unused in this fixture');
-  return {
-    schemaVersion: 1,
+function buildAlphaGradingArtifact(overrides: Partial<GradingArtifact> = {}): GradingArtifact {
+  return buildGradingArtifact({
     runId: '20260923t000000z-grading',
     caseId: 'task-1--alpha--1',
-    grader: buildGrader(),
-    call,
-    calls: [
-      buildGraderCall({
-        outcome: call.status === 'replied' ? { status: 'replied' } : call,
-        metrics,
-      }),
-    ],
-    metrics,
-    grades: [],
+    grader: buildFakeAgentGrader(),
+    metrics: unavailableAgentMetrics('unused in this fixture'),
     ...overrides,
-  };
+  });
 }
 
 function buildGradingManifest(
@@ -6527,21 +6517,21 @@ function buildGradingManifest(
     host: { platform: 'linux', nodeVersion: 'v24.21.0' },
     tools: {
       gitVersion: 'git version 2.45.0',
-      agentVersions: { [AGENT_NAME]: null },
+      agentVersions: { [FAKE_AGENT_NAME]: null },
       agentConfigurationFiles: {},
       copiedProviders: {},
     },
     execution: { concurrency: 1, caseTimeoutMs: 1000, repeat: { value: 1, source: 'config' } },
     efforts: buildEfforts(['alpha'], grader),
-    cases: caseIds.map((caseId) => buildCaseIdentity({ caseId })),
+    cases: caseIds.map((caseId) => buildAlphaCaseIdentity({ caseId })),
   };
 }
 
 describe('grading rendered in the report', () => {
   function buildGradedTaskRecord(overrides: Partial<TaskRecord> = {}): TaskRecord {
-    return buildTaskRecord({
+    return buildWelcomeRouteTaskRecord({
       checks: [
-        buildCheckRecord({
+        buildSyntheticCheckRecord({
           id: 'csv-content',
           description: 'escapes every value correctly',
           evaluator: 'grader',
@@ -6552,17 +6542,17 @@ describe('grading rendered in the report', () => {
   }
 
   it('renders the grader run-section line, one grade line per check, and the separate Grader metrics block', () => {
-    const graderCase = buildCaseResult({
+    const graderCase = buildAlphaCaseResult({
       checks: [
         buildCheckResult({
           checkId: 'csv-content',
           verdict: 'passed',
-          evidence: `graded passed by ${buildGrader().model} (effort high, agent ${AGENT_NAME}): lines 1-4 add escaping`,
+          evidence: `graded passed by ${buildFakeAgentGrader().model} (effort high, agent ${FAKE_AGENT_NAME}): lines 1-4 add escaping`,
         }),
       ],
-      artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'grading'])),
+      artifacts: buildPresentArtifacts('task-1--alpha--1', new Set(['result', 'grading'])),
     });
-    const grading = buildGradingArtifact({
+    const grading = buildAlphaGradingArtifact({
       grades: [
         {
           checkId: 'csv-content',
@@ -6629,8 +6619,8 @@ describe('grading rendered in the report', () => {
         schemaVersion: 1,
         manifest: buildGradingManifest(['task-1--alpha--1'], check),
         cases: [
-          buildCaseResult({
-            artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'grading'])),
+          buildAlphaCaseResult({
+            artifacts: buildPresentArtifacts('task-1--alpha--1', new Set(['result', 'grading'])),
           }),
         ],
         findings: [],
@@ -6641,7 +6631,7 @@ describe('grading rendered in the report', () => {
       models: [],
       repositories: [],
       assessments: [],
-      gradings: [buildGradingArtifact()],
+      gradings: [buildAlphaGradingArtifact()],
       conclusions: null,
     };
 
@@ -6664,8 +6654,8 @@ describe('grading rendered in the report', () => {
           reason: 'grader-only reason',
         }),
         cases: [
-          buildCaseResult({
-            artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'grading'])),
+          buildAlphaCaseResult({
+            artifacts: buildPresentArtifacts('task-1--alpha--1', new Set(['result', 'grading'])),
           }),
         ],
         findings: [],
@@ -6676,7 +6666,7 @@ describe('grading rendered in the report', () => {
       models: [{ id: 'alpha', model: 'vendor/model-alpha-synth', effort: 'effort-high' }],
       repositories: [],
       assessments: [],
-      gradings: [buildGradingArtifact()],
+      gradings: [buildAlphaGradingArtifact()],
       conclusions: null,
     };
 
@@ -6692,7 +6682,7 @@ describe('grading rendered in the report', () => {
       run: {
         schemaVersion: 1,
         manifest: buildGradingManifest(['task-1--alpha--1']),
-        cases: [buildCaseResult()],
+        cases: [buildAlphaCaseResult()],
         findings: [],
         exitCode: 0,
       },
@@ -6716,8 +6706,8 @@ describe('grading rendered in the report', () => {
         schemaVersion: 1,
         manifest: buildGradingManifest(['task-1--alpha--1']),
         cases: [
-          buildCaseResult({
-            artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'grading'])),
+          buildAlphaCaseResult({
+            artifacts: buildPresentArtifacts('task-1--alpha--1', new Set(['result', 'grading'])),
           }),
         ],
         findings: [],
@@ -6728,7 +6718,7 @@ describe('grading rendered in the report', () => {
       models,
       repositories: [],
       assessments: [],
-      gradings: [buildGradingArtifact()],
+      gradings: [buildAlphaGradingArtifact()],
       conclusions: null,
     });
 
@@ -6749,7 +6739,7 @@ describe('grading rendered in the report', () => {
   });
 
   it('explains a no-reply grading in the grades block and as the pending state of the attempt, keeping the reason in the technical detail', () => {
-    const pendingCase = buildCaseResult({
+    const pendingCase = buildAlphaCaseResult({
       outcome: 'pending',
       checks: [
         buildCheckResult({
@@ -6760,9 +6750,9 @@ describe('grading rendered in the report', () => {
           durationMs: null,
         }),
       ],
-      artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'grading'])),
+      artifacts: buildPresentArtifacts('task-1--alpha--1', new Set(['result', 'grading'])),
     });
-    const grading = buildGradingArtifact({
+    const grading = buildAlphaGradingArtifact({
       call: {
         status: 'no-reply',
         cause: 'other',
@@ -6812,7 +6802,7 @@ describe('grading rendered in the report', () => {
   });
 
   it('keeps case metrics and grader metrics in separate blocks, sharing no field, and reports a costless grader export as unavailable with its reason', () => {
-    const caseResult = buildCaseResult({
+    const caseResult = buildAlphaCaseResult({
       metrics: {
         ...unavailableBenchmarkMetrics('unused'),
         cost: {
@@ -6823,9 +6813,9 @@ describe('grading rendered in the report', () => {
         },
       },
       checks: [buildCheckResult({ checkId: 'csv-content' })],
-      artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'grading'])),
+      artifacts: buildPresentArtifacts('task-1--alpha--1', new Set(['result', 'grading'])),
     });
-    const grading = buildGradingArtifact({
+    const grading = buildAlphaGradingArtifact({
       metrics: {
         ...unavailableAgentMetrics('field "cost" is absent in export message "msg-1"'),
       },
@@ -6895,28 +6885,34 @@ describe('grading and report regeneration stay byte-identical (P7)', () => {
     const config = rekeyToFakeAgent(buildSyntheticConfig());
     const configWithGrader: TevuConfig = {
       ...config,
-      roles: { grader: buildGrader() },
+      roles: { grader: buildFakeAgentGrader() },
     };
-    const manifest = buildManifest(runId, configWithGrader, buildCapabilityReport(), [
-      'task-1--alpha--1',
-    ]);
+    const manifest = buildFakeAgentManifest(
+      runId,
+      configWithGrader,
+      buildFakeAgentCapabilityReport(),
+      ['task-1--alpha--1'],
+    );
     const started = await store.startRun(manifest);
     if (!started.ok) {
       throw new Error(`startRun failed: ${JSON.stringify(started.error)}`);
     }
-    const caseResult = buildCaseResult({
+    const caseResult = buildAlphaCaseResult({
       checks: [
         buildCheckResult({
           checkId: 'acc-acceptance-command',
-          evidence: `graded passed by ${buildGrader().model} (effort high, agent ${AGENT_NAME}): ok`,
+          evidence: `graded passed by ${buildFakeAgentGrader().model} (effort high, agent ${FAKE_AGENT_NAME}): ok`,
         }),
       ],
-      artifacts: buildArtifactIndex('task-1--alpha--1', new Set(['result', 'checks', 'grading'])),
+      artifacts: buildPresentArtifacts(
+        'task-1--alpha--1',
+        new Set(['result', 'checks', 'grading']),
+      ),
     });
     await writeChecksOrThrow(store, 'task-1--alpha--1', caseResult.checks);
     const gradingWrite = await store.writeGrading(
       'task-1--alpha--1',
-      buildGradingArtifact({
+      buildAlphaGradingArtifact({
         runId,
         calls: [buildGraderCall(CALL_RECORDS)],
         grades: [
@@ -7008,8 +7004,8 @@ describe('assessCase for graded checks (P9)', () => {
         stop_grace: '1s',
       },
       agents: { opencode: { command: '/synthetic/opencode', secrets: [], env: [] } },
-      repositories: [buildRepository()],
-      models: [buildModel(), buildModel({ id: 'beta', effort: 'effort-low' })],
+      repositories: [buildSyntheticRepository()],
+      models: [buildAlphaModel(), buildAlphaModel({ id: 'beta', effort: 'effort-low' })],
       roles: { grader: { model: 'openai/grader-model', effort: 'high' } },
       tasks: [
         {
@@ -7046,13 +7042,15 @@ describe('assessCase for graded checks (P9)', () => {
       redact: (text) => text,
     });
     const config = buildGradedAssessmentConfig();
-    const capabilities = buildCapabilityReport();
-    const manifest = buildManifest(runId, config, capabilities, ['graded-assess-task--alpha--1']);
+    const capabilities = buildFakeAgentCapabilityReport();
+    const manifest = buildFakeAgentManifest(runId, config, capabilities, [
+      'graded-assess-task--alpha--1',
+    ]);
     const started = await store.startRun(manifest);
     if (!started.ok) {
       throw new Error(`startRun failed: ${JSON.stringify(started.error)}`);
     }
-    const grader = buildGrader();
+    const grader = buildFakeAgentGrader();
     const hasGrading = scenario !== 'none';
     const checks = [
       buildCheckResult({
@@ -7091,13 +7089,13 @@ describe('assessCase for graded checks (P9)', () => {
         throw new Error(`writeGrading failed: ${JSON.stringify(gradingWrite.error)}`);
       }
     }
-    const caseResult = buildCaseResult({
-      identity: buildCaseIdentity({
+    const caseResult = buildAlphaCaseResult({
+      identity: buildAlphaCaseIdentity({
         caseId: 'graded-assess-task--alpha--1',
         taskId: 'graded-assess-task',
       }),
       checks,
-      artifacts: buildArtifactIndex(
+      artifacts: buildPresentArtifacts(
         'graded-assess-task--alpha--1',
         new Set(hasGrading ? ['result', 'checks', 'grading'] : ['result', 'checks']),
       ),

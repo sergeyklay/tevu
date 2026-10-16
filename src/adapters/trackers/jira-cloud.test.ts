@@ -1,12 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { unwrapOk } from '@/domain/__fixtures__/errors.fixtures';
+
 import { createJiraCloudAdapter } from './jira-cloud';
 
 import type { JiraCloudDependencies, JiraCloudSettings } from './jira-cloud';
-import type { TevuResult } from '@/domain/errors';
-import type { IssueSnapshot } from '@/domain/ports/issue-tracker';
-
-type ReadIssueResult = TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>;
 
 type AdfNode = Record<string, unknown>;
 
@@ -19,13 +17,6 @@ const SETTINGS: JiraCloudSettings = {
   emailEnvironmentVariable: 'JIRA_EMAIL',
   tokenEnvironmentVariable: 'JIRA_TOKEN',
 };
-
-function expectOk(result: ReadIssueResult): IssueSnapshot {
-  if (!result.ok) {
-    throw new Error(`expected success, got ${JSON.stringify(result.error)}`);
-  }
-  return result.value;
-}
 
 function doc(...content: AdfNode[]): AdfNode {
   return { type: 'doc', version: 1, content };
@@ -76,7 +67,7 @@ function buildDependencies(description: unknown) {
 async function importDescription(description: unknown): Promise<string> {
   const adapter = createJiraCloudAdapter(SETTINGS, buildDependencies(description));
 
-  return expectOk(await adapter.readIssue('TEST-1')).description;
+  return unwrapOk(await adapter.readIssue('TEST-1')).description;
 }
 
 describe('createJiraCloudAdapter description projection', () => {
@@ -320,7 +311,7 @@ describe('createJiraCloudAdapter description projection', () => {
       const dependencies = buildDependencies(content);
       const adapter = createJiraCloudAdapter(SETTINGS, dependencies);
 
-      expectOk(await adapter.readIssue('TEST-1'));
+      unwrapOk(await adapter.readIssue('TEST-1'));
 
       expect(dependencies.fetch).toHaveBeenCalledExactlyOnceWith(ISSUE_URL, expect.anything());
       expect(dependencies.sleep).not.toHaveBeenCalled();

@@ -5,9 +5,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
-import { execa } from 'execa';
 import { afterEach, assert, beforeEach, describe, expect, it } from 'vitest';
 
+import { createSyntheticRepository } from '@/adapters/__fixtures__/git.fixtures';
 import { createArtifactStore } from '@/adapters/artifact-store';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
 import {
@@ -15,8 +15,20 @@ import {
   createEvaluatorProcessAdapter,
   createRedactor,
 } from '@/adapters/process';
+import {
+  buildCommandCheckInput,
+  buildModelDefinitionInput,
+  buildRepositoryInput,
+  buildRunSettingsInput,
+  buildTaskInput,
+  buildTevuConfig,
+  FAKE_AGENT_NAME,
+  rekeyToFakeAgent,
+} from '@/config/__fixtures__/config.fixtures';
 import { durationMs, TevuConfigSchema } from '@/config/schema';
+import { unwrapOk } from '@/domain/__fixtures__/errors.fixtures';
 import { unavailableMetric } from '@/domain/run-records';
+import { buildProcessResult } from '@/evaluation/__fixtures__/report.fixtures';
 
 import { buildVerifiedEfforts } from './__fixtures__/effort.fixtures';
 import { rebuildReport } from './assess';
@@ -40,9 +52,7 @@ import type { PrerequisiteAdapter } from '@/domain/ports/prerequisite';
 import type { AgentMetrics, CaseResult, ProcessResult, RunResult } from '@/domain/run-records';
 import type { RunDependencies } from '@/domain/use-cases';
 
-const FAKE_AGENT_NAME = 'fake-agent';
 const CONFIG_PATH = '/synthetic/tevu.yaml';
-const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 
 const BASE_GUARD_CONTENT = 'base-guard-content\n';
 const AGENT_WEAKENED_GUARD_CONTENT = 'weakened-guard-content\n';
@@ -56,41 +66,15 @@ function sha256Hex(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-type GitOutcome = { exitCode: number | null; stdout: string; stderr: string };
-
-async function runGit(cwd: string, args: readonly string[]): Promise<GitOutcome> {
-  const result = await execa('git', [...args], {
-    cwd,
-    env: {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_SYSTEM: '/dev/null',
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_TERMINAL_PROMPT: '0',
-    },
-    reject: false,
-    stdin: 'ignore',
-    timeout: 60_000,
-  });
-  return {
-    exitCode: typeof result.exitCode === 'number' ? result.exitCode : null,
-    stdout: typeof result.stdout === 'string' ? result.stdout : '',
-    stderr: typeof result.stderr === 'string' ? result.stderr : '',
-  };
-}
-
-async function createSyntheticRepository(
+async function createGuardRepository(
   testDirectory: string,
 ): Promise<{ path: string; commit: string }> {
   const path = join(testDirectory, 'source-repo');
-  await mkdir(join(path, 'tests'), { recursive: true });
-  await mkdir(join(path, 'src'), { recursive: true });
-  await writeFile(join(path, 'tests/guard.test.txt'), BASE_GUARD_CONTENT);
-  await writeFile(join(path, 'src/feature.txt'), BASE_FEATURE_CONTENT);
-  await runGit(path, ['init', '--quiet', '-b', 'main']);
-  await runGit(path, ['add', '-A']);
-  await runGit(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'synthetic base commit']);
-  const commit = (await runGit(path, ['rev-parse', 'HEAD'])).stdout.trim();
+  const commit = await createSyntheticRepository(
+    path,
+    { 'tests/guard.test.txt': BASE_GUARD_CONTENT, 'src/feature.txt': BASE_FEATURE_CONTENT },
+    { message: 'synthetic base commit' },
+  );
   return { path, commit };
 }
 
@@ -119,92 +103,66 @@ function buildVerificationScript(): string {
  * two model entries (`TevuConfigSchema` requires at least two) rekeyed onto
  * the fake agent so no real coding agent is invoked.
  */
-function buildConfig(options: {
+function buildGuardConfig(options: {
   repositoryPath: string;
   commit: string;
   overlayDirectory: string;
   outputDirectory: string;
   taskTimeout?: string;
 }): TevuConfig {
-  const input: TevuConfigInput = {
-    version: 1,
-    run: {
-      output_dir: options.outputDirectory,
-      concurrency: 1,
-      timeout: '30s',
-      stop_grace: '500ms',
-    },
-    agents: { opencode: { command: 'unused-agent-command', secrets: [], env: [] } },
-    repositories: [{ id: 'repo-1', path: options.repositoryPath }],
-    models: [
-      { id: 'm1', model: 'synthetic/model-a', effort: 'fast' },
-      { id: 'm2', model: 'synthetic/model-b', effort: 'deep' },
-    ],
-    tasks: [
-      {
-        id: 'guard-task',
-        title: 'Guard task',
-        repo: 'repo-1',
-        base_commit: options.commit,
-        ...(options.taskTimeout === undefined ? {} : { timeout: options.taskTimeout }),
-        description: 'synthetic task description',
-        prompt: 'synthetic task prompt',
-        readiness: ['synthetic ready item'],
-        checks: {
-          restore: ['tests/**'],
-          overlay: options.overlayDirectory,
-          acceptance: [
-            {
-              id: 'verify-check-state',
-              description: 'observes the restored, removed, and overlaid worktree state',
-              run: [process.execPath, '-e', buildVerificationScript()],
-              timeout: '10s',
-              exit_codes: [0],
-            },
-          ],
-          done: [
-            {
-              id: 'trivial-done',
-              description: 'always passes',
-              run: [process.execPath, '-e', 'process.exit(0);'],
-              timeout: '10s',
-              exit_codes: [0],
-            },
-          ],
-        },
-      },
-    ],
-  };
-  return rekeyToFakeAgent(TevuConfigSchema.parse(input));
+  return rekeyToFakeAgent(
+    buildTevuConfig({
+      run: buildRunSettingsInput({
+        output_dir: options.outputDirectory,
+        timeout: '30s',
+        stop_grace: '500ms',
+      }),
+      agents: { opencode: { command: 'unused-agent-command', secrets: [], env: [] } },
+      repositories: [buildRepositoryInput({ path: options.repositoryPath })],
+      models: [
+        buildModelDefinitionInput({ model: 'synthetic/model-a', effort: 'fast' }),
+        buildModelDefinitionInput({ id: 'm2', model: 'synthetic/model-b', effort: 'deep' }),
+      ],
+      tasks: [
+        buildTaskInput({
+          id: 'guard-task',
+          title: 'Guard task',
+          base_commit: options.commit,
+          ...(options.taskTimeout === undefined ? {} : { timeout: options.taskTimeout }),
+          checks: {
+            restore: ['tests/**'],
+            overlay: options.overlayDirectory,
+            acceptance: [
+              buildCommandCheckInput({
+                id: 'verify-check-state',
+                description: 'observes the restored, removed, and overlaid worktree state',
+                run: [process.execPath, '-e', buildVerificationScript()],
+                timeout: '10s',
+                exit_codes: [0],
+              }),
+            ],
+            done: [
+              buildCommandCheckInput({
+                id: 'trivial-done',
+                description: 'always passes',
+                run: [process.execPath, '-e', 'process.exit(0);'],
+                timeout: '10s',
+                exit_codes: [0],
+              }),
+            ],
+          },
+        }),
+      ],
+    }),
+  );
 }
 
-/**
- * Renames the schema-required `opencode` key to `fake-agent` after parsing.
- * The strict schema accepts only the literal `opencode` agent key, so this
- * configuration is built through that key and relabeled afterward, mirroring
- * `run-benchmark.test.ts`'s own `rekeyToFakeAgent`.
- */
-function rekeyToFakeAgent(config: TevuConfig): TevuConfig {
-  const { opencode, ...otherAgents } = config.agents;
-  assert.isDefined(opencode, 'agents.opencode block');
-  return {
-    ...config,
-    agents: { ...otherAgents, [FAKE_AGENT_NAME]: opencode },
-    models: config.models.map((model) => ({ ...model, agent: FAKE_AGENT_NAME })),
-  };
-}
-
-function buildProcessResult(): ProcessResult {
-  const startedAt = '2026-01-01T00:00:00.000Z';
-  const endedAt = '2026-01-01T00:00:01.000Z';
-  return {
-    exitCode: 0,
-    signal: null,
-    startedAt,
-    endedAt,
+function buildOneSecondProcessResult(): ProcessResult {
+  return buildProcessResult({
+    startedAt: '2026-01-01T00:00:00.000Z',
+    endedAt: '2026-01-01T00:00:01.000Z',
     durationMs: 1_000,
-    terminationStage: 'none',
-  };
+  });
 }
 
 function unavailableAgentMetrics(reason: string): AgentMetrics {
@@ -302,7 +260,7 @@ function buildFakeAgentAdapter(
       }
 
       const value: AgentRunResult = {
-        process: buildProcessResult(),
+        process: buildOneSecondProcessResult(),
         sessionId: 'session-1',
         parseFindings: [],
       };
@@ -362,13 +320,6 @@ function buildDependencies(
   };
 }
 
-function unwrapOk<T, K extends TevuError['kind']>(result: TevuResult<T, K>): T {
-  if (!result.ok) {
-    throw new Error(`expected an ok result, received ${result.error.kind}`);
-  }
-  return result.value;
-}
-
 function caseResultOf(run: RunResult, caseId: string): CaseResult {
   const found = run.cases.find((entry) => entry.identity.caseId === caseId);
   if (found === undefined) {
@@ -404,9 +355,9 @@ afterEach(async () => {
 
 describe('runBenchmark tamper-proof check-state (AC-1, P11)', () => {
   it("restores a weakened test file, removes an agent-added file, applies the overlay, and passes the check while the saved patch holds only the agent's edits", async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const overlayDirectory = await createOverlayDirectory(testDirectory);
-    const config = buildConfig({
+    const config = buildGuardConfig({
       repositoryPath: repository.path,
       commit: repository.commit,
       overlayDirectory,
@@ -455,9 +406,9 @@ describe.each([
   'runBenchmark tamper-proof check-state when the agent $label after the pin (P18)',
   ({ mutateOverlay }) => {
     it('still passes the check against only the pinned overlay snapshot', async () => {
-      const repository = await createSyntheticRepository(testDirectory);
+      const repository = await createGuardRepository(testDirectory);
       const overlayDirectory = await createOverlayDirectory(testDirectory);
-      const config = buildConfig({
+      const config = buildGuardConfig({
         repositoryPath: repository.path,
         commit: repository.commit,
         overlayDirectory,
@@ -487,9 +438,9 @@ describe.each([
 
 describe('runBenchmark records the task timeout in saved artifacts (AC-4)', () => {
   it("writes every manifest and case identity's timeoutMs as the task's own limit, distinct from the default in execution.caseTimeoutMs", async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const overlayDirectory = await createOverlayDirectory(testDirectory);
-    const config = buildConfig({
+    const config = buildGuardConfig({
       repositoryPath: repository.path,
       commit: repository.commit,
       overlayDirectory,
@@ -527,9 +478,9 @@ describe('runBenchmark records the task timeout in saved artifacts (AC-4)', () =
 
 describe('runBenchmark providers (AC-1, D10, D11)', () => {
   it('reads providers exactly once before startRun, delivers the same files to every case, and records their digest in run.json', async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const overlayDirectory = await createOverlayDirectory(testDirectory);
-    const config = buildConfig({
+    const config = buildGuardConfig({
       repositoryPath: repository.path,
       commit: repository.commit,
       overlayDirectory,
@@ -594,9 +545,9 @@ describe('runBenchmark providers (AC-1, D10, D11)', () => {
   });
 
   it('records an empty array in run.json for an agent whose block names no provider', async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const overlayDirectory = await createOverlayDirectory(testDirectory);
-    const config = buildConfig({
+    const config = buildGuardConfig({
       repositoryPath: repository.path,
       commit: repository.commit,
       overlayDirectory,
@@ -761,7 +712,7 @@ describe('runBenchmark grading in the case flow', () => {
       },
       async run(input: AgentRunInput): Promise<TevuResult<AgentRunResult, never>> {
         const value: AgentRunResult = {
-          process: buildProcessResult(),
+          process: buildOneSecondProcessResult(),
           sessionId: 'session-1',
           parseFindings: [],
         };
@@ -853,7 +804,7 @@ describe('runBenchmark grading in the case flow', () => {
   }
 
   it('calls the grader exactly once for the case whose task declares a graded check, and never for the plain task', async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const config = buildGradedConfig({
       repositoryPath: repository.path,
       commit: repository.commit,
@@ -893,7 +844,7 @@ describe('runBenchmark grading in the case flow', () => {
   });
 
   it('records the plan efforts in the stored manifest and keeps every saved identity effort as configured', async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const config = buildGradedConfig({
       repositoryPath: repository.path,
       commit: repository.commit,
@@ -946,7 +897,7 @@ describe('runBenchmark grading in the case flow', () => {
   });
 
   it('ends the case cancelled with no grading.json when the run is cancelled during the grader call', async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const config = buildGradedConfig({
       repositoryPath: repository.path,
       commit: repository.commit,
@@ -985,7 +936,7 @@ describe('runBenchmark grading in the case flow', () => {
   });
 
   it('ends the case infrastructure-failed and stops scheduling later cases when writeGrading fails', async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const config: TevuConfig = {
       ...buildGradedConfig({
         repositoryPath: repository.path,
@@ -1054,7 +1005,7 @@ describe('runBenchmark grading in the case flow', () => {
   });
 
   it('leaves the case outcome pending when a required graded check is left pending by an unparseable reply, and the run exits 2', async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const config = buildGradedConfig({
       repositoryPath: repository.path,
       commit: repository.commit,
@@ -1080,7 +1031,7 @@ describe('runBenchmark grading in the case flow', () => {
   });
 
   it('records a warning finding naming the retained grader call directory when its removal fails', async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const config = buildGradedConfig({
       repositoryPath: repository.path,
       commit: repository.commit,
@@ -1111,7 +1062,7 @@ describe('runBenchmark grading in the case flow', () => {
   });
 
   it('records one warning finding per case for a failed grader call whose removal fails', async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const config = buildGradedConfig({
       repositoryPath: repository.path,
       commit: repository.commit,
@@ -1149,7 +1100,7 @@ describe('runBenchmark grading in the case flow', () => {
   });
 
   it('records the warning finding in the cancelled run when the call cancelled during grading cannot be removed', async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const config = buildGradedConfig({
       repositoryPath: repository.path,
       commit: repository.commit,
@@ -1190,7 +1141,7 @@ describe('runBenchmark grading in the case flow', () => {
   });
 
   it('keeps the warning finding of a grader call that replied when grading.json cannot be written', async () => {
-    const repository = await createSyntheticRepository(testDirectory);
+    const repository = await createGuardRepository(testDirectory);
     const config = buildGradedConfig({
       repositoryPath: repository.path,
       commit: repository.commit,
@@ -1275,7 +1226,7 @@ describe('runBenchmark grading in the case flow', () => {
     }
 
     async function runWithRetries() {
-      const repository = await createSyntheticRepository(testDirectory);
+      const repository = await createGuardRepository(testDirectory);
       const config = buildGradedConfig({
         repositoryPath: repository.path,
         commit: repository.commit,

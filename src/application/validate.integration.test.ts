@@ -1,11 +1,12 @@
 // @vitest-environment node
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
-import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createSyntheticRepository } from '@/adapters/__fixtures__/git.fixtures';
+import { writeExecutable } from '@/adapters/__fixtures__/process.fixtures';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
 import {
   createCaseExecutableAdapter,
@@ -20,8 +21,6 @@ import type { ValidationFinding } from '@/domain/errors';
 import type { AgentAdapter, ToolDenialProbe } from '@/domain/ports/agent';
 import type { AgentConfigurationFile, EnvironmentAdapter } from '@/domain/ports/environment';
 import type { ValidationDependencies } from '@/domain/use-cases';
-
-const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 
 /**
  * A synthetic version-manager shim's body: it reads a version name from
@@ -50,40 +49,16 @@ function shellScript(body: string): string {
   return `#!/bin/sh\n${body}`;
 }
 
-async function writeExecutable(path: string, contents: string): Promise<void> {
-  await writeFile(path, contents);
-  await chmod(path, 0o755);
-}
-
-async function runGit(cwd: string, args: readonly string[]): Promise<void> {
-  await execa('git', [...args], {
-    cwd,
-    env: {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_SYSTEM: '/dev/null',
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_TERMINAL_PROMPT: '0',
-    },
-    stdin: 'ignore',
-  });
-}
-
 /** Initializes a Git repository with one commit holding `README.md` and `extraFiles`, and returns its full commit hash. */
-async function createSourceRepository(
+async function createReadmeRepository(
   directory: string,
   extraFiles: readonly string[] = [],
 ): Promise<string> {
-  await mkdir(directory, { recursive: true });
-  await runGit(directory, ['init', '--quiet', '-b', 'main']);
-  await writeFile(join(directory, 'README.md'), 'synthetic\n');
-  for (const file of extraFiles) {
-    await writeFile(join(directory, file), '{}\n');
-  }
-  await runGit(directory, ['add', '-A']);
-  await runGit(directory, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'base']);
-  const { stdout } = await execa('git', ['rev-parse', 'HEAD'], { cwd: directory });
-  return stdout.trim();
+  const files = {
+    'README.md': 'synthetic\n',
+    ...Object.fromEntries(extraFiles.map((file) => [file, '{}\n'])),
+  };
+  return createSyntheticRepository(directory, files, { message: 'base' });
 }
 
 type FakeAgent = { adapter: AgentAdapter; probe: ReturnType<typeof vi.fn> };
@@ -262,7 +237,7 @@ describe('validateConfig with the real case-executable adapter', () => {
       await writeExecutable(join(binDirectory, 'toolx'), shellScript(SYNTHETIC_SHIM_BODY));
       await writeExecutable(join(operatorHome, 'installs', 'v1', 'toolx'), shellScript('exit 0\n'));
       const repositoryPath = join(workspace, 'repo');
-      const baseCommit = await createSourceRepository(repositoryPath);
+      const baseCommit = await createReadmeRepository(repositoryPath);
       process.env.HOME = operatorHome;
       process.env.PATH = `${binDirectory}:${process.env.PATH ?? ''}`;
       return { binDirectory, operatorHome, repositoryPath, baseCommit };
@@ -426,7 +401,7 @@ describe('validateConfig with the real case-executable adapter', () => {
 
   it('reports one change warning for the check that wrote a file, none for the check that did not, and leaves the configuration valid', async () => {
     const repositoryPath = join(workspace, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath);
+    const baseCommit = await createReadmeRepository(repositoryPath);
     const creatorScript = join(workspace, 'creator.sh');
     const quietScript = join(workspace, 'quiet.sh');
     const agentScript = join(workspace, 'agent-ok.sh');
@@ -584,7 +559,7 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
 
   it('reports an unlisted model entry as an error, nothing for a listed one, and never starts run', async () => {
     const repositoryPath = join(workspace, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath);
+    const baseCommit = await createReadmeRepository(repositoryPath);
     const agentScript = join(workspace, 'agent-ok.sh');
     await writeExecutable(agentScript, shellScript('exit 0\n'));
     const config = buildModelResolutionConfig({
@@ -630,7 +605,7 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
 
   it('reports an unlisted, non-required role model as a warning and leaves the configuration valid', async () => {
     const repositoryPath = join(workspace, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath);
+    const baseCommit = await createReadmeRepository(repositoryPath);
     const agentScript = join(workspace, 'agent-ok.sh');
     await writeExecutable(agentScript, shellScript('exit 0\n'));
     const config = buildModelResolutionConfig({
@@ -669,7 +644,7 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
 
   it('reports an unlisted grader model as an error when a task declares a graded check', async () => {
     const repositoryPath = join(workspace, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath);
+    const baseCommit = await createReadmeRepository(repositoryPath);
     const agentScript = join(workspace, 'agent-ok.sh');
     await writeExecutable(agentScript, shellScript('exit 0\n'));
     const config = buildModelResolutionConfig({
@@ -709,7 +684,7 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
 
   it('reports an unlisted summary model as a warning even when a task declares a graded check', async () => {
     const repositoryPath = join(workspace, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath);
+    const baseCommit = await createReadmeRepository(repositoryPath);
     const agentScript = join(workspace, 'agent-ok.sh');
     await writeExecutable(agentScript, shellScript('exit 0\n'));
     const config = buildModelResolutionConfig({
@@ -750,7 +725,7 @@ describe('validateConfig model resolution (AC-3, AC-4)', () => {
 
   it('stays valid on a provider snapshot carrying only a P-NOKEY warning', async () => {
     const repositoryPath = join(workspace, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath);
+    const baseCommit = await createReadmeRepository(repositoryPath);
     const agentScript = join(workspace, 'agent-ok.sh');
     await writeExecutable(agentScript, shellScript('exit 0\n'));
     const config = buildModelResolutionConfig({
@@ -801,7 +776,7 @@ describe('validateConfig model listing outcomes', () => {
     environments?: (real: EnvironmentAdapter) => EnvironmentAdapter;
   }): Promise<ValidationFinding[]> {
     const repositoryPath = join(workspace, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath);
+    const baseCommit = await createReadmeRepository(repositoryPath);
     const agentScript = join(workspace, 'agent-ok.sh');
     await writeExecutable(agentScript, shellScript('exit 0\n'));
     const config = buildModelResolutionConfig({
@@ -950,7 +925,7 @@ describe('validateConfig effort check', () => {
     gradedCheck?: boolean;
   }) {
     const repositoryPath = join(workspace, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath, options.baseFiles);
+    const baseCommit = await createReadmeRepository(repositoryPath, options.baseFiles);
     const agentScript = join(workspace, 'agent-ok.sh');
     await writeExecutable(agentScript, shellScript('exit 0\n'));
     const config = buildModelResolutionConfig({
@@ -1180,7 +1155,7 @@ describe('validateConfig tool denial check', () => {
     } = {},
   ) {
     const repositoryPath = join(workspace, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath);
+    const baseCommit = await createReadmeRepository(repositoryPath);
     const agentScript = join(workspace, 'agent-ok.sh');
     await writeExecutable(agentScript, shellScript('exit 0\n'));
     const built = buildModelResolutionConfig({

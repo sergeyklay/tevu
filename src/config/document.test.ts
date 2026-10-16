@@ -6,6 +6,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createConfigStore } from '@/adapters/artifact-store';
 import { createTask } from '@/application/create-task';
+import {
+  buildCommandCheckInput,
+  buildManualCheckInput,
+  buildModelDefinitionInput,
+  buildRepositoryInput,
+  buildRunSettingsInput,
+  buildTaskInput,
+  buildTevuConfigInput,
+} from '@/config/__fixtures__/config.fixtures';
+import { unwrapErrorOfKind } from '@/domain/__fixtures__/errors.fixtures';
 
 import { appendToConfigText, renderConfigDocument } from './document';
 import { parseConfigText, resolveConfig } from './load';
@@ -18,67 +28,75 @@ import type {
   TevuConfigInput,
 } from './schema';
 import type { TaskDependencies, TaskWizardInput } from '@/application/create-task';
-import type { TevuError } from '@/domain/errors';
 import type { GitWorkspaceAdapter } from '@/domain/ports/git-workspace';
 
-function buildRepository(overrides: Partial<RepositoryInput> = {}): RepositoryInput {
-  return { id: 'app', path: '../app', ...overrides };
+function buildDocumentRepositoryInput(overrides: Partial<RepositoryInput> = {}): RepositoryInput {
+  return buildRepositoryInput({ id: 'app', path: '../app', ...overrides });
 }
 
-function buildModel(overrides: Partial<ModelDefinitionInput> = {}): ModelDefinitionInput {
-  return { id: 'gpt-low', model: 'openai/model', effort: 'low', ...overrides };
+function buildDocumentModelInput(
+  overrides: Partial<ModelDefinitionInput> = {},
+): ModelDefinitionInput {
+  return buildModelDefinitionInput({
+    id: 'gpt-low',
+    model: 'openai/model',
+    effort: 'low',
+    ...overrides,
+  });
 }
 
-function buildManualCheck(overrides: Partial<CheckInput> = {}): CheckInput {
-  return { id: 'a1', description: 'd1', manual: true, ...overrides };
+function buildDocumentManualCheckInput(overrides: Partial<CheckInput> = {}): CheckInput {
+  return buildManualCheckInput({ id: 'a1', description: 'd1', ...overrides });
 }
 
-function buildCommandCheck(overrides: Partial<CheckInput> = {}): CheckInput {
-  return { id: 'd1', description: 'd2', run: ['npm', 'test'], timeout: '1m', ...overrides };
+function buildDocumentCommandCheckInput(overrides: Partial<CheckInput> = {}): CheckInput {
+  return buildCommandCheckInput({
+    id: 'd1',
+    description: 'd2',
+    run: ['npm', 'test'],
+    timeout: '1m',
+    ...overrides,
+  });
 }
 
-function buildTask(overrides: Partial<TaskInput> = {}): TaskInput {
-  return {
+function buildDocumentTaskInput(overrides: Partial<TaskInput> = {}): TaskInput {
+  return buildTaskInput({
     id: 't1',
     title: 'Title',
     repo: 'app',
-    base_commit: '0123456789abcdef0123456789abcdef01234567',
     prompt: 'p',
     description: 'd',
     readiness: ['r'],
-    checks: { acceptance: [buildManualCheck()], done: [buildCommandCheck()] },
+    checks: {
+      acceptance: [buildDocumentManualCheckInput()],
+      done: [buildDocumentCommandCheckInput()],
+    },
     ...overrides,
-  };
+  });
 }
 
-function buildConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfigInput {
-  return {
-    version: 1,
-    run: { output_dir: '../runs', concurrency: 2, timeout: '10m', stop_grace: '3s' },
+function buildDocumentConfigInput(overrides: Partial<TevuConfigInput> = {}): TevuConfigInput {
+  return buildTevuConfigInput({
+    run: buildRunSettingsInput({
+      output_dir: '../runs',
+      concurrency: 2,
+      timeout: '10m',
+      stop_grace: '3s',
+    }),
     agents: { opencode: { command: 'opencode', secrets: [], env: [] } },
-    repositories: [buildRepository()],
-    models: [buildModel(), buildModel({ id: 'gpt-high', effort: 'high' })],
-    tasks: [buildTask()],
+    repositories: [buildDocumentRepositoryInput()],
+    models: [
+      buildDocumentModelInput(),
+      buildDocumentModelInput({ id: 'gpt-high', effort: 'high' }),
+    ],
+    tasks: [buildDocumentTaskInput()],
     ...overrides,
-  };
-}
-
-function expectFailure<K extends TevuError['kind']>(
-  outcome: { ok: true; value: unknown } | { ok: false; error: TevuError },
-  kind: K,
-): Extract<TevuError, { kind: K }> {
-  if (outcome.ok) {
-    throw new Error(`expected a ${kind} failure, got success`);
-  }
-  if (outcome.error.kind !== kind) {
-    throw new Error(`expected error kind ${kind}, got ${JSON.stringify(outcome.error)}`);
-  }
-  return outcome.error as Extract<TevuError, { kind: K }>;
+  });
 }
 
 describe('renderConfigDocument', () => {
   it('renders top-level keys in canonical order separated by one blank line, ending with one LF', () => {
-    const rendered = renderConfigDocument(buildConfig(), { redact: (text) => text });
+    const rendered = renderConfigDocument(buildDocumentConfigInput(), { redact: (text) => text });
 
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
@@ -96,7 +114,7 @@ describe('renderConfigDocument', () => {
   });
 
   it('renders trackers between agents and repositories when present', () => {
-    const config = buildConfig({
+    const config = buildDocumentConfigInput({
       trackers: {
         jira: { url: 'https://jira.example.com', email: '$JIRA_EMAIL', token: '$JIRA_TOKEN' },
       },
@@ -113,9 +131,12 @@ describe('renderConfigDocument', () => {
   });
 
   it('writes {id, path} for a path repository entry', () => {
-    const rendered = renderConfigDocument(buildConfig({ repositories: [buildRepository()] }), {
-      redact: (text) => text,
-    });
+    const rendered = renderConfigDocument(
+      buildDocumentConfigInput({ repositories: [buildDocumentRepositoryInput()] }),
+      {
+        redact: (text) => text,
+      },
+    );
 
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
@@ -123,7 +144,7 @@ describe('renderConfigDocument', () => {
   });
 
   it('writes {id, github} for a GitHub repository entry, omitting path', () => {
-    const config = buildConfig({
+    const config = buildDocumentConfigInput({
       repositories: [{ id: 'upstream', github: 'octo/app' }],
     });
 
@@ -136,7 +157,9 @@ describe('renderConfigDocument', () => {
   });
 
   it('redacts a GitHub repository entry before it becomes YAML', () => {
-    const config = buildConfig({ repositories: [{ id: 'upstream', github: 'SECRET_REPO' }] });
+    const config = buildDocumentConfigInput({
+      repositories: [{ id: 'upstream', github: 'SECRET_REPO' }],
+    });
     const redact = (text: string): string => text.replaceAll('SECRET_REPO', '[REDACTED]');
 
     const rendered = renderConfigDocument(config, { redact });
@@ -148,7 +171,7 @@ describe('renderConfigDocument', () => {
   });
 
   it('omits empty agents.opencode.secrets and env, and omits an absent trackers block', () => {
-    const rendered = renderConfigDocument(buildConfig(), { redact: (text) => text });
+    const rendered = renderConfigDocument(buildDocumentConfigInput(), { redact: (text) => text });
 
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
@@ -158,7 +181,7 @@ describe('renderConfigDocument', () => {
   });
 
   it('renders non-empty agents.opencode.secrets and env as block lists', () => {
-    const config = buildConfig({
+    const config = buildDocumentConfigInput({
       agents: { opencode: { command: 'opencode', secrets: ['OPENAI_API_KEY'], env: ['NODE_ENV'] } },
     });
 
@@ -171,7 +194,7 @@ describe('renderConfigDocument', () => {
   });
 
   it("double-quotes base_commit and omits a command check's default exit_codes and empty env", () => {
-    const rendered = renderConfigDocument(buildConfig(), { redact: (text) => text });
+    const rendered = renderConfigDocument(buildDocumentConfigInput(), { redact: (text) => text });
 
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
@@ -182,12 +205,12 @@ describe('renderConfigDocument', () => {
   });
 
   it("renders a command check's run, non-default exit_codes, and env in flow style without padding", () => {
-    const config = buildConfig({
+    const config = buildDocumentConfigInput({
       tasks: [
-        buildTask({
+        buildDocumentTaskInput({
           checks: {
-            acceptance: [buildManualCheck()],
-            done: [buildCommandCheck({ exit_codes: [1, 2], env: ['NODE_OPTIONS'] })],
+            acceptance: [buildDocumentManualCheckInput()],
+            done: [buildDocumentCommandCheckInput({ exit_codes: [1, 2], env: ['NODE_OPTIONS'] })],
           },
         }),
       ],
@@ -206,10 +229,13 @@ describe('renderConfigDocument', () => {
     { required: true, expectPresent: false },
     { required: false, expectPresent: true },
   ])('renders required: false but omits required: $required', ({ required, expectPresent }) => {
-    const config = buildConfig({
+    const config = buildDocumentConfigInput({
       tasks: [
-        buildTask({
-          checks: { acceptance: [buildManualCheck()], done: [buildCommandCheck({ required })] },
+        buildDocumentTaskInput({
+          checks: {
+            acceptance: [buildDocumentManualCheckInput()],
+            done: [buildDocumentCommandCheckInput({ required })],
+          },
         }),
       ],
     });
@@ -222,7 +248,7 @@ describe('renderConfigDocument', () => {
   });
 
   it('redacts every decoded string value before it becomes YAML', () => {
-    const config = buildConfig({
+    const config = buildDocumentConfigInput({
       run: { output_dir: 'SECRET_PATH', concurrency: 2, timeout: '10m', stop_grace: '3s' },
     });
     const redact = (text: string): string => text.replaceAll('SECRET_PATH', '[REDACTED]');
@@ -240,17 +266,17 @@ describe('renderConfigDocument', () => {
       throw new Error('redaction backend unavailable');
     };
 
-    const rendered = renderConfigDocument(buildConfig(), { redact });
+    const rendered = renderConfigDocument(buildDocumentConfigInput(), { redact });
 
-    const error = expectFailure(rendered, 'ArtifactError');
+    const error = unwrapErrorOfKind(rendered, 'ArtifactError');
     expect(error.operation).toBe('render-configuration');
     expect(error.reason).toContain('redaction backend unavailable');
   });
 
   it('renders and reloads a commit reference unchanged, with the hash double-quoted', () => {
-    const config = buildConfig({
+    const config = buildDocumentConfigInput({
       tasks: [
-        buildTask({
+        buildDocumentTaskInput({
           reference: {
             kind: 'commit',
             identifier: 'HEAD~3',
@@ -288,7 +314,7 @@ describe('renderConfigDocument', () => {
       ],
       merge_commit: '1111111111111111111111111111111111111111',
     };
-    const config = buildConfig({ tasks: [buildTask({ reference })] });
+    const config = buildDocumentConfigInput({ tasks: [buildDocumentTaskInput({ reference })] });
 
     const rendered = renderConfigDocument(config, { redact: (text) => text });
 
@@ -303,9 +329,9 @@ describe('renderConfigDocument', () => {
   });
 
   it('redacts the reference identifier before it becomes YAML', () => {
-    const config = buildConfig({
+    const config = buildDocumentConfigInput({
       tasks: [
-        buildTask({
+        buildDocumentTaskInput({
           reference: {
             kind: 'commit',
             identifier: 'secret-token-branch',
@@ -331,9 +357,9 @@ describe('renderConfigDocument', () => {
   it('returns an ArtifactError when redaction returns a non-string value', () => {
     const redact = (): string => 42 as unknown as string;
 
-    const rendered = renderConfigDocument(buildConfig(), { redact });
+    const rendered = renderConfigDocument(buildDocumentConfigInput(), { redact });
 
-    const error = expectFailure(rendered, 'ArtifactError');
+    const error = unwrapErrorOfKind(rendered, 'ArtifactError');
     expect(error.operation).toBe('render-configuration');
     expect(error.reason).toBe('redaction returned no text while rendering the configuration');
   });
@@ -343,7 +369,7 @@ describe('renderConfigDocument with agent providers', () => {
   function buildAgentWithProviders(
     overrides: Partial<TevuConfigInput['agents']['opencode']> = {},
   ): TevuConfigInput {
-    return buildConfig({
+    return buildDocumentConfigInput({
       agents: {
         opencode: {
           command: 'opencode',
@@ -393,7 +419,7 @@ describe('renderConfigDocument with agent providers', () => {
     { name: 'an empty list', providers: [] },
     { name: 'an absent list', providers: undefined },
   ])('omits the providers key for $name', ({ providers }) => {
-    const config = buildConfig({
+    const config = buildDocumentConfigInput({
       agents: {
         opencode: {
           command: 'opencode',
@@ -448,13 +474,13 @@ describe('renderConfigDocument with agent providers', () => {
 });
 
 describe('appendToConfigText', () => {
-  const newTask = buildTask({
+  const newTask = buildDocumentTaskInput({
     id: 'new-task',
     title: 'New task',
     base_commit: '1111111111111111111111111111111111111111',
     checks: {
-      acceptance: [buildManualCheck({ id: 'a1' })],
-      done: [buildManualCheck({ id: 'd1' })],
+      acceptance: [buildDocumentManualCheckInput({ id: 'a1' })],
+      done: [buildDocumentManualCheckInput({ id: 'd1' })],
     },
   });
 
@@ -510,7 +536,7 @@ describe('appendToConfigText', () => {
     const repositoriesBlock = 'repositories:\n  - id: app\n    path: ../app\n';
     const separator = '\nmodels:\n  - id: m1\n    model: a/b\n    effort: high\n';
     const text = repositoriesBlock + separator + EXISTING_TASK_LF.replace('version: 1\n', '');
-    const newRepository = buildRepository({ id: 'extra', path: '../extra' });
+    const newRepository = buildDocumentRepositoryInput({ id: 'extra', path: '../extra' });
 
     const result = appendToConfigText(
       text,
@@ -560,7 +586,10 @@ describe('appendToConfigText', () => {
 
     const result = appendToConfigText(
       text,
-      { task: newTask, repository: buildRepository({ id: 'extra', path: '../extra' }) },
+      {
+        task: newTask,
+        repository: buildDocumentRepositoryInput({ id: 'extra', path: '../extra' }),
+      },
       { redact: (value) => value },
     );
 
@@ -618,13 +647,15 @@ describe('a command check with a string run', () => {
 
   function checksWithRun(run: string): TaskInput['checks'] {
     return {
-      acceptance: [buildCommandCheck({ id: 'a1', run })],
-      done: [buildCommandCheck({ id: 'd1', run: ['npm', 'test'] })],
+      acceptance: [buildDocumentCommandCheckInput({ id: 'a1', run })],
+      done: [buildDocumentCommandCheckInput({ id: 'd1', run: ['npm', 'test'] })],
     };
   }
 
   it.each(TRICKY_COMMANDS)('renders %j as text that loads back to the same string', (run) => {
-    const config = buildConfig({ tasks: [buildTask({ checks: checksWithRun(run) })] });
+    const config = buildDocumentConfigInput({
+      tasks: [buildDocumentTaskInput({ checks: checksWithRun(run) })],
+    });
 
     const rendered = renderConfigDocument(config, { redact: (text) => text });
 
@@ -637,8 +668,8 @@ describe('a command check with a string run', () => {
   });
 
   it('keeps an array run in flow style beside a string run', () => {
-    const config = buildConfig({
-      tasks: [buildTask({ checks: checksWithRun('npm test -- --run') })],
+    const config = buildDocumentConfigInput({
+      tasks: [buildDocumentTaskInput({ checks: checksWithRun('npm test -- --run') })],
     });
 
     const rendered = renderConfigDocument(config, { redact: (text) => text });
@@ -650,10 +681,10 @@ describe('a command check with a string run', () => {
   });
 
   it.each(TRICKY_COMMANDS)('appends %j so it loads back to the same string', (run) => {
-    const base = renderConfigDocument(buildConfig(), { redact: (text) => text });
+    const base = renderConfigDocument(buildDocumentConfigInput(), { redact: (text) => text });
     expect(base.ok).toBe(true);
     if (!base.ok) return;
-    const task = buildTask({ id: 'added', checks: checksWithRun(run) });
+    const task = buildDocumentTaskInput({ id: 'added', checks: checksWithRun(run) });
 
     const appended = appendToConfigText(base.value, { task }, { redact: (text) => text });
 
@@ -667,8 +698,10 @@ describe('a command check with a string run', () => {
 
   it('redacts a secret value inside the string as it redacts an array token', () => {
     const redact = (text: string): string => text.replaceAll('SECRET_VALUE', '[REDACTED]');
-    const config = buildConfig({
-      tasks: [buildTask({ checks: checksWithRun('curl -H "token: SECRET_VALUE" host') })],
+    const config = buildDocumentConfigInput({
+      tasks: [
+        buildDocumentTaskInput({ checks: checksWithRun('curl -H "token: SECRET_VALUE" host') }),
+      ],
     });
 
     const rendered = renderConfigDocument(config, { redact });
@@ -688,7 +721,7 @@ describe('createTask leaves the configuration file byte-identical on failure', (
   beforeEach(async () => {
     tempDirectory = await fs.mkdtemp(join(tmpdir(), 'tevu-document-p6-'));
     configPath = join(tempDirectory, 'tevu.yaml');
-    const rendered = renderConfigDocument(buildConfig(), { redact: (text) => text });
+    const rendered = renderConfigDocument(buildDocumentConfigInput(), { redact: (text) => text });
     if (!rendered.ok) throw new Error('expected the fixture configuration to render');
     originalText = rendered.value;
     await fs.writeFile(configPath, originalText, 'utf8');
@@ -705,26 +738,26 @@ describe('createTask leaves the configuration file byte-identical on failure', (
   it('rejects a repo naming no configured or new repository', async () => {
     const input: TaskWizardInput = {
       configPath,
-      task: buildTask({ id: 'new-task', repo: 'ghost' }),
+      task: buildDocumentTaskInput({ id: 'new-task', repo: 'ghost' }),
     };
 
     const result = await createTask(input, buildTaskDependencies());
 
-    expectFailure(result, 'ConfigValidationError');
+    unwrapErrorOfKind(result, 'ConfigValidationError');
     await expectFileUnchanged();
   });
 
   it('rejects a candidate that violates the schema', async () => {
-    const input: TaskWizardInput = { configPath, task: buildTask({ id: 't1' }) };
+    const input: TaskWizardInput = { configPath, task: buildDocumentTaskInput({ id: 't1' }) };
 
     const result = await createTask(input, buildTaskDependencies());
 
-    expectFailure(result, 'ConfigValidationError');
+    unwrapErrorOfKind(result, 'ConfigValidationError');
     await expectFileUnchanged();
   });
 
   it('propagates a source materialization failure', async () => {
-    const input: TaskWizardInput = { configPath, task: buildTask({ id: 'new-task' }) };
+    const input: TaskWizardInput = { configPath, task: buildDocumentTaskInput({ id: 'new-task' }) };
     const dependencies = buildTaskDependencies({
       git: {
         validateSource: async () => ({
@@ -741,31 +774,31 @@ describe('createTask leaves the configuration file byte-identical on failure', (
 
     const result = await createTask(input, dependencies);
 
-    expectFailure(result, 'SourceMaterializationError');
+    unwrapErrorOfKind(result, 'SourceMaterializationError');
     await expectFileUnchanged();
   });
 
   it('returns CancellationError with no read when already cancelled', async () => {
     const cancellation = new AbortController();
     cancellation.abort();
-    const input: TaskWizardInput = { configPath, task: buildTask({ id: 'new-task' }) };
+    const input: TaskWizardInput = { configPath, task: buildDocumentTaskInput({ id: 'new-task' }) };
 
     const result = await createTask(
       input,
       buildTaskDependencies({ cancellation: cancellation.signal }),
     );
 
-    expectFailure(result, 'CancellationError');
+    unwrapErrorOfKind(result, 'CancellationError');
     await expectFileUnchanged();
   });
 
   it('leaves a missing configuration file absent when there is no bootstrap', async () => {
     await fs.rm(configPath);
-    const input: TaskWizardInput = { configPath, task: buildTask({ id: 'new-task' }) };
+    const input: TaskWizardInput = { configPath, task: buildDocumentTaskInput({ id: 'new-task' }) };
 
     const result = await createTask(input, buildTaskDependencies());
 
-    expectFailure(result, 'ConfigValidationError');
+    unwrapErrorOfKind(result, 'ConfigValidationError');
     await expect(fs.access(configPath)).rejects.toThrow();
   });
 });

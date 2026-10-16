@@ -1,7 +1,9 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest';
 
+import { buildManualCheckInput, buildTaskInput } from '@/config/__fixtures__/config.fixtures';
 import { TevuConfigSchema } from '@/config/schema';
+import { unwrapError, unwrapOk } from '@/domain/__fixtures__/errors.fixtures';
 
 import {
   describeManagedCloneError,
@@ -100,22 +102,6 @@ function buildFetchingDependencies(alreadyResolved: readonly string[] = []): {
     git: { resolveCommit: buildResolveCommit(resolved) },
   });
   return { clones, dependencies };
-}
-
-function unwrapOk<T, K extends TevuError['kind']>(result: TevuResult<T, K>): T {
-  if (!result.ok) {
-    throw new Error(`expected an ok result, received ${JSON.stringify(result.error)}`);
-  }
-  return result.value;
-}
-
-function unwrapError<T, K extends TevuError['kind']>(
-  result: TevuResult<T, K>,
-): Extract<TevuError, { kind: K }> {
-  if (result.ok) {
-    throw new Error('expected an error result, received success');
-  }
-  return result.error;
 }
 
 function managedCloneError(reason = 'boom'): Extract<TevuError, { kind: 'ManagedCloneError' }> {
@@ -505,9 +491,8 @@ describe('describeManagedCloneError', () => {
   });
 });
 
-function buildTaskDefinition(overrides: Partial<TaskInput> = {}): TaskInput {
-  return {
-    id: 'task-1',
+function buildGitHubTaskInput(overrides: Partial<TaskInput> = {}): TaskInput {
+  return buildTaskInput({
     title: 'Fixture task title',
     repo: 'app',
     base_commit: COMMIT_A,
@@ -515,11 +500,11 @@ function buildTaskDefinition(overrides: Partial<TaskInput> = {}): TaskInput {
     prompt: 'Fixture task prompt',
     readiness: ['Repository is readable'],
     checks: {
-      acceptance: [{ id: 'acc-1', description: 'acc', manual: true }],
-      done: [{ id: 'dod-1', description: 'dod', manual: true }],
+      acceptance: [buildManualCheckInput({ id: 'acc-1', description: 'acc' })],
+      done: [buildManualCheckInput({ id: 'dod-1', description: 'dod' })],
     },
     ...overrides,
-  };
+  });
 }
 
 /**
@@ -569,7 +554,7 @@ describe('prepareManagedRepositories', () => {
       clone: vi.fn(async () => ({ ok: false as const, error: failure })),
     });
     const config = buildGitHubConfig([
-      buildTaskDefinition({
+      buildGitHubTaskInput({
         reference: { kind: 'commit', identifier: 'HEAD~1', commits: [COMMIT_B] },
       }),
     ]);
@@ -594,11 +579,11 @@ describe('prepareManagedRepositories', () => {
       }),
     });
     const config = buildGitHubConfig([
-      buildTaskDefinition({
+      buildGitHubTaskInput({
         id: 'task-one',
         reference: { kind: 'commit', identifier: 'HEAD~1', commits: [COMMIT_B] },
       }),
-      buildTaskDefinition({
+      buildGitHubTaskInput({
         id: 'task-two',
         reference: { kind: 'commit', identifier: 'HEAD~1', commits: [COMMIT_B] },
       }),
@@ -635,7 +620,7 @@ describe('prepareManagedRepositories', () => {
       }),
     });
     const config = buildGitHubConfig([
-      buildTaskDefinition({
+      buildGitHubTaskInput({
         reference: { kind: 'commit', identifier: 'HEAD~1', commits: [COMMIT_B] },
       }),
     ]);
@@ -649,7 +634,7 @@ describe('prepareManagedRepositories', () => {
   it('skips a GitHub entry no task names, and never reaches the adapter for a path entry', async () => {
     const clones = buildManagedCloneAdapter();
     const config = buildGitHubConfig(
-      [buildTaskDefinition({ repo: 'other' })],
+      [buildGitHubTaskInput({ repo: 'other' })],
       [
         { id: 'app', path: '/unused/path-placeholder' },
         { id: 'other', path: '/synthetic/other' },
@@ -666,7 +651,7 @@ describe('prepareManagedRepositories', () => {
   it("fetches a pull request's own repository as the reference source, then its merge commit", async () => {
     const clones = buildManagedCloneAdapter();
     const config = buildGitHubConfig([
-      buildTaskDefinition({
+      buildGitHubTaskInput({
         reference: {
           kind: 'pull-request',
           identifier: 'other/app#12',
@@ -705,13 +690,13 @@ describe('prepareManagedRepositories', () => {
         },
       );
       const config = buildGitHubConfig([
-        buildTaskDefinition({
+        buildGitHubTaskInput({
           id: 'task-one',
           base_commit: COMMIT_A,
           reference: { kind: 'commit', identifier: 'HEAD~1', commits: [COMMIT_C] },
         }),
-        buildTaskDefinition({ id: 'task-two', base_commit: COMMIT_A }),
-        buildTaskDefinition({ id: 'task-three', base_commit: COMMIT_B }),
+        buildGitHubTaskInput({ id: 'task-two', base_commit: COMMIT_A }),
+        buildGitHubTaskInput({ id: 'task-three', base_commit: COMMIT_B }),
       ]);
       const dependencies = buildDependencies({
         clones,
@@ -740,12 +725,12 @@ describe('prepareManagedRepositories', () => {
       vi.mocked(clones.fetchLfsObjects).mockResolvedValueOnce({ ok: false, error: failure });
       vi.mocked(dependencies.git.inspectLfsObjects).mockResolvedValue(inventoryOf(1));
       const config = buildGitHubConfig([
-        buildTaskDefinition({
+        buildGitHubTaskInput({
           id: 'task-one',
           base_commit: COMMIT_A,
           reference: { kind: 'commit', identifier: 'HEAD~1', commits: [COMMIT_C] },
         }),
-        buildTaskDefinition({ id: 'task-two', base_commit: COMMIT_B }),
+        buildGitHubTaskInput({ id: 'task-two', base_commit: COMMIT_B }),
       ]);
 
       const result = await prepareManagedRepositories(config, dependencies);
@@ -758,7 +743,7 @@ describe('prepareManagedRepositories', () => {
     it('never inspects Git LFS objects for a path entry', async () => {
       const dependencies = buildDependencies();
       const config = buildGitHubConfig(
-        [buildTaskDefinition({ repo: 'other' })],
+        [buildGitHubTaskInput({ repo: 'other' })],
         [
           { id: 'app', path: '/unused/path-placeholder' },
           { id: 'other', path: '/synthetic/other' },

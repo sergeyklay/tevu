@@ -3,20 +3,27 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
-import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { createSyntheticRepository } from '@/adapters/__fixtures__/git.fixtures';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
 import { createEnvironmentAdapter, createEvaluatorProcessAdapter } from '@/adapters/process';
-import { TevuConfigSchema } from '@/config/schema';
+import {
+  buildCommandCheckInput,
+  buildModelDefinitionInput,
+  buildRepositoryInput,
+  buildRunSettingsInput,
+  buildTaskInput,
+  buildTevuConfig,
+} from '@/config/__fixtures__/config.fixtures';
+import { unwrapOk } from '@/domain/__fixtures__/errors.fixtures';
 import { unavailableMetric } from '@/domain/run-records';
+import { buildAgentCapabilityReport } from '@/evaluation/__fixtures__/report.fixtures';
 
 import { buildVerifiedEfforts } from './__fixtures__/effort.fixtures';
 import { planBenchmark, runBenchmark } from './run-benchmark';
 
-import type { TevuConfigInput } from '@/config/schema';
 import type { TevuConfig } from '@/domain/config';
-import type { TevuError, TevuResult } from '@/domain/errors';
 import type { AgentAdapter, AgentRegistry, AgentRunResult } from '@/domain/ports/agent';
 import type { CaseArtifactPathIndex, RunRecorder } from '@/domain/ports/artifact-store';
 import type { Clock } from '@/domain/ports/clock';
@@ -24,7 +31,6 @@ import type { HostProbe, PrerequisiteAdapter } from '@/domain/ports/prerequisite
 import type { AgentCapabilityReport, AgentMetrics, CaseResult } from '@/domain/run-records';
 import type { RunDependencies } from '@/domain/use-cases';
 
-const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 const CONFIG_PATH = '/synthetic/tevu.yaml';
 
 const MODEL_EDIT_BASE = 'base content for model edit\n';
@@ -51,39 +57,17 @@ afterEach(async () => {
   }
 });
 
-function unwrapOk<T, K extends TevuError['kind']>(result: TevuResult<T, K>): T {
-  if (!result.ok) {
-    throw new Error(`expected an ok result, received ${JSON.stringify(result.error)}`);
-  }
-  return result.value;
-}
-
-async function runGit(cwd: string, args: readonly string[]): Promise<void> {
-  await execa('git', [...args], {
-    cwd,
-    env: {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_SYSTEM: '/dev/null',
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_TERMINAL_PROMPT: '0',
-    },
-    reject: true,
-    stdin: 'ignore',
-    timeout: 60_000,
-  });
-}
-
-async function createSourceRepository(): Promise<{ path: string; commit: string }> {
+async function createSetupSourceRepository(): Promise<{ path: string; commit: string }> {
   const path = join(testDirectory, 'source-repo');
-  await mkdir(join(path, 'src'), { recursive: true });
-  await writeFile(join(path, 'src/model-edit.txt'), MODEL_EDIT_BASE);
-  await writeFile(join(path, 'src/restore-target.txt'), RESTORE_BASE_CONTENT);
-  await runGit(path, ['init', '--quiet', '-b', 'main']);
-  await runGit(path, ['add', '-A']);
-  await runGit(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'base commit']);
-  const { stdout } = await execa('git', ['rev-parse', 'HEAD'], { cwd: path });
-  return { path, commit: stdout.trim() };
+  const commit = await createSyntheticRepository(
+    path,
+    {
+      'src/model-edit.txt': MODEL_EDIT_BASE,
+      'src/restore-target.txt': RESTORE_BASE_CONTENT,
+    },
+    { message: 'base commit' },
+  );
+  return { path, commit };
 }
 
 /** JSON-quotes a path for embedding in a `node -e` script string. */
@@ -124,19 +108,16 @@ function acceptanceCheckScript(): string {
   ].join('\n');
 }
 
-function buildConfig(repositoryPath: string, commit: string, overlayDirectory: string): TevuConfig {
-  const config: TevuConfigInput = {
-    version: 1,
-    run: {
-      output_dir: join(testDirectory, 'artifacts'),
-      concurrency: 1,
-      timeout: '30s',
-      stop_grace: '1s',
-    },
+function buildSetupConfig(
+  repositoryPath: string,
+  commit: string,
+  overlayDirectory: string,
+): TevuConfig {
+  return buildTevuConfig({
+    run: buildRunSettingsInput({ output_dir: join(testDirectory, 'artifacts'), timeout: '30s' }),
     agents: { opencode: { command: '/unused/agent', secrets: [], env: [] } },
     repositories: [
-      {
-        id: 'repo-1',
+      buildRepositoryInput({
         path: repositoryPath,
         setup: {
           before_agent: [[process.execPath, '-e', beforeAgentScript()]],
@@ -144,49 +125,40 @@ function buildConfig(repositoryPath: string, commit: string, overlayDirectory: s
           timeout: '10s',
           env: [],
         },
-      },
+      }),
     ],
     models: [
-      { id: 'c1', model: 'synthetic/model-a', effort: 'fast' },
-      { id: 'c2', model: 'synthetic/model-b', effort: 'deep' },
+      buildModelDefinitionInput({ id: 'c1', model: 'synthetic/model-a', effort: 'fast' }),
+      buildModelDefinitionInput({ id: 'c2', model: 'synthetic/model-b', effort: 'deep' }),
     ],
     tasks: [
-      {
-        id: 'task-1',
+      buildTaskInput({
         title: 'Synthetic setup task',
-        repo: 'repo-1',
         base_commit: commit,
-        description: 'synthetic task description',
         prompt: 'implement the synthetic feature',
-        readiness: ['synthetic ready item'],
         checks: {
           restore: ['src/restore-target.txt'],
           overlay: overlayDirectory,
           acceptance: [
-            {
+            buildCommandCheckInput({
               id: 'acc-repaired',
               description: 'the repaired config is visible to the check',
               run: [process.execPath, '-e', acceptanceCheckScript()],
               timeout: '10s',
-              exit_codes: [0],
-              env: [],
-            },
+            }),
           ],
           done: [
-            {
+            buildCommandCheckInput({
               id: 'dod-noop',
               description: 'no-op done check',
               run: [process.execPath, '-e', 'process.exit(0);'],
               timeout: '10s',
-              exit_codes: [0],
-              env: [],
-            },
+            }),
           ],
         },
-      },
+      }),
     ],
-  };
-  return TevuConfigSchema.parse(config);
+  });
 }
 
 function buildAgentMetricsStub(): AgentMetrics {
@@ -206,20 +178,19 @@ function buildAgentMetricsStub(): AgentMetrics {
   };
 }
 
-function buildAgentCapabilityReport(): AgentCapabilityReport {
-  return {
+function buildUnusedAgentCapabilityReport(): AgentCapabilityReport {
+  return buildAgentCapabilityReport({
     executable: '/unused/agent',
     detectedVersion: null,
     capabilities: [],
-    isolation: { denyOutsideWorktree: 'available' },
-  };
+  });
 }
 
 /** The "agent": edits the worktree directly with plain Node fs calls, no model or subprocess involved. */
 function buildDirectEditAgent(): AgentAdapter {
   return {
     async probe() {
-      return { ok: true, value: buildAgentCapabilityReport() };
+      return { ok: true, value: buildUnusedAgentCapabilityReport() };
     },
     async readProviders() {
       return {
@@ -374,12 +345,12 @@ async function readMarker(name: string): Promise<string> {
 
 describe('repository setup orchestration end to end (AC-1, P7)', () => {
   it("keeps before_agent output out of the patch, includes the agent's edits, repairs a corrupted setup file before checks, and runs before_checks after restore and overlay (AC-1, P7)", async () => {
-    const repository = await createSourceRepository();
+    const repository = await createSetupSourceRepository();
     const overlayDirectory = join(testDirectory, 'overlay');
     await mkdir(overlayDirectory, { recursive: true });
     await writeFile(join(overlayDirectory, 'overlay-marker.txt'), OVERLAY_CONTENT);
 
-    const config = buildConfig(repository.path, repository.commit, overlayDirectory);
+    const config = buildSetupConfig(repository.path, repository.commit, overlayDirectory);
     const git = createGitWorkspaceAdapter({
       workspacesDirectory: join(testDirectory, 'workspaces'),
     });

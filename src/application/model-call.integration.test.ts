@@ -7,14 +7,12 @@ import process from 'node:process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { withoutPlatformVariables } from '@/adapters/__fixtures__/environment.fixtures';
+import { buildSecretRedactor } from '@/adapters/__fixtures__/process.fixtures';
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
-import {
-  createEnvironmentAdapter,
-  createRedactor,
-  createSecretRedactor,
-  runManagedProcess,
-} from '@/adapters/process';
+import { createEnvironmentAdapter, runManagedProcess } from '@/adapters/process';
+import { buildRunSettingsInput, buildTevuConfig } from '@/config/__fixtures__/config.fixtures';
+import { unwrapErrorOfKind, unwrapOk } from '@/domain/__fixtures__/errors.fixtures';
 
 import {
   callModelRole,
@@ -51,30 +49,6 @@ const SECRET_VALUE = 'sk-live-modelcall-secret-000111';
 const SESSION_ID = 'ses-mc-1';
 const PROMPT = 'Draft acceptance criteria for the CSV export button.';
 const DENY_EVERY_TOOL = '{"*":"deny"}';
-
-function expectOk<T>(outcome: { ok: true; value: T } | { ok: false; error: TevuError }): T {
-  if (outcome.ok) {
-    return outcome.value;
-  }
-  throw new Error(`expected success, got ${JSON.stringify(outcome.error)}`);
-}
-
-function expectFailure<K extends TevuError['kind']>(
-  outcome: { ok: true; value: unknown } | { ok: false; error: TevuError },
-  kind: K,
-): Extract<TevuError, { kind: K }> {
-  if (outcome.ok) {
-    throw new Error(`expected a ${kind} failure, got success`);
-  }
-  if (outcome.error.kind !== kind) {
-    throw new Error(`expected error kind ${kind}, got ${JSON.stringify(outcome.error)}`);
-  }
-  return outcome.error as Extract<TevuError, { kind: K }>;
-}
-
-function buildSecretRedactor(secretValues: readonly string[]): SecretRedactor {
-  return createSecretRedactor(() => secretValues, createRedactor(secretValues));
-}
 
 /** A redactor whose `redactValue` fails after the copied providers pass, exercising a record-redaction failure mid-run. */
 function buildRecordRedactionFailingSecretRedactor(): SecretRedactor {
@@ -339,27 +313,25 @@ afterAll(async () => {
   await rm(tempRoot, { recursive: true, force: true });
 });
 
-function buildConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
+function buildGraderConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
   return {
-    version: 1,
-    run: {
-      output_dir: join(tempRoot, 'runs'),
-      concurrency: 1,
-      repeat: 1,
-      timeout: '30s',
-      stop_grace: '200ms',
-    },
-    agents: {
-      opencode: {
-        command: 'unused-fake-opencode-command',
-        secrets: [SECRET_VARIABLE_NAME],
-        env: [],
-        providers: [],
+    ...buildTevuConfig({
+      run: buildRunSettingsInput({
+        output_dir: join(tempRoot, 'runs'),
+        timeout: '30s',
+        stop_grace: '200ms',
+      }),
+      agents: {
+        opencode: {
+          command: 'unused-fake-opencode-command',
+          secrets: [SECRET_VARIABLE_NAME],
+          env: [],
+        },
       },
-    },
+      roles: { grader: { model: 'openai/grader-model', effort: 'high', agent: 'opencode' } },
+    }),
     repositories: [],
     models: [],
-    roles: { grader: { model: 'openai/grader-model', effort: 'high', agent: 'opencode' } },
     tasks: [],
     ...overrides,
   };
@@ -486,7 +458,7 @@ async function callWithFakeAgent(options: CallOptions) {
       createGitWorkspaceAdapter({ workspacesDirectory: join(tempRoot, 'workspaces') }),
   };
   const request: ModelRoleCallRequest = {
-    config: options.config ?? buildConfig(),
+    config: options.config ?? buildGraderConfig(),
     role: options.role ?? 'grader',
     prompt: PROMPT,
     timeoutMs: options.timeoutMs ?? 10_000,
@@ -501,7 +473,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
     it('returns the redacted reply text and the export-reported metrics with a configured secret redacted', async () => {
       const result = await callWithFakeAgent({ run: 'ok', export: 'reply-with-secret' });
 
-      const value = expectOk(result);
+      const value = unwrapOk(result);
       expect(value.text).toBe('Hello [REDACTED] world');
       expect(value.text).not.toContain(SECRET_VALUE);
       expect(result.retainedDirectory).toBeNull();
@@ -526,7 +498,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
     it('marks cost unavailable with the documented reason when the export message has no cost field', async () => {
       const result = await callWithFakeAgent({ run: 'ok', export: 'no-cost' });
 
-      const value = expectOk(result);
+      const value = unwrapOk(result);
       expect(value.metrics.cost).toEqual({
         value: null,
         unit: 'USD',
@@ -541,7 +513,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
     it('joins two text parts that split a configured secret with a line feed, leaving both halves and no whole occurrence', async () => {
       const result = await callWithFakeAgent({ run: 'ok', export: 'secret-split' });
 
-      const value = expectOk(result);
+      const value = unwrapOk(result);
       const half = Math.ceil(SECRET_VALUE.length / 2);
       const first = SECRET_VALUE.slice(0, half);
       const second = SECRET_VALUE.slice(half);
@@ -653,7 +625,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
         runProcess,
       });
 
-      const error = expectFailure(result, 'ArtifactError');
+      const error = unwrapErrorOfKind(result, 'ArtifactError');
       expect(error.operation).toBe('initialize-repository');
       expect(calls.some((call) => call.argv[1] === 'run' && call.argv[2] === '--format')).toBe(
         false,
@@ -703,7 +675,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
 
         const result = await callWithFakeAgent({ ...options, environments });
 
-        expectFailure(result, kind);
+        unwrapErrorOfKind(result, kind);
         expect(roots).toHaveLength(1);
         expect(result.retainedDirectory).toBe(roots[0]);
         expect(disposals).toEqual(roots);
@@ -729,7 +701,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
         cancellation: controller.signal,
       });
 
-      expectFailure(result, 'CancellationError');
+      unwrapErrorOfKind(result, 'CancellationError');
       expect(roots).toHaveLength(1);
       expect(result.retainedDirectory).toBe(roots[0]);
       expect(disposals).toEqual(roots);
@@ -745,7 +717,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
         environments,
       });
 
-      const value = expectOk(result);
+      const value = unwrapOk(result);
       expect(value.text).toBe('Hello [REDACTED] world');
       expect(result.retainedDirectory).toBe(roots[0]);
     });
@@ -760,7 +732,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
         git: failingGit,
       });
 
-      const error = expectFailure(result, 'ArtifactError');
+      const error = unwrapErrorOfKind(result, 'ArtifactError');
       expect(error.operation).toBe('initialize-repository');
       expect(roots).toHaveLength(1);
       expect(result.retainedDirectory).toBe(roots[0]);
@@ -777,7 +749,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
         git: failingGit,
       });
 
-      expectFailure(result, 'ArtifactError');
+      unwrapErrorOfKind(result, 'ArtifactError');
       expect(roots).toHaveLength(1);
       expect(result.retainedDirectory).toBeNull();
     });
@@ -791,7 +763,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
         secrets: buildRecordRedactionFailingSecretRedactor(),
       });
 
-      const error = expectFailure(result, 'AgentProtocolError');
+      const error = unwrapErrorOfKind(result, 'AgentProtocolError');
       expect(error.context).toEqual({ phase: 'call', role: 'grader' });
       expect(error.reason).toBe('record redaction failed; record withheld');
     });
@@ -803,7 +775,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
         secrets: buildReplyRedactionThrowingSecretRedactor([SECRET_VALUE]),
       });
 
-      const error = expectFailure(result, 'AgentProtocolError');
+      const error = unwrapErrorOfKind(result, 'AgentProtocolError');
       expect(error.context).toEqual({ phase: 'call', role: 'grader' });
       expect(error.reason).toBe('reply redaction failed; reply withheld');
     });
@@ -819,10 +791,10 @@ describe('callModelRole against a fake OpenCode executable', () => {
         export: 'none',
         environments,
         runProcess,
-        config: buildConfig({ roles: {} }),
+        config: buildGraderConfig({ roles: {} }),
       });
 
-      const error = expectFailure(result, 'ConfigValidationError');
+      const error = unwrapErrorOfKind(result, 'ConfigValidationError');
       expect(error.findings).toEqual([
         { severity: 'error', identifier: 'roles.grader', message: 'model role is not configured' },
       ]);
@@ -845,7 +817,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
         cancellation: controller.signal,
       });
 
-      const error = expectFailure(result, 'CancellationError');
+      const error = unwrapErrorOfKind(result, 'CancellationError');
       expect(error.activeCaseIds).toEqual([]);
       expect(result.retainedDirectory).toBeNull();
       expect(calls).toHaveLength(0);
@@ -927,7 +899,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
     ])('reports no directory when $name', async ({ options, kind }) => {
       const result = await callWithFakeAgent({ run: 'ok', export: 'none', ...options });
 
-      expectFailure(result, kind);
+      unwrapErrorOfKind(result, kind);
       expect(result.retainedDirectory).toBeNull();
     });
   });
@@ -936,7 +908,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
     it('fails with the exit code and error summary when run exits nonzero after reporting an error', async () => {
       const result = await callWithFakeAgent({ run: 'error-exit-1', export: 'none' });
 
-      const error = expectFailure(result, 'ModelCallError');
+      const error = unwrapErrorOfKind(result, 'ModelCallError');
       expect(error.cause).toBe('failed');
       expect(error.reason).toBe('run process exited with code 1: Synthetic failure');
     });
@@ -944,7 +916,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
     it('times out when run outlives timeoutMs', async () => {
       const result = await callWithFakeAgent({ run: 'sleep', export: 'none', timeoutMs: 700 });
 
-      const error = expectFailure(result, 'ModelCallError');
+      const error = unwrapErrorOfKind(result, 'ModelCallError');
       expect(error.cause).toBe('timed-out');
       expect(error.reason).toBe('run process did not finish within 700ms');
     });
@@ -965,7 +937,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
     ])('fails the call with cause failed for $name', async ({ run, exportBehavior, reason }) => {
       const result = await callWithFakeAgent({ run, export: exportBehavior });
 
-      const error = expectFailure(result, 'ModelCallError');
+      const error = unwrapErrorOfKind(result, 'ModelCallError');
       expect(error.cause).toBe('failed');
       expect(error.reason).toBe(reason);
     });
@@ -973,7 +945,7 @@ describe('callModelRole against a fake OpenCode executable', () => {
     it('fails the call with cause unfinished for a final assistant message with a non-stop finish reason', async () => {
       const result = await callWithFakeAgent({ run: 'ok', export: 'finish-length' });
 
-      const error = expectFailure(result, 'ModelCallError');
+      const error = unwrapErrorOfKind(result, 'ModelCallError');
       expect(error.cause).toBe('unfinished');
       expect(error.reason).toBe('final assistant message finished with "length"');
     });
@@ -984,8 +956,8 @@ describe('callModelRole tool denial and evidence against a fake OpenCode executa
   const OPERATOR_PERMISSION = '{"bash":"allow"}';
 
   function buildConfigForRole(role: ModelRoleName, env: string[] = []): TevuConfig {
-    const base = buildConfig();
-    return buildConfig({
+    const base = buildGraderConfig();
+    return buildGraderConfig({
       agents: { opencode: { ...base.agents['opencode']!, env } },
       roles: { [role]: { model: 'openai/role-model', effort: 'high', agent: 'opencode' } },
     });
@@ -1042,7 +1014,7 @@ describe('callModelRole tool denial and evidence against a fake OpenCode executa
       onEvidence: (evidence) => delivered.push(evidence),
     });
 
-    const value = expectOk(result);
+    const value = unwrapOk(result);
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.session?.metrics).toEqual(value.metrics);
     expect(delivered[0]?.events).toHaveLength(1);
@@ -1058,7 +1030,7 @@ describe('callModelRole tool denial and evidence against a fake OpenCode executa
       onEvidence: (evidence) => delivered.push(evidence),
     });
 
-    expectFailure(result, 'ModelCallError');
+    unwrapErrorOfKind(result, 'ModelCallError');
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.session).toBeNull();
   });
@@ -1069,11 +1041,11 @@ describe('callModelRole tool denial and evidence against a fake OpenCode executa
     const result = await callWithFakeAgent({
       run: 'ok',
       export: 'none',
-      config: buildConfig({ roles: {} }),
+      config: buildGraderConfig({ roles: {} }),
       onEvidence: (evidence) => delivered.push(evidence),
     });
 
-    expectFailure(result, 'ConfigValidationError');
+    unwrapErrorOfKind(result, 'ConfigValidationError');
     expect(delivered).toEqual([]);
   });
 });
@@ -1120,7 +1092,7 @@ describe('callModelRole tool denial check against a fake OpenCode executable', (
       recordPath,
     });
 
-    expect(expectOk(result).text).toBe('Hello [REDACTED] world');
+    expect(unwrapOk(result).text).toBe('Hello [REDACTED] world');
     const records = readRecords(recordPath);
     expect(records.debugConfig).toHaveLength(1);
     expect(records.run.debugConfigRuns).toBe(1);
@@ -1133,20 +1105,20 @@ describe('callModelRole tool denial check against a fake OpenCode executable', (
     const shown = await callWithFakeAgent({ run: 'ok', export: 'reply-with-secret' });
     const failing = await callWithFakeAgent({ run: 'error-exit-1', export: 'none' });
 
-    expect(expectOk(shown).text).toBe('Hello [REDACTED] world');
-    expectFailure(failing, 'ModelCallError');
+    expect(unwrapOk(shown).text).toBe('Hello [REDACTED] world');
+    unwrapErrorOfKind(failing, 'ModelCallError');
   });
 
   it('sends the denial in the check request even when the agent block and the process environment name a permission', async () => {
     const { runProcess, calls } = spyOnRunProcess();
-    const base = buildConfig();
+    const base = buildGraderConfig();
     process.env['OPENCODE_PERMISSION'] = OPERATOR_PERMISSION;
     try {
       const result = await callWithFakeAgent({
         run: 'ok',
         export: 'reply-with-secret',
         runProcess,
-        config: buildConfig({
+        config: buildGraderConfig({
           agents: { opencode: { ...base.agents['opencode']!, env: ['OPENCODE_PERMISSION'] } },
         }),
       });
@@ -1174,7 +1146,7 @@ describe('callModelRole tool denial check against a fake OpenCode executable', (
       onEvidence: (evidence) => delivered.push(evidence),
     });
 
-    const error = expectFailure(result, 'AgentProtocolError');
+    const error = unwrapErrorOfKind(result, 'AgentProtocolError');
     expect(error.agent).toBe('opencode');
     expect(error.context).toEqual({ phase: 'probe' });
     expect(error.reason.startsWith('capability "model call tool denial" is missing: "')).toBe(true);
@@ -1196,7 +1168,7 @@ describe('callModelRole tool denial check against a fake OpenCode executable', (
       runProcess,
     });
 
-    const error = expectFailure(result, 'AgentProtocolError');
+    const error = unwrapErrorOfKind(result, 'AgentProtocolError');
     expect(error.context).toEqual({ phase: 'probe' });
     expect(error.reason).toContain('could not be checked: "');
     expect(error.reason).toContain('exits with code 1');
@@ -1224,7 +1196,7 @@ describe('callModelRole tool denial check against a fake OpenCode executable', (
       cancellation: controller.signal,
     });
 
-    expectFailure(result, 'CancellationError');
+    unwrapErrorOfKind(result, 'CancellationError');
     expect(result.retainedDirectory).toBeNull();
     expect(existsSync(roots[0]!)).toBe(false);
     expectRefusedBeforeAnyRun(calls);
@@ -1242,7 +1214,7 @@ describe('callModelRole tool denial check against a fake OpenCode executable', (
       debugConfig: { kind: 'print', stdout },
     });
 
-    const error = expectFailure(result, 'AgentProtocolError');
+    const error = unwrapErrorOfKind(result, 'AgentProtocolError');
     expect(error.reason).toContain('lists "[REDACTED]" after "*"');
     expect(JSON.stringify(error)).not.toContain(SECRET_VALUE);
   });
@@ -1250,7 +1222,7 @@ describe('callModelRole tool denial check against a fake OpenCode executable', (
   it('still fails with the tool-call cause when the denial is shown and the session holds a tool part', async () => {
     const result = await callWithFakeAgent({ run: 'ok', export: 'tool-part' });
 
-    const error = expectFailure(result, 'ModelCallError');
+    const error = unwrapErrorOfKind(result, 'ModelCallError');
     expect(error.cause).toBe('tool-call');
     expect(error.reason).toBe(
       'the session called the tool "read" although every tool is denied to a model call',
@@ -1267,7 +1239,7 @@ describe('callModelRole tool denial check against a fake OpenCode executable', (
       environments,
     });
 
-    expectFailure(result, 'AgentProtocolError');
+    unwrapErrorOfKind(result, 'AgentProtocolError');
     expect(roots).toHaveLength(1);
     expect(result.retainedDirectory).toBe(roots[0]);
     expect(disposals).toEqual(roots);
@@ -1331,7 +1303,7 @@ describe('callModelRole providers resolution', () => {
 
     const result = await callModelRole(
       {
-        config: buildConfig(),
+        config: buildGraderConfig(),
         role: 'grader',
         prompt: PROMPT,
         timeoutMs: 10_000,
@@ -1340,7 +1312,7 @@ describe('callModelRole providers resolution', () => {
       modelCallDependencies,
     );
 
-    expectOk(result);
+    unwrapOk(result);
     expect(calls).toEqual(['probe', 'readProviders']);
     expect(receivedFiles).toEqual([['opencode/opencode.json']]);
   });
@@ -1389,7 +1361,7 @@ describe('callModelRole providers resolution', () => {
 
     const result = await callModelRole(
       {
-        config: buildConfig(),
+        config: buildGraderConfig(),
         role: 'grader',
         prompt: PROMPT,
         timeoutMs: 10_000,
@@ -1399,7 +1371,7 @@ describe('callModelRole providers resolution', () => {
       modelCallDependencies,
     );
 
-    expectOk(result);
+    unwrapOk(result);
     expect(readProvidersCalls).toBe(0);
     expect(receivedFiles).toEqual([['opencode/opencode.json']]);
   });
@@ -1453,7 +1425,7 @@ describe('callModelRole providers resolution', () => {
 
       const result = await callModelRole(
         {
-          config: buildConfig(),
+          config: buildGraderConfig(),
           role: 'grader',
           prompt: PROMPT,
           timeoutMs: 10_000,
@@ -1463,7 +1435,7 @@ describe('callModelRole providers resolution', () => {
         modelCallDependencies,
       );
 
-      expectOk(result);
+      unwrapOk(result);
       return received;
     }
 
@@ -1728,7 +1700,7 @@ describe('listModelsInCallEnvironment', () => {
     const outcome = await listModelsInCallEnvironment(
       agent,
       {
-        snapshot: expectOk(snapshot),
+        snapshot: unwrapOk(snapshot),
         agentVariables: AGENT_VARIABLES,
         configurationFiles: [{ relativePath: 'opencode/opencode.json', text: '{"provider":{}}\n' }],
       },

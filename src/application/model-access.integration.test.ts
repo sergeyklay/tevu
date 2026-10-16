@@ -7,6 +7,7 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { afterAll, assert, beforeAll, describe, expect, it } from 'vitest';
 
+import { buildRetainingEnvironments } from '@/adapters/__fixtures__/environment.fixtures';
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
 import {
@@ -169,40 +170,6 @@ function buildDependencies(options: DependencyOptions = {}): ModelAccessDependen
 
 function buildAgent(overrides: Partial<AgentDraft> = {}): AgentDraft {
   return { command: 'opencode', secrets: [], env: [], providers: [], ...overrides };
-}
-
-/** Wraps the real environment adapter so every removal deletes the call directory and then fails, recording each root. */
-function buildRetainingEnvironments(): { environments: EnvironmentAdapter; roots: string[] } {
-  const real = createEnvironmentAdapter();
-  const roots: string[] = [];
-  const environments: EnvironmentAdapter = {
-    ...real,
-    createModelCallEnvironment: async (snapshot, agentVariables, configurationFiles) => {
-      const created = await real.createModelCallEnvironment(
-        snapshot,
-        agentVariables,
-        configurationFiles,
-      );
-      if (!created.ok) {
-        return created;
-      }
-      roots.push(created.value.rootDirectory);
-      return {
-        ok: true,
-        value: {
-          ...created.value,
-          dispose: async () => {
-            await created.value.dispose();
-            return {
-              ok: false,
-              error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
-            };
-          },
-        },
-      };
-    },
-  };
-  return { environments, roots };
 }
 
 const CONFIG_PATH = () => join(tempRoot, 'tevu.yaml');

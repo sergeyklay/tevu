@@ -1,12 +1,14 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { afterAll, assert, beforeAll, describe, expect, it } from 'vitest';
 
-import { createRedactor, createSecretRedactor, runManagedProcess } from '@/adapters/process';
+import { buildSecretRedactor, writeExecutable } from '@/adapters/__fixtures__/process.fixtures';
+import { runManagedProcess } from '@/adapters/process';
 
+import { readJsonFixture, readTextFixture } from './__fixtures__/protocol.fixtures';
 import { exportMessageIdentity, exportPartIdentity, normalizeMetrics } from './metrics';
 import { createOpenCodeAdapter } from './opencode';
 
@@ -30,15 +32,6 @@ import type { SecretRedactor } from '@/domain/ports/secret-redactor';
 import type { AgentMetrics, AgentSessionExport, CopiedProvider } from '@/domain/run-records';
 
 const CASE_ID = 'task-1--alpha--1';
-const FIXTURE_DIRECTORY = new URL('./fixtures/', import.meta.url);
-
-function readTextFixture(name: string): string {
-  return readFileSync(new URL(name, FIXTURE_DIRECTORY), 'utf8');
-}
-
-function readJsonFixture(name: string): unknown {
-  return JSON.parse(readTextFixture(name)) as unknown;
-}
 
 /** Raw, undecoded event records so `normalizeMetrics` exercises its own decode-first path. */
 function readRawFixtureEvents(name: string): unknown[] {
@@ -46,10 +39,6 @@ function readRawFixtureEvents(name: string): unknown[] {
     .trim()
     .split('\n')
     .map((line) => JSON.parse(line) as unknown);
-}
-
-function buildSecretRedactor(secretValues: readonly string[]): SecretRedactor {
-  return createSecretRedactor(() => secretValues, createRedactor(secretValues));
 }
 
 function buildAlwaysFailingSecretRedactor(): SecretRedactor {
@@ -1007,21 +996,23 @@ function scriptCounter(): number {
   return scriptCounterValue;
 }
 
-async function writeExecutable(name: string, body: string): Promise<string> {
+async function writeSyntheticOpencode(name: string, body: string): Promise<string> {
   const filePath = join(tempRoot, name);
-  await writeFile(filePath, body, { mode: 0o755 });
-  await chmod(filePath, 0o755);
+  await writeExecutable(filePath, body);
   return filePath;
 }
 
 beforeAll(async () => {
   tempRoot = await realpath(await mkdtemp(join(tmpdir(), 'tevu-opencode-metrics-')));
-  syntheticExecutable = await writeExecutable('synthetic-opencode.mjs', SYNTHETIC_OPENCODE_SCRIPT);
-  missingVariantExecutable = await writeExecutable(
+  syntheticExecutable = await writeSyntheticOpencode(
+    'synthetic-opencode.mjs',
+    SYNTHETIC_OPENCODE_SCRIPT,
+  );
+  missingVariantExecutable = await writeSyntheticOpencode(
     'synthetic-opencode-missing-variant.mjs',
     SYNTHETIC_MISSING_VARIANT_SCRIPT,
   );
-  exitFourExecutable = await writeExecutable(
+  exitFourExecutable = await writeSyntheticOpencode(
     'synthetic-opencode-exit-four.mjs',
     SYNTHETIC_EXIT_FOUR_SCRIPT,
   );
@@ -2770,7 +2761,7 @@ describe('OpenCode adapter models command capability probe', () => {
   let noModelsExecutable: string;
 
   beforeAll(async () => {
-    noModelsExecutable = await writeExecutable(
+    noModelsExecutable = await writeSyntheticOpencode(
       'synthetic-opencode-no-models.mjs',
       SYNTHETIC_NO_MODELS_HELP_SCRIPT,
     );
@@ -2829,7 +2820,7 @@ describe('OpenCode adapter models --verbose capability probe', () => {
   let versionedExecutable: string;
 
   beforeAll(async () => {
-    versionedExecutable = await writeExecutable(
+    versionedExecutable = await writeSyntheticOpencode(
       'synthetic-opencode-versioned.mjs',
       SYNTHETIC_VERSIONED_SCRIPT,
     );

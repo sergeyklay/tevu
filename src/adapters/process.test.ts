@@ -17,10 +17,11 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import process from 'node:process';
-import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { withoutPlatformVariables } from './__fixtures__/environment.fixtures';
+import { GIT_IDENTITY_FLAGS, runGit } from './__fixtures__/git.fixtures';
+import { writeExecutable } from './__fixtures__/process.fixtures';
 import {
   createCaseExecutableAdapter,
   createEnvironmentAdapter,
@@ -161,8 +162,6 @@ describe('runManagedProcess stdin', () => {
   });
 });
 
-const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
-
 /**
  * A synthetic version-manager shim's body: it reads a version name from
  * `synthetic-pin` in its working directory, or else from
@@ -194,30 +193,11 @@ function nodeScript(body: string): string {
   return `#!${process.execPath}\n${body}`;
 }
 
-async function writeExecutable(path: string, contents: string): Promise<void> {
-  await writeFile(path, contents);
-  await chmod(path, 0o755);
-}
-
 function buildRequest(
   overrides: Partial<CaseExecutableProbeRequest> &
     Pick<CaseExecutableProbeRequest, 'executable' | 'path'>,
 ): CaseExecutableProbeRequest {
   return { additions: {}, withheldNames: [], ...overrides };
-}
-
-async function runGit(cwd: string, args: readonly string[]): Promise<void> {
-  await execa('git', [...args], {
-    cwd,
-    env: {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_SYSTEM: '/dev/null',
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_TERMINAL_PROMPT: '0',
-    },
-    stdin: 'ignore',
-  });
 }
 
 /** One committed file, `tracked.txt`, and nothing else pending. */

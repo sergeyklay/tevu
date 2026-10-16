@@ -16,6 +16,7 @@ import {
   buildJiraTrackerSettings,
   buildParentEnvironmentSnapshot,
 } from '@/__fixtures__/host.fixtures';
+import { createSyntheticRepository } from '@/adapters/__fixtures__/git.fixtures';
 import { TevuConfigSchema } from '@/config/schema';
 import { GH_CREDENTIAL_ENVIRONMENT_VARIABLES } from '@/domain/github-cli';
 import { runProgram } from '@/interface/program';
@@ -275,30 +276,8 @@ describe('composeProgramDependencies credential registration', () => {
   });
 });
 
-const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
-
-async function runGit(cwd: string, args: readonly string[]): Promise<string> {
-  const result = await execa('git', [...args], {
-    cwd,
-    env: {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_SYSTEM: '/dev/null',
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_TERMINAL_PROMPT: '0',
-    },
-    stdin: 'ignore',
-  });
-  return typeof result.stdout === 'string' ? result.stdout : '';
-}
-
-async function createSourceRepository(directory: string): Promise<string> {
-  await mkdir(directory, { recursive: true });
-  await runGit(directory, ['init', '--quiet', '-b', 'main']);
-  await writeFile(join(directory, 'README.md'), 'synthetic\n');
-  await runGit(directory, ['add', '-A']);
-  await runGit(directory, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'base']);
-  return (await runGit(directory, ['rev-parse', 'HEAD'])).trim();
+async function createReadmeRepository(directory: string): Promise<string> {
+  return createSyntheticRepository(directory, { 'README.md': 'synthetic\n' }, { message: 'base' });
 }
 
 /** What the fake's `debug config` prints: the permission it received, as OpenCode resolves it. */
@@ -549,7 +528,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     const executable = await writeFakeExecutable();
     await writeOperatorFixture();
     const repositoryPath = join(testDirectory, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath);
+    const baseCommit = await createReadmeRepository(repositoryPath);
     const config = TevuConfigSchema.parse(
       buildConfigInput({
         executable,
@@ -593,7 +572,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
       await writeFile(executable, options.script, { mode: 0o755 });
       await writeOperatorFixture();
       const repositoryPath = join(directory, 'repo');
-      const baseCommit = await createSourceRepository(repositoryPath);
+      const baseCommit = await createReadmeRepository(repositoryPath);
       const config = TevuConfigSchema.parse({
         ...buildConfigInput({
           executable,
@@ -667,7 +646,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
   describe('effort check', () => {
     async function buildMisspelledConfig(executable: string) {
       const repositoryPath = join(testDirectory, 'repo');
-      const baseCommit = await createSourceRepository(repositoryPath);
+      const baseCommit = await createReadmeRepository(repositoryPath);
       const input = buildConfigInput({
         executable,
         repositoryPath,
@@ -722,7 +701,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
       const executable = await writeFakeExecutable();
       await writeOperatorFixture();
       const repositoryPath = join(testDirectory, 'repo');
-      const baseCommit = await createSourceRepository(repositoryPath);
+      const baseCommit = await createReadmeRepository(repositoryPath);
       const config = TevuConfigSchema.parse(
         buildConfigInput({
           executable,
@@ -880,7 +859,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     const executable = await writeFakeExecutable();
     await writeOperatorFixture();
     const repositoryPath = join(testDirectory, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath);
+    const baseCommit = await createReadmeRepository(repositoryPath);
     const config = TevuConfigSchema.parse(
       buildConfigInput({
         executable,
@@ -914,7 +893,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     const executable = await writeLateExportExecutable();
     await writeOperatorFixture();
     const repositoryPath = join(testDirectory, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath);
+    const baseCommit = await createReadmeRepository(repositoryPath);
     const config = TevuConfigSchema.parse(
       buildConfigInput({
         executable,
@@ -959,7 +938,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     const executable = await writeBunExportExecutable();
     await writeOperatorFixture();
     const repositoryPath = join(testDirectory, 'repo');
-    const baseCommit = await createSourceRepository(repositoryPath);
+    const baseCommit = await createReadmeRepository(repositoryPath);
     const config = TevuConfigSchema.parse(
       buildConfigInput({
         executable,
@@ -1014,7 +993,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
     async function runTwoCases(executable: string, checks = COMMAND_CHECKS) {
       await writeOperatorFixture();
       const repositoryPath = join(testDirectory, 'repo');
-      const baseCommit = await createSourceRepository(repositoryPath);
+      const baseCommit = await createReadmeRepository(repositoryPath);
       const config = TevuConfigSchema.parse(
         buildConfigInput({
           executable,
@@ -1106,7 +1085,7 @@ describe('composeProgramDependencies wires providers into the real OpenCode adap
 
     async function prepareRepository(): Promise<{ repositoryPath: string; baseCommit: string }> {
       const repositoryPath = join(testDirectory, 'repo');
-      return { repositoryPath, baseCommit: await createSourceRepository(repositoryPath) };
+      return { repositoryPath, baseCommit: await createReadmeRepository(repositoryPath) };
     }
 
     it.each(['taskAdd', 'validate', 'run', 'assess', 'report'] as const)(

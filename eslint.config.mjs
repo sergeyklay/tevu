@@ -59,6 +59,19 @@ const oversizedFiles = {
   'src/interface/task-wizard/task-wizard.ts': { functionLines: 106, complexity: 32 },
 };
 
+const testSizeBudget = { lines: 1500 };
+
+// Test files that exceeded testSizeBudget when it was introduced, held at their measured counts. A change that shrinks one lowers its count in the same change, and a file leaves the list once it fits testSizeBudget.
+const oversizedTestFiles = {
+  'src/adapters/agents/opencode/metrics.test.ts': { lines: 3901 },
+  'src/adapters/agents/opencode/report.test.ts': { lines: 1838 },
+  'src/adapters/isolation.integration.test.ts': { lines: 2912 },
+  'src/application/model-call.integration.test.ts': { lines: 1726 },
+  'src/application/run-benchmark.test.ts': { lines: 4024 },
+  'src/config/config.test.ts': { lines: 4503 },
+  'src/evaluation/evaluation.test.ts': { lines: 6633 },
+};
+
 function sizeRules({ lines, functionLines, complexity }) {
   const length = { skipBlankLines: true, skipComments: true };
   return {
@@ -108,6 +121,18 @@ export default defineConfig([
     rules: sizeRules(sizeBudget),
   },
   ...Object.entries(oversizedFiles).map(([file, limits]) => ({
+    files: [file],
+    rules: sizeRules(limits),
+  })),
+
+  // A describe callback is a function, so the function-length and complexity limits would measure whole suites; test files and fixture modules are limited by file length only. Raising testSizeBudget, adding to oversizedTestFiles, or raising a listed count needs the maintainers' approval first.
+  {
+    files: ['src/**/*.test.ts', 'src/**/__fixtures__/**/*.ts'],
+    // A directive comment must not exempt a test file or fixture module from the limit.
+    linterOptions: { noInlineConfig: true },
+    rules: sizeRules(testSizeBudget),
+  },
+  ...Object.entries(oversizedTestFiles).map(([file, limits]) => ({
     files: [file],
     rules: sizeRules(limits),
   })),
