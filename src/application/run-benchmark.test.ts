@@ -19,7 +19,6 @@ import type {
   AgentRegistry,
   AgentRunInput,
   AgentRunResult,
-  ArtifactStore,
   BenchmarkMetrics,
   CaseEnvironments,
   CaseGrading,
@@ -31,14 +30,12 @@ import type {
   CheckStateRecord,
   CheckStateRequest,
   Clock,
-  CommitLookup,
   CopiedProvider,
   EnvironmentAdapter,
   EnvironmentVariableRecord,
   EvaluatorProcessAdapter,
   EvaluatorProcessRequest,
   FailureRecord,
-  GitWorkspaceAdapter,
   HostProbe,
   IsolatedEnvironment,
   MetricValue,
@@ -52,6 +49,7 @@ import type {
   RunDependencies,
   RunFinding,
   RunManifest,
+  RunRecorder,
   RunResult,
   SetupCommandRecord,
   SetupPhase,
@@ -496,10 +494,6 @@ function createHarness(config: TevuConfig) {
     applyCheckStateCalls: [] as Array<{ caseId: string; request: CheckStateRequest }>,
     applyCheckStateError: null as Extract<TevuError, { kind: 'CheckStateError' }> | null,
     applyCheckStateResults: new Map<string, CheckStateRecord>(),
-    resolveCommitCalls: [] as Array<{ repositoryId: string; reference: string }>,
-    resolveCommitResult: { kind: 'not-found' } as CommitLookup,
-    isAncestorCalls: [] as Array<{ repositoryId: string; ancestor: string; descendant: string }>,
-    isAncestorResult: null as boolean | null,
   };
 
   type AbortPoint = 'snapshotPatchBase' | 'applyCheckState' | 'writePatch' | 'writeGrading';
@@ -510,7 +504,7 @@ function createHarness(config: TevuConfig) {
     }
   };
 
-  const git: GitWorkspaceAdapter = {
+  const git: RunDependencies['git'] = {
     async validateSource(repository, commit) {
       gitState.validatedCommits.push({ repositoryId: repository.id, commit });
       timeline.push(`validateSource:${repository.id}`);
@@ -526,17 +520,6 @@ function createHarness(config: TevuConfig) {
           rootEntries: [],
         },
       };
-    },
-    async resolveCommit(repository, reference) {
-      gitState.resolveCommitCalls.push({ repositoryId: repository.id, reference });
-      return gitState.resolveCommitResult;
-    },
-    async inspectLfsObjects(_repository, revision) {
-      return { ok: true, value: { commit: revision, objectCount: 0, missingCount: 0 } };
-    },
-    async isAncestor(repository, ancestor, descendant) {
-      gitState.isAncestorCalls.push({ repositoryId: repository.id, ancestor, descendant });
-      return gitState.isAncestorResult;
     },
     async createIsolatedCase(identity, repository) {
       gitState.createIsolatedCaseCalls.push(identity);
@@ -611,16 +594,6 @@ function createHarness(config: TevuConfig) {
         error: {
           kind: 'ArtifactError',
           operation: 'initialize-repository',
-          reason: 'not used in these tests',
-        },
-      };
-    },
-    async diffCommit() {
-      return {
-        ok: false,
-        error: {
-          kind: 'ArtifactError',
-          operation: 'diff-reference-commit',
           reason: 'not used in these tests',
         },
       };
@@ -735,7 +708,7 @@ function createHarness(config: TevuConfig) {
     return { ok: true, value: undefined };
   };
 
-  const artifacts: ArtifactStore = {
+  const artifacts: RunRecorder = {
     caseArtifactPaths(caseId) {
       return {
         events: `${caseId}/events.jsonl`,
@@ -783,61 +756,9 @@ function createHarness(config: TevuConfig) {
       artifactState.finalizedCases.push(result);
       return recordArtifactCall('finalizeCase', result.identity.caseId);
     },
-    async replaceCaseResult() {
-      return { ok: true, value: undefined };
-    },
     async finalizeRun(result) {
       artifactState.finalizedRuns.push(result);
       return recordArtifactCall('finalizeRun', result.manifest.runId);
-    },
-    async writeReport() {
-      return { ok: true, value: undefined };
-    },
-    async readConclusions() {
-      return { ok: true, value: null };
-    },
-    async writeConclusions() {
-      return { ok: true, value: undefined };
-    },
-    async writeSummary() {
-      return { ok: true, value: undefined };
-    },
-    async readRunManifest() {
-      return { ok: true, value: buildRunManifest() };
-    },
-    async readRunResult() {
-      return { ok: true, value: buildRunResult() };
-    },
-    async readCaseResult(_runId, caseId) {
-      return { ok: true, value: buildCaseResult({ identity: buildCaseIdentity(caseId) }) };
-    },
-    async readEvents() {
-      return { ok: true, value: [] };
-    },
-    async readSessionExport() {
-      return { ok: true, value: null };
-    },
-    async readChecks() {
-      return { ok: true, value: [] };
-    },
-    async readGrading() {
-      throw new Error('not used in this test');
-    },
-    async readAssessment() {
-      return { ok: true, value: null };
-    },
-    async acquireAssessmentLock(runId, caseId) {
-      return {
-        ok: true,
-        value: {
-          runId,
-          caseId,
-          release: async () => ({ ok: true, value: undefined }),
-        },
-      };
-    },
-    async replaceAssessment() {
-      return { ok: true, value: undefined };
     },
   };
 
@@ -4533,29 +4454,3 @@ describe('case lifecycle: grading', () => {
     expect(run.exitCode).toBe(0);
   });
 });
-
-function buildRunManifest(overrides: Partial<RunManifest> = {}): RunManifest {
-  return {
-    schemaVersion: 1,
-    runId: 'run-stub-synthetic',
-    configDigest: 'digest-stub-synthetic',
-    configPath: CONFIG_PATH,
-    startedAt: CLOCK_BASE,
-    completedAt: null,
-    host: { platform: 'linux', nodeVersion: 'v24.0.0-synthetic' },
-    tools: {
-      gitVersion: '2.45.0-synthetic',
-      agentVersions: {},
-      agentConfigurationFiles: {},
-      copiedProviders: {},
-    },
-    execution: { concurrency: 1, caseTimeoutMs: 1_000, repeat: { value: 1, source: 'config' } },
-    cases: [],
-    efforts: { models: {}, grader: null },
-    ...overrides,
-  };
-}
-
-function buildRunResult(): RunResult {
-  return { schemaVersion: 1, manifest: buildRunManifest(), cases: [], findings: [], exitCode: 0 };
-}

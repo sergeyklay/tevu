@@ -7,7 +7,8 @@
  * aggregate, and the report solely from versioned source artifacts, resolving
  * each case's adapter from the injected `AgentRegistry` by its saved agent
  * name. No Git, Jira, model, clock, or filesystem implementation enters this
- * module; every effect flows through the injected `ArtifactStore`.
+ * module; every effect flows through the injected `RunArchive`, and
+ * `assessCase` alone also receives an `AssessmentStore`.
  */
 
 import { decodeRunConfig } from '@/config/run-snapshot';
@@ -25,11 +26,11 @@ import type {
   AgentEventRecord,
   AgentRegistry,
   AgentSessionExport,
-  ArtifactStore,
   AssessmentArtifact,
   AssessmentInput,
   AssessmentLock,
   AssessmentRecord,
+  AssessmentStore,
   CaseResult,
   CheckRecord,
   CheckResult,
@@ -41,6 +42,7 @@ import type {
   ReplacedGraderVerdict,
   ReplacedOperatorVerdict,
   ReportResult,
+  RunArchive,
   RunConfigRecord,
   RunManifest,
   RunResult,
@@ -203,7 +205,7 @@ const ELAPSED_ABSENT_REASON = 'the preserved case result contains no process tim
  */
 export async function assessCase(
   input: AssessmentInput,
-  store: ArtifactStore,
+  store: RunArchive & AssessmentStore,
   agents: AgentRegistry,
 ): Promise<TevuResult<AssessedCase, AssessCaseErrorKind>> {
   if (isAborted(input.cancellation)) {
@@ -346,7 +348,7 @@ export async function assessCase(
 export async function readAssessmentContext(
   runId: string,
   caseId: string,
-  store: ArtifactStore,
+  store: RunArchive,
 ): Promise<TevuResult<AssessmentCaseContext, 'ConfigValidationError' | 'ArtifactError'>> {
   const manifest = await store.readRunManifest(runId);
   if (!manifest.ok) {
@@ -427,7 +429,7 @@ export async function readAssessmentContext(
  */
 export async function rebuildReport(
   runId: string,
-  store: ArtifactStore,
+  store: RunArchive,
   agents: AgentRegistry,
   writer?: ConclusionWriter,
 ): Promise<TevuResult<RebuiltReport, RebuildReportErrorKind>> {
@@ -449,7 +451,7 @@ export async function rebuildReport(
 /** Regenerates and persists every derived record of one finalized run. */
 async function rebuildRunDerived(
   runId: string,
-  store: ArtifactStore,
+  store: RunArchive,
   agents: AgentRegistry,
   mode: ConclusionsMode,
 ): Promise<TevuResult<RebuiltRun, RebuildReportErrorKind>> {
@@ -597,7 +599,7 @@ async function rebuildCaseResult(
   runId: string,
   caseId: string,
   tasksById: ReadonlyMap<string, TaskRecord>,
-  store: ArtifactStore,
+  store: RunArchive,
   agents: AgentRegistry,
   copiedProviders: Readonly<Record<string, readonly CopiedProvider[]>>,
 ): Promise<

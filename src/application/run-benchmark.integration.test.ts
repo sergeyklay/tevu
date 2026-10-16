@@ -329,7 +329,7 @@ function buildDependencies(
   config: TevuConfig,
   agent: AgentAdapter,
   testDirectory: string,
-): RunDependencies {
+): RunDependencies & { artifacts: ArtifactStore } {
   const prerequisites: PrerequisiteAdapter = {
     async probeHost() {
       return {
@@ -797,7 +797,7 @@ describe('runBenchmark grading in the case flow', () => {
       artifacts?: ArtifactStore;
       cancellation?: AbortSignal;
     } = {},
-  ): RunDependencies {
+  ): RunDependencies & { artifacts: ArtifactStore } {
     const base = buildDependencies(config, agent, testDir);
     return {
       ...base,

@@ -894,7 +894,8 @@ export interface GitWorkspaceAdapter {
     request: CheckStateRequest,
   ): Promise<TevuResult<CheckStateRecord, 'CheckStateError'>>;
   dispose(workspace: CaseWorkspace): Promise<TevuResult<void, 'ArtifactError'>>;
-  isReadable?(workspace: CaseWorkspace): Promise<boolean>;
+  /** Reports whether Git still resolves `HEAD` in the case worktree. */
+  isReadable(workspace: CaseWorkspace): Promise<boolean>;
   /** Runs `git init` in an existing empty directory; creates no commit, remote, or configuration. */
   initializeEmptyRepository(directory: string): Promise<TevuResult<void, 'ArtifactError'>>;
   /** The unified diff `commit` introduces against its first parent: no color, no external diff driver, no binary contents. */
@@ -1486,11 +1487,8 @@ export type RunResult = {
   exitCode: 0 | 1 | 2 | 130;
 };
 
-/**
- * Versioned atomic artifact storage: run start, per-case appends and writes,
- * finalization, assessment revision under lock, and regeneration reads.
- */
-export interface ArtifactStore {
+/** Writes the artifacts of the run in progress, from `startRun` to `finalizeRun`. */
+export interface RunRecorder {
   caseArtifactPaths(caseId: string): CaseArtifactPathIndex;
   startRun(manifest: RunManifest): Promise<TevuResult<void, 'ArtifactError'>>;
   appendEvent(caseId: string, event: AgentEventRecord): Promise<TevuResult<void, 'ArtifactError'>>;
@@ -1509,6 +1507,17 @@ export interface ArtifactStore {
     text: string,
   ): Promise<TevuResult<void, 'ArtifactError'>>;
   finalizeCase(result: CaseResult): Promise<TevuResult<void, 'ArtifactError'>>;
+  /** Writes the final `run.json` and ends the active run. */
+  finalizeRun(result: RunResult): Promise<TevuResult<void, 'ArtifactError'>>;
+}
+
+/**
+ * Reads a finalized run's saved artifacts and writes the records built from
+ * them: case results, `run.json`, `result.json`, `report.md`,
+ * `conclusions.json`, and `summary.md`.
+ */
+export interface RunArchive {
+  caseArtifactPaths(caseId: string): CaseArtifactPathIndex;
   /**
    * Atomically replaces one case's derived result record inside an existing
    * run directory. Unlike `finalizeCase`, this is the derived-write contract
@@ -1516,6 +1525,7 @@ export interface ArtifactStore {
    * regeneration; it never requires an active run.
    */
   replaceCaseResult(runId: string, result: CaseResult): Promise<TevuResult<void, 'ArtifactError'>>;
+  /** Replaces `run.json` of a finalized run with its regenerated record. */
   finalizeRun(result: RunResult): Promise<TevuResult<void, 'ArtifactError'>>;
   writeReport(runId: string, report: ReportResult): Promise<TevuResult<void, 'ArtifactError'>>;
   /** `null` when `conclusions.json` does not exist; a malformed file is an `ArtifactError`. */
@@ -1541,12 +1551,23 @@ export interface ArtifactStore {
     runId: string,
     caseId: string,
   ): Promise<TevuResult<AssessmentArtifact | null, 'ArtifactError'>>;
+}
+
+/** Takes a case's exclusive assessment lock and commits its next `assessment.json` revision. */
+export interface AssessmentStore {
   acquireAssessmentLock(
     runId: string,
     caseId: string,
   ): Promise<TevuResult<AssessmentLock, 'AssessmentConflictError' | 'ArtifactError'>>;
   replaceAssessment(artifact: AssessmentArtifact): Promise<TevuResult<void, 'ArtifactError'>>;
 }
+
+/**
+ * Every artifact role in one contract: what the file adapter implements and
+ * the composition root wires. A use case receives a role, never this
+ * interface.
+ */
+export interface ArtifactStore extends RunRecorder, RunArchive, AssessmentStore {}
 
 /** Reads and atomically replaces the raw configuration document text. */
 export interface ConfigStore {
@@ -1633,7 +1654,10 @@ export interface CaseExecutableAdapter {
 
 /** Effects injected into the aggregate validation use case. */
 export type ValidationDependencies = {
-  git: GitWorkspaceAdapter;
+  git: Pick<
+    GitWorkspaceAdapter,
+    'validateSource' | 'resolveCommit' | 'isAncestor' | 'readOverlay' | 'initializeEmptyRepository'
+  >;
   agents: AgentRegistry;
   environments: EnvironmentAdapter;
   prerequisites: PrerequisiteAdapter;
@@ -1666,9 +1690,20 @@ export type BenchmarkPlan = {
 
 /** Effects injected into the benchmark orchestration use case. */
 export type RunDependencies = {
-  git: GitWorkspaceAdapter;
+  git: Pick<
+    GitWorkspaceAdapter,
+    | 'validateSource'
+    | 'createIsolatedCase'
+    | 'snapshotPatchBase'
+    | 'capturePatch'
+    | 'readOverlay'
+    | 'applyCheckState'
+    | 'dispose'
+    | 'isReadable'
+    | 'initializeEmptyRepository'
+  >;
   agents: AgentRegistry;
-  artifacts: ArtifactStore;
+  artifacts: RunRecorder;
   evaluatorProcesses: EvaluatorProcessAdapter;
   environments: EnvironmentAdapter;
   prerequisites: PrerequisiteAdapter;

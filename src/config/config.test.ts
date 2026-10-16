@@ -219,39 +219,13 @@ function buildGit(
   };
 }
 
-function buildFullGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspaceAdapter {
+function buildValidationGit(
+  overrides: Partial<ValidationDependencies['git']> = {},
+): ValidationDependencies['git'] {
   return {
     ...buildGit(),
     resolveCommit: vi.fn(async () => ({ kind: 'not-found' as const })),
-    inspectLfsObjects: vi.fn(async (_repository: RepositoryDefinition, revision: string) => ({
-      ok: true as const,
-      value: { commit: revision, objectCount: 0, missingCount: 0 },
-    })),
     isAncestor: vi.fn(async () => null),
-    snapshotPatchBase: vi.fn(async () => ({
-      ok: false as const,
-      error: {
-        kind: 'ArtifactError' as const,
-        operation: 'snapshot-patch-base',
-        reason: 'not used in these tests',
-      },
-    })),
-    createIsolatedCase: vi.fn(async () => ({
-      ok: false as const,
-      error: {
-        kind: 'IsolationError' as const,
-        caseId: 'unused',
-        reason: 'not used in these tests',
-      },
-    })),
-    capturePatch: vi.fn(async () => ({
-      ok: false as const,
-      error: {
-        kind: 'ArtifactError' as const,
-        operation: 'capture-patch',
-        reason: 'not used in these tests',
-      },
-    })),
     readOverlay: vi.fn(async () => ({
       ok: false as const,
       error: {
@@ -260,24 +234,7 @@ function buildFullGit(overrides: Partial<GitWorkspaceAdapter> = {}): GitWorkspac
         reason: 'not used in these tests',
       },
     })),
-    applyCheckState: vi.fn(async () => ({
-      ok: false as const,
-      error: {
-        kind: 'CheckStateError' as const,
-        step: 'restore' as const,
-        reason: 'not used in these tests',
-      },
-    })),
-    dispose: vi.fn(async () => ({ ok: true as const, value: undefined })),
     initializeEmptyRepository: vi.fn(async () => ({ ok: true as const, value: undefined })),
-    diffCommit: vi.fn(async () => ({
-      ok: false as const,
-      error: {
-        kind: 'ArtifactError' as const,
-        operation: 'diff-reference-commit',
-        reason: 'not used in these tests',
-      },
-    })),
     ...overrides,
   };
 }
@@ -439,7 +396,7 @@ function buildValidationDependencies(
   overrides: Partial<ValidationDependencies> = {},
 ): ValidationDependencies {
   return {
-    git: buildFullGit(),
+    git: buildValidationGit(),
     // `validateConfig` re-validates the strict schema, whose only agent key
     // is `opencode`, so this test registry keeps that schema-declared name.
     agents: new Map([['opencode', buildFakeAgentAdapter()]]),
@@ -3432,7 +3389,7 @@ describe('validateConfig', () => {
       }),
     );
     const dependencies = buildValidationDependencies({
-      git: buildFullGit({
+      git: buildValidationGit({
         validateSource: vi.fn(async () => ({
           ok: false as const,
           error: {
@@ -3654,7 +3611,7 @@ describe('validateConfig', () => {
       prompt: 'the agent should pin the commit ABCDEF0 for this task',
     });
     const dependencies = buildValidationDependencies({
-      git: buildFullGit({
+      git: buildValidationGit({
         validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
           ok: true as const,
           value: {
@@ -3693,7 +3650,7 @@ describe('validateConfig', () => {
       prompt: 'unrelated fedcba9876543210fedcba9876543210fedcba98 and deadbeef',
     });
     const dependencies = buildValidationDependencies({
-      git: buildFullGit({
+      git: buildValidationGit({
         validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
           ok: true as const,
           value: {
@@ -3732,10 +3689,10 @@ describe('validateConfig', () => {
 
     function buildDependenciesResolvingBaseTo(
       resolvedCommit: string,
-      overrides: Partial<GitWorkspaceAdapter> = {},
+      overrides: Partial<ValidationDependencies['git']> = {},
     ): ValidationDependencies {
       return buildValidationDependencies({
-        git: buildFullGit({
+        git: buildValidationGit({
           validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
             ok: true as const,
             value: {
@@ -3870,10 +3827,10 @@ describe('validateConfig', () => {
 
     function buildDependenciesResolvingBaseTo(
       resolvedCommit: string,
-      overrides: Partial<GitWorkspaceAdapter> = {},
+      overrides: Partial<ValidationDependencies['git']> = {},
     ): ValidationDependencies {
       return buildValidationDependencies({
-        git: buildFullGit({
+        git: buildValidationGit({
           validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
             ok: true as const,
             value: {
@@ -3926,7 +3883,7 @@ describe('validateConfig', () => {
       const task = buildTaskWithReference({ base_commit: BASE });
       const validateSource = vi.fn();
       const dependencies = buildValidationDependencies({
-        git: buildFullGit({
+        git: buildValidationGit({
           validateSource,
           resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) =>
             commit === BASE
@@ -3959,7 +3916,7 @@ describe('validateConfig', () => {
         },
       }));
       const dependencies = buildValidationDependencies({
-        git: buildFullGit({
+        git: buildValidationGit({
           validateSource,
           resolveCommit: vi.fn(async () => ({ kind: 'no-repository' as const })),
         }),
@@ -4022,7 +3979,7 @@ describe('validateConfig', () => {
         prompt: `use commit ${BASE.slice(0, 7)} as a starting point`,
       });
       const dependencies = buildValidationDependencies({
-        git: buildFullGit({
+        git: buildValidationGit({
           resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) =>
             commit === BASE
               ? { kind: 'not-found' as const }
@@ -4192,7 +4149,7 @@ describe('validateConfig', () => {
       const inspectClone = vi.fn(async () => 'repository' as const);
       const dependencies = buildValidationDependencies({
         clones: { inspectClone },
-        git: buildFullGit({
+        git: buildValidationGit({
           ...buildGit(),
           resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) => ({
             kind: 'found' as const,
@@ -4219,7 +4176,7 @@ describe('validateConfig', () => {
       const validateSource = vi.fn();
       const dependencies = buildValidationDependencies({
         clones: { inspectClone: vi.fn(async () => 'repository' as const) },
-        git: buildFullGit({
+        git: buildValidationGit({
           validateSource,
           resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) =>
             commit === BASE
@@ -4245,7 +4202,7 @@ describe('validateConfig', () => {
       const validateSource = vi.fn();
       const dependencies = buildValidationDependencies({
         clones: { inspectClone: vi.fn(async () => 'repository' as const) },
-        git: buildFullGit({
+        git: buildValidationGit({
           validateSource,
           resolveCommit: vi.fn(async () => ({ kind: 'not-found' as const })),
         }),
@@ -4272,7 +4229,7 @@ describe('validateConfig', () => {
       });
       const dependencies = buildValidationDependencies({
         clones: { inspectClone: vi.fn(async () => 'repository' as const) },
-        git: buildFullGit({
+        git: buildValidationGit({
           validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
             ok: true as const,
             value: {
@@ -4316,7 +4273,7 @@ describe('validateConfig', () => {
       });
       const dependencies = buildValidationDependencies({
         clones: { inspectClone: vi.fn(async () => 'repository' as const) },
-        git: buildFullGit({
+        git: buildValidationGit({
           validateSource: vi.fn(async (repository: RepositoryDefinition, commit: string) => ({
             ok: true as const,
             value: {
@@ -4574,7 +4531,7 @@ describe('the case-executable stage of validateConfig', () => {
       }),
       // The GitHub entry's base commit needs to resolve so the source stage
       // adds no finding unrelated to the case-executable stage under test.
-      git: buildFullGit({
+      git: buildValidationGit({
         resolveCommit: vi.fn(async (_repository: RepositoryDefinition, commit: string) => ({
           kind: 'found' as const,
           commit,
