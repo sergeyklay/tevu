@@ -2,7 +2,8 @@ import { z } from 'zod';
 
 import { describePath } from '@/domain/describe-path';
 
-import type { AgentSessionExport, ModelRoleName } from '@/domain/types';
+import type { ModelRoleName } from '@/domain/config';
+import type { AgentSessionExport } from '@/domain/run-records';
 
 /** Error context for protocol failures: capability probing, one planned case, or one model call. */
 export type ProtocolContext =

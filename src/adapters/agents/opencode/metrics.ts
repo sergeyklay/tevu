@@ -7,7 +7,7 @@
  * timing.
  */
 
-import { unavailableMetric } from '@/domain/types';
+import { unavailableMetric } from '@/domain/run-records';
 
 import { decodeEvent, decodeExport, isRootSessionErrorEvent } from './protocol';
 
@@ -18,7 +18,8 @@ import type {
   OpenCodeRunEvent,
   ProtocolErrorShape,
 } from './protocol';
-import type { AgentMetrics, AgentMetricsInput, CopiedProvider, MetricValue } from '@/domain/types';
+import type { AgentMetricsInput } from '@/domain/ports/agent';
+import type { AgentMetrics, CopiedProvider, MetricValue } from '@/domain/run-records';
 
 const EXPORT_SOURCE = 'root-session export';
 const EVENT_SOURCE = 'run events';

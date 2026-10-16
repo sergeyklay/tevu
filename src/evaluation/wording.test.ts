@@ -33,7 +33,8 @@ import {
 } from './wording';
 
 import type { AttemptFacts } from './wording';
-import type { CheckRecord, CheckResult, GradingArtifact, TevuError } from '@/domain/types';
+import type { TevuError } from '@/domain/errors';
+import type { CheckRecord, CheckResult, GradingArtifact } from '@/domain/run-records';
 
 type NoReplyCause = Extract<GradingArtifact['call'], { status: 'no-reply' }>['cause'];
 

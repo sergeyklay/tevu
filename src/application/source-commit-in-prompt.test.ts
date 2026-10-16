@@ -7,8 +7,8 @@ import {
   describeSourceCommitInPrompt,
 } from './source-commit-in-prompt';
 
+import type { TaskReference } from '@/domain/config';
 import type { ParsedGitHubReference } from '@/domain/github-reference';
-import type { TaskReference } from '@/domain/types';
 
 const SOURCE_COMMIT = 'abcdef0123456789abcdef0123456789abcdef01';
 

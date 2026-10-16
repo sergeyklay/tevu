@@ -1,6 +1,6 @@
 import { describeManagedCloneError } from '@/application/managed-clone';
 
-import type { TevuError, ValidationFinding } from '@/domain/types';
+import type { TevuError, ValidationFinding } from '@/domain/errors';
 
 /** Renders one typed failure as the lines the program prints for it. */
 export function renderTevuError(error: TevuError, redact: (text: string) => string): string[] {

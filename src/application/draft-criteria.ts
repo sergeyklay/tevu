@@ -25,16 +25,13 @@ import type { ModelVariantEvidence } from './effort-check';
 import type { AgentDraft } from './model-access';
 import type { ResolvedReferenceSolution } from './reference-solution';
 import type { RepositoryInput, TevuConfigInput } from '@/config/schema';
-import type {
-  AgentRegistry,
-  EffortCheck,
-  EnvironmentAdapter,
-  GitWorkspaceAdapter,
-  ModelRole,
-  PullRequestReader,
-  Redactor,
-  TevuConfig,
-} from '@/domain/types';
+import type { ModelRole, TevuConfig } from '@/domain/config';
+import type { AgentRegistry } from '@/domain/ports/agent';
+import type { EnvironmentAdapter } from '@/domain/ports/environment';
+import type { GitWorkspaceAdapter } from '@/domain/ports/git-workspace';
+import type { PullRequestReader } from '@/domain/ports/pull-request-reader';
+import type { Redactor } from '@/domain/ports/secret-redactor';
+import type { EffortCheck } from '@/domain/run-records';
 
 /** Both drafted lists in reply order: `acceptance` holds at least one item, `done` may be empty. */
 export type CriteriaDraft = { acceptance: string[]; done: string[] };

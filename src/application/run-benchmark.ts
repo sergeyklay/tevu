@@ -10,7 +10,7 @@ import pLimit from 'p-limit';
 
 import { agentNamesInUse, durationMs } from '@/config/schema';
 import { parseGitHubReference } from '@/domain/github-reference';
-import { unavailableBenchmarkMetrics } from '@/domain/types';
+import { unavailableBenchmarkMetrics } from '@/domain/run-records';
 import {
   buildCheckEnvironment,
   evaluateChecks,
@@ -32,46 +32,47 @@ import {
 import { buildTaskPrompt } from './task-prompt';
 
 import type {
+  RepositoryDefinition,
+  RepositorySetup,
+  SetupCommand,
+  SetupPhase,
+  TaskDefinition,
+  TevuConfig,
+} from '@/domain/config';
+import type { TevuError, TevuResult } from '@/domain/errors';
+import type { AgentRegistry, AgentRunResult, ProviderSnapshot } from '@/domain/ports/agent';
+import type {
+  CaseEnvironments,
+  EnvironmentVariableNames,
+  ParentEnvironmentSnapshot,
+} from '@/domain/ports/environment';
+import type {
+  CaseWorkspace,
+  CheckStateRequest,
+  GitWorkspaceAdapter,
+  OverlaySnapshot,
+  PatchBase,
+} from '@/domain/ports/git-workspace';
+import type {
   AgentCapabilityReport,
   AgentConfigurationFileRecord,
   AgentEventRecord,
-  AgentRegistry,
-  AgentRunResult,
   AgentSessionExport,
   BenchmarkMetrics,
-  BenchmarkPlan,
-  CaseEnvironments,
   CaseGrading,
   CaseIdentity,
   CaseLifecycle,
   CaseResult,
-  CaseWorkspace,
   CheckResult,
   CheckStateRecord,
-  CheckStateRequest,
   CopiedProvider,
-  EffortChecks,
-  EnvironmentVariableNames,
-  GitWorkspaceAdapter,
-  OverlaySnapshot,
-  ParentEnvironmentSnapshot,
-  PatchBase,
-  ProviderSnapshot,
   RepeatSetting,
-  RepositoryDefinition,
-  RepositorySetup,
-  RunDependencies,
   RunFinding,
   RunManifest,
   RunResult,
-  SetupCommand,
   SetupCommandRecord,
-  SetupPhase,
-  TaskDefinition,
-  TevuConfig,
-  TevuError,
-  TevuResult,
-} from '@/domain/types';
+} from '@/domain/run-records';
+import type { BenchmarkPlan, EffortChecks, RunDependencies } from '@/domain/use-cases';
 import type { OrderedCheck } from '@/evaluation/checks';
 
 type OrderedChecks = readonly OrderedCheck[];

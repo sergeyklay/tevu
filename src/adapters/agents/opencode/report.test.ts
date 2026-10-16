@@ -10,7 +10,7 @@ import { createArtifactStore } from '@/adapters/artifact-store';
 import { createRedactor } from '@/adapters/process';
 import { assessCase, rebuildReport } from '@/application/assess';
 import { TevuConfigSchema } from '@/config/schema';
-import { unavailableAgentMetrics, unavailableBenchmarkMetrics } from '@/domain/types';
+import { unavailableAgentMetrics, unavailableBenchmarkMetrics } from '@/domain/run-records';
 import { combineCaseMetrics } from '@/evaluation/metrics';
 
 import { createOpenCodeAdapter } from './opencode';
@@ -18,12 +18,14 @@ import { decodeEvent, decodeExport } from './protocol';
 
 import type { OpenCodeExport, OpenCodeRunEvent } from './protocol';
 import type { ModelDefinitionInput, TaskInput, TevuConfigInput } from '@/config/schema';
+import type { RepositoryDefinition, TevuConfig } from '@/domain/config';
+import type { TevuResult } from '@/domain/errors';
+import type { AgentRegistry } from '@/domain/ports/agent';
+import type { ArtifactStore } from '@/domain/ports/artifact-store';
 import type {
   AgentCapabilityReport,
   AgentEventRecord,
-  AgentRegistry,
   AgentSessionExport,
-  ArtifactStore,
   AssessmentArtifact,
   CaseGrading,
   CaseIdentity,
@@ -31,13 +33,10 @@ import type {
   CheckResult,
   ConclusionsArtifact,
   ProcessResult,
-  RepositoryDefinition,
   RunFinding,
   RunManifest,
   RunResult,
-  TevuConfig,
-  TevuResult,
-} from '@/domain/types';
+} from '@/domain/run-records';
 
 const PROVIDER_SECRET = 'synthetic-provider-secret-9f2';
 const PROVIDER_ENV_NAME = 'TEVU_PROVIDER_KEY';

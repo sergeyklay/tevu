@@ -8,7 +8,8 @@ import {
 import { checkEfforts, checkRoleEffort } from './effort-check';
 
 import type { ModelVariantEvidence } from './effort-check';
-import type { EffortCheck, TevuConfig } from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
+import type { EffortCheck } from '@/domain/run-records';
 
 const MODEL = 'prov/model-a';
 const VARIANTS_CLAUSE = '"opencode models --verbose" reports for "prov/model-a" (high, low)';

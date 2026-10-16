@@ -9,14 +9,11 @@
 
 import { gradedChecksOf } from '@/evaluation/grading';
 
-import type {
-  EffortCheck,
-  EffortChecks,
-  ModelListing,
-  ModelRoleName,
-  TevuConfig,
-  ValidationFinding,
-} from '@/domain/types';
+import type { ModelRoleName, TevuConfig } from '@/domain/config';
+import type { ValidationFinding } from '@/domain/errors';
+import type { ModelListing } from '@/domain/ports/agent';
+import type { EffortCheck } from '@/domain/run-records';
+import type { EffortChecks } from '@/domain/use-cases';
 
 /** What one listing told about one model. */
 export type ModelVariantEvidence =

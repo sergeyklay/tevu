@@ -23,15 +23,12 @@ import type { CriteriaDraftDependencies, CriteriaDraftRequest } from './draft-cr
 import type { ResolvedReferenceSolution } from './reference-solution';
 import type { OpenCodeAdapterDependencies } from '@/adapters/agents/opencode/opencode';
 import type { TevuConfigInput } from '@/config/schema';
-import type {
-  AgentAdapter,
-  EnvironmentAdapter,
-  PullRequestReader,
-  RepositoryDefinition,
-  SecretRedactor,
-  TevuConfig,
-  TevuResult,
-} from '@/domain/types';
+import type { RepositoryDefinition, TevuConfig } from '@/domain/config';
+import type { TevuResult } from '@/domain/errors';
+import type { AgentAdapter } from '@/domain/ports/agent';
+import type { EnvironmentAdapter } from '@/domain/ports/environment';
+import type { PullRequestReader } from '@/domain/ports/pull-request-reader';
+import type { SecretRedactor } from '@/domain/ports/secret-redactor';
 
 const SECRET_VARIABLE_NAME = 'TEVU_DRAFT_CRITERIA_SECRET';
 const SECRET_VALUE = 'sk-live-draft-criteria-secret-445566';

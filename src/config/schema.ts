@@ -24,7 +24,7 @@ import type {
   SetupCommand,
   TaskDefinition,
   TevuConfig,
-} from '@/domain/types';
+} from '@/domain/config';
 
 /** ID_MAX_LENGTH reports the most characters a configuration ID may hold. */
 export const ID_MAX_LENGTH = 64;

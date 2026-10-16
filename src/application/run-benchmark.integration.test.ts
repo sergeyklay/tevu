@@ -16,33 +16,29 @@ import {
   createRedactor,
 } from '@/adapters/process';
 import { durationMs, TevuConfigSchema } from '@/config/schema';
-import { unavailableMetric } from '@/domain/types';
+import { unavailableMetric } from '@/domain/run-records';
 
 import { buildVerifiedEfforts } from './__fixtures__/effort.fixtures';
 import { rebuildReport } from './assess';
 import { planBenchmark, runBenchmark } from './run-benchmark';
 
 import type { TaskInput, TevuConfigInput } from '@/config/schema';
+import type { TevuConfig } from '@/domain/config';
+import type { TevuError, TevuResult } from '@/domain/errors';
 import type {
   AgentAdapter,
-  AgentMetrics,
   AgentRunInput,
   AgentRunResult,
-  ArtifactStore,
-  CaseResult,
-  Clock,
-  EnvironmentAdapter,
   ModelCallEvidence,
   ModelCallInput,
   ModelCallResult,
-  PrerequisiteAdapter,
-  ProcessResult,
-  RunDependencies,
-  RunResult,
-  TevuConfig,
-  TevuError,
-  TevuResult,
-} from '@/domain/types';
+} from '@/domain/ports/agent';
+import type { ArtifactStore } from '@/domain/ports/artifact-store';
+import type { Clock } from '@/domain/ports/clock';
+import type { EnvironmentAdapter } from '@/domain/ports/environment';
+import type { PrerequisiteAdapter } from '@/domain/ports/prerequisite';
+import type { AgentMetrics, CaseResult, ProcessResult, RunResult } from '@/domain/run-records';
+import type { RunDependencies } from '@/domain/use-cases';
 
 const FAKE_AGENT_NAME = 'fake-agent';
 const CONFIG_PATH = '/synthetic/tevu.yaml';

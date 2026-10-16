@@ -12,23 +12,22 @@ import { createOpenCodeAdapter } from './opencode';
 
 import type { OpenCodeAdapterDependencies } from './opencode';
 import type { OpenCodeExport, OpenCodePart } from './protocol';
+import type { TevuError } from '@/domain/errors';
 import type {
   AgentAdapter,
-  AgentMetrics,
   AgentRunInput,
   AgentRunResult,
-  AgentSessionExport,
-  CopiedProvider,
-  IsolatedEnvironment,
+  ModelCallEvidence,
+} from '@/domain/ports/agent';
+import type { IsolatedEnvironment, ModelCallEnvironment } from '@/domain/ports/environment';
+import type {
   ManagedProcessRequest,
   ManagedProcessResult,
   ManagedProcessRunner,
-  ModelCallEnvironment,
-  ModelCallEvidence,
   RedactedCapture,
-  SecretRedactor,
-  TevuError,
-} from '@/domain/types';
+} from '@/domain/ports/managed-process-runner';
+import type { SecretRedactor } from '@/domain/ports/secret-redactor';
+import type { AgentMetrics, AgentSessionExport, CopiedProvider } from '@/domain/run-records';
 
 const CASE_ID = 'task-1--alpha--1';
 const FIXTURE_DIRECTORY = new URL('./fixtures/', import.meta.url);

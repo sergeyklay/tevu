@@ -16,15 +16,11 @@ import {
   parseGitHubRepository,
 } from '@/domain/github-reference';
 
+import type { TevuConfig } from '@/domain/config';
+import type { TevuError, TevuResult, ValidationFinding } from '@/domain/errors';
 import type { ParsedGitHubRepository } from '@/domain/github-reference';
-import type {
-  GitWorkspaceAdapter,
-  ManagedCloneAdapter,
-  TevuConfig,
-  TevuError,
-  TevuResult,
-  ValidationFinding,
-} from '@/domain/types';
+import type { GitWorkspaceAdapter } from '@/domain/ports/git-workspace';
+import type { ManagedCloneAdapter } from '@/domain/ports/managed-clone';
 
 /** A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters. */
 const FULL_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;

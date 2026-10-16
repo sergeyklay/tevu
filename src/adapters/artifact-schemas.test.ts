@@ -9,7 +9,7 @@ import {
   parseRunManifest,
   parseRunResult,
 } from '@/adapters/artifact-schemas';
-import { unavailableAgentMetrics, unavailableBenchmarkMetrics } from '@/domain/types';
+import { unavailableAgentMetrics, unavailableBenchmarkMetrics } from '@/domain/run-records';
 
 import type { ChecksArtifact } from '@/adapters/artifact-schemas';
 import type {
@@ -20,7 +20,7 @@ import type {
   GradingArtifact,
   RunManifest,
   RunResult,
-} from '@/domain/types';
+} from '@/domain/run-records';
 
 const RUN_ID = '20260923t000000z-synthetic';
 const CASE_ID = 'task-1--alpha--1';

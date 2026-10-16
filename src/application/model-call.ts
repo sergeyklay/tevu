@@ -11,22 +11,26 @@
 
 import { durationMs } from '@/config/schema';
 
+import type { TevuError } from '@/domain/errors';
 import type {
   AgentAdapter,
+  ModelListing,
+  ProviderSnapshot,
+  ToolDenialProbe,
+} from '@/domain/ports/agent';
+import type {
   AgentConfigurationFile,
   EnvironmentAdapter,
   EnvironmentVariableNames,
-  GitWorkspaceAdapter,
-  ModelCallDependencies,
   ModelCallEnvironment,
-  ModelListing,
+  ParentEnvironmentSnapshot,
+} from '@/domain/ports/environment';
+import type { GitWorkspaceAdapter } from '@/domain/ports/git-workspace';
+import type {
+  ModelCallDependencies,
   ModelRoleCallOutcome,
   ModelRoleCallRequest,
-  ParentEnvironmentSnapshot,
-  ProviderSnapshot,
-  TevuError,
-  ToolDenialProbe,
-} from '@/domain/types';
+} from '@/domain/use-cases';
 
 /** Identifier-only text for a model-role call failure; never includes a secret value. */
 export function describeModelCallFailure(

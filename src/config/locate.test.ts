@@ -9,7 +9,8 @@ import { createConfigStore } from '@/adapters/artifact-store';
 import { loadConfig } from './load';
 import { locateConfig, managedCloneRoot } from './locate';
 
-import type { ConfigStore, TevuError, TevuResult } from '@/domain/types';
+import type { TevuError, TevuResult } from '@/domain/errors';
+import type { ConfigStore } from '@/domain/ports/config-store';
 
 type Environment = { cwd: string; home: string | undefined; xdgConfigHome: string | undefined };
 

@@ -50,23 +50,16 @@ import {
 
 import type { LfsObject } from './__fixtures__/lfs.fixtures';
 import type { TaskInput, TevuConfigInput } from '@/config/schema';
-import type {
-  AgentAdapter,
-  AgentRunInput,
-  AgentRunResult,
-  CaseEnvironments,
-  CaseIdentity,
-  CaseWorkspace,
-  Clock,
-  GitWorkspaceAdapter,
-  IsolatedEnvironment,
-  ManagedProcessResult,
-  PrerequisiteAdapter,
-  RunDependencies,
-  TevuConfig,
-  TevuError,
-  TevuResult,
-} from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
+import type { TevuError, TevuResult } from '@/domain/errors';
+import type { AgentAdapter, AgentRunInput, AgentRunResult } from '@/domain/ports/agent';
+import type { Clock } from '@/domain/ports/clock';
+import type { CaseEnvironments, IsolatedEnvironment } from '@/domain/ports/environment';
+import type { CaseWorkspace, GitWorkspaceAdapter } from '@/domain/ports/git-workspace';
+import type { ManagedProcessResult } from '@/domain/ports/managed-process-runner';
+import type { PrerequisiteAdapter } from '@/domain/ports/prerequisite';
+import type { CaseIdentity } from '@/domain/run-records';
+import type { RunDependencies } from '@/domain/use-cases';
 
 const PROVIDER_NAME = 'TEVU_IT_PROVIDER_KEY';
 const PROVIDER_VALUE = 'synthetic-provider-secret-9f2';

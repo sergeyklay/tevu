@@ -23,7 +23,7 @@ import {
   unavailableAgentMetrics,
   unavailableBenchmarkMetrics,
   unavailableMetric,
-} from '@/domain/types';
+} from '@/domain/run-records';
 
 import {
   buildGradedGrade,
@@ -50,42 +50,41 @@ import {
 import type { CheckEvaluationInput, OrderedCheck } from './checks';
 import type { ReportInput } from './report';
 import type { CheckInput, ModelDefinitionInput, TaskInput, TevuConfigInput } from '@/config/schema';
+import type { CommandCheck, RepositoryDefinition, TevuConfig } from '@/domain/config';
+import type { TevuResult } from '@/domain/errors';
+import type { AgentAdapter, AgentRegistry } from '@/domain/ports/agent';
+import type { ArtifactStore } from '@/domain/ports/artifact-store';
 import type {
-  AgentAdapter,
+  EvaluatorProcessAdapter,
+  EvaluatorProcessRequest,
+  EvaluatorProcessResult,
+} from '@/domain/ports/evaluator-process';
+import type {
   AgentCapabilityReport,
   AgentEventRecord,
   AgentMetrics,
-  AgentRegistry,
   AgentSessionExport,
-  ArtifactStore,
   AssessmentArtifact,
-  AssessmentDecision,
   BenchmarkMetrics,
   CaseIdentity,
   CaseResult,
   CheckRecord,
   CheckResult,
-  CommandCheck,
   ConclusionsArtifact,
-  EvaluatorProcessAdapter,
-  EvaluatorProcessRequest,
-  EvaluatorProcessResult,
   FailureRecord,
   GraderIdentity,
   GradingArtifact,
   MetricValue,
   ModelRecord,
   ProcessResult,
-  RepositoryDefinition,
   RepositoryRecord,
   RunFinding,
   RunManifest,
   RunResult,
   SummaryCall,
   TaskRecord,
-  TevuConfig,
-  TevuResult,
-} from '@/domain/types';
+} from '@/domain/run-records';
+import type { AssessmentDecision } from '@/domain/use-cases';
 
 const PROVIDER_SECRET = 'synthetic-provider-secret-9f2';
 const PROVIDER_ENV_NAME = 'TEVU_PROVIDER_KEY';

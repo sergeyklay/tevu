@@ -22,37 +22,38 @@ import type {
   ProtocolContext,
   ProtocolErrorShape,
 } from './protocol';
+import type { AgentProviderSetting, ModelRoleName } from '@/domain/config';
+import type { TevuError, TevuResult } from '@/domain/errors';
 import type {
   AgentAdapter,
-  AgentCapability,
-  AgentCapabilityReport,
-  AgentMetrics,
   AgentMetricsInput,
-  AgentProviderSetting,
   AgentRunInput,
   AgentRunResult,
-  AgentSessionExport,
-  CapabilityAvailability,
-  CopiedProvider,
-  IsolatedEnvironment,
-  ManagedProcessCompletion,
-  ManagedProcessResult,
-  ManagedProcessRunner,
-  ModelCallEnvironment,
   ModelCallEvidence,
   ModelCallInput,
   ModelCallResult,
   ModelListing,
-  ModelRoleName,
   OperatorProvider,
-  ProcessResult,
   ProviderSnapshot,
-  RedactedCapture,
-  SecretRedactor,
-  TevuError,
-  TevuResult,
   ToolDenialProbe,
-} from '@/domain/types';
+} from '@/domain/ports/agent';
+import type { IsolatedEnvironment, ModelCallEnvironment } from '@/domain/ports/environment';
+import type {
+  ManagedProcessCompletion,
+  ManagedProcessResult,
+  ManagedProcessRunner,
+  RedactedCapture,
+} from '@/domain/ports/managed-process-runner';
+import type { SecretRedactor } from '@/domain/ports/secret-redactor';
+import type {
+  AgentCapability,
+  AgentCapabilityReport,
+  AgentMetrics,
+  AgentSessionExport,
+  CapabilityAvailability,
+  CopiedProvider,
+  ProcessResult,
+} from '@/domain/run-records';
 
 /** Construction inputs identifying this adapter instance within the `AgentRegistry`. */
 export type OpenCodeAdapterSettings = {

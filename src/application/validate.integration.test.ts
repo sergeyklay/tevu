@@ -15,15 +15,11 @@ import {
 import { validateConfig } from '@/application/validate';
 import { TevuConfigSchema } from '@/config/schema';
 
-import type {
-  AgentAdapter,
-  AgentConfigurationFile,
-  EnvironmentAdapter,
-  TevuConfig,
-  ToolDenialProbe,
-  ValidationDependencies,
-  ValidationFinding,
-} from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
+import type { ValidationFinding } from '@/domain/errors';
+import type { AgentAdapter, ToolDenialProbe } from '@/domain/ports/agent';
+import type { AgentConfigurationFile, EnvironmentAdapter } from '@/domain/ports/environment';
+import type { ValidationDependencies } from '@/domain/use-cases';
 
 const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 

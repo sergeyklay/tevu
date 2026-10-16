@@ -24,7 +24,8 @@ import { composeProgramDependencies, createHostEnvironment, ignoreClosedReader }
 
 import type { AgentDraft } from '@/application/model-access';
 import type { TevuConfigInput } from '@/config/schema';
-import type { BenchmarkPlan, TevuConfig } from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
+import type { BenchmarkPlan } from '@/domain/use-cases';
 import type { RunOperations } from '@/interface/commands/run';
 
 type TevuTaskInput = NonNullable<TevuConfigInput['tasks']>[number];

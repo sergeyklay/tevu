@@ -6,6 +6,7 @@ The source directories of tevu, what each holds, how they depend on each other, 
 | --- | --- |
 | `src/config` | YAML loading, configuration file search, the strict schema, the template, document rendering and append, and run-snapshot decoding |
 | `src/domain` | Shared records, dependency contracts, and helpers every layer may import |
+| `src/domain/ports` | One module per dependency contract an adapter implements, with the request and result shapes only that contract uses |
 | `src/application` | Task creation and prompts, reference-solution resolution, managed-clone preparation, validation, run orchestration, assessment, report rebuilding, the one-shot model, grading, criteria, and summary calls, writing the summary conclusions, and the model access check of the setup interview |
 | `src/evaluation` | Checks, agent-independent metric rules, grading logic, report rendering, and the run summary: its facts, template sentences, rendering, prompt, and acceptance check |
 | `src/adapters` | Git, managed clones, trackers, process supervision, and artifact I/O |
@@ -31,6 +32,8 @@ A directory imports only from directories to its left. `src/adapters` implements
 - Errors cross module boundaries as `TevuResult` values, never as thrown exceptions.
 - Pure modules read time only through the injected clock, never through `Date.now()` or `new Date()`.
 - `tevu report` reproduces byte-identical JSON and Markdown from unchanged artifacts, so derived output never depends on wall-clock time, randomness, or unordered iteration.
+- Modules under `src/domain` stay free of boundary dependencies: no Commander.js, Clack, Execa, Git commands, Jira transport code, or Node.js process globals.
+- Each declaration in `src/domain` lives in the module of its concept: a dependency contract in its own module under `src/domain/ports`, a shape a run saves in `run-records.ts`. No module re-exports another module's declarations, and no catch-all module collects unrelated ones.
 
 ## Build
 

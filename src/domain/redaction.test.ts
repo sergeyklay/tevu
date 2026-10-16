@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { redactDecodedValue } from './redaction';
 
-import type { Redactor } from './types';
+import type { Redactor } from '@/domain/ports/secret-redactor';
 
 // The secret is a literal backslash followed by "n", not a real newline. It
 // only appears in the text once the payload's real newlines are JSON-escaped,

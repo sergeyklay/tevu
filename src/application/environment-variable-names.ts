@@ -7,7 +7,8 @@
 
 import { evaluatorEnvironmentNames, referencedVariableName } from '@/config/schema';
 
-import type { EnvironmentVariableNames, TevuConfig } from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
+import type { EnvironmentVariableNames } from '@/domain/ports/environment';
 
 /**
  * Derives the environment ports' name policy from one resolved configuration.

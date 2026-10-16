@@ -22,15 +22,14 @@ import { buildReaderNames, gradeLines } from '@/evaluation/wording';
 import { reduceRunExitCode } from './run-benchmark';
 
 import type { ConclusionWriter } from './write-conclusions';
+import type { TevuError, TevuResult, ValidationFinding } from '@/domain/errors';
+import type { AgentRegistry } from '@/domain/ports/agent';
+import type { AssessmentLock, AssessmentStore, RunArchive } from '@/domain/ports/artifact-store';
 import type {
   AgentEventRecord,
-  AgentRegistry,
   AgentSessionExport,
   AssessmentArtifact,
-  AssessmentInput,
-  AssessmentLock,
   AssessmentRecord,
-  AssessmentStore,
   CaseResult,
   CheckRecord,
   CheckResult,
@@ -42,16 +41,13 @@ import type {
   ReplacedGraderVerdict,
   ReplacedOperatorVerdict,
   ReportResult,
-  RunArchive,
   RunConfigRecord,
   RunManifest,
   RunResult,
   TaskConclusions,
   TaskRecord,
-  TevuError,
-  TevuResult,
-  ValidationFinding,
-} from '@/domain/types';
+} from '@/domain/run-records';
+import type { AssessmentInput } from '@/domain/use-cases';
 import type { SummaryEvidence } from '@/evaluation/summary';
 import type { ReaderNames } from '@/evaluation/wording';
 

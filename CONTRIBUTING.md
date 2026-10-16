@@ -130,7 +130,7 @@ Use `bun run test`, never `bun test`: the second starts Bun's own test runner in
 
 ## Architecture
 
-- [Source layout](docs/reference/source-layout.md): what each source directory holds, the direction of imports between them, the rules for errors, time, and deterministic reports, and how the build works.
+- [Source layout](docs/reference/source-layout.md): what each source directory holds, the direction of imports between them, the rules for errors, time, deterministic reports, and domain dependencies, and how the build works.
 - [How tevu works](docs/concepts/how-tevu-works.md) and [Isolation](docs/concepts/isolation.md): the model a change must preserve.
 
 Open an issue before changing the configuration contract (`version: 1`, strict rejection of unknown fields) or the layout and format of saved run artifacts. Both are public contracts with existing files on disk.

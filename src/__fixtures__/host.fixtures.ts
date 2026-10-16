@@ -1,4 +1,5 @@
-import type { JiraTrackerSettings, ParentEnvironmentSnapshot } from '@/domain/types';
+import type { JiraTrackerSettings } from '@/domain/config';
+import type { ParentEnvironmentSnapshot } from '@/domain/ports/environment';
 
 export function buildParentEnvironmentSnapshot(
   overrides: Partial<ParentEnvironmentSnapshot> = {},

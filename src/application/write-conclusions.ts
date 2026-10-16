@@ -12,18 +12,13 @@
 
 import { callModelRole, describeModelCallFailure } from '@/application/model-call';
 import { durationMs } from '@/config/schema';
-import { unavailableAgentMetrics } from '@/domain/types';
+import { unavailableAgentMetrics } from '@/domain/run-records';
 import { acceptConclusions, buildSummaryPrompt, templateConclusions } from '@/evaluation/summary';
 
-import type {
-  ConclusionTexts,
-  ModelCallDependencies,
-  ModelCallEvidence,
-  ModelRoleCallConfig,
-  Redactor,
-  SummaryCall,
-  TaskConclusions,
-} from '@/domain/types';
+import type { ModelCallEvidence } from '@/domain/ports/agent';
+import type { Redactor } from '@/domain/ports/secret-redactor';
+import type { ConclusionTexts, SummaryCall, TaskConclusions } from '@/domain/run-records';
+import type { ModelCallDependencies, ModelRoleCallConfig } from '@/domain/use-cases';
 import type { SummaryEvidence } from '@/evaluation/summary';
 
 /**

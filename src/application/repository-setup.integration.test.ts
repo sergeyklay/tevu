@@ -9,29 +9,20 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
 import { createEnvironmentAdapter, createEvaluatorProcessAdapter } from '@/adapters/process';
 import { TevuConfigSchema } from '@/config/schema';
-import { unavailableMetric } from '@/domain/types';
+import { unavailableMetric } from '@/domain/run-records';
 
 import { buildVerifiedEfforts } from './__fixtures__/effort.fixtures';
 import { planBenchmark, runBenchmark } from './run-benchmark';
 
 import type { TevuConfigInput } from '@/config/schema';
-import type {
-  AgentAdapter,
-  AgentCapabilityReport,
-  AgentMetrics,
-  AgentRegistry,
-  AgentRunResult,
-  CaseArtifactPathIndex,
-  CaseResult,
-  Clock,
-  HostProbe,
-  PrerequisiteAdapter,
-  RunDependencies,
-  RunRecorder,
-  TevuConfig,
-  TevuError,
-  TevuResult,
-} from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
+import type { TevuError, TevuResult } from '@/domain/errors';
+import type { AgentAdapter, AgentRegistry, AgentRunResult } from '@/domain/ports/agent';
+import type { CaseArtifactPathIndex, RunRecorder } from '@/domain/ports/artifact-store';
+import type { Clock } from '@/domain/ports/clock';
+import type { HostProbe, PrerequisiteAdapter } from '@/domain/ports/prerequisite';
+import type { AgentCapabilityReport, AgentMetrics, CaseResult } from '@/domain/run-records';
+import type { RunDependencies } from '@/domain/use-cases';
 
 const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 const CONFIG_PATH = '/synthetic/tevu.yaml';

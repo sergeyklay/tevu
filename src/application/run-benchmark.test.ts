@@ -2,7 +2,7 @@
 import { assert, describe, expect, it, vi } from 'vitest';
 
 import { durationMs, TevuConfigSchema } from '@/config/schema';
-import { unavailableBenchmarkMetrics } from '@/domain/types';
+import { unavailableBenchmarkMetrics } from '@/domain/run-records';
 import { evaluateChecks } from '@/evaluation/checks';
 
 import { buildVerifiedEfforts } from './__fixtures__/effort.fixtures';
@@ -12,51 +12,55 @@ import { buildTaskPrompt } from './task-prompt';
 
 import type { GradeCaseOutcome } from './grade-case';
 import type { CheckInput, TaskInput, TevuConfigInput } from '@/config/schema';
+import type { RepositoryDefinition, SetupPhase, TevuConfig } from '@/domain/config';
+import type { TevuError, TevuResult } from '@/domain/errors';
 import type {
   AgentAdapter,
-  AgentCapabilityReport,
-  AgentMetrics,
   AgentRegistry,
   AgentRunInput,
   AgentRunResult,
-  BenchmarkMetrics,
+} from '@/domain/ports/agent';
+import type { RunRecorder } from '@/domain/ports/artifact-store';
+import type { Clock } from '@/domain/ports/clock';
+import type {
   CaseEnvironments,
+  EnvironmentAdapter,
+  IsolatedEnvironment,
+  ParentEnvironmentSnapshot,
+} from '@/domain/ports/environment';
+import type {
+  EvaluatorProcessAdapter,
+  EvaluatorProcessRequest,
+} from '@/domain/ports/evaluator-process';
+import type {
+  CaseWorkspace,
+  CheckStateRequest,
+  OverlaySnapshot,
+  PatchBase,
+} from '@/domain/ports/git-workspace';
+import type { RedactedCapture } from '@/domain/ports/managed-process-runner';
+import type { HostProbe, PrerequisiteAdapter } from '@/domain/ports/prerequisite';
+import type {
+  AgentCapabilityReport,
+  AgentMetrics,
+  BenchmarkMetrics,
   CaseGrading,
   CaseIdentity,
   CaseLifecycle,
   CaseResult,
-  CaseWorkspace,
   CheckResult,
   CheckStateRecord,
-  CheckStateRequest,
-  Clock,
   CopiedProvider,
-  EnvironmentAdapter,
   EnvironmentVariableRecord,
-  EvaluatorProcessAdapter,
-  EvaluatorProcessRequest,
   FailureRecord,
-  HostProbe,
-  IsolatedEnvironment,
   MetricValue,
-  OverlaySnapshot,
-  ParentEnvironmentSnapshot,
-  PatchBase,
-  PrerequisiteAdapter,
   ProcessResult,
-  RedactedCapture,
-  RepositoryDefinition,
-  RunDependencies,
   RunFinding,
   RunManifest,
-  RunRecorder,
   RunResult,
   SetupCommandRecord,
-  SetupPhase,
-  TevuConfig,
-  TevuError,
-  TevuResult,
-} from '@/domain/types';
+} from '@/domain/run-records';
+import type { RunDependencies } from '@/domain/use-cases';
 import type * as ChecksModule from '@/evaluation/checks';
 
 vi.mock('./grade-case', () => ({ gradeCase: vi.fn() }));

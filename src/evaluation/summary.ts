@@ -24,7 +24,7 @@ import type {
   SummaryMargin,
   SummaryMeasure,
   SummarySetting,
-} from '@/domain/types';
+} from '@/domain/run-records';
 
 /** The facts of one task as the report context supplies them, one row per model setting. */
 export type SummaryTaskView = {

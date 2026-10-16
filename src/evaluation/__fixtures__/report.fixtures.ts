@@ -1,5 +1,6 @@
-import { unavailableAgentMetrics, unavailableBenchmarkMetrics } from '@/domain/types';
+import { unavailableAgentMetrics, unavailableBenchmarkMetrics } from '@/domain/run-records';
 
+import type { TevuError } from '@/domain/errors';
 import type {
   AgentMetrics,
   CaseIdentity,
@@ -15,8 +16,7 @@ import type {
   SummaryMeasure,
   SummarySetting,
   TaskRecord,
-  TevuError,
-} from '@/domain/types';
+} from '@/domain/run-records';
 import type { SummaryEvidence, SummaryTaskView } from '@/evaluation/summary';
 
 export const FIXTURE_RUN_ID = 'run-1';

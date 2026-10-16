@@ -19,7 +19,9 @@ import {
 import { checkModelAccess, inspectModelProvider, probeAgent } from './model-access';
 
 import type { AgentDraft, ModelAccessDependencies } from './model-access';
-import type { AgentAdapter, EnvironmentAdapter, TevuConfig } from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
+import type { AgentAdapter } from '@/domain/ports/agent';
+import type { EnvironmentAdapter } from '@/domain/ports/environment';
 
 const LITERAL_KEY = 'sk-test-literal';
 const SET_VARIABLE = 'TEVU_MODEL_ACCESS_SET_KEY';

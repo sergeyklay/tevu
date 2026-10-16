@@ -1,7 +1,7 @@
 /** `tevu run`: prepares, validates, plans, and executes a benchmark, or prints the dry-run plan. */
 
 import { agentNamesInUse } from '@/config/schema';
-import { effortLabel } from '@/domain/types';
+import { effortLabel } from '@/domain/run-records';
 import { renderTevuError } from '@/interface/render-error';
 
 import {
@@ -22,17 +22,10 @@ import type {
   LineWriter,
   RunReportRebuild,
 } from './shared';
-import type {
-  AgentCapabilityReport,
-  BenchmarkPlan,
-  CaseLifecycle,
-  EffortChecks,
-  RunResult,
-  TaskDefinition,
-  TevuConfig,
-  TevuResult,
-  ValidationFinding,
-} from '@/domain/types';
+import type { TaskDefinition, TevuConfig } from '@/domain/config';
+import type { TevuResult, ValidationFinding } from '@/domain/errors';
+import type { AgentCapabilityReport, CaseLifecycle, RunResult } from '@/domain/run-records';
+import type { BenchmarkPlan, EffortChecks } from '@/domain/use-cases';
 
 /** Cancellation and observation hooks the run command hands to one benchmark execution. */
 export type BenchmarkExecutionHooks = {

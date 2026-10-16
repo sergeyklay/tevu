@@ -7,7 +7,9 @@ import { createLineWriters, EXIT_COMPLETED, loadCommandConfig, reportFailure } f
 
 import type { CommandContext, ConfigOperations, ConfigOptionValues } from './shared';
 import type { AssessedCase, AssessmentCaseContext } from '@/application/assess';
-import type { AssessmentInput, TevuConfig, TevuResult } from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
+import type { TevuResult } from '@/domain/errors';
+import type { AssessmentInput } from '@/domain/use-cases';
 
 export type AssessOperations = ConfigOperations & {
   readAssessmentContext(

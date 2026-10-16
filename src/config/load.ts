@@ -5,17 +5,10 @@ import { parseDocument } from 'yaml';
 import { TevuConfigSchema } from './schema';
 
 import type { ModelRoleInput, RepositoryInput, TevuConfigInput } from './schema';
-import type {
-  ConfigStore,
-  LoadConfigErrorKind,
-  ModelRole,
-  ModelRoleCallConfig,
-  ModelRoleName,
-  RepositoryDefinition,
-  TevuConfig,
-  TevuResult,
-  ValidationFinding,
-} from '@/domain/types';
+import type { ModelRole, ModelRoleName, RepositoryDefinition, TevuConfig } from '@/domain/config';
+import type { LoadConfigErrorKind, TevuResult, ValidationFinding } from '@/domain/errors';
+import type { ConfigStore } from '@/domain/ports/config-store';
+import type { ModelRoleCallConfig } from '@/domain/use-cases';
 
 /**
  * Parses and validates one configuration document's text against the

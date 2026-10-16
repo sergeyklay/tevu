@@ -2,21 +2,18 @@ import { durationMs } from '@/config/schema';
 import { describeCause } from '@/domain/describe-cause';
 import { isFixedEnvironmentName } from '@/domain/fixed-environment';
 
+import type { CheckDefinition, CommandCheck, TaskDefinition } from '@/domain/config';
+import type { TevuResult } from '@/domain/errors';
+import type { IsolatedEnvironment, ParentEnvironmentSnapshot } from '@/domain/ports/environment';
 import type {
-  CaseWorkspace,
-  CheckDefinition,
-  CheckResult,
-  CommandCheck,
   EvaluatorProcessAdapter,
   EvaluatorProcessRequest,
   EvaluatorProcessResult,
-  IsolatedEnvironment,
-  ParentEnvironmentSnapshot,
-  RedactedCapture,
-  Redactor,
-  TaskDefinition,
-  TevuResult,
-} from '@/domain/types';
+} from '@/domain/ports/evaluator-process';
+import type { CaseWorkspace } from '@/domain/ports/git-workspace';
+import type { RedactedCapture } from '@/domain/ports/managed-process-runner';
+import type { Redactor } from '@/domain/ports/secret-redactor';
+import type { CheckResult } from '@/domain/run-records';
 
 /** One configured check paired with the collection it came from. */
 export type OrderedCheck = {

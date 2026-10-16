@@ -69,24 +69,24 @@ import type {
   TaskInput,
   TevuConfigInput,
 } from '@/config/schema';
-import type { ParsedGitHubRepository } from '@/domain/github-reference';
 import type {
-  AgentCapabilityReport,
   AgentProviderSetting,
-  AssessmentDecision,
-  AssessmentInput,
-  AssessmentRecord,
-  IssueSnapshot,
   JiraTrackerSettings,
-  LoadConfigErrorKind,
   RepositoryDefinition,
   TaskDefinition,
   TaskReference,
   TevuConfig,
+} from '@/domain/config';
+import type {
+  LoadConfigErrorKind,
   TevuError,
   TevuResult,
   ValidationFinding,
-} from '@/domain/types';
+} from '@/domain/errors';
+import type { ParsedGitHubRepository } from '@/domain/github-reference';
+import type { IssueSnapshot } from '@/domain/ports/issue-tracker';
+import type { AgentCapabilityReport, AssessmentRecord } from '@/domain/run-records';
+import type { AssessmentDecision, AssessmentInput } from '@/domain/use-cases';
 import type { CANCEL_SYMBOL, Option } from '@clack/prompts';
 import type { Readable, Writable } from 'node:stream';
 

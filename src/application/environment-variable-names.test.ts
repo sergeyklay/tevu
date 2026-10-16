@@ -6,7 +6,7 @@ import { TevuConfigSchema } from '@/config/schema';
 import { buildEnvironmentVariableNames } from './environment-variable-names';
 
 import type { TevuConfigInput } from '@/config/schema';
-import type { TevuConfig } from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
 
 function buildTaskInput(
   overrides: Partial<TevuConfigInput['tasks'][number]> = {},

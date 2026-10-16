@@ -10,7 +10,7 @@ import { loadConfig, parseConfigText } from './load';
 import { repositoryInputOf, TevuConfigSchema } from './schema';
 import { CONFIG_TEMPLATE } from './template';
 
-import type { TevuConfig } from '@/domain/types';
+import type { TevuConfig } from '@/domain/config';
 
 const OPTIONAL_LINE_PATTERN = /^( *)# ( *(?:- )?[A-Za-z][A-Za-z0-9_]*:(?: |$))/;
 

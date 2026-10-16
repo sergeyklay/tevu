@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
 
-import { unavailableAgentMetrics } from '@/domain/types';
+import { unavailableAgentMetrics } from '@/domain/run-records';
 
 import { buildAgentMetrics, buildGraderCall } from './__fixtures__/report.fixtures';
 import {
@@ -14,15 +14,14 @@ import {
 } from './grading';
 
 import type { GradedCheckSummary } from './grading';
+import type { CheckDefinition, TaskDefinition } from '@/domain/config';
 import type {
   AgentMetrics,
   CaseGrading,
-  CheckDefinition,
   CheckResult,
   GraderIdentity,
   MetricValue,
-  TaskDefinition,
-} from '@/domain/types';
+} from '@/domain/run-records';
 
 function buildCommandCheck(overrides: Partial<CheckDefinition> = {}): CheckDefinition {
   return {

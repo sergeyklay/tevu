@@ -15,12 +15,8 @@ import { parse, printParseErrorCode } from 'jsonc-parser';
 import { describeCause } from '@/domain/describe-cause';
 
 import type { OpenCodeAdapterDependencies, OpenCodeAdapterSettings } from './opencode';
-import type {
-  OperatorProvider,
-  ProviderSnapshot,
-  TevuResult,
-  ValidationFinding,
-} from '@/domain/types';
+import type { TevuResult, ValidationFinding } from '@/domain/errors';
+import type { OperatorProvider, ProviderSnapshot } from '@/domain/ports/agent';
 import type { ParseError } from 'jsonc-parser';
 
 /** OpenCode's own file names and load order for its global configuration directory. */
