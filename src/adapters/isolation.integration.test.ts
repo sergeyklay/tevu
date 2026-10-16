@@ -675,11 +675,11 @@ describe('sealed Git case materialization', () => {
 
   it('reports workspace readability and disposes the case directory', async () => {
     const { adapter, workspace } = await sealCaseFromSyntheticRepository('task-1--c1');
-    const readableBefore = await adapter.isReadable?.(workspace);
+    const readableBefore = await adapter.isReadable(workspace);
 
     await rm(join(workspace.repositoryDirectory, 'HEAD'));
 
-    const readableAfterCorruption = await adapter.isReadable?.(workspace);
+    const readableAfterCorruption = await adapter.isReadable(workspace);
     const disposed = await adapter.dispose(workspace);
 
     expect(readableBefore).toBe(true);

@@ -21,13 +21,13 @@ import type {
   AgentMetrics,
   AgentRegistry,
   AgentRunResult,
-  ArtifactStore,
   CaseArtifactPathIndex,
   CaseResult,
   Clock,
   HostProbe,
   PrerequisiteAdapter,
   RunDependencies,
+  RunRecorder,
   TevuConfig,
   TevuError,
   TevuResult,
@@ -290,8 +290,8 @@ function buildDirectEditAgent(): AgentAdapter {
   };
 }
 
-function createRecordingArtifactStore(): {
-  store: ArtifactStore;
+function createRecordingRunRecorder(): {
+  store: RunRecorder;
   patches: Map<string, string>;
   results: Map<string, CaseResult>;
 } {
@@ -311,7 +311,7 @@ function createRecordingArtifactStore(): {
     setupBeforeChecks: `${caseId}/setup-before-checks.log`,
   });
 
-  const store: ArtifactStore = {
+  const store: RunRecorder = {
     caseArtifactPaths: paths,
     async startRun() {
       return { ok: true, value: undefined };
@@ -342,52 +342,7 @@ function createRecordingArtifactStore(): {
       results.set(result.identity.caseId, result);
       return { ok: true, value: undefined };
     },
-    async replaceCaseResult() {
-      return { ok: true, value: undefined };
-    },
     async finalizeRun() {
-      return { ok: true, value: undefined };
-    },
-    async writeReport() {
-      return { ok: true, value: undefined };
-    },
-    async readConclusions() {
-      return { ok: true, value: null };
-    },
-    async writeConclusions() {
-      return { ok: true, value: undefined };
-    },
-    async writeSummary() {
-      return { ok: true, value: undefined };
-    },
-    async readRunManifest() {
-      throw new Error('not used in this test');
-    },
-    async readRunResult() {
-      throw new Error('not used in this test');
-    },
-    async readCaseResult() {
-      throw new Error('not used in this test');
-    },
-    async readEvents() {
-      return { ok: true, value: [] };
-    },
-    async readSessionExport() {
-      return { ok: true, value: null };
-    },
-    async readChecks() {
-      return { ok: true, value: [] };
-    },
-    async readGrading() {
-      throw new Error('not used in this test');
-    },
-    async readAssessment() {
-      return { ok: true, value: null };
-    },
-    async acquireAssessmentLock() {
-      throw new Error('not used in this test');
-    },
-    async replaceAssessment() {
       return { ok: true, value: undefined };
     },
   };
@@ -440,7 +395,7 @@ describe('repository setup orchestration end to end (AC-1, P7)', () => {
     const environments = createEnvironmentAdapter();
     const evaluatorProcesses = createEvaluatorProcessAdapter(() => []);
     const agents: AgentRegistry = new Map([['opencode', buildDirectEditAgent()]]);
-    const artifactsFake = createRecordingArtifactStore();
+    const artifactsFake = createRecordingRunRecorder();
 
     const dependencies: RunDependencies = {
       git,

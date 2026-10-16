@@ -681,7 +681,7 @@ function sourceFailure(
  */
 async function pinOverlays(
   planned: PlannedCase[],
-  git: GitWorkspaceAdapter,
+  git: Pick<GitWorkspaceAdapter, 'readOverlay'>,
 ): Promise<TevuResult<PlannedCase[], 'CheckStateError'>> {
   const snapshots = new Map<string, OverlaySnapshot>();
   for (const entry of planned) {
@@ -1185,10 +1185,7 @@ async function concludeCase(
     case 'AgentProcessError':
     case 'AgentProtocolError':
     case 'AgentSessionError': {
-      const readable =
-        run.dependencies.git.isReadable === undefined
-          ? true
-          : await run.dependencies.git.isReadable(finished.workspace);
+      const readable = await run.dependencies.git.isReadable(finished.workspace);
       if (readable) {
         return evaluateReadableCase(run, finished, error);
       }
