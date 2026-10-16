@@ -28,6 +28,7 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 
 ### Ask first
 
+- Raising a threshold of the size budget in `eslint.config.mjs` (`complexity`, `max-lines-per-function`, `max-lines`) or exempting a file from it. Thresholds only go down: a change that lowers a measured maximum lowers its threshold in the same change.
 - Any change to the configuration contract (`version: 1`, strict rejection of unknown fields) or to the layout and format of saved run artifacts. Both are public contracts with existing files on disk.
 - Restructuring `docs/`, which follows Diátaxis: getting-started, guides, reference, concepts.
 

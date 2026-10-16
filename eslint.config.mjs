@@ -32,5 +32,18 @@ export default defineConfig([
     },
   },
 
+  // Each threshold is the measured maximum of production code, so code cannot grow past today's largest function or file; a change that lowers a measured maximum lowers its threshold in the same change.
+  // noInlineConfig stops a directive comment from exempting a function or file instead of lowering a threshold; raising a threshold or exempting a file is an AGENTS.md "Ask first" change.
+  {
+    files: ['src/**/*.ts'],
+    ignores: ['src/**/*.test.ts', 'src/**/__fixtures__/**'],
+    linterOptions: { noInlineConfig: true },
+    rules: {
+      complexity: ['error', { max: 32, variant: 'modified' }],
+      'max-lines-per-function': ['error', { max: 173, skipBlankLines: true, skipComments: true }],
+      'max-lines': ['error', { max: 2738, skipBlankLines: true, skipComments: true }],
+    },
+  },
+
   prettierConfig,
 ]);
