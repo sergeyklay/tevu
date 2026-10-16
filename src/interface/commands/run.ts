@@ -38,7 +38,7 @@ import type {
 export type BenchmarkExecutionHooks = {
   cancellation: AbortSignal;
   onRunId?: (runId: string) => void;
-  onLifecycle?: (caseId: string, lifecycle: CaseLifecycle) => void;
+  onLifecycle?: ((caseId: string, lifecycle: CaseLifecycle) => void) | undefined;
   onRetainedGradingDirectory?: (directory: string) => void;
 };
 

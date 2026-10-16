@@ -101,10 +101,20 @@ function noReplyCauseOf(error: TevuError): 'unfinished' | 'tool-call' | 'other' 
     : 'other';
 }
 
-/** `calls` is never empty where this runs: every exit of the call loop follows a push. */
-function sumCallMetrics(calls: CaseGrading['calls']): AgentMetrics {
-  const [first, ...rest] = calls.map((call) => call.metrics);
-  return sumGraderCallMetrics([first, ...rest]);
+type GraderCall = CaseGrading['calls'][number];
+
+/** The calls made before `latest`, in call order, followed by `latest`. */
+function appendGraderCall(
+  earlier: readonly GraderCall[],
+  latest: GraderCall,
+): [GraderCall, ...GraderCall[]] {
+  const [head, ...tail] = earlier;
+  return head === undefined ? [latest] : [head, ...tail, latest];
+}
+
+function sumCallMetrics(calls: readonly [GraderCall, ...GraderCall[]]): AgentMetrics {
+  const [first, ...rest] = calls;
+  return sumGraderCallMetrics([first.metrics, ...rest.map((call) => call.metrics)]);
 }
 
 /**
@@ -142,7 +152,7 @@ export async function gradeCase(
     return unredactedPromptOutcome(grader, checks);
   }
 
-  const calls: CaseGrading['calls'] = [];
+  let calls: GraderCall[] = [];
   const retainedDirectories: string[] = [];
   for (;;) {
     let evidence: ModelCallEvidence | undefined;
@@ -170,14 +180,18 @@ export async function gradeCase(
     };
 
     if (result.ok) {
-      calls.push({ outcome: { status: 'replied' }, metrics: result.value.metrics, ...records });
+      const gradedCalls = appendGraderCall(calls, {
+        outcome: { status: 'replied' },
+        metrics: result.value.metrics,
+        ...records,
+      });
       return {
         status: 'graded',
         grading: {
           grader,
           call: { status: 'replied', reply: result.value.text },
-          calls,
-          metrics: sumCallMetrics(calls),
+          calls: gradedCalls,
+          metrics: sumCallMetrics(gradedCalls),
           grades: deriveGrades(result.value.text, checks),
         },
         retainedDirectories,
@@ -189,23 +203,24 @@ export async function gradeCase(
     }
     const cause = noReplyCauseOf(result.error);
     const reason = `the grader call failed: ${describeModelCallFailure(result.error)}`;
-    calls.push({
+    const madeCalls = appendGraderCall(calls, {
       outcome: { status: 'no-reply', cause, reason },
       metrics: evidence?.session?.metrics ?? unavailableAgentMetrics(reason),
       ...records,
     });
-    if (cause !== 'unfinished' || calls.length >= GRADER_CALL_LIMIT) {
+    if (cause !== 'unfinished' || madeCalls.length >= GRADER_CALL_LIMIT) {
       return {
         status: 'graded',
         grading: {
           grader,
           call: { status: 'no-reply', cause, reason },
-          calls,
-          metrics: sumCallMetrics(calls),
+          calls: madeCalls,
+          metrics: sumCallMetrics(madeCalls),
           grades: pendingGrades(checks, reason),
         },
         retainedDirectories,
       };
     }
+    calls = madeCalls;
   }
 }

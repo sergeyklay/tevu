@@ -39,7 +39,7 @@ type WizardPromptContext = {
   input: Readable;
   output: Writable;
   /** Aborting it resolves the cancel value, as for the same-named function from @clack/prompts. */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
   statusLine: StatusLine & StatusLineDisplay;
 };
 
@@ -66,13 +66,13 @@ export async function text(
   const { input, output, signal } = options;
 
   const prompt = new TextPrompt({
-    validate,
-    placeholder,
-    defaultValue,
-    initialValue,
+    ...(validate === undefined ? {} : { validate }),
+    ...(placeholder === undefined ? {} : { placeholder }),
+    ...(defaultValue === undefined ? {} : { defaultValue }),
+    ...(initialValue === undefined ? {} : { initialValue }),
     input,
     output,
-    signal,
+    ...(signal === undefined ? {} : { signal }),
     render() {
       const title = `${styleText('gray', S_BAR)}\n${symbol(this.state)}  ${message}\n`;
       const placeholderCell =
@@ -108,7 +108,7 @@ export async function confirm(
     initialValue,
     input,
     output,
-    signal,
+    ...(signal === undefined ? {} : { signal }),
     render() {
       const title = `${styleText('gray', S_BAR)}\n${wrapTextWithPrefix(
         output,
@@ -138,17 +138,17 @@ export async function select<Value extends string>(
   options: WizardPromptContext & {
     message: string;
     options: Option<Value>[];
-    initialValue?: Value;
+    initialValue?: Value | undefined;
   },
 ): Promise<Value | typeof CANCEL_SYMBOL> {
   const { message, initialValue, input, output, signal, statusLine } = options;
 
   const prompt = new SelectPrompt<SelectRow<Value>>({
     options: options.options,
-    initialValue,
+    ...(initialValue === undefined ? {} : { initialValue }),
     input,
     output,
-    signal,
+    ...(signal === undefined ? {} : { signal }),
     render() {
       const title = `${styleText('gray', S_BAR)}\n${wrapTextWithPrefix(
         output,

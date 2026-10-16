@@ -55,7 +55,11 @@ function parseDurationMs(value: string): number | null {
   if (digits === undefined || unit === undefined) {
     return null;
   }
-  return Number(digits) * DURATION_UNIT_MS[unit];
+  const factor = DURATION_UNIT_MS[unit];
+  if (factor === undefined) {
+    return null;
+  }
+  return Number(digits) * factor;
 }
 
 /**
@@ -144,7 +148,7 @@ const RunSettingsSchema = z.strictObject({
   repeat: RepeatSchema.default(1),
   timeout: DurationSchema,
   stop_grace: DurationSchema,
-  check_timeout: DurationSchema.optional(),
+  check_timeout: DurationSchema.exactOptional(),
 });
 
 function checkNoFixedNames(
@@ -177,7 +181,7 @@ function checkUniqueStrings(
 /** One provider entry `agents.<agentName>.providers` may copy from the operator's OpenCode configuration. */
 const ProviderEntrySchema = z.strictObject({
   id: z.string(),
-  api_key: VariableNameSchema.optional(),
+  api_key: VariableNameSchema.exactOptional(),
 });
 
 const PROVIDER_ID_MESSAGE = 'provider id must be non-empty and contain no "/"';
@@ -249,8 +253,13 @@ const AGENTS_SHAPE = { opencode: agentSettingsSchema('opencode') };
 /** Agent name: a key of the `agents` block. */
 export type AgentName = keyof TevuConfigInput['agents'];
 
+// `AGENTS_SHAPE` is a literal with at least one key and `Object.keys` returns `string[]`,
+// so the compiler sees neither the key names nor the non-empty length.
 /** Agent names the `agents` block accepts, derived from its strict object shape, not a second literal. */
-export const AGENT_NAMES: readonly AgentName[] = Object.keys(AGENTS_SHAPE) as AgentName[];
+export const AGENT_NAMES: readonly [AgentName, ...AgentName[]] = Object.keys(AGENTS_SHAPE) as [
+  AgentName,
+  ...AgentName[],
+];
 
 /** Distinct `models[].agent` values in configuration order. */
 export function agentNamesInUse(config: TevuConfig): string[] {
@@ -287,7 +296,9 @@ const RawRepositorySetupShape = z.strictObject({
 
 type RawRepositorySetup = z.infer<typeof RawRepositorySetupShape>;
 
-function hasSetupCommand(commands: SetupCommand[] | undefined): boolean {
+function hasSetupCommand(
+  commands: SetupCommand[] | undefined,
+): commands is [SetupCommand, ...SetupCommand[]] {
   return commands !== undefined && commands.length > 0;
 }
 
@@ -480,7 +491,7 @@ const TaskReferenceUnionSchema = z.discriminatedUnion('kind', [
         'must be OWNER/REPO#NUMBER or https://HOST/OWNER/REPO/pull/NUMBER, without user info or a port',
       ),
     commits: z.array(CommitHashSchema).min(1),
-    merge_commit: CommitHashSchema.optional(),
+    merge_commit: CommitHashSchema.exactOptional(),
   }),
   z.strictObject({
     kind: z.literal('commit'),
@@ -762,7 +773,7 @@ const RawTevuConfigShape = z.strictObject({
   version: z.literal(1),
   run: RunSettingsSchema,
   agents: z.strictObject(AGENTS_SHAPE),
-  trackers: z.strictObject({ jira: JiraTrackerSettingsSchema.optional() }).optional(),
+  trackers: z.strictObject({ jira: JiraTrackerSettingsSchema.exactOptional() }).optional(),
   repositories: z.array(RepositoryDefinitionSchema).min(1),
   models: z.array(ModelDefinitionSchema).min(2),
   roles: z.strictObject(ROLES_SHAPE).optional(),

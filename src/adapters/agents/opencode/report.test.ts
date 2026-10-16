@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, assert, beforeAll, describe, expect, it } from 'vitest';
 
 import { createArtifactStore } from '@/adapters/artifact-store';
 import { createRedactor } from '@/adapters/process';
@@ -229,7 +229,7 @@ function buildCheckResult(
 }
 
 function buildArtifactIndex(caseId: string, present: ReadonlySet<string>): CaseResult['artifacts'] {
-  const paths: Record<string, string> = {
+  const paths: Record<keyof CaseResult['artifacts'], string> = {
     events: `cases/${caseId}/events.jsonl`,
     diagnostics: `cases/${caseId}/stderr.log`,
     sessionExport: `cases/${caseId}/session.json`,
@@ -395,7 +395,9 @@ function buildSyntheticRecords(): SyntheticRecords {
   const parsedExport = structuredClone(readJsonFixture('session-valid.json')) as {
     messages: Array<{ parts: Array<Record<string, unknown>> }>;
   };
-  parsedExport.messages[1].parts.push({
+  const exportMessage = parsedExport.messages[1];
+  assert.isDefined(exportMessage, 'session export message 1');
+  exportMessage.parts.push({
     id: 'prt-x9',
     sessionID: 'ses-root-0001',
     messageID: 'msg-a1',
@@ -600,7 +602,9 @@ async function createSyntheticRun(root: string): Promise<{
   if (!patchWrite.ok) {
     throw new Error(`writePatch failed: ${JSON.stringify(patchWrite.error)}`);
   }
-  await writeChecksOrThrow(store, 'task-1--alpha--1', records.caseResults[0].checks);
+  const alphaResult = records.caseResults[0];
+  assert.isDefined(alphaResult, 'alpha case result');
+  await writeChecksOrThrow(store, 'task-1--alpha--1', alphaResult.checks);
 
   const betaError: OpenCodeRunEvent = {
     type: 'error',
@@ -631,7 +635,9 @@ async function createSyntheticRun(root: string): Promise<{
   if (!betaDiagnostic.ok) {
     throw new Error(`appendDiagnostic failed: ${JSON.stringify(betaDiagnostic.error)}`);
   }
-  await writeChecksOrThrow(store, 'task-1--beta--1', records.caseResults[1].checks);
+  const betaResult = records.caseResults[1];
+  assert.isDefined(betaResult, 'beta case result');
+  await writeChecksOrThrow(store, 'task-1--beta--1', betaResult.checks);
 
   for (const result of records.caseResults) {
     const finalized = await store.finalizeCase(result);

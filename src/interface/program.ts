@@ -225,10 +225,13 @@ function configureCommandBoundary(command: Command, dependencies: ProgramDepende
   });
   command.showHelpAfterError(false);
   command.showSuggestionAfterError(false);
-  const examples = HELP_EXAMPLES[command.name()]
-    .map(([description, invocation]) => `  # ${description}\n  ${invocation}`)
-    .join('\n\n');
-  command.addHelpText('after', `\nExamples:\n${examples}`);
+  const helpExamples = HELP_EXAMPLES[command.name()];
+  if (helpExamples !== undefined) {
+    const examples = helpExamples
+      .map(([description, invocation]) => `  # ${description}\n  ${invocation}`)
+      .join('\n\n');
+    command.addHelpText('after', `\nExamples:\n${examples}`);
+  }
   command.configureOutput({
     writeOut: (text) => {
       dependencies.io.stdout.write(dependencies.redact(text));

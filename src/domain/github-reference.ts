@@ -42,6 +42,9 @@ export function parseGitHubReference(text: string): ParsedGitHubReference | null
   const shortForm = SHORT_FORM_PATTERN.exec(text);
   if (shortForm !== null) {
     const [, owner, repo, numberText] = shortForm;
+    if (owner === undefined || repo === undefined || numberText === undefined) {
+      return null;
+    }
     if (isReservedRepoName(repo)) {
       return null;
     }
@@ -71,11 +74,17 @@ function parseReferencePath(pathname: string): ReferencePath | null {
     return null;
   }
   const [, owner, repo, kind, numberText] = match;
+  if (owner === undefined || repo === undefined || numberText === undefined) {
+    return null;
+  }
+  if (kind !== 'issues' && kind !== 'pull') {
+    return null;
+  }
   if (isReservedRepoName(repo)) {
     return null;
   }
   const number = toReferenceNumber(numberText);
-  return number === null ? null : { owner, repo, number, path: kind as 'issues' | 'pull' };
+  return number === null ? null : { owner, repo, number, path: kind };
 }
 
 function isReservedRepoName(repo: string): boolean {
@@ -171,6 +180,9 @@ function parseRepositoryUrl(text: string): ParsedGitHubRepository | null {
     return null;
   }
   const [owner, rawRepo] = segments;
+  if (owner === undefined || rawRepo === undefined) {
+    return null;
+  }
   const repo = parseRepoSegment(rawRepo);
   return OWNER_ONLY_PATTERN.test(owner) && repo !== null ? { host, owner, repo } : null;
 }

@@ -325,18 +325,22 @@ function createGit(): GitWorkspaceAdapter {
 /** Registers every configured agent under its own name; currently the schema declares only "opencode". */
 function createAgentsFor({ host }: CompositionContext): AgentsFor {
   const secrets = createSecretRedactor(host.secretValues, host.redact);
-  return (config) =>
-    new Map([
+  return (config) => {
+    const opencode = config.agents['opencode'];
+    if (opencode === undefined) {
+      throw new Error('unreachable: the configuration schema requires the opencode agent block');
+    }
+    return new Map([
       [
         'opencode',
         createOpenCodeAdapter(
           {
             agent: 'opencode',
-            executable: config.agents.opencode.command,
-            providers: config.agents.opencode.providers,
+            executable: opencode.command,
+            providers: opencode.providers,
             declaredVariables: {
-              secrets: config.agents.opencode.secrets,
-              env: config.agents.opencode.env,
+              secrets: opencode.secrets,
+              env: opencode.env,
             },
           },
           {
@@ -352,6 +356,7 @@ function createAgentsFor({ host }: CompositionContext): AgentsFor {
         ),
       ],
     ]);
+  };
 }
 
 function createClones(context: CompositionContext): ManagedCloneAdapter {

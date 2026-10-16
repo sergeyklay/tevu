@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { assert, describe, expect, it } from 'vitest';
 
 import {
   decodeEvent,
@@ -81,7 +81,9 @@ describe('decodeEvent', () => {
     'rejects malformed fixture line $number as a required-identity protocol error',
     ({ number, path }) => {
       const lines = malformedFixtureLines();
-      const decoded = decodeEvent(JSON.parse(lines[number - 1]) as unknown, CASE_CONTEXT, number);
+      const line = lines[number - 1];
+      assert.isDefined(line, `malformed fixture line ${String(number)}`);
+      const decoded = decodeEvent(JSON.parse(line) as unknown, CASE_CONTEXT, number);
 
       expect(decoded.ok).toBe(false);
       if (decoded.ok) return;
@@ -96,7 +98,9 @@ describe('decodeEvent', () => {
 
   it('accepts the tool part with an absent optional tool name instead of failing the protocol', () => {
     const lines = malformedFixtureLines();
-    const decoded = decodeEvent(JSON.parse(lines[6]) as unknown, CASE_CONTEXT, 7);
+    const line = lines[6];
+    assert.isDefined(line, 'malformed fixture line 7');
+    const decoded = decodeEvent(JSON.parse(line) as unknown, CASE_CONTEXT, 7);
 
     expect(decoded.ok).toBe(true);
     if (!decoded.ok) return;
@@ -147,6 +151,7 @@ describe('eventIdentity', () => {
   it('identifies part events by (sessionID, part.id) regardless of the ordinal', () => {
     const events = validFixtureEvents();
     const stepStart = events[0];
+    assert.isDefined(stepStart, 'step_start fixture event');
 
     expect(eventIdentity(stepStart, 0)).toBe(eventIdentity(stepStart, 99));
     expect(eventIdentity(stepStart, 0)).toBe(`${stepStart.sessionID}\u0000prt-0001`);
@@ -155,6 +160,7 @@ describe('eventIdentity', () => {
   it('separates identical part identities across different sessions', () => {
     const events = validFixtureEvents();
     const stepStart = events[0];
+    assert.isDefined(stepStart, 'step_start fixture event');
     const sibling: OpenCodeRunEvent = {
       type: 'step_start',
       timestamp: 1,
@@ -173,6 +179,7 @@ describe('eventIdentity', () => {
   it('identifies error events by session and ordinal so identical error records stay distinct', () => {
     const events = validFixtureEvents();
     const errorEvent = events[7];
+    assert.isDefined(errorEvent, 'error fixture event');
 
     expect(eventIdentity(errorEvent, 0)).not.toBe(eventIdentity(errorEvent, 1));
     expect(eventIdentity(errorEvent, 2)).toBe(`${errorEvent.sessionID}\u0000error\u00002`);

@@ -3,7 +3,7 @@
 import { basename } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { inspect, stripVTControlCharacters } from 'node:util';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createGitHubPullRequestReader } from '@/adapters/trackers/github-issues';
 import { resolveReferenceSolution } from '@/application/reference-solution';
@@ -365,6 +365,7 @@ const AGENT_NAME = 'fake-agent';
  */
 function rekeyToFakeAgent(config: TevuConfig): TevuConfig {
   const { opencode, ...otherAgents } = config.agents;
+  assert.isDefined(opencode, 'agents.opencode block');
   return {
     ...config,
     agents: { ...otherAgents, [AGENT_NAME]: opencode },

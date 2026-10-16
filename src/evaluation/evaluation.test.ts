@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, assert, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { withoutPlatformVariables } from '@/adapters/__fixtures__/environment.fixtures';
 import { createArtifactStore, createConfigStore } from '@/adapters/artifact-store';
@@ -112,6 +112,7 @@ type FakeEventRecord = { kind: 'tool' } | { kind: 'error'; message: string };
  */
 function rekeyToFakeAgent(config: TevuConfig): TevuConfig {
   const { opencode, ...otherAgents } = config.agents;
+  assert.isDefined(opencode, 'agents.opencode block');
   return {
     ...config,
     agents: { ...otherAgents, [AGENT_NAME]: opencode },
@@ -358,7 +359,7 @@ function buildCheckResult(
 }
 
 function buildArtifactIndex(caseId: string, present: ReadonlySet<string>): CaseResult['artifacts'] {
-  const paths: Record<string, string> = {
+  const paths: Record<keyof CaseResult['artifacts'], string> = {
     events: `cases/${caseId}/events.jsonl`,
     diagnostics: `cases/${caseId}/stderr.log`,
     sessionExport: `cases/${caseId}/session.json`,
@@ -858,7 +859,9 @@ async function createSyntheticRun(root: string): Promise<{
   if (!patchWrite.ok) {
     throw new Error(`writePatch failed: ${JSON.stringify(patchWrite.error)}`);
   }
-  await writeChecksOrThrow(store, 'task-1--alpha--1', records.caseResults[0].checks);
+  const alphaResult = records.caseResults[0];
+  assert.isDefined(alphaResult, 'alpha case result');
+  await writeChecksOrThrow(store, 'task-1--alpha--1', alphaResult.checks);
 
   const betaError: FakeEventRecord = { kind: 'error', message: 'synthetic provider outage' };
   const betaToolUse: FakeEventRecord = { kind: 'tool' };
@@ -871,7 +874,9 @@ async function createSyntheticRun(root: string): Promise<{
   if (!betaDiagnostic.ok) {
     throw new Error(`appendDiagnostic failed: ${JSON.stringify(betaDiagnostic.error)}`);
   }
-  await writeChecksOrThrow(store, 'task-1--beta--1', records.caseResults[1].checks);
+  const betaResult = records.caseResults[1];
+  assert.isDefined(betaResult, 'beta case result');
+  await writeChecksOrThrow(store, 'task-1--beta--1', betaResult.checks);
 
   for (const result of records.caseResults) {
     const finalized = await store.finalizeCase(result);
@@ -1063,10 +1068,12 @@ describe('evaluateChecks', () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value[0].verdict).toBe('failed');
-    expect(result.value[0].evidence).toContain('exit code 7 (not a declared success exit code)');
-    expect(result.value[0].evidence).toContain('stdout (11 bytes): step failed');
-    expect(result.value[0].evidence).toContain('stderr (0 bytes)');
+    const check = result.value[0];
+    assert.isDefined(check, 'evaluated check');
+    expect(check.verdict).toBe('failed');
+    expect(check.evidence).toContain('exit code 7 (not a declared success exit code)');
+    expect(check.evidence).toContain('stdout (11 bytes): step failed');
+    expect(check.evidence).toContain('stderr (0 bytes)');
   });
 
   it('fails a check that exceeds its timeout and reports the termination stage', async () => {
@@ -1092,8 +1099,10 @@ describe('evaluateChecks', () => {
 
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      expect(result.value[0].verdict).toBe('failed');
-      expect(result.value[0].evidence).toContain('timed out after 250ms (termination: graceful)');
+      const check = result.value[0];
+      assert.isDefined(check, 'evaluated check');
+      expect(check.verdict).toBe('failed');
+      expect(check.evidence).toContain('timed out after 250ms (termination: graceful)');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1119,8 +1128,10 @@ describe('evaluateChecks', () => {
 
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      expect(result.value[0].verdict).toBe('failed');
-      expect(result.value[0].evidence).toContain('terminated by signal SIGKILL');
+      const check = result.value[0];
+      assert.isDefined(check, 'evaluated check');
+      expect(check.verdict).toBe('failed');
+      expect(check.evidence).toContain('terminated by signal SIGKILL');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1140,9 +1151,11 @@ describe('evaluateChecks', () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value[0].verdict).toBe('failed');
-    expect(result.value[0].evidence).toBe('launch failed: spawn synthetic ENOENT');
-    expect(result.value[0].durationMs).toBeNull();
+    const check = result.value[0];
+    assert.isDefined(check, 'evaluated check');
+    expect(check.verdict).toBe('failed');
+    expect(check.evidence).toBe('launch failed: spawn synthetic ENOENT');
+    expect(check.durationMs).toBeNull();
   });
 
   it('keeps a thrown process-adapter failure as failed-check evidence', async () => {
@@ -1158,8 +1171,10 @@ describe('evaluateChecks', () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value[0].verdict).toBe('failed');
-    expect(result.value[0].evidence).toBe('launch failed: adapter exploded');
+    const check = result.value[0];
+    assert.isDefined(check, 'evaluated check');
+    expect(check.verdict).toBe('failed');
+    expect(check.evidence).toBe('launch failed: adapter exploded');
   });
 
   it('redacts credential secrets from captured evidence before it leaves the module', async () => {
@@ -1189,7 +1204,9 @@ describe('evaluateChecks', () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const evidence = result.value[0].evidence;
+    const check = result.value[0];
+    assert.isDefined(check, 'evaluated check');
+    const evidence = check.evidence;
     expect(evidence).toContain('[REDACTED]');
     expect(evidence).not.toContain(PROVIDER_SECRET);
     expect(evidence).not.toContain(PARENT_SENTINEL);
@@ -1210,8 +1227,10 @@ describe('evaluateChecks', () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value[0].evidence).toContain('stdout (999 bytes, truncated): partial capture');
-    expect(result.value[0].evidence).toContain('stderr (0 bytes)');
+    const check = result.value[0];
+    assert.isDefined(check, 'evaluated check');
+    expect(check.evidence).toContain('stdout (999 bytes, truncated): partial capture');
+    expect(check.evidence).toContain('stderr (0 bytes)');
   });
 
   it('stops before the next check once cancellation is requested', async () => {
@@ -1322,8 +1341,11 @@ describe('evaluateChecks', () => {
 
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      expect(result.value[0].verdict).toBe('passed');
-      const stdoutLine = result.value[0].evidence.split('\n')[1];
+      const check = result.value[0];
+      assert.isDefined(check, 'evaluated check');
+      expect(check.verdict).toBe('passed');
+      const stdoutLine = check.evidence.split('\n')[1];
+      assert.isDefined(stdoutLine, 'stdout line of the check evidence');
       const reported = JSON.parse(stdoutLine.slice(stdoutLine.indexOf('): ') + 3)) as {
         argv: string[];
         cwd: string;
@@ -1795,7 +1817,9 @@ describe('deterministic report regeneration', () => {
     ]);
     expect(model.tasks.map((task) => task.id)).toEqual(['task-1', 'task-2']);
     expect(model.models.map((entry) => entry.id)).toEqual(['alpha', 'beta', 'gamma']);
-    expect(model.cases[0].checks.map((check) => check.checkId)).toEqual([
+    const firstCase = model.cases[0];
+    assert.isDefined(firstCase, 'normalized first case');
+    expect(firstCase.checks.map((check) => check.checkId)).toEqual([
       'acc-acceptance-command',
       'dod-manual-review',
       'man-optional-polish',
@@ -6281,8 +6305,9 @@ describe('credential-secret redaction at serialization boundaries', () => {
       );
       expect(started.ok).toBe(true);
       const exportWithSecret = buildRedactionExport();
-      (exportWithSecret.messages[0].parts[0] as unknown as { text: string }).text =
-        `note ${QUOTED_SECRET} end`;
+      const exportMessage = exportWithSecret.messages[0];
+      assert.isDefined(exportMessage, 'redaction export message 0');
+      (exportMessage.parts[0] as unknown as { text: string }).text = `note ${QUOTED_SECRET} end`;
 
       const written = await store.writeSessionExport('task-1--alpha--1', exportWithSecret);
       expect(written.ok).toBe(true);
@@ -6295,7 +6320,9 @@ describe('credential-secret redaction at serialization boundaries', () => {
       // The store persists an opaque record; this fixture's own shape is
       // known here only because the test constructed it.
       const readBackExport = readBack.value as unknown as RedactionTestExport;
-      const text = (readBackExport.messages[0].parts[0] as Record<string, unknown>)['text'];
+      const readBackMessage = readBackExport.messages[0];
+      assert.isDefined(readBackMessage, 'read-back export message 0');
+      const text = (readBackMessage.parts[0] as Record<string, unknown>)['text'];
       expect(typeof text).toBe('string');
       expect(
         String(text).replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'),
@@ -6328,22 +6355,28 @@ describe('credential-secret redaction at serialization boundaries', () => {
           info: { tokens?: { input?: unknown; output?: unknown }; cost?: unknown };
         }>;
       };
-      expect(typeof storedDocument.messages[1].info.tokens?.input).toBe('number');
-      expect(storedDocument.messages[1].info.tokens?.input).toBe(120);
-      expect(storedDocument.messages[1].info.cost).toBe(0.0125);
+      const storedAssistant = storedDocument.messages[1];
+      assert.isDefined(storedAssistant, 'stored assistant message');
+      expect(typeof storedAssistant.info.tokens?.input).toBe('number');
+      expect(storedAssistant.info.tokens?.input).toBe(120);
+      expect(storedAssistant.info.cost).toBe(0.0125);
       const readBack = await store.readSessionExport(runId, 'task-1--alpha--1');
       expect(readBack.ok).toBe(true);
       if (!readBack.ok || readBack.value === null) return;
       // The store persists an opaque record; this fixture's own shape is
       // known here only because the test constructed it.
       const readBackExport = readBack.value as unknown as RedactionTestExport;
-      const assistantInfo = readBackExport.messages[1].info as unknown as {
+      const readBackAssistant = readBackExport.messages[1];
+      assert.isDefined(readBackAssistant, 'read-back assistant message');
+      const assistantInfo = readBackAssistant.info as unknown as {
         tokens?: { input?: unknown; output?: unknown };
         cost?: unknown;
       };
       expect(assistantInfo.tokens?.input).toBe(120);
       expect(assistantInfo.cost).toBe(0.0125);
-      const userText = (readBackExport.messages[0].parts[0] as Record<string, unknown>)['text'];
+      const readBackUser = readBackExport.messages[0];
+      assert.isDefined(readBackUser, 'read-back user message');
+      const userText = (readBackUser.parts[0] as Record<string, unknown>)['text'];
       expect(String(userText)).not.toContain(TOKEN_DIGIT_SECRET);
       expect(String(userText)).toContain('[REDACTED]');
     } finally {
@@ -6395,8 +6428,12 @@ describe('credential-secret redaction at serialization boundaries', () => {
       // strict schema, which accepts only the literal "opencode" key, so it
       // stays un-rekeyed rather than using "fake-agent".
       const config = buildSyntheticConfig(join(root, 'artifacts'));
-      config.repositories[0].path = join(root, 'repo-1');
-      config.tasks[0].prompt = `note ${QUOTED_SECRET} end`;
+      const repository = config.repositories[0];
+      assert.isDefined(repository, 'synthetic repository 0');
+      repository.path = join(root, 'repo-1');
+      const task = config.tasks[0];
+      assert.isDefined(task, 'synthetic task 0');
+      task.prompt = `note ${QUOTED_SECRET} end`;
       const redact = createRedactor([QUOTED_SECRET]);
       // A materialized TevuConfig is always a valid TevuConfigInput value (every
       // default already filled in); the compiler cannot see that a Record-typed
@@ -6412,8 +6449,10 @@ describe('credential-secret redaction at serialization boundaries', () => {
       expect(loaded.ok).toBe(true);
       if (!loaded.ok) return;
       expect(loaded.value.run.stop_grace).toBe('1s');
-      expect(loaded.value.tasks[0].prompt).not.toContain(QUOTED_SECRET);
-      expect(loaded.value.tasks[0].prompt).toContain('[REDACTED]');
+      const loadedTask = loaded.value.tasks[0];
+      assert.isDefined(loadedTask, 'loaded task 0');
+      expect(loadedTask.prompt).not.toContain(QUOTED_SECRET);
+      expect(loadedTask.prompt).toContain('[REDACTED]');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -6424,7 +6463,9 @@ describe('credential-secret redaction at serialization boundaries', () => {
     try {
       const configPath = join(root, 'tevu.yaml');
       const config = buildSyntheticConfig(join(root, 'artifacts'));
-      config.repositories[0].path = join(root, 'repo-1');
+      const repository = config.repositories[0];
+      assert.isDefined(repository, 'synthetic repository 0');
+      repository.path = join(root, 'repo-1');
       const redact = createRedactor([YAML_DIGIT_SECRET]);
       // A materialized TevuConfig is always a valid TevuConfigInput value (every
       // default already filled in); the compiler cannot see that a Record-typed

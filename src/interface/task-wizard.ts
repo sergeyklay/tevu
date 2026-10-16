@@ -117,8 +117,8 @@ type WizardProgress = { holdsCriteriaDraft: boolean };
 /** Command-line facts the task wizard starts from. */
 export type TaskWizardRequest = {
   configPath: string;
-  jiraIssueKey?: string;
-  githubIssueReference?: string;
+  jiraIssueKey?: string | undefined;
+  githubIssueReference?: string | undefined;
 };
 
 /** Injected effects for the task wizard; it triggers the single write through `createTask` and retries it on failure. */
@@ -2493,10 +2493,14 @@ async function reviewDraft(
         }
         continue;
       }
+      const item = lists[target.index];
+      if (item === undefined) {
+        continue;
+      }
       const edited = (
         await askText(io, {
           message: 'Item',
-          initialValue: lists[target.index],
+          initialValue: item,
           validate: draftItemValidator(reference),
         })
       ).trim();

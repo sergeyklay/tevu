@@ -229,7 +229,7 @@ const tevuErrorSchema = schemaFor<TevuError>()(
       kind: z.literal('PrerequisiteError'),
       tool: z.string(),
       expected: z.string(),
-      actual: z.string().optional(),
+      actual: z.string().exactOptional(),
     }),
     z.strictObject({
       kind: z.literal('SourceMaterializationError'),
@@ -241,7 +241,7 @@ const tevuErrorSchema = schemaFor<TevuError>()(
       kind: z.literal('IssueImportError'),
       tracker: z.enum(['jira-cloud', 'github-issue']),
       reference: z.string(),
-      status: z.number().optional(),
+      status: z.number().exactOptional(),
       reason: z.string(),
     }),
     z.strictObject({
@@ -259,14 +259,14 @@ const tevuErrorSchema = schemaFor<TevuError>()(
         z.strictObject({ phase: z.literal('case'), caseId: z.string() }),
         z.strictObject({ phase: z.literal('call'), role: modelRoleNameSchema }),
       ]),
-      line: z.number().optional(),
+      line: z.number().exactOptional(),
       reason: z.string(),
     }),
     z.strictObject({
       kind: z.literal('AgentSessionError'),
       agent: z.string(),
       caseId: z.string(),
-      agentMessage: z.string().optional(),
+      agentMessage: z.string().exactOptional(),
     }),
     z.strictObject({
       kind: z.literal('ModelCallError'),
@@ -274,7 +274,7 @@ const tevuErrorSchema = schemaFor<TevuError>()(
       agent: z.string(),
       cause: z.enum(['launch-failed', 'failed', 'timed-out', 'unfinished', 'tool-call']),
       reason: z.string(),
-      agentMessage: z.string().optional(),
+      agentMessage: z.string().exactOptional(),
     }),
     z.strictObject({
       kind: z.literal('CaseTimeoutError'),
@@ -450,9 +450,9 @@ const caseResultSchema = schemaFor<CaseResult>()(
     metrics: benchmarkMetricsSchema,
     artifacts: artifactIndexSchema,
     failure: failureRecordSchema.nullable(),
-    checkState: checkStateRecordSchema.optional(),
-    setup: setupRecordSchema.optional(),
-    context: caseContextSchema.optional(),
+    checkState: checkStateRecordSchema.exactOptional(),
+    setup: setupRecordSchema.exactOptional(),
+    context: caseContextSchema.exactOptional(),
   }),
 );
 
@@ -531,7 +531,7 @@ const runManifestSchema = schemaFor<RunManifest>()(
           config: z.unknown(),
           capabilities: z.record(z.string(), agentCapabilityReportSchema),
         })
-        .optional(),
+        .exactOptional(),
     })
     .superRefine((manifest, ctx) => {
       const unlistedAgent = manifest.cases.findIndex(

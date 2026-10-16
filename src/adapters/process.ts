@@ -50,6 +50,7 @@ import type {
   TevuResult,
   WorkingDirectoryChanges,
 } from '@/domain/types';
+import type { Options, ResultPromise } from 'execa';
 import type { FileHandle } from 'node:fs/promises';
 
 /** Chunk-safe redactor holding back partial secret prefixes across chunk boundaries. */
@@ -218,23 +219,24 @@ export async function runManagedProcess(
   const [file, ...args] = request.argv;
   const startedAt = new Date();
   const launchedAtMs = performance.now();
-  let subprocess: ReturnType<typeof execa>;
+  const execaOptions = {
+    cwd: request.cwd,
+    env: request.environment,
+    extendEnv: false,
+    // `input` needs a piped stdin: combining it with 'ignore' throws at spawn.
+    ...(request.stdinText === undefined
+      ? { stdin: 'ignore' }
+      : { stdin: 'pipe', input: request.stdinText }),
+    stdout: stdoutOption,
+    stderr: 'pipe',
+    buffer: false,
+    reject: false,
+    detached: true,
+    stripFinalNewline: false,
+  } satisfies Options;
+  let subprocess: ResultPromise<typeof execaOptions>;
   try {
-    subprocess = execa(file, args, {
-      cwd: request.cwd,
-      env: request.environment,
-      extendEnv: false,
-      // `input` needs a piped stdin: combining it with 'ignore' throws at spawn.
-      ...(request.stdinText === undefined
-        ? { stdin: 'ignore' }
-        : { stdin: 'pipe', input: request.stdinText }),
-      stdout: stdoutOption,
-      stderr: 'pipe',
-      buffer: false,
-      reject: false,
-      detached: true,
-      stripFinalNewline: false,
-    });
+    subprocess = execa(file, args, execaOptions);
   } catch (cause) {
     await closeQuietly(captureFile);
     return launchFailure(redact(describeCause(cause)), describeErrorCode(cause));
@@ -1335,7 +1337,7 @@ function snapshotParentEnvironment(
 type EnvironmentBase = {
   homeDirectory: string;
   temporaryDirectory: string;
-  variables: Record<string, string>;
+  variables: Record<string, string> & { XDG_CONFIG_HOME: string };
 };
 
 /**
@@ -1360,7 +1362,7 @@ async function createEnvironmentBase(
   for (const directory of [temporaryDirectory, ...Object.values(xdgDirectories)]) {
     await mkdir(directory, { recursive: true });
   }
-  const variables: Record<string, string> = {
+  const variables: EnvironmentBase['variables'] = {
     PATH: path,
     HOME: homeDirectory,
     ...xdgDirectories,
@@ -1375,7 +1377,7 @@ async function createEnvironmentBase(
 type EnvironmentAddition = {
   name: string;
   classification: 'secret' | 'ordinary';
-  value?: string;
+  value?: string | undefined;
 };
 
 type IsolatedEnvironmentInput = {
@@ -1388,9 +1390,9 @@ type IsolatedEnvironmentInput = {
 
 async function buildIsolatedEnvironment(
   input: IsolatedEnvironmentInput,
-): Promise<IsolatedEnvironment> {
+): Promise<IsolatedEnvironment & { variables: EnvironmentBase['variables'] }> {
   const base = await createEnvironmentBase(input.baseDirectory, input.path);
-  const variables: Record<string, string> = { ...base.variables };
+  const variables: EnvironmentBase['variables'] = { ...base.variables };
   const variableManifest: EnvironmentVariableRecord[] = Object.keys(variables).map((name) => ({
     name,
     classification: 'fixed',

@@ -75,13 +75,20 @@ export function replayScreen(bytes: string): Screen {
     }
   };
   const write = (text: string): void => {
-    rows[row] = rows[row].slice(0, column).padEnd(column, ' ') + text;
+    const current = rows[row];
+    if (current === undefined) {
+      throw new Error(`unmodeled row ${String(row)}`);
+    }
+    rows[row] = current.slice(0, column).padEnd(column, ' ') + text;
     column += text.length;
   };
 
   let index = 0;
   while (index < bytes.length) {
     const char = bytes[index];
+    if (char === undefined) {
+      throw new Error(`unmodeled offset ${String(index)}`);
+    }
     if (char === '\n') {
       row += 1;
       column = 0;
@@ -121,7 +128,11 @@ export function replayScreen(bytes: string): Screen {
     } else if (final === 'K' && params === '2') {
       rows[row] = '';
     } else if (final === 'J' && params === '') {
-      rows[row] = rows[row].slice(0, column);
+      const current = rows[row];
+      if (current === undefined) {
+        throw new Error(`unmodeled row ${String(row)}`);
+      }
+      rows[row] = current.slice(0, column);
       rows.length = row + 1;
     } else if ((final === 'l' || final === 'h') && params === '?25') {
       continue;

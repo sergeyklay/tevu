@@ -72,7 +72,7 @@ export function renderConfigDocument(
  */
 export function appendToConfigText(
   text: string,
-  addition: { task: TaskInput; repository?: RepositoryInput },
+  addition: { task: TaskInput; repository?: RepositoryInput | undefined },
   rendering: ConfigRendering,
 ): TevuResult<string, 'ConfigValidationError' | 'ArtifactError'> {
   const guard = createGuardedRedactor(rendering);

@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createConfigStore } from '@/adapters/artifact-store';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
@@ -657,8 +657,10 @@ describe('TevuConfigSchema', () => {
 
   it('defaults agents.opencode.providers to an empty array when absent', () => {
     const config = expectSchemaAcceptance(buildConfig());
+    const opencode = config.agents['opencode'];
+    assert.isDefined(opencode, 'agents.opencode block');
 
-    expect(config.agents.opencode.providers).toEqual([]);
+    expect(opencode.providers).toEqual([]);
   });
 
   it.each(['', 'acme/proxy'])('rejects the provider id %j', (id) => {
@@ -702,7 +704,10 @@ describe('TevuConfigSchema', () => {
       }),
     );
 
-    expect(config.agents.opencode.providers).toEqual([{ id: 'acme', api_key: 'ACME_KEY' }]);
+    const opencode = config.agents['opencode'];
+    assert.isDefined(opencode, 'agents.opencode block');
+
+    expect(opencode.providers).toEqual([{ id: 'acme', api_key: 'ACME_KEY' }]);
   });
 
   it.each([
@@ -1778,7 +1783,9 @@ describe('TevuConfigSchema', () => {
 
     it('rejects an empty setup block for both R1 and R3', () => {
       const config = buildConfig({
-        repositories: [buildRepository({ setup: {} as RepositoryDefinition['setup'] })],
+        repositories: [
+          buildRepository({ setup: {} as NonNullable<RepositoryDefinition['setup']> }),
+        ],
       });
 
       const issues = expectSchemaRejection(config);
@@ -1823,7 +1830,9 @@ describe('TevuConfigSchema', () => {
       const config = buildConfig({
         repositories: [
           buildRepository({
-            setup: { before_agent: [['npm', 'ci']] } as unknown as RepositoryDefinition['setup'],
+            setup: { before_agent: [['npm', 'ci']] } as unknown as NonNullable<
+              RepositoryDefinition['setup']
+            >,
           }),
         ],
       });
@@ -1891,7 +1900,7 @@ describe('TevuConfigSchema', () => {
     it('rejects setup: null', () => {
       const config = buildConfig({
         repositories: [
-          buildRepository({ setup: null as unknown as RepositoryDefinition['setup'] }),
+          buildRepository({ setup: null as unknown as NonNullable<RepositoryDefinition['setup']> }),
         ],
       });
 
@@ -1908,7 +1917,7 @@ describe('TevuConfigSchema', () => {
               before_agent: [['npm', 'ci']],
               timeout: '1m',
               extra: true,
-            } as unknown as RepositoryDefinition['setup'],
+            } as unknown as NonNullable<RepositoryDefinition['setup']>,
           }),
         ],
       });
@@ -2083,8 +2092,11 @@ describe('loadConfig', () => {
     const config = expectOk(await loadConfig(configPath, configStore, undefined));
 
     expect(config.run.output_dir).toBe(join(tempDirectory, 'runs'));
+    const opencode = config.agents['opencode'];
+    assert.isDefined(opencode, 'agents.opencode block');
+
     expect(config.repositories[0]?.path).toBe(join(tempDirectory, 'repo'));
-    expect(config.agents.opencode.command).toBe(join(tempDirectory, 'bin/opencode'));
+    expect(opencode.command).toBe(join(tempDirectory, 'bin/opencode'));
     expect(config.tasks).toHaveLength(1);
     expect(config.models).toHaveLength(2);
   });
@@ -2095,8 +2107,10 @@ describe('loadConfig', () => {
     );
 
     const config = expectOk(await loadConfig(configPath, configStore, undefined));
+    const opencode = config.agents['opencode'];
+    assert.isDefined(opencode, 'agents.opencode block');
 
-    expect(config.agents.opencode.command).toBe('opencode');
+    expect(opencode.command).toBe('opencode');
   });
 
   const isRoot = process.getuid?.() === 0;
@@ -2982,10 +2996,12 @@ describe('canonicalConfigSerialization', () => {
 
     const serialized = canonicalConfigSerialization(config);
     const parsed = JSON.parse(serialized) as Pick<TevuConfig, 'agents'>;
+    const opencode = parsed.agents['opencode'];
+    assert.isDefined(opencode, 'agents.opencode block');
 
     expect(serialized).toContain('"SYNTHETIC_OC_VAR"');
-    expect(parsed.agents.opencode.secrets).toEqual(['SYNTHETIC_OC_VAR']);
-    expect(parsed.agents.opencode.env).toEqual([]);
+    expect(opencode.secrets).toEqual(['SYNTHETIC_OC_VAR']);
+    expect(opencode.env).toEqual([]);
   });
 });
 

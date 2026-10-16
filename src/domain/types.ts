@@ -999,7 +999,7 @@ export type EvaluatorProcessRequest = {
   environment: Record<string, string>;
   timeoutMs: number;
   terminationGraceMs: number;
-  cancellation?: AbortSignal;
+  cancellation?: AbortSignal | undefined;
 };
 
 /** Evaluator process evidence; launch failure is evidence for a failed check, not an error. */
@@ -1142,7 +1142,7 @@ export type ModelCallInput = {
   /** Copied providers of the snapshot the call environment was built from. Required, never defaulted. */
   copiedProviders: readonly CopiedProvider[];
   /** Receives the call's evidence once, before `callModel` resolves, when the `run` process started. */
-  onEvidence?: (evidence: ModelCallEvidence) => void;
+  onEvidence?: ((evidence: ModelCallEvidence) => void) | undefined;
 };
 
 export type ModelCallResult = {
@@ -1177,7 +1177,7 @@ export type AgentMetricsInput = {
   sessionId: string | null;
   events: readonly AgentEventRecord[];
   sessionExport: AgentSessionExport | null;
-  exportUnavailableReason?: string;
+  exportUnavailableReason?: string | undefined;
   /** The case agent's copied providers: its run snapshot's, or the run manifest's on regeneration. Required, never defaulted. */
   copiedProviders: readonly CopiedProvider[];
 };
@@ -1240,7 +1240,7 @@ export type ManagedProcessRequest = {
   environment: Record<string, string>;
   timeoutMs: number;
   terminationGraceMs: number;
-  cancellation?: AbortSignal;
+  cancellation?: AbortSignal | undefined;
   secretValues?: readonly string[];
   onStdout?: (text: string) => void;
   onStderr?: (text: string) => void;
@@ -1679,8 +1679,8 @@ export type RunDependencies = {
   textDigest: (text: string) => string;
   redact: (text: string) => string;
   cancellation: AbortSignal;
-  onLifecycle?: (caseId: string, lifecycle: CaseLifecycle) => void;
-  onRetainedGradingDirectory?: (directory: string) => void;
+  onLifecycle?: ((caseId: string, lifecycle: CaseLifecycle) => void) | undefined;
+  onRetainedGradingDirectory?: ((directory: string) => void) | undefined;
 };
 
 /** The configuration fields one model-role call reads; a `TevuConfig` satisfies it. */
