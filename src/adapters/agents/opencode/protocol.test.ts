@@ -1,6 +1,6 @@
-import { readFileSync } from 'node:fs';
 import { assert, describe, expect, it } from 'vitest';
 
+import { readJsonFixture, readTextFixture } from './__fixtures__/protocol.fixtures';
 import {
   decodeEvent,
   decodeExport,
@@ -14,15 +14,6 @@ import {
 import type { OpenCodeRunEvent, ProtocolContext } from './protocol';
 
 const CASE_CONTEXT: ProtocolContext = { phase: 'case', caseId: 'task-1--alpha' };
-const FIXTURE_DIRECTORY = new URL('./fixtures/', import.meta.url);
-
-function readTextFixture(name: string): string {
-  return readFileSync(new URL(name, FIXTURE_DIRECTORY), 'utf8');
-}
-
-function readJsonFixture(name: string): unknown {
-  return JSON.parse(readTextFixture(name)) as unknown;
-}
 
 function validFixtureEvents(): OpenCodeRunEvent[] {
   const events: OpenCodeRunEvent[] = [];

@@ -144,6 +144,7 @@ Tests sit next to the code they verify, as `*.test.ts` or `*.integration.test.ts
 - A synthetic value shaped like a real credential fails the secrets scan. After checking that it is synthetic, add the `Fingerprint` line gitleaks prints to `.gitleaksignore`; never exclude a whole file or path.
 - A fixture never holds material from a real run: no real session export, task text, repository content, or credential. Write it by hand, or reduce a captured one until only synthetic content remains.
 - Pure modules read time through the injected clock, so tests control it instead of reading the wall clock.
+- A test data builder exists once, in a `__fixtures__` module. A test imports it and passes the values it depends on as overrides instead of declaring a copy, so changing a shared default keeps every test's input unchanged.
 
 ## Send a change
 

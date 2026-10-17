@@ -1,13 +1,14 @@
 // @vitest-environment node
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
-import { execa } from 'execa';
 import { afterAll, assert, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { buildRetainingEnvironments } from '@/adapters/__fixtures__/environment.fixtures';
+import { createSyntheticRepository } from '@/adapters/__fixtures__/git.fixtures';
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createArtifactStore } from '@/adapters/artifact-store';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
@@ -18,7 +19,17 @@ import {
   createSecretRedactor,
   runManagedProcess,
 } from '@/adapters/process';
-import { TevuConfigSchema } from '@/config/schema';
+import {
+  buildCommandCheckInput,
+  buildManualCheckInput,
+  buildModelDefinitionInput,
+  buildRepositoryInput,
+  buildRunSettingsInput,
+  buildTaskInput,
+  buildTevuConfig,
+  FAKE_AGENT_NAME,
+} from '@/config/__fixtures__/config.fixtures';
+import { unwrapOk } from '@/domain/__fixtures__/errors.fixtures';
 import { buildAgentMetrics, buildSummaryFacts } from '@/evaluation/__fixtures__/report.fixtures';
 
 import { buildVerifiedEfforts } from './__fixtures__/effort.fixtures';
@@ -27,7 +38,7 @@ import { planBenchmark, runBenchmark } from './run-benchmark';
 import { writeTaskConclusions } from './write-conclusions';
 
 import type { ConclusionWriter, TaskConclusionsOutcome } from './write-conclusions';
-import type { TaskInput, TevuConfigInput } from '@/config/schema';
+import type { TaskInput } from '@/config/schema';
 import type { TevuConfig } from '@/domain/config';
 import type { TevuError, TevuResult } from '@/domain/errors';
 import type { AgentAdapter, AgentRunInput, AgentRunResult } from '@/domain/ports/agent';
@@ -38,9 +49,7 @@ import type { Redactor } from '@/domain/ports/secret-redactor';
 import type { AgentMetrics, ConclusionsArtifact } from '@/domain/run-records';
 import type { RunDependencies } from '@/domain/use-cases';
 
-const FAKE_AGENT_NAME = 'fake-agent';
 const CONFIG_PATH = '/synthetic/tevu.yaml';
-const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 const SESSION_ID = 'ses-summary-1';
 
 const SETTING_A = 'model-a, fast';
@@ -153,13 +162,6 @@ function sha256Hex(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-function unwrapOk<T, K extends TevuError['kind']>(result: TevuResult<T, K>): T {
-  if (!result.ok) {
-    throw new Error(`expected an ok result, received ${JSON.stringify(result.error)}`);
-  }
-  return result.value;
-}
-
 function unwrapFailure<T, K extends TevuError['kind']>(result: TevuResult<T, K>): TevuError {
   if (result.ok) {
     throw new Error('expected a failure, received an ok result');
@@ -167,96 +169,69 @@ function unwrapFailure<T, K extends TevuError['kind']>(result: TevuResult<T, K>)
   return result.error;
 }
 
-async function runGit(cwd: string, args: readonly string[]): Promise<string> {
-  const result = await execa('git', [...args], {
-    cwd,
-    env: {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_SYSTEM: '/dev/null',
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_TERMINAL_PROMPT: '0',
-    },
-    reject: false,
-    stdin: 'ignore',
-    timeout: 60_000,
-  });
-  return typeof result.stdout === 'string' ? result.stdout : '';
-}
-
-async function createSyntheticRepository(root: string): Promise<{ path: string; commit: string }> {
+async function createRunSourceRepository(root: string): Promise<{ path: string; commit: string }> {
   const path = join(root, 'source-repo');
-  await mkdir(path, { recursive: true });
-  await writeFile(join(path, 'README.md'), 'synthetic repository\n');
-  await runGit(path, ['init', '--quiet', '-b', 'main']);
-  await runGit(path, ['add', '-A']);
-  await runGit(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'synthetic base commit']);
-  return { path, commit: (await runGit(path, ['rev-parse', 'HEAD'])).trim() };
+  const commit = await createSyntheticRepository(path, { 'README.md': 'synthetic repository\n' });
+  return { path, commit };
 }
 
 const PASSING_COMMAND: [string, ...string[]] = [process.execPath, '-e', 'process.exit(0);'];
 
-function buildTask(id: string, title: string, manual = false): TaskInput {
-  return {
+function buildSummaryRunTask(id: string, title: string, manual = false): TaskInput {
+  return buildTaskInput({
     id,
     title,
-    repo: 'repo-1',
-    base_commit: '0123456789abcdef0123456789abcdef01234567',
-    description: 'synthetic task description',
-    prompt: 'synthetic task prompt',
-    readiness: ['synthetic ready item'],
     checks: {
       acceptance: [
         manual
-          ? { id: 'acc-manual', description: 'a person confirms the redirect', manual: true }
-          : {
-              id: 'acc-command',
+          ? buildManualCheckInput({
+              id: 'acc-manual',
+              description: 'a person confirms the redirect',
+            })
+          : buildCommandCheckInput({
               description: 'the acceptance command passes',
               run: PASSING_COMMAND,
               timeout: '10s',
               exit_codes: [0],
-            },
+            }),
       ],
       done: [
-        {
+        buildCommandCheckInput({
           id: 'done-command',
           description: 'the done command passes',
           run: PASSING_COMMAND,
           timeout: '10s',
           exit_codes: [0],
-        },
+        }),
       ],
     },
-  };
+  });
 }
 
 /**
  * Two model entries on the fake agent, and a `roles.summary` on the sole
  * `opencode` agent, which the summary call reaches through a fake executable.
  */
-function buildConfig(options: {
+function buildSummaryRunConfig(options: {
   repositoryPath: string;
   outputDirectory: string;
   tasks: TaskInput[];
 }): TevuConfig {
-  const input: TevuConfigInput = {
-    version: 1,
-    run: {
+  const config = buildTevuConfig({
+    run: buildRunSettingsInput({
       output_dir: options.outputDirectory,
-      concurrency: 1,
       timeout: '30s',
       stop_grace: '500ms',
-    },
+    }),
     agents: { opencode: { command: 'unused-agent-command', secrets: [], env: [] } },
-    repositories: [{ id: 'repo-1', path: options.repositoryPath }],
+    repositories: [buildRepositoryInput({ path: options.repositoryPath })],
     models: [
-      { id: 'm1', model: 'litellm/vendor/model-a', effort: 'fast' },
-      { id: 'm2', model: 'vendor/model-b', effort: 'deep' },
+      buildModelDefinitionInput({ model: 'litellm/vendor/model-a', effort: 'fast' }),
+      buildModelDefinitionInput({ id: 'm2', model: 'vendor/model-b', effort: 'deep' }),
     ],
     roles: { summary: { model: 'vendor/summary-model', effort: 'medium' } },
     tasks: options.tasks,
-  };
-  const config = TevuConfigSchema.parse(input);
+  });
   const { opencode } = config.agents;
   assert.isDefined(opencode, 'agents.opencode block');
   return {
@@ -385,9 +360,9 @@ let scriptCounter = 0;
 let copyCounter = 0;
 
 async function executeRun(name: string, tasks: TaskInput[]): Promise<Run> {
-  const repository = await createSyntheticRepository(join(root, name));
+  const repository = await createRunSourceRepository(join(root, name));
   const directory = join(root, name, 'artifacts');
-  const config = buildConfig({
+  const config = buildSummaryRunConfig({
     repositoryPath: repository.path,
     outputDirectory: directory,
     tasks: tasks.map((task) => ({ ...task, base_commit: repository.commit })),
@@ -404,10 +379,12 @@ async function executeRun(name: string, tasks: TaskInput[]): Promise<Run> {
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), 'tevu-summary-it-'));
   mainRun = await executeRun('main', [
-    buildTask('alpha-task', 'Fix the welcome route'),
-    buildTask('beta-task', 'Add the export button'),
+    buildSummaryRunTask('alpha-task', 'Fix the welcome route'),
+    buildSummaryRunTask('beta-task', 'Add the export button'),
   ]);
-  manualRun = await executeRun('manual', [buildTask('manual-task', 'Review the redirect', true)]);
+  manualRun = await executeRun('manual', [
+    buildSummaryRunTask('manual-task', 'Review the redirect', true),
+  ]);
 }, 120_000);
 
 afterAll(async () => {
@@ -482,40 +459,6 @@ function buildWriter(options: {
         },
       ),
   };
-}
-
-/** Wraps the environment adapter so every removal deletes the call directory and then fails, recording each root in call order. */
-function buildRetainingEnvironments(): { environments: EnvironmentAdapter; roots: string[] } {
-  const real = createEnvironmentAdapter();
-  const roots: string[] = [];
-  const environments: EnvironmentAdapter = {
-    ...real,
-    createModelCallEnvironment: async (snapshot, agentVariables, configurationFiles) => {
-      const created = await real.createModelCallEnvironment(
-        snapshot,
-        agentVariables,
-        configurationFiles,
-      );
-      if (!created.ok) {
-        return created;
-      }
-      roots.push(created.value.rootDirectory);
-      return {
-        ok: true,
-        value: {
-          ...created.value,
-          dispose: async () => {
-            await created.value.dispose();
-            return {
-              ok: false,
-              error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
-            };
-          },
-        },
-      };
-    },
-  };
-  return { environments, roots };
 }
 
 /** Records the outcome of every task the wrapped writer settles. */

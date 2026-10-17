@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { unwrapOk } from '@/domain/__fixtures__/errors.fixtures';
 import { GH_CREDENTIAL_ENVIRONMENT_VARIABLES } from '@/domain/github-cli';
 
 import { createGitHubIssuesAdapter, createGitHubPullRequestReader } from './github-issues';
@@ -16,13 +17,6 @@ import type { IssueSnapshot } from '@/domain/ports/issue-tracker';
 import type { PullRequestSnapshot } from '@/domain/ports/pull-request-reader';
 
 type ReadIssueResult = TevuResult<IssueSnapshot, 'IssueImportError' | 'CancellationError'>;
-
-function expectOk(result: ReadIssueResult): IssueSnapshot {
-  if (!result.ok) {
-    throw new Error(`expected success, got ${JSON.stringify(result.error)}`);
-  }
-  return result.value;
-}
 
 function expectIssueImportError(
   result: ReadIssueResult,
@@ -147,7 +141,7 @@ describe('createGitHubIssuesAdapter reference grammar', () => {
     const runGh = fakeRun(buildLaunchedResult({ stdout: successStdout() }));
     const adapter = createGitHubIssuesAdapter(buildDependencies({ runGh }));
 
-    const snapshot = expectOk(await adapter.readIssue('  octo/repo#42  '));
+    const snapshot = unwrapOk(await adapter.readIssue('  octo/repo#42  '));
 
     expect(snapshot.issueKey).toBe('octo/repo#42');
   });
@@ -156,7 +150,7 @@ describe('createGitHubIssuesAdapter reference grammar', () => {
     const runGh = fakeRun(buildLaunchedResult({ stdout: successStdout() }));
     const adapter = createGitHubIssuesAdapter(buildDependencies({ runGh }));
 
-    const snapshot = expectOk(await adapter.readIssue('octo/repo#42'));
+    const snapshot = unwrapOk(await adapter.readIssue('octo/repo#42'));
 
     expect(snapshot).toEqual({
       issueKey: 'octo/repo#42',

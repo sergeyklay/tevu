@@ -18,19 +18,19 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
-import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { runManagedProcess } from '@/adapters/process';
 import { ensureManagedCommits, ensureManagedLfsObjects } from '@/application/managed-clone';
+import { unwrapOk } from '@/domain/__fixtures__/errors.fixtures';
 
+import { GIT_IDENTITY_FLAGS, runGit, tryGit } from './__fixtures__/git.fixtures';
 import { buildLfsObject, lfsObjectFile } from './__fixtures__/lfs.fixtures';
 import { createGitWorkspaceAdapter, createSourceValidator } from './git';
 import { createManagedCloneAdapter } from './managed-clone';
 
 import type { LfsObject } from './__fixtures__/lfs.fixtures';
 import type { ManagedLfsDependencies } from '@/application/managed-clone';
-import type { TevuError, TevuResult } from '@/domain/errors';
 import type { CaseWorkspace } from '@/domain/ports/git-workspace';
 import type {
   ManagedProcessRequest,
@@ -50,7 +50,6 @@ function describeWithGitLfs(name: string, body: () => void): void {
   }
 }
 
-const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 const LFS_VERSION_LINE = 'version https://git-lfs.github.com/spec/v1';
 const UNREACHABLE_LFS_CONFIG = '[lfs]\n\turl = http://127.0.0.1:9/unreachable\n';
 const TEST_TIMEOUT_MS = 60_000;
@@ -89,36 +88,6 @@ afterEach(async () => {
   await rm(testDirectory, { recursive: true, force: true });
 });
 
-function unwrapOk<T, K extends TevuError['kind']>(result: TevuResult<T, K>): T {
-  if (!result.ok) {
-    throw new Error(`expected an ok result, received ${JSON.stringify(result.error)}`);
-  }
-  return result.value;
-}
-
-async function runGit(
-  cwd: string,
-  args: readonly string[],
-): Promise<{ exitCode: number | null; stdout: string }> {
-  const result = await execa('git', [...args], {
-    cwd,
-    env: {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_SYSTEM: '/dev/null',
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_TERMINAL_PROMPT: '0',
-    },
-    reject: false,
-    stdin: 'ignore',
-    timeout: 60_000,
-  });
-  return {
-    exitCode: typeof result.exitCode === 'number' ? result.exitCode : null,
-    stdout: typeof result.stdout === 'string' ? result.stdout : '',
-  };
-}
-
 /** Builds a repository with the real git-lfs tool: tracked `*.bin` files, a root `.lfsconfig` naming an unreachable endpoint. */
 async function createLfsSource(): Promise<LfsSource> {
   const path = join(testDirectory, 'source');
@@ -134,12 +103,12 @@ async function createLfsSource(): Promise<LfsSource> {
   await chmod(join(path, 'tools/run.bin'), 0o755);
   await runGit(path, ['add', '-A']);
   await runGit(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'lfs source commit']);
-  const commit = (await runGit(path, ['rev-parse', 'HEAD'])).stdout;
+  const commit = await runGit(path, ['rev-parse', 'HEAD']);
   const objects = Object.fromEntries(
     LFS_PATHS.map((file) => [file, buildLfsObject(LFS_CONTENT[file])]),
   ) as Record<LfsPath, LfsObject>;
   for (const file of LFS_PATHS) {
-    const committed = (await runGit(path, ['show', `HEAD:${file}`])).stdout;
+    const committed = await runGit(path, ['show', `HEAD:${file}`]);
     if (`${committed}\n` !== objects[file].pointer) {
       throw new Error(`the fixture committed an unexpected pointer for ${file}`);
     }
@@ -231,9 +200,9 @@ async function sourceFingerprint(source: LfsSource): Promise<{
   storage: string[];
 }> {
   return {
-    head: (await runGit(source.path, ['rev-parse', 'HEAD'])).stdout,
-    status: (await runGit(source.path, ['status', '--porcelain'])).stdout,
-    objects: (await runGit(source.path, ['count-objects', '-v'])).stdout,
+    head: await runGit(source.path, ['rev-parse', 'HEAD']),
+    status: await runGit(source.path, ['status', '--porcelain']),
+    objects: await runGit(source.path, ['count-objects', '-v']),
     storage: await listFilesWithSizes(join(source.path, '.git', 'lfs')),
   };
 }
@@ -263,17 +232,15 @@ describeWithGitLfs('sealing a case from a source that stores files in Git LFS', 
       );
 
       const worktree = workspace.worktreeDirectory;
-      const configKeys = (
-        await runGit(worktree, ['config', '--local', '--list', '--name-only'])
-      ).stdout
+      const configKeys = (await runGit(worktree, ['config', '--local', '--list', '--name-only']))
         .split('\n')
         .filter((key) => key.length > 0);
       const hooks = await readdir(join(workspace.repositoryDirectory, 'hooks')).catch(() => []);
-      expect((await runGit(worktree, ['rev-list', '--all', '--count'])).stdout).toBe('1');
-      expect((await runGit(worktree, ['rev-list', '--parents', '-n', '1', 'HEAD'])).stdout).toBe(
-        (await runGit(worktree, ['rev-parse', 'HEAD'])).stdout,
+      expect(await runGit(worktree, ['rev-list', '--all', '--count'])).toBe('1');
+      expect(await runGit(worktree, ['rev-list', '--parents', '-n', '1', 'HEAD'])).toBe(
+        await runGit(worktree, ['rev-parse', 'HEAD']),
       );
-      expect((await runGit(worktree, ['remote'])).stdout).toBe('');
+      expect(await runGit(worktree, ['remote'])).toBe('');
       expect(
         configKeys.filter((key) =>
           ['lfs.', 'filter.', 'remote.', 'credential.'].some((prefix) => key.startsWith(prefix)),
@@ -297,9 +264,9 @@ describeWithGitLfs('sealing a case from a source that stores files in Git LFS', 
       );
 
       for (const file of ['.gitattributes', '.lfsconfig']) {
-        expect(
-          (await runGit(workspace.worktreeDirectory, ['rev-parse', `HEAD:${file}`])).stdout,
-        ).toBe((await runGit(source.path, ['rev-parse', `${source.commit}:${file}`])).stdout);
+        expect(await runGit(workspace.worktreeDirectory, ['rev-parse', `HEAD:${file}`])).toBe(
+          await runGit(source.path, ['rev-parse', `${source.commit}:${file}`]),
+        );
       }
       expect(await readFile(join(workspace.worktreeDirectory, '.lfsconfig'), 'utf8')).toBe(
         UNREACHABLE_LFS_CONFIG,
@@ -583,7 +550,7 @@ describeWithGitLfs('fetching Git LFS objects into a managed clone', () => {
     async () => {
       const fixture = await createCloneFixture();
 
-      const unpinned = await runGit(fixture.cloneDirectory, [
+      const unpinned = await tryGit(fixture.cloneDirectory, [
         'lfs',
         'fetch',
         '-I',

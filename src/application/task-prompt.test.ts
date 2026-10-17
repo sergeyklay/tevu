@@ -1,6 +1,12 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
 
+import {
+  buildCommandCheckInput,
+  buildManualCheckInput,
+  buildModelDefinitionInput,
+  buildTaskInput,
+} from '@/config/__fixtures__/config.fixtures';
 import { TevuConfigSchema } from '@/config/schema';
 
 import { buildTaskPrompt } from './task-prompt';
@@ -8,39 +14,26 @@ import { buildTaskPrompt } from './task-prompt';
 import type { ModelDefinitionInput, TaskInput } from '@/config/schema';
 import type { TaskDefinition } from '@/domain/config';
 
-function buildTask(overrides: Partial<TaskInput> = {}): TaskInput {
-  return {
-    id: 'task-1',
+function buildWelcomeRouteTask(overrides: Partial<TaskInput> = {}): TaskInput {
+  return buildTaskInput({
     title: 'Synthetic welcome-route task',
-    repo: 'repo-1',
-    base_commit: '0123456789abcdef0123456789abcdef01234567',
     description: 'synthetic task description for the welcome route',
     prompt: 'TEVU-PROMPT-BODY implement the welcome route',
-    readiness: ['synthetic ready item'],
     checks: {
-      acceptance: [
-        {
-          id: 'acc-acceptance-command',
-          description: 'acceptance command exits zero',
-          run: ['/synthetic/acceptance-probe', '--suite', 'synthetic'],
-          timeout: '5s',
-          exit_codes: [0],
-        },
-      ],
-      done: [
-        {
-          id: 'dod-manual-review',
-          description: 'manual Definition of Done review',
-          manual: true,
-        },
-      ],
+      acceptance: [buildCommandCheckInput({ id: 'acc-acceptance-command', exit_codes: [0] })],
+      done: [buildManualCheckInput({ id: 'dod-manual-review' })],
     },
     ...overrides,
-  };
+  });
 }
 
-function buildModel(overrides: Partial<ModelDefinitionInput> = {}): ModelDefinitionInput {
-  return { id: 'alpha', model: 'vendor/model-alpha-synth', effort: 'effort-high', ...overrides };
+function buildAlphaModel(overrides: Partial<ModelDefinitionInput> = {}): ModelDefinitionInput {
+  return buildModelDefinitionInput({
+    id: 'alpha',
+    model: 'vendor/model-alpha-synth',
+    effort: 'effort-high',
+    ...overrides,
+  });
 }
 
 /** Materializes one task through the schema so `buildTaskPrompt` sees every default resolved. */
@@ -50,8 +43,8 @@ function materializeTask(overrides: Partial<TaskInput> = {}): TaskDefinition {
     run: { output_dir: '/synthetic/artifacts', concurrency: 1, timeout: '1m', stop_grace: '1s' },
     agents: { opencode: { command: '/synthetic/opencode' } },
     repositories: [{ id: 'repo-1', path: '/synthetic/source' }],
-    models: [buildModel(), buildModel({ id: 'beta' })],
-    tasks: [buildTask(overrides)],
+    models: [buildAlphaModel(), buildAlphaModel({ id: 'beta' })],
+    tasks: [buildWelcomeRouteTask(overrides)],
   });
   const task = config.tasks[0];
   if (task === undefined) {
@@ -98,7 +91,7 @@ describe('buildTaskPrompt', () => {
         body: 'TEVU-JIRA-DESCRIPTION',
       },
     });
-    const model: ModelDefinitionInput = buildModel();
+    const model: ModelDefinitionInput = buildAlphaModel();
 
     const prompt = buildTaskPrompt(jiraTask);
 

@@ -2,15 +2,19 @@ import { unavailableAgentMetrics, unavailableBenchmarkMetrics } from '@/domain/r
 
 import type { TevuError } from '@/domain/errors';
 import type {
+  AgentCapabilityReport,
   AgentMetrics,
   CaseIdentity,
   CaseResult,
   CheckRecord,
   CheckResult,
   GradeRecord,
+  GraderIdentity,
   GradingArtifact,
   MetricValue,
   ModelRecord,
+  ProcessResult,
+  RunManifest,
   SummaryCall,
   SummaryFacts,
   SummaryMeasure,
@@ -419,6 +423,86 @@ export function buildSummaryCall(overrides: Partial<SummaryCall> = {}): SummaryC
     model: { model: 'openai/summary-model', effort: 'medium', agent: 'opencode' },
     outcome: { status: 'accepted', reply: '{}' },
     metrics: buildAgentMetrics(),
+    ...overrides,
+  };
+}
+
+export function buildProcessResult(overrides: Partial<ProcessResult> = {}): ProcessResult {
+  return {
+    exitCode: 0,
+    signal: null,
+    startedAt: '2026-09-23T00:00:00.000Z',
+    endedAt: '2026-09-23T00:00:01.500Z',
+    durationMs: 1500,
+    terminationStage: 'none',
+    ...overrides,
+  };
+}
+
+const DEFAULT_CAPABILITY_NAMES = [
+  'run command',
+  'export command',
+  'run --format json',
+  'run --model',
+  'run --variant',
+];
+
+export function buildAgentCapabilityReport(
+  overrides: Partial<AgentCapabilityReport> = {},
+): AgentCapabilityReport {
+  return {
+    executable: '/synthetic/opencode',
+    detectedVersion: '9.9.9-synthetic',
+    capabilities: DEFAULT_CAPABILITY_NAMES.map((name) => ({
+      name,
+      required: true,
+      availability: 'available',
+    })),
+    isolation: { denyOutsideWorktree: 'available' },
+    ...overrides,
+  };
+}
+
+/** The artifact index of the default case: every artifact missing except its result. */
+export function buildCaseArtifacts(
+  overrides: Partial<CaseResult['artifacts']> = {},
+): CaseResult['artifacts'] {
+  return {
+    events: null,
+    diagnostics: null,
+    sessionExport: null,
+    solutionPatch: null,
+    checks: null,
+    assessment: null,
+    grading: null,
+    result: 'cases/task-1--m1--1/result.json',
+    ...overrides,
+  };
+}
+
+export function buildGraderIdentity(overrides: Partial<GraderIdentity> = {}): GraderIdentity {
+  return { model: 'vendor/grader-model', effort: 'medium', agent: 'opencode', ...overrides };
+}
+
+/** A manifest of one unfinished run of the default case. */
+export function buildRunManifest(overrides: Partial<RunManifest> = {}): RunManifest {
+  return {
+    schemaVersion: 1,
+    runId: FIXTURE_RUN_ID,
+    configDigest: 'sha256-synthetic',
+    configPath: '/synthetic/tevu.yaml',
+    startedAt: '2026-09-23T00:00:00.000Z',
+    completedAt: null,
+    host: { platform: 'linux', nodeVersion: 'v24.0.0' },
+    tools: {
+      gitVersion: 'git version 2.45.0',
+      agentVersions: { opencode: '9.9.9-synthetic' },
+      agentConfigurationFiles: { opencode: [] },
+      copiedProviders: { opencode: [] },
+    },
+    execution: { concurrency: 1, caseTimeoutMs: 60_000, repeat: { value: 1, source: 'config' } },
+    cases: [buildCaseIdentity()],
+    efforts: { models: { m1: { status: 'verified' } }, grader: null },
     ...overrides,
   };
 }

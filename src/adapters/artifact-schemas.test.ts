@@ -10,12 +10,22 @@ import {
   parseRunResult,
 } from '@/adapters/artifact-schemas';
 import { unavailableAgentMetrics, unavailableBenchmarkMetrics } from '@/domain/run-records';
+import {
+  buildAgentCapabilityReport,
+  buildCaseArtifacts,
+  buildCaseIdentity,
+  buildCaseResult,
+  buildCheckResult,
+  buildProcessResult,
+  buildRunManifest,
+} from '@/evaluation/__fixtures__/report.fixtures';
 
 import type { ChecksArtifact } from '@/adapters/artifact-schemas';
 import type {
   AgentMetrics,
   AssessmentArtifact,
   CaseResult,
+  CheckResult,
   ConclusionsArtifact,
   GradingArtifact,
   RunManifest,
@@ -44,15 +54,9 @@ function buildMetrics(): AgentMetrics {
   };
 }
 
-function buildManifest(overrides: Partial<RunManifest> = {}): RunManifest {
-  return {
-    schemaVersion: 1,
+function buildContextManifest(overrides: Partial<RunManifest> = {}): RunManifest {
+  return buildRunManifest({
     runId: RUN_ID,
-    configDigest: 'sha256-synthetic',
-    configPath: '/synthetic/tevu.yaml',
-    startedAt: '2026-09-23T00:00:00.000Z',
-    completedAt: null,
-    host: { platform: 'linux', nodeVersion: 'v24.0.0' },
     tools: {
       gitVersion: 'git version 2.45.0',
       agentVersions: { opencode: '1.2.3', other: null },
@@ -60,19 +64,7 @@ function buildManifest(overrides: Partial<RunManifest> = {}): RunManifest {
       copiedProviders: { opencode: [{ id: 'acme', pricedModels: ['m1'] }] },
     },
     execution: { concurrency: 2, caseTimeoutMs: 60_000, repeat: { value: 1, source: 'config' } },
-    cases: [
-      {
-        caseId: CASE_ID,
-        taskId: 'task-1',
-        modelId: 'alpha',
-        attempt: 1,
-        sourceCommit: '0123456789abcdef0123456789abcdef01234567',
-        model: 'vendor/model-alpha',
-        effort: 'high',
-        agent: 'opencode',
-        timeoutMs: 60_000,
-      },
-    ],
+    cases: [buildCaseIdentity({ caseId: CASE_ID, modelId: 'alpha', model: 'vendor/model-alpha' })],
     efforts: {
       models: { alpha: { status: 'unverified', reason: 'not reported' } },
       grader: { status: 'verified' },
@@ -80,56 +72,55 @@ function buildManifest(overrides: Partial<RunManifest> = {}): RunManifest {
     context: {
       config: { roles: { grader: { model: 'vendor/grader' } }, anything: [1, 'two'] },
       capabilities: {
-        opencode: {
-          executable: '/synthetic/opencode',
+        opencode: buildAgentCapabilityReport({
           detectedVersion: null,
           capabilities: [{ name: 'run command', required: true, availability: 'available' }],
           isolation: { denyOutsideWorktree: 'unavailable' },
-        },
+        }),
       },
     },
     ...overrides,
-  };
+  });
 }
 
-function buildCaseResult(): CaseResult {
-  const manifestCase = buildManifest().cases[0];
+// The key-order tests compare JSON text, and producers write checkId first.
+function withCheckIdFirst({ checkId, ...rest }: CheckResult): CheckResult {
+  return { checkId, ...rest };
+}
+
+function buildInfrastructureFailedCaseResult(): CaseResult {
+  const manifestCase = buildContextManifest().cases[0];
   if (manifestCase === undefined) {
     throw new Error('the synthetic manifest holds one case');
   }
-  return {
-    schemaVersion: 1,
+  return buildCaseResult({
     identity: manifestCase,
     lifecycle: 'infrastructure-failed',
-    process: {
+    process: buildProcessResult({
       exitCode: null,
       signal: 'SIGKILL',
-      startedAt: '2026-09-23T00:00:00.000Z',
       endedAt: '2026-09-23T00:00:01.000Z',
       durationMs: 1000,
       terminationStage: 'forced',
-    },
+    }),
     outcome: 'not-evaluated',
     checks: [
-      {
-        checkId: 'acc-1',
-        category: 'acceptance',
-        verdict: 'not-run',
-        evidence: 'skipped',
-        durationMs: null,
-      },
+      withCheckIdFirst(
+        buildCheckResult({
+          checkId: 'acc-1',
+          verdict: 'not-run',
+          evidence: 'skipped',
+          durationMs: null,
+        }),
+      ),
     ],
     metrics: unavailableBenchmarkMetrics('no export'),
-    artifacts: {
+    artifacts: buildCaseArtifacts({
       events: `cases/${CASE_ID}/events.jsonl`,
-      diagnostics: null,
-      sessionExport: null,
-      solutionPatch: null,
       checks: `cases/${CASE_ID}/checks.json`,
-      assessment: null,
       grading: `cases/${CASE_ID}/grading.json`,
       result: `cases/${CASE_ID}/result.json`,
-    },
+    }),
     failure: {
       error: {
         kind: 'AgentProtocolError',
@@ -161,21 +152,26 @@ function buildCaseResult(): CaseResult {
       syntheticCommit: 'feedface',
       environment: [{ name: 'HOME', classification: 'fixed', recipient: 'agent' }],
     },
-  };
+  });
 }
 
 function buildRunResult(): RunResult {
   return {
     schemaVersion: 1,
-    manifest: buildManifest(),
-    cases: [buildCaseResult()],
+    manifest: buildContextManifest(),
+    cases: [buildInfrastructureFailedCaseResult()],
     findings: [{ severity: 'warning', caseId: null, message: 'cleanup warning' }],
     exitCode: 130,
   };
 }
 
 function buildChecks(): ChecksArtifact {
-  return { schemaVersion: 1, runId: RUN_ID, caseId: CASE_ID, checks: buildCaseResult().checks };
+  return {
+    schemaVersion: 1,
+    runId: RUN_ID,
+    caseId: CASE_ID,
+    checks: buildInfrastructureFailedCaseResult().checks,
+  };
 }
 
 function buildGrading(): GradingArtifact {
@@ -332,7 +328,7 @@ type Parser = {
 const PARSERS: Parser[] = [
   {
     name: 'parseRunManifest',
-    build: buildManifest,
+    build: buildContextManifest,
     parse: (value) => parseRunManifest(value, RUN_ID),
     recordPaths: [
       'tools.agentVersions',
@@ -358,7 +354,7 @@ const PARSERS: Parser[] = [
   },
   {
     name: 'parseCaseResult',
-    build: buildCaseResult,
+    build: buildInfrastructureFailedCaseResult,
     parse: (value) => parseCaseResult(value, CASE_ID),
     recordPaths: [],
     opaquePaths: [],
@@ -471,7 +467,7 @@ describe('parse functions on values shaped like the real producers write them', 
   });
 
   it('accepts a manifest without a context and without a grader check', () => {
-    const manifest = buildManifest();
+    const manifest = buildContextManifest();
     delete manifest.context;
     manifest.efforts.grader = null;
 
@@ -479,7 +475,7 @@ describe('parse functions on values shaped like the real producers write them', 
   });
 
   it('accepts a case result without its optional records', () => {
-    const result = buildCaseResult();
+    const result = buildInfrastructureFailedCaseResult();
     delete result.checkState;
     delete result.setup;
     delete result.context;
@@ -682,7 +678,7 @@ describe('an unknown key at any object level', () => {
   });
 
   it('keeps unknown keys inside the opaque parts of a stored artifact', () => {
-    const manifest = buildManifest();
+    const manifest = buildContextManifest();
     (manifest.context as { config: JsonObject }).config['unexpected'] = 1;
     const grading = buildGrading();
     (grading.calls[0] as { session: JsonObject }).session['unexpected'] = 1;
@@ -695,7 +691,7 @@ describe('an unknown key at any object level', () => {
 
 describe('identity rules', () => {
   it('refuses a manifest of another run at runId', () => {
-    expect(parseRunManifest(buildManifest(), 'other-run')).toEqual({
+    expect(parseRunManifest(buildContextManifest(), 'other-run')).toEqual({
       ok: false,
       defectPath: 'runId',
     });
@@ -709,7 +705,7 @@ describe('identity rules', () => {
   });
 
   it('refuses a case result of another case at identity.caseId', () => {
-    expect(parseCaseResult(buildCaseResult(), 'task-1--beta--1')).toEqual({
+    expect(parseCaseResult(buildInfrastructureFailedCaseResult(), 'task-1--beta--1')).toEqual({
       ok: false,
       defectPath: 'identity.caseId',
     });
@@ -747,14 +743,14 @@ describe('identity rules', () => {
 
 describe('manifest cross-field rules', () => {
   it('names the case whose agent has no copied-providers entry', () => {
-    const manifest = buildManifest();
+    const manifest = buildContextManifest();
     manifest.cases.push({ ...(manifest.cases[0] as RunManifest['cases'][number]), agent: 'ghost' });
 
     expect(parseRunManifest(manifest, RUN_ID)).toEqual({ ok: false, defectPath: 'cases.1.agent' });
   });
 
   it('names the case whose model entry has no effort check', () => {
-    const manifest = buildManifest();
+    const manifest = buildContextManifest();
     manifest.cases.push({
       ...(manifest.cases[0] as RunManifest['cases'][number]),
       modelId: 'ghost',
@@ -767,21 +763,21 @@ describe('manifest cross-field rules', () => {
   });
 
   it('refuses a grader check that the snapshot does not declare', () => {
-    const manifest = buildManifest();
+    const manifest = buildContextManifest();
     (manifest.context as { config: unknown }).config = { roles: {} };
 
     expect(parseRunManifest(manifest, RUN_ID)).toEqual({ ok: false, defectPath: 'efforts.grader' });
   });
 
   it('refuses a missing grader check when the snapshot declares a grader', () => {
-    const manifest = buildManifest();
+    const manifest = buildContextManifest();
     manifest.efforts.grader = null;
 
     expect(parseRunManifest(manifest, RUN_ID)).toEqual({ ok: false, defectPath: 'efforts.grader' });
   });
 
   it('checks the agent, then the model entry, then the grader', () => {
-    const manifest = buildManifest();
+    const manifest = buildContextManifest();
     manifest.cases.push({
       ...(manifest.cases[0] as RunManifest['cases'][number]),
       agent: 'ghost',
@@ -793,7 +789,7 @@ describe('manifest cross-field rules', () => {
   });
 
   it('treats an inherited property name as absent', () => {
-    const manifest = buildManifest();
+    const manifest = buildContextManifest();
     manifest.cases.push({
       ...(manifest.cases[0] as RunManifest['cases'][number]),
       agent: 'toString',
@@ -813,7 +809,7 @@ describe('manifest cross-field rules', () => {
   });
 
   it('does not evaluate them when the manifest shape failed', () => {
-    const manifest = buildManifest();
+    const manifest = buildContextManifest();
     manifest.efforts.grader = null;
     (manifest as { configPath: unknown }).configPath = 7;
 
@@ -823,7 +819,7 @@ describe('manifest cross-field rules', () => {
 
 describe('ordering and secrets', () => {
   it('reports the first of two defects in schema key order', () => {
-    const value = clone(buildCaseResult()) as unknown as JsonObject;
+    const value = clone(buildInfrastructureFailedCaseResult()) as unknown as JsonObject;
     (value['artifacts'] as JsonObject)['grading'] = '';
     (value['identity'] as JsonObject)['attempt'] = 0;
 
@@ -859,7 +855,7 @@ describe('ordering and secrets', () => {
   });
 
   it('names an unknown key that holds the string and nothing it carries', () => {
-    const value = clone(buildCaseResult()) as unknown as JsonObject;
+    const value = clone(buildInfrastructureFailedCaseResult()) as unknown as JsonObject;
     value[SECRET] = SECRET.toUpperCase();
 
     const parsed = parseCaseResult(value, CASE_ID);
@@ -869,7 +865,7 @@ describe('ordering and secrets', () => {
   });
 
   it('names an unknown key nested in a record entry', () => {
-    const manifest = clone(buildManifest());
+    const manifest = clone(buildContextManifest());
     (manifest.tools.copiedProviders['opencode']?.[0] as unknown as JsonObject)[SECRET] = 1;
 
     expect(parseRunManifest(manifest, RUN_ID)).toEqual({

@@ -9,8 +9,19 @@ import { createConfigStore } from '@/adapters/artifact-store';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
 import { createTask } from '@/application/create-task';
 import { validateConfig } from '@/application/validate';
+import { unwrapErrorOfKind, unwrapOk } from '@/domain/__fixtures__/errors.fixtures';
 import { GH_CREDENTIAL_ENVIRONMENT_VARIABLES } from '@/domain/github-cli';
+import { buildAgentCapabilityReport } from '@/evaluation/__fixtures__/report.fixtures';
 
+import {
+  buildCommandCheckInput,
+  buildManualCheckInput,
+  buildModelDefinitionInput,
+  buildRepositoryDefinition,
+  buildRunSettingsInput,
+  buildTaskInput,
+  buildTevuConfigInput,
+} from './__fixtures__/config.fixtures';
 import { renderConfigDocument } from './document';
 import {
   canonicalConfigSerialization,
@@ -39,7 +50,7 @@ import type {
 } from './schema';
 import type { TaskDependencies, TaskWizardInput } from '@/application/create-task';
 import type { RepositoryDefinition, TaskDefinition, TevuConfig } from '@/domain/config';
-import type { TevuError, TevuResult } from '@/domain/errors';
+import type { TevuResult } from '@/domain/errors';
 import type { AgentAdapter } from '@/domain/ports/agent';
 import type {
   CaseExecutableAdapter,
@@ -61,26 +72,6 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
-function expectOk<T>(outcome: { ok: true; value: T } | { ok: false; error: TevuError }): T {
-  if (outcome.ok) {
-    return outcome.value;
-  }
-  throw new Error(`expected success, got ${JSON.stringify(outcome.error)}`);
-}
-
-function expectFailure<K extends TevuError['kind']>(
-  outcome: { ok: true; value: unknown } | { ok: false; error: TevuError },
-  kind: K,
-): Extract<TevuError, { kind: K }> {
-  if (outcome.ok) {
-    throw new Error(`expected a ${kind} failure, got success`);
-  }
-  if (outcome.error.kind !== kind) {
-    throw new Error(`expected error kind ${kind}, got ${JSON.stringify(outcome.error)}`);
-  }
-  return outcome.error as Extract<TevuError, { kind: K }>;
-}
-
 function expectSchemaAcceptance(config: unknown): TevuConfig {
   const parsed = TevuConfigSchema.safeParse(config);
   if (!parsed.success) {
@@ -100,57 +91,68 @@ function expectSchemaRejection(config: unknown): Array<{ path: string; message: 
   }));
 }
 
-function buildRepository(overrides: Partial<RepositoryDefinition> = {}): RepositoryDefinition {
-  return { id: 'sample-repo', path: '/tmp/tevu/sample-repo', ...overrides };
+function buildSampleRepository(
+  overrides: Partial<RepositoryDefinition> = {},
+): RepositoryDefinition {
+  return buildRepositoryDefinition({
+    id: 'sample-repo',
+    path: '/tmp/tevu/sample-repo',
+    ...overrides,
+  });
 }
 
-function buildModel(overrides: Partial<ModelDefinitionInput> = {}): ModelDefinitionInput {
-  return { id: 'alpha', model: 'openai/gpt-5', effort: 'high', ...overrides };
+function buildAlphaModel(overrides: Partial<ModelDefinitionInput> = {}): ModelDefinitionInput {
+  return buildModelDefinitionInput({ id: 'alpha', model: 'openai/gpt-5', ...overrides });
 }
 
 function buildModelRole(overrides: Partial<ModelRoleInput> = {}): ModelRoleInput {
   return { model: 'openai/grader-model', effort: 'high', ...overrides };
 }
 
-function buildManualCheck(overrides: Partial<CheckInput> = {}): CheckInput {
-  return { id: 'api-returns-200', description: 'The API returns 200', manual: true, ...overrides };
+function buildManualApiCheck(overrides: Partial<CheckInput> = {}): CheckInput {
+  return buildManualCheckInput({
+    id: 'api-returns-200',
+    description: 'The API returns 200',
+    ...overrides,
+  });
 }
 
-function buildCommandCheck(overrides: Partial<CheckInput> = {}): CheckInput {
-  return {
+function buildTestsPassCheck(overrides: Partial<CheckInput> = {}): CheckInput {
+  return buildCommandCheckInput({
     id: 'tests-pass',
     description: 'The tests pass',
     run: ['npm', 'test'],
     timeout: '1m',
     ...overrides,
-  };
+  });
 }
 
-function buildTaskDefinition(overrides: Partial<TaskInput> = {}): TaskInput {
-  return {
+function buildWriteReportTask(overrides: Partial<TaskInput> = {}): TaskInput {
+  return buildTaskInput({
     id: 'write-report',
     title: 'Write the report',
     repo: 'sample-repo',
-    base_commit: '0123456789abcdef0123456789abcdef01234567',
     description: 'Write a report',
     prompt: 'Write the report',
     readiness: ['The spec is approved'],
     checks: {
-      acceptance: [buildManualCheck()],
-      done: [buildCommandCheck()],
+      acceptance: [buildManualApiCheck()],
+      done: [buildTestsPassCheck()],
     },
     ...overrides,
-  };
+  });
 }
 
-function buildRunSettings(overrides: Partial<TevuConfigInput['run']> = {}): TevuConfigInput['run'] {
-  return {
+function buildSampleRunSettings(
+  overrides: Partial<TevuConfigInput['run']> = {},
+): TevuConfigInput['run'] {
+  return buildRunSettingsInput({
     output_dir: '/tmp/tevu/runs',
     concurrency: 2,
     timeout: '10m',
     stop_grace: '3s',
     ...overrides,
-  };
+  });
 }
 
 function buildAgents(
@@ -159,29 +161,31 @@ function buildAgents(
   return { opencode: { command: 'opencode', secrets: [], env: [], ...overrides } };
 }
 
-function buildConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfigInput {
-  return {
-    version: 1,
-    run: buildRunSettings(),
+function buildSampleConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfigInput {
+  return buildTevuConfigInput({
+    run: buildSampleRunSettings(),
     agents: buildAgents(),
-    repositories: [buildRepository()],
-    models: [buildModel(), buildModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max' })],
-    tasks: [buildTaskDefinition()],
+    repositories: [buildSampleRepository()],
+    models: [
+      buildAlphaModel(),
+      buildAlphaModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max' }),
+    ],
+    tasks: [buildWriteReportTask()],
     ...overrides,
-  };
+  });
 }
 
 function buildTaskWizardInput(overrides: Partial<TaskWizardInput> = {}): TaskWizardInput {
   return {
     configPath: '/tmp/tevu/tevu.yaml',
-    task: buildTaskDefinition({ id: 'new-task', title: 'New task', base_commit: 'abc123' }),
+    task: buildWriteReportTask({ id: 'new-task', title: 'New task', base_commit: 'abc123' }),
     ...overrides,
   };
 }
 
 /** A fully valid, rendered base document, used as the default existing-file text in `createTask` tests. */
 function validBaseText(): string {
-  const rendered = renderConfigDocument(buildConfig(), { redact: (text) => text });
+  const rendered = renderConfigDocument(buildSampleConfig(), { redact: (text) => text });
   if (!rendered.ok) {
     throw new Error('expected the fixture configuration to render');
   }
@@ -247,19 +251,8 @@ function buildTaskDependencies(overrides: Partial<TaskDependencies> = {}): TaskD
   };
 }
 
-function buildAgentCapabilityReport(executable: string): AgentCapabilityReport {
-  return {
-    executable,
-    detectedVersion: '1.0.0',
-    capabilities: [
-      { name: 'run command', required: true, availability: 'available' },
-      { name: 'export command', required: true, availability: 'available' },
-      { name: 'run --format json', required: true, availability: 'available' },
-      { name: 'run --model', required: true, availability: 'available' },
-      { name: 'run --variant', required: true, availability: 'available' },
-    ],
-    isolation: { denyOutsideWorktree: 'available' },
-  };
+function buildCapabilityReportFor(executable: string): AgentCapabilityReport {
+  return buildAgentCapabilityReport({ executable, detectedVersion: '1.0.0' });
 }
 
 function buildPrerequisites(overrides: Partial<PrerequisiteAdapter> = {}): PrerequisiteAdapter {
@@ -293,7 +286,7 @@ function buildFakeAgentAdapter(overrides: Partial<AgentAdapter> = {}): AgentAdap
   return {
     probe: vi.fn(async () => ({
       ok: true as const,
-      value: buildAgentCapabilityReport('opencode'),
+      value: buildCapabilityReportFor('opencode'),
     })),
     readProviders: vi.fn(async () => ({
       ok: true as const,
@@ -541,10 +534,15 @@ describe('AGENT_NAMES', () => {
 describe('agentNamesInUse', () => {
   it('returns the distinct models[].agent values in configuration order', () => {
     const config = expectSchemaAcceptance(
-      buildConfig({
+      buildSampleConfig({
         models: [
-          buildModel({ id: 'alpha', agent: 'opencode' }),
-          buildModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max', agent: 'opencode' }),
+          buildAlphaModel({ id: 'alpha', agent: 'opencode' }),
+          buildAlphaModel({
+            id: 'beta',
+            model: 'anthropic/claude-4',
+            effort: 'max',
+            agent: 'opencode',
+          }),
         ],
       }),
     );
@@ -555,7 +553,7 @@ describe('agentNamesInUse', () => {
 
 describe('TevuConfigSchema', () => {
   it('accepts a minimal valid configuration and materializes its defaults', () => {
-    const config = buildConfig();
+    const config = buildSampleConfig();
 
     const accepted = expectSchemaAcceptance(config);
     expect(accepted.tasks[0]?.repo).toBe('sample-repo');
@@ -563,10 +561,13 @@ describe('TevuConfigSchema', () => {
   });
 
   it.each([
-    { level: 'top-level', config: { ...buildConfig(), telemetry: true } },
+    { level: 'top-level', config: { ...buildSampleConfig(), telemetry: true } },
     {
       level: 'task',
-      config: { ...buildConfig(), tasks: [{ ...buildTaskDefinition(), notes: 'extra' }] },
+      config: {
+        ...buildSampleConfig(),
+        tasks: [{ ...buildWriteReportTask(), notes: 'extra' }],
+      },
     },
   ])('rejects an unknown field at the $level', ({ config }) => {
     expect(TevuConfigSchema.safeParse(config).success).toBe(false);
@@ -574,27 +575,29 @@ describe('TevuConfigSchema', () => {
 
   it('rejects a version other than 1', () => {
     expect(
-      expectSchemaRejection({ ...buildConfig(), version: 2 }).map((issue) => issue.path),
+      expectSchemaRejection({ ...buildSampleConfig(), version: 2 }).map((issue) => issue.path),
     ).toContain('version');
   });
 
   it.each(['Bad-id', 'bad_id', '1bad', 'a'.repeat(65)])('rejects the invalid id %s', (id) => {
     expect(
-      TevuConfigSchema.safeParse(buildConfig({ repositories: [buildRepository({ id })] })).success,
+      TevuConfigSchema.safeParse(
+        buildSampleConfig({ repositories: [buildSampleRepository({ id })] }),
+      ).success,
     ).toBe(false);
   });
 
   it.each(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'CI', 'XDG_DATA_HOME'])(
     'rejects the fixed environment name %s',
     (name) => {
-      const config = buildConfig({ agents: buildAgents({ secrets: [name] }) });
+      const config = buildSampleConfig({ agents: buildAgents({ secrets: [name] }) });
 
       expect(TevuConfigSchema.safeParse(config).success).toBe(false);
     },
   );
 
   it('rejects duplicate environment names within one collection', () => {
-    const config = buildConfig({ agents: buildAgents({ secrets: ['SHARED', 'SHARED'] }) });
+    const config = buildSampleConfig({ agents: buildAgents({ secrets: ['SHARED', 'SHARED'] }) });
 
     expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
       'duplicate environment variable name "SHARED"',
@@ -602,7 +605,9 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects an environment variable declared for both secrets and env', () => {
-    const config = buildConfig({ agents: buildAgents({ secrets: ['SHARED'], env: ['SHARED'] }) });
+    const config = buildSampleConfig({
+      agents: buildAgents({ secrets: ['SHARED'], env: ['SHARED'] }),
+    });
 
     expect(expectSchemaRejection(config).map((issue) => issue.message)).toContain(
       'environment variable "SHARED" appears in both agents.opencode.secrets and agents.opencode.env',
@@ -610,7 +615,7 @@ describe('TevuConfigSchema', () => {
   });
 
   it('defaults agents.opencode.providers to an empty array when absent', () => {
-    const config = expectSchemaAcceptance(buildConfig());
+    const config = expectSchemaAcceptance(buildSampleConfig());
     const opencode = config.agents['opencode'];
     assert.isDefined(opencode, 'agents.opencode block');
 
@@ -618,7 +623,7 @@ describe('TevuConfigSchema', () => {
   });
 
   it.each(['', 'acme/proxy'])('rejects the provider id %j', (id) => {
-    const config = buildConfig({ agents: buildAgents({ providers: [{ id }] }) });
+    const config = buildSampleConfig({ agents: buildAgents({ providers: [{ id }] }) });
 
     expect(expectSchemaRejection(config)).toContainEqual({
       path: 'agents.opencode.providers.0.id',
@@ -627,7 +632,7 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects a duplicate provider id', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       agents: buildAgents({ providers: [{ id: 'acme' }, { id: 'acme' }] }),
     });
 
@@ -638,7 +643,7 @@ describe('TevuConfigSchema', () => {
   });
 
   it("rejects a provider api_key not listed in the block's secrets", () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       agents: buildAgents({ providers: [{ id: 'acme', api_key: 'ACME_KEY' }] }),
     });
 
@@ -650,7 +655,7 @@ describe('TevuConfigSchema', () => {
 
   it("accepts a provider api_key listed in the block's secrets", () => {
     const config = expectSchemaAcceptance(
-      buildConfig({
+      buildSampleConfig({
         agents: buildAgents({
           secrets: ['ACME_KEY'],
           providers: [{ id: 'acme', api_key: 'ACME_KEY' }],
@@ -665,9 +670,9 @@ describe('TevuConfigSchema', () => {
   });
 
   it.each([
-    { collection: 'repositories', config: { ...buildConfig(), repositories: [] } },
-    { collection: 'models', config: { ...buildConfig(), models: [buildModel()] } },
-    { collection: 'tasks', config: { ...buildConfig(), tasks: [] } },
+    { collection: 'repositories', config: { ...buildSampleConfig(), repositories: [] } },
+    { collection: 'models', config: { ...buildSampleConfig(), models: [buildAlphaModel()] } },
+    { collection: 'tasks', config: { ...buildSampleConfig(), tasks: [] } },
   ])('rejects an empty or undersized $collection collection', ({ config }) => {
     expect(TevuConfigSchema.safeParse(config).success).toBe(false);
   });
@@ -675,23 +680,28 @@ describe('TevuConfigSchema', () => {
   it.each([
     {
       collection: 'repositories',
-      config: buildConfig({
-        repositories: [buildRepository({ id: 'dup' }), buildRepository({ id: 'dup' })],
+      config: buildSampleConfig({
+        repositories: [buildSampleRepository({ id: 'dup' }), buildSampleRepository({ id: 'dup' })],
       }),
       path: 'repositories.1.id',
       message: 'duplicate repositories id "dup"',
     },
     {
       collection: 'models',
-      config: buildConfig({
-        models: [buildModel({ id: 'dup' }), buildModel({ id: 'dup', model: 'other/model' })],
+      config: buildSampleConfig({
+        models: [
+          buildAlphaModel({ id: 'dup' }),
+          buildAlphaModel({ id: 'dup', model: 'other/model' }),
+        ],
       }),
       path: 'models.1.id',
       message: 'duplicate models id "dup"',
     },
     {
       collection: 'tasks',
-      config: buildConfig({ tasks: [buildTaskDefinition(), buildTaskDefinition()] }),
+      config: buildSampleConfig({
+        tasks: [buildWriteReportTask(), buildWriteReportTask()],
+      }),
       path: 'tasks.1.id',
       message: 'duplicate tasks id "write-report"',
     },
@@ -700,7 +710,7 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects a task referencing an unconfigured repository', () => {
-    const config = buildConfig({ tasks: [buildTaskDefinition({ repo: 'ghost' })] });
+    const config = buildSampleConfig({ tasks: [buildWriteReportTask({ repo: 'ghost' })] });
 
     expect(expectSchemaRejection(config)).toContainEqual({
       path: 'tasks.0.repo',
@@ -709,15 +719,15 @@ describe('TevuConfigSchema', () => {
   });
 
   it("rejects a Jira credential variable listed in a check's env", () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       trackers: {
         jira: { url: 'https://jira.example.com', email: '$JIRA_EMAIL', token: '$JIRA_TOKEN' },
       },
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [buildManualCheck()],
-            done: [buildCommandCheck({ env: ['JIRA_TOKEN'] })],
+            acceptance: [buildManualApiCheck()],
+            done: [buildTestsPassCheck({ env: ['JIRA_TOKEN'] })],
           },
         }),
       ],
@@ -730,12 +740,12 @@ describe('TevuConfigSchema', () => {
   });
 
   it('requires at least one required acceptance check', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [buildManualCheck({ required: false })],
-            done: [buildCommandCheck()],
+            acceptance: [buildManualApiCheck({ required: false })],
+            done: [buildTestsPassCheck()],
           },
         }),
       ],
@@ -747,12 +757,12 @@ describe('TevuConfigSchema', () => {
   });
 
   it('requires at least one required done check', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [buildManualCheck()],
-            done: [buildCommandCheck({ required: false })],
+            acceptance: [buildManualApiCheck()],
+            done: [buildTestsPassCheck({ required: false })],
           },
         }),
       ],
@@ -764,12 +774,12 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects duplicate check ids across acceptance and done', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [buildManualCheck({ id: 'shared' })],
-            done: [buildCommandCheck({ id: 'shared' })],
+            acceptance: [buildManualApiCheck({ id: 'shared' })],
+            done: [buildTestsPassCheck({ id: 'shared' })],
           },
         }),
       ],
@@ -806,8 +816,8 @@ describe('TevuConfigSchema', () => {
       path: 'tasks.0.source.url',
     },
   ])('rejects an invalid imported task source $field', ({ source, path }) => {
-    const config = buildConfig({
-      tasks: [buildTaskDefinition({ source: source as TaskInput['source'] })],
+    const config = buildSampleConfig({
+      tasks: [buildWriteReportTask({ source: source as TaskInput['source'] })],
     });
 
     expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain(path);
@@ -817,13 +827,15 @@ describe('TevuConfigSchema', () => {
     { field: 'description', value: '   ' },
     { field: 'prompt', value: '\t ' },
   ])('rejects a whitespace-only task $field', ({ field, value }) => {
-    const config = buildConfig({ tasks: [{ ...buildTaskDefinition(), [field]: value }] });
+    const config = buildSampleConfig({
+      tasks: [{ ...buildWriteReportTask(), [field]: value }],
+    });
 
     expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain(`tasks.0.${field}`);
   });
 
   it('accepts a task timeout and materializes it verbatim', () => {
-    const config = buildConfig({ tasks: [buildTaskDefinition({ timeout: '20m' })] });
+    const config = buildSampleConfig({ tasks: [buildWriteReportTask({ timeout: '20m' })] });
 
     const accepted = expectSchemaAcceptance(config);
 
@@ -831,7 +843,7 @@ describe('TevuConfigSchema', () => {
   });
 
   it('materializes a task with no timeout property when the file declares none', () => {
-    const config = buildConfig({ tasks: [buildTaskDefinition()] });
+    const config = buildSampleConfig({ tasks: [buildWriteReportTask()] });
 
     const accepted = expectSchemaAcceptance(config);
 
@@ -849,8 +861,8 @@ describe('TevuConfigSchema', () => {
       message: 'must be a positive whole number followed by ms, s, m, or h, for example 30s or 10m',
     },
   ])('rejects a task timeout of $value at tasks.0.timeout', ({ value, message }) => {
-    const config = buildConfig({
-      tasks: [{ ...buildTaskDefinition(), timeout: value } as unknown as TaskInput],
+    const config = buildSampleConfig({
+      tasks: [{ ...buildWriteReportTask(), timeout: value } as unknown as TaskInput],
     });
 
     expect(expectSchemaRejection(config)).toContainEqual({ path: 'tasks.0.timeout', message });
@@ -858,20 +870,20 @@ describe('TevuConfigSchema', () => {
 
   it('rejects a model without a namespace separator', () => {
     const config = {
-      ...buildConfig(),
-      models: [{ ...buildModel(), model: 'gpt-5' }, buildModel({ id: 'beta' })],
+      ...buildSampleConfig(),
+      models: [{ ...buildAlphaModel(), model: 'gpt-5' }, buildAlphaModel({ id: 'beta' })],
     };
 
     expect(expectSchemaRejection(config).map((issue) => issue.path)).toContain('models.0.model');
   });
 
   it('rejects a non-positive command timeout', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [buildManualCheck()],
-            done: [buildCommandCheck({ timeout: '0m' })],
+            acceptance: [buildManualApiCheck()],
+            done: [buildTestsPassCheck({ timeout: '0m' })],
           },
         }),
       ],
@@ -883,12 +895,12 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects an empty exit_codes list', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [buildManualCheck()],
-            done: [buildCommandCheck({ exit_codes: [] })],
+            acceptance: [buildManualApiCheck()],
+            done: [buildTestsPassCheck({ exit_codes: [] })],
           },
         }),
       ],
@@ -900,7 +912,7 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects a non-HTTPS Jira base URL', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       trackers: {
         jira: { url: 'http://jira.example.com', email: '$JIRA_EMAIL', token: '$JIRA_TOKEN' },
       },
@@ -910,10 +922,13 @@ describe('TevuConfigSchema', () => {
   });
 
   it('accepts a manual check without a command definition', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
-          checks: { acceptance: [buildManualCheck()], done: [buildManualCheck({ id: 'docs' })] },
+        buildWriteReportTask({
+          checks: {
+            acceptance: [buildManualApiCheck()],
+            done: [buildManualApiCheck({ id: 'docs' })],
+          },
         }),
       ],
     });
@@ -935,17 +950,17 @@ describe('TevuConfigSchema', () => {
       title: 'Export table as CSV',
       body: 'Users need an export button',
     };
-    const config = buildConfig({ tasks: [buildTaskDefinition({ source })] });
+    const config = buildSampleConfig({ tasks: [buildWriteReportTask({ source })] });
 
     expect(expectSchemaAcceptance(config).tasks[0]?.source).toEqual(source);
   });
 
   it('rejects an unknown field inside a github task source', () => {
     const config = {
-      ...buildConfig(),
+      ...buildSampleConfig(),
       tasks: [
         {
-          ...buildTaskDefinition(),
+          ...buildWriteReportTask(),
           source: {
             kind: 'github',
             key: 'octo/repo#42',
@@ -968,13 +983,13 @@ describe('TevuConfigSchema', () => {
       identifier: 'HEAD~3',
       commits: ['0123456789abcdef0123456789abcdef01234567'],
     };
-    const config = buildConfig({ tasks: [buildTaskDefinition({ reference })] });
+    const config = buildSampleConfig({ tasks: [buildWriteReportTask({ reference })] });
 
     expect(expectSchemaAcceptance(config).tasks[0]?.reference).toEqual(reference);
   });
 
   it('materializes a task with no reference property when the file declares none', () => {
-    const config = buildConfig({ tasks: [buildTaskDefinition()] });
+    const config = buildSampleConfig({ tasks: [buildWriteReportTask()] });
 
     const accepted = expectSchemaAcceptance(config);
 
@@ -983,10 +998,10 @@ describe('TevuConfigSchema', () => {
 
   it('rejects an unknown field inside a commit reference', () => {
     const config = {
-      ...buildConfig(),
+      ...buildSampleConfig(),
       tasks: [
         {
-          ...buildTaskDefinition(),
+          ...buildWriteReportTask(),
           reference: {
             kind: 'commit',
             identifier: 'HEAD~3',
@@ -1001,9 +1016,9 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects a malformed reference commit hash', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           reference: { kind: 'commit', identifier: 'HEAD~3', commits: ['not-a-hash'] },
         }),
       ],
@@ -1027,7 +1042,7 @@ describe('TevuConfigSchema', () => {
         commits: [COMMIT_A, COMMIT_B],
         merge_commit: MERGE_COMMIT,
       };
-      const config = buildConfig({ tasks: [buildTaskDefinition({ reference })] });
+      const config = buildSampleConfig({ tasks: [buildWriteReportTask({ reference })] });
 
       expect(expectSchemaAcceptance(config).tasks[0]?.reference).toEqual(reference);
     });
@@ -1038,15 +1053,15 @@ describe('TevuConfigSchema', () => {
         identifier: 'https://github.com/octo/app/pull/128',
         commits: [COMMIT_A],
       };
-      const config = buildConfig({ tasks: [buildTaskDefinition({ reference })] });
+      const config = buildSampleConfig({ tasks: [buildWriteReportTask({ reference })] });
 
       expect(expectSchemaAcceptance(config).tasks[0]?.reference).toEqual(reference);
     });
 
     it('rejects a duplicate reference commit', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         tasks: [
-          buildTaskDefinition({
+          buildWriteReportTask({
             reference: {
               kind: 'pull-request',
               identifier: 'octo/app#128',
@@ -1063,9 +1078,9 @@ describe('TevuConfigSchema', () => {
     });
 
     it('rejects a merge commit that repeats a listed commit', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         tasks: [
-          buildTaskDefinition({
+          buildWriteReportTask({
             reference: {
               kind: 'pull-request',
               identifier: 'octo/app#128',
@@ -1087,9 +1102,9 @@ describe('TevuConfigSchema', () => {
       { description: 'a port', identifier: 'https://github.com:8443/octo/app/pull/128' },
       { description: 'path issues', identifier: 'https://github.com/octo/app/issues/128' },
     ])('rejects an identifier with $description', ({ identifier }) => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         tasks: [
-          buildTaskDefinition({
+          buildWriteReportTask({
             reference: { kind: 'pull-request', identifier, commits: [COMMIT_A] },
           }),
         ],
@@ -1102,10 +1117,10 @@ describe('TevuConfigSchema', () => {
   });
 
   it('accepts an explicit agent value naming a configured agent', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       models: [
-        buildModel({ agent: 'opencode' }),
-        buildModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max' }),
+        buildAlphaModel({ agent: 'opencode' }),
+        buildAlphaModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max' }),
       ],
     });
 
@@ -1113,10 +1128,10 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects a model agent that does not name a configured agent', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       models: [
-        buildModel({ agent: 'claude' }),
-        buildModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max' }),
+        buildAlphaModel({ agent: 'claude' }),
+        buildAlphaModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max' }),
       ],
     });
 
@@ -1128,7 +1143,7 @@ describe('TevuConfigSchema', () => {
 
   describe('roles', () => {
     it('parses CONFIG_TEMPLATE with roles.criteria, roles.grader, and roles.summary declared', () => {
-      const parsed = expectOk(parseConfigText(CONFIG_TEMPLATE));
+      const parsed = unwrapOk(parseConfigText(CONFIG_TEMPLATE));
 
       expect(parsed.roles).toEqual({
         criteria: { model: 'openai/your-criteria-model', effort: 'high', agent: 'opencode' },
@@ -1138,13 +1153,13 @@ describe('TevuConfigSchema', () => {
     });
 
     it('materializes roles as absent when the file declares none', () => {
-      const accepted = expectSchemaAcceptance(buildConfig());
+      const accepted = expectSchemaAcceptance(buildSampleConfig());
 
       expect(accepted.roles).toBeUndefined();
     });
 
     it('accepts roles: {} and materializes it as {}', () => {
-      const accepted = expectSchemaAcceptance(buildConfig({ roles: {} }));
+      const accepted = expectSchemaAcceptance(buildSampleConfig({ roles: {} }));
 
       expect(accepted.roles).toEqual({});
     });
@@ -1154,7 +1169,7 @@ describe('TevuConfigSchema', () => {
         configYaml({ outputDirectory: './runs', repositoryPath: './repo', command: 'opencode' }) +
         'roles:\n  grader:\n    model: openai/grader-model\n    effort: high\n    extra: nope\n';
 
-      const parsed = expectFailure(parseConfigText(text), 'ConfigValidationError');
+      const parsed = unwrapErrorOfKind(parseConfigText(text), 'ConfigValidationError');
 
       expect(parsed.findings).toContainEqual({
         severity: 'error',
@@ -1164,7 +1179,7 @@ describe('TevuConfigSchema', () => {
     });
 
     it('accepts roles.summary alone and defaults its agent to the sole configured agent', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         roles: { summary: buildModelRole({ model: 'openai/summary-model', effort: 'medium' }) },
       });
 
@@ -1178,7 +1193,7 @@ describe('TevuConfigSchema', () => {
         configYaml({ outputDirectory: './runs', repositoryPath: './repo', command: 'opencode' }) +
         'roles:\n  summary:\n    model: openai/summary-model\n    effort: medium\n    extra: nope\n';
 
-      const parsed = expectFailure(parseConfigText(text), 'ConfigValidationError');
+      const parsed = unwrapErrorOfKind(parseConfigText(text), 'ConfigValidationError');
 
       expect(parsed.findings).toContainEqual({
         severity: 'error',
@@ -1188,7 +1203,9 @@ describe('TevuConfigSchema', () => {
     });
 
     it('rejects a summary agent that does not name a configured agent', () => {
-      const config = buildConfig({ roles: { summary: buildModelRole({ agent: 'claude' }) } });
+      const config = buildSampleConfig({
+        roles: { summary: buildModelRole({ agent: 'claude' }) },
+      });
 
       expect(expectSchemaRejection(config)).toContainEqual({
         path: 'roles.summary.agent',
@@ -1197,7 +1214,7 @@ describe('TevuConfigSchema', () => {
     });
 
     it('re-parses a materialized configuration with every model role to a deeply equal value', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         roles: {
           criteria: buildModelRole({ model: 'anthropic/criteria-model', effort: 'medium' }),
           grader: buildModelRole(),
@@ -1212,7 +1229,7 @@ describe('TevuConfigSchema', () => {
     });
 
     it('rejects a role agent that does not name a configured agent', () => {
-      const config = buildConfig({ roles: { grader: buildModelRole({ agent: 'claude' }) } });
+      const config = buildSampleConfig({ roles: { grader: buildModelRole({ agent: 'claude' }) } });
 
       expect(expectSchemaRejection(config)).toContainEqual({
         path: 'roles.grader.agent',
@@ -1221,7 +1238,7 @@ describe('TevuConfigSchema', () => {
     });
 
     it('re-parses a materialized configuration with both model roles to a deeply equal value', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         roles: {
           criteria: buildModelRole({ model: 'anthropic/criteria-model', effort: 'medium' }),
           grader: buildModelRole(),
@@ -1235,13 +1252,13 @@ describe('TevuConfigSchema', () => {
     });
 
     it("defaults a model role's agent to the sole configured agent", () => {
-      const config = buildConfig({ roles: { grader: buildModelRole() } });
+      const config = buildSampleConfig({ roles: { grader: buildModelRole() } });
 
       expect(expectSchemaAcceptance(config).roles?.grader?.agent).toBe('opencode');
     });
 
     it('accepts a model role with the same model and effort as a model entry', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         roles: { grader: buildModelRole({ model: 'openai/gpt-5', effort: 'high' }) },
       });
 
@@ -1250,15 +1267,17 @@ describe('TevuConfigSchema', () => {
   });
 
   it("defaults a task's repo to the sole configured repository", () => {
-    const config = buildConfig({ tasks: [{ ...buildTaskDefinition(), repo: undefined }] });
+    const config = buildSampleConfig({
+      tasks: [{ ...buildWriteReportTask(), repo: undefined }],
+    });
 
     expect(expectSchemaAcceptance(config).tasks[0]?.repo).toBe('sample-repo');
   });
 
   it('requires repo when more than one repository is configured', () => {
-    const config = buildConfig({
-      repositories: [buildRepository(), buildRepository({ id: 'second-repo' })],
-      tasks: [{ ...buildTaskDefinition(), repo: undefined }],
+    const config = buildSampleConfig({
+      repositories: [buildSampleRepository(), buildSampleRepository({ id: 'second-repo' })],
+      tasks: [{ ...buildWriteReportTask(), repo: undefined }],
     });
 
     expect(expectSchemaRejection(config)).toContainEqual({
@@ -1268,12 +1287,12 @@ describe('TevuConfigSchema', () => {
   });
 
   it('parses a check with neither run nor manual as a graded check', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
             acceptance: [{ id: 'no-form', description: 'x' }],
-            done: [buildCommandCheck()],
+            done: [buildTestsPassCheck()],
           },
         }),
       ],
@@ -1288,12 +1307,12 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects a graded check whose description holds no non-whitespace text', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
             acceptance: [{ id: 'no-description', description: '   ' }],
-            done: [buildCommandCheck()],
+            done: [buildTestsPassCheck()],
           },
         }),
       ],
@@ -1307,12 +1326,12 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects a check with both run and manual', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [{ ...buildCommandCheck(), manual: true }],
-            done: [buildCommandCheck()],
+            acceptance: [{ ...buildTestsPassCheck(), manual: true }],
+            done: [buildTestsPassCheck()],
           },
         }),
       ],
@@ -1324,12 +1343,12 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects manual: false', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
             acceptance: [{ id: 'bad-manual', description: 'x', manual: false }],
-            done: [buildCommandCheck()],
+            done: [buildTestsPassCheck()],
           },
         }),
       ],
@@ -1349,10 +1368,10 @@ describe('TevuConfigSchema', () => {
         manual: true,
         [key]: key === 'timeout' ? '1m' : key === 'exit_codes' ? [0] : ['NAME'],
       };
-      const config = buildConfig({
+      const config = buildSampleConfig({
         tasks: [
-          buildTaskDefinition({
-            checks: { acceptance: [overSpecified], done: [buildCommandCheck()] },
+          buildWriteReportTask({
+            checks: { acceptance: [overSpecified], done: [buildTestsPassCheck()] },
           }),
         ],
       });
@@ -1364,13 +1383,13 @@ describe('TevuConfigSchema', () => {
   );
 
   it("resolves a command check's timeout from run.check_timeout when omitted", () => {
-    const config = buildConfig({
-      run: buildRunSettings({ check_timeout: '5m' }),
+    const config = buildSampleConfig({
+      run: buildSampleRunSettings({ check_timeout: '5m' }),
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [buildManualCheck()],
-            done: [buildCommandCheck({ timeout: undefined })],
+            acceptance: [buildManualApiCheck()],
+            done: [buildTestsPassCheck({ timeout: undefined })],
           },
         }),
       ],
@@ -1382,12 +1401,12 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects a command check with no timeout and no run.check_timeout', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [buildManualCheck()],
-            done: [buildCommandCheck({ timeout: undefined })],
+            acceptance: [buildManualApiCheck()],
+            done: [buildTestsPassCheck({ timeout: undefined })],
           },
         }),
       ],
@@ -1399,13 +1418,13 @@ describe('TevuConfigSchema', () => {
   });
 
   it('rejects a check env variable also passed to the agent', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       agents: buildAgents({ secrets: ['OPENAI_API_KEY'] }),
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [buildManualCheck()],
-            done: [buildCommandCheck({ env: ['OPENAI_API_KEY'] })],
+            acceptance: [buildManualApiCheck()],
+            done: [buildTestsPassCheck({ env: ['OPENAI_API_KEY'] })],
           },
         }),
       ],
@@ -1419,15 +1438,15 @@ describe('TevuConfigSchema', () => {
   });
 
   it("rejects a Jira email variable listed in a check's env", () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       trackers: {
         jira: { url: 'https://jira.example.com', email: '$JIRA_EMAIL', token: '$JIRA_TOKEN' },
       },
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [buildManualCheck()],
-            done: [buildCommandCheck({ env: ['JIRA_EMAIL'] })],
+            acceptance: [buildManualApiCheck()],
+            done: [buildTestsPassCheck({ env: ['JIRA_EMAIL'] })],
           },
         }),
       ],
@@ -1440,12 +1459,12 @@ describe('TevuConfigSchema', () => {
   });
 
   it("rejects duplicate variable names within one check's env", () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [buildManualCheck()],
-            done: [buildCommandCheck({ env: ['NODE_OPTIONS', 'NODE_OPTIONS'] })],
+            acceptance: [buildManualApiCheck()],
+            done: [buildTestsPassCheck({ env: ['NODE_OPTIONS', 'NODE_OPTIONS'] })],
           },
         }),
       ],
@@ -1460,12 +1479,12 @@ describe('TevuConfigSchema', () => {
   it.each(['PATH', 'XDG_CACHE_HOME'])(
     'rejects the fixed environment name %s in a command check env',
     (name) => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         tasks: [
-          buildTaskDefinition({
+          buildWriteReportTask({
             checks: {
-              acceptance: [buildManualCheck()],
-              done: [buildCommandCheck({ env: [name] })],
+              acceptance: [buildManualApiCheck()],
+              done: [buildTestsPassCheck({ env: [name] })],
             },
           }),
         ],
@@ -1482,12 +1501,12 @@ describe('TevuConfigSchema', () => {
   );
 
   it('accepts an ordinary environment variable name in a command check env', () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       tasks: [
-        buildTaskDefinition({
+        buildWriteReportTask({
           checks: {
-            acceptance: [buildManualCheck()],
-            done: [buildCommandCheck({ env: ['NODE_OPTIONS'] })],
+            acceptance: [buildManualApiCheck()],
+            done: [buildTestsPassCheck({ env: ['NODE_OPTIONS'] })],
           },
         }),
       ],
@@ -1505,7 +1524,7 @@ describe('TevuConfigSchema', () => {
   });
 
   it('re-parses its own materialized output to a deeply equal value', () => {
-    const parsedOnce = expectSchemaAcceptance(buildConfig());
+    const parsedOnce = expectSchemaAcceptance(buildSampleConfig());
 
     const parsedTwice = expectSchemaAcceptance(parsedOnce);
 
@@ -1513,7 +1532,9 @@ describe('TevuConfigSchema', () => {
   });
 
   it('accepts a duration at the 2147483647ms bound', () => {
-    const config = buildConfig({ run: buildRunSettings({ timeout: '2147483647ms' }) });
+    const config = buildSampleConfig({
+      run: buildSampleRunSettings({ timeout: '2147483647ms' }),
+    });
 
     expect(TevuConfigSchema.safeParse(config).success).toBe(true);
   });
@@ -1521,7 +1542,7 @@ describe('TevuConfigSchema', () => {
   it.each(['2147483648ms', '900h'])(
     'rejects the duration %s for exceeding the 2147483647ms bound',
     (value) => {
-      const config = buildConfig({ run: buildRunSettings({ timeout: value }) });
+      const config = buildSampleConfig({ run: buildSampleRunSettings({ timeout: value }) });
 
       expect(expectSchemaRejection(config)).toContainEqual({
         path: 'run.timeout',
@@ -1533,7 +1554,7 @@ describe('TevuConfigSchema', () => {
   it.each(['0s', '01s', '10x', 'abc', '5'])(
     'rejects the malformed duration %s with the grammar message',
     (value) => {
-      const config = buildConfig({ run: buildRunSettings({ timeout: value }) });
+      const config = buildSampleConfig({ run: buildSampleRunSettings({ timeout: value }) });
 
       expect(expectSchemaRejection(config)).toContainEqual({
         path: 'run.timeout',
@@ -1546,7 +1567,7 @@ describe('TevuConfigSchema', () => {
   it.each(['1bad', 'bad-name', 'name!', ''])(
     'rejects the malformed variable name %s with the grammar message',
     (name) => {
-      const config = buildConfig({ agents: buildAgents({ secrets: [name] }) });
+      const config = buildSampleConfig({ agents: buildAgents({ secrets: [name] }) });
 
       expect(expectSchemaRejection(config)).toContainEqual({
         path: 'agents.opencode.secrets.0',
@@ -1558,7 +1579,7 @@ describe('TevuConfigSchema', () => {
   it.each(['JIRA_EMAIL', '$JIRA-EMAIL', '$1BAD', ''])(
     'rejects the Jira email value %s that is not a $VARIABLE reference',
     (value) => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         trackers: { jira: { url: 'https://jira.example.com', email: value, token: '$JIRA_TOKEN' } },
       });
 
@@ -1575,9 +1596,11 @@ describe('TevuConfigSchema', () => {
       'run must be a non-blank command string or an array starting with a non-empty executable';
 
     function buildConfigWithDoneCheck(check: CheckInput): TevuConfigInput {
-      return buildConfig({
+      return buildSampleConfig({
         tasks: [
-          buildTaskDefinition({ checks: { acceptance: [buildManualCheck()], done: [check] } }),
+          buildWriteReportTask({
+            checks: { acceptance: [buildManualApiCheck()], done: [check] },
+          }),
         ],
       });
     }
@@ -1586,7 +1609,7 @@ describe('TevuConfigSchema', () => {
       { form: 'a command string', run: 'npm test' },
       { form: 'an executable and arguments', run: ['npm', 'test'] as [string, ...string[]] },
     ])('accepts $form', ({ run }) => {
-      const config = buildConfigWithDoneCheck(buildCommandCheck({ run }));
+      const config = buildConfigWithDoneCheck(buildTestsPassCheck({ run }));
 
       const accepted = expectSchemaAcceptance(config);
 
@@ -1595,7 +1618,7 @@ describe('TevuConfigSchema', () => {
 
     it('keeps a command string exactly as written', () => {
       const run = '  CI=1 npm test -- --run | tee "out log" && echo "a: #b"  ';
-      const config = buildConfigWithDoneCheck(buildCommandCheck({ run }));
+      const config = buildConfigWithDoneCheck(buildTestsPassCheck({ run }));
 
       const accepted = expectSchemaAcceptance(config);
 
@@ -1609,7 +1632,7 @@ describe('TevuConfigSchema', () => {
       { description: 'a number', run: 42 },
     ])('rejects $description with one finding at run', ({ run }) => {
       const config = buildConfigWithDoneCheck(
-        buildCommandCheck({ run: run as unknown as [string, ...string[]] }),
+        buildTestsPassCheck({ run: run as unknown as [string, ...string[]] }),
       );
 
       expect(expectSchemaRejection(config)).toEqual([
@@ -1619,7 +1642,7 @@ describe('TevuConfigSchema', () => {
 
     it('still rejects an unknown check field', () => {
       const config = buildConfigWithDoneCheck({
-        ...buildCommandCheck({ run: 'npm test' }),
+        ...buildTestsPassCheck({ run: 'npm test' }),
         bogus: true,
       } as CheckInput);
 
@@ -1629,9 +1652,9 @@ describe('TevuConfigSchema', () => {
     });
 
     it('still rejects a command string in a repository setup command', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [
-          buildRepository({
+          buildSampleRepository({
             setup: {
               before_agent: ['npm ci' as unknown as [string, ...string[]]],
               timeout: '1m',
@@ -1649,13 +1672,13 @@ describe('TevuConfigSchema', () => {
 
   describe('run.repeat', () => {
     it('defaults to 1 when omitted', () => {
-      const config = expectSchemaAcceptance(buildConfig());
+      const config = expectSchemaAcceptance(buildSampleConfig());
 
       expect(config.run.repeat).toBe(1);
     });
 
     it.each([3, 3.0, 100])('accepts %s', (value) => {
-      const config = buildConfig({ run: buildRunSettings({ repeat: value }) });
+      const config = buildSampleConfig({ run: buildSampleRunSettings({ repeat: value }) });
 
       expect(TevuConfigSchema.safeParse(config).success).toBe(true);
     });
@@ -1666,29 +1689,35 @@ describe('TevuConfigSchema', () => {
       { value: 1.5, message: 'Invalid input: expected int, received number' },
       { value: 101, message: 'Too big: expected number to be <=100' },
     ])('rejects $value with the message $message', ({ value, message }) => {
-      const config = buildConfig({ run: buildRunSettings({ repeat: value }) });
+      const config = buildSampleConfig({ run: buildSampleRunSettings({ repeat: value }) });
 
       expect(expectSchemaRejection(config)).toContainEqual({ path: 'run.repeat', message });
     });
 
     it('rejects the string "3"', () => {
-      const config = buildConfig({ run: buildRunSettings({ repeat: '3' as unknown as number }) });
+      const config = buildSampleConfig({
+        run: buildSampleRunSettings({ repeat: '3' as unknown as number }),
+      });
 
       expect(TevuConfigSchema.safeParse(config).success).toBe(false);
     });
 
     it('rejects null', () => {
-      const config = buildConfig({ run: buildRunSettings({ repeat: null as unknown as number }) });
+      const config = buildSampleConfig({
+        run: buildSampleRunSettings({ repeat: null as unknown as number }),
+      });
 
       expect(TevuConfigSchema.safeParse(config).success).toBe(false);
     });
 
     it('passes at the MAX_REPEAT bound of 100 and rejects 101 over it (AC-14)', () => {
       expect(
-        TevuConfigSchema.safeParse(buildConfig({ run: buildRunSettings({ repeat: 100 }) })).success,
+        TevuConfigSchema.safeParse(
+          buildSampleConfig({ run: buildSampleRunSettings({ repeat: 100 }) }),
+        ).success,
       ).toBe(true);
       expect(
-        expectSchemaRejection(buildConfig({ run: buildRunSettings({ repeat: 101 }) })),
+        expectSchemaRejection(buildSampleConfig({ run: buildSampleRunSettings({ repeat: 101 }) })),
       ).toContainEqual({ path: 'run.repeat', message: 'Too big: expected number to be <=100' });
     });
   });
@@ -1730,15 +1759,15 @@ describe('TevuConfigSchema', () => {
     function buildSetupRepository(
       setup: Partial<NonNullable<RepositoryDefinition['setup']>>,
     ): RepositoryDefinition {
-      return buildRepository({
+      return buildSampleRepository({
         setup: { before_agent: [['npm', 'ci']], timeout: '1m', env: [], ...setup },
       });
     }
 
     it('rejects an empty setup block for both R1 and R3', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [
-          buildRepository({ setup: {} as NonNullable<RepositoryDefinition['setup']> }),
+          buildSampleRepository({ setup: {} as NonNullable<RepositoryDefinition['setup']> }),
         ],
       });
 
@@ -1755,7 +1784,7 @@ describe('TevuConfigSchema', () => {
     });
 
     it('rejects a setup block whose phases are both absent or empty (R1)', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [buildSetupRepository({ before_agent: [], before_checks: [] })],
       });
 
@@ -1769,7 +1798,7 @@ describe('TevuConfigSchema', () => {
       { label: 'an empty command array', command: [] },
       { label: 'a command with an empty-string executable', command: [''] },
     ])('rejects $label (R2)', ({ command }) => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [
           buildSetupRepository({ before_agent: [command as unknown as [string, ...string[]]] }),
         ],
@@ -1781,9 +1810,9 @@ describe('TevuConfigSchema', () => {
     });
 
     it('rejects a setup block with no timeout (R3)', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [
-          buildRepository({
+          buildSampleRepository({
             setup: { before_agent: [['npm', 'ci']] } as unknown as NonNullable<
               RepositoryDefinition['setup']
             >,
@@ -1798,7 +1827,7 @@ describe('TevuConfigSchema', () => {
     });
 
     it('rejects a setup.env name also passed to the agent (R4)', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         agents: buildAgents({ secrets: ['AGENT_SECRET'] }),
         repositories: [buildSetupRepository({ env: ['AGENT_SECRET'] })],
       });
@@ -1814,7 +1843,7 @@ describe('TevuConfigSchema', () => {
       'rejects a setup.env name that is the Jira %s credential variable',
       (field) => {
         const variableName = field === 'email' ? 'JIRA_EMAIL' : 'JIRA_TOKEN';
-        const config = buildConfig({
+        const config = buildSampleConfig({
           trackers: {
             jira: { url: 'https://jira.example.com', email: '$JIRA_EMAIL', token: '$JIRA_TOKEN' },
           },
@@ -1829,7 +1858,7 @@ describe('TevuConfigSchema', () => {
     );
 
     it('rejects a duplicate name within setup.env', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [buildSetupRepository({ env: ['SHARED', 'SHARED'] })],
       });
 
@@ -1840,7 +1869,7 @@ describe('TevuConfigSchema', () => {
     });
 
     it('rejects a fixed environment name within setup.env', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [buildSetupRepository({ env: ['PATH'] })],
       });
 
@@ -1852,9 +1881,11 @@ describe('TevuConfigSchema', () => {
     });
 
     it('rejects setup: null', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [
-          buildRepository({ setup: null as unknown as NonNullable<RepositoryDefinition['setup']> }),
+          buildSampleRepository({
+            setup: null as unknown as NonNullable<RepositoryDefinition['setup']>,
+          }),
         ],
       });
 
@@ -1864,9 +1895,9 @@ describe('TevuConfigSchema', () => {
     });
 
     it('rejects an unknown key inside setup', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [
-          buildRepository({
+          buildSampleRepository({
             setup: {
               before_agent: [['npm', 'ci']],
               timeout: '1m',
@@ -1880,7 +1911,7 @@ describe('TevuConfigSchema', () => {
     });
 
     it('materializes before_agent: [] as an absent key when before_checks holds a command', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [buildSetupRepository({ before_agent: [], before_checks: [['npm', 'ci']] })],
       });
 
@@ -1896,7 +1927,7 @@ describe('TevuConfigSchema', () => {
 
   describe('github repository entry (AC-1, AC-15, V1)', () => {
     it('rejects a repository entry declaring neither path nor github', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [{ id: 'sample-repo' } as unknown as RepositoryDefinition],
       });
 
@@ -1907,7 +1938,7 @@ describe('TevuConfigSchema', () => {
     });
 
     it('rejects a repository entry declaring both path and github', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [
           {
             id: 'sample-repo',
@@ -1936,7 +1967,7 @@ describe('TevuConfigSchema', () => {
         github: 'https://[::1]/octo/app',
       },
     ])('rejects github with $description', ({ github }) => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [{ id: 'sample-repo', github } as unknown as RepositoryDefinition],
       });
 
@@ -1947,9 +1978,9 @@ describe('TevuConfigSchema', () => {
     });
 
     it('accepts the short form and materializes an absolute-clone-location path, lowercased', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [{ id: 'upstream', github: 'Octo/App' } as unknown as RepositoryDefinition],
-        tasks: [buildTaskDefinition({ repo: 'upstream' })],
+        tasks: [buildWriteReportTask({ repo: 'upstream' })],
       });
 
       const accepted = expectSchemaAcceptance(config);
@@ -1962,14 +1993,14 @@ describe('TevuConfigSchema', () => {
     });
 
     it('accepts a GitHub Enterprise Server URL naming its own host', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [
           {
             id: 'upstream',
             github: 'https://ghe.example.com/platform/api',
           } as unknown as RepositoryDefinition,
         ],
-        tasks: [buildTaskDefinition({ repo: 'upstream' })],
+        tasks: [buildWriteReportTask({ repo: 'upstream' })],
       });
 
       const accepted = expectSchemaAcceptance(config);
@@ -1978,7 +2009,7 @@ describe('TevuConfigSchema', () => {
     });
 
     it('keeps setup on a GitHub entry', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [
           {
             id: 'upstream',
@@ -1986,7 +2017,7 @@ describe('TevuConfigSchema', () => {
             setup: { before_agent: [['npm', 'ci']], timeout: '1m', env: [] },
           } as unknown as RepositoryDefinition,
         ],
-        tasks: [buildTaskDefinition({ repo: 'upstream' })],
+        tasks: [buildWriteReportTask({ repo: 'upstream' })],
       });
 
       const accepted = expectSchemaAcceptance(config);
@@ -1999,9 +2030,9 @@ describe('TevuConfigSchema', () => {
     });
 
     it('re-parses a materialized GitHub entry through repositoryInputOf to a deeply equal value', () => {
-      const config = buildConfig({
+      const config = buildSampleConfig({
         repositories: [{ id: 'upstream', github: 'octo/app' } as unknown as RepositoryDefinition],
-        tasks: [buildTaskDefinition({ repo: 'upstream' })],
+        tasks: [buildWriteReportTask({ repo: 'upstream' })],
       });
       const parsedOnce = expectSchemaAcceptance(config);
 
@@ -2043,7 +2074,7 @@ describe('loadConfig', () => {
       }),
     );
 
-    const config = expectOk(await loadConfig(configPath, configStore, undefined));
+    const config = unwrapOk(await loadConfig(configPath, configStore, undefined));
 
     expect(config.run.output_dir).toBe(join(tempDirectory, 'runs'));
     const opencode = config.agents['opencode'];
@@ -2060,7 +2091,7 @@ describe('loadConfig', () => {
       configYaml({ outputDirectory: './runs', repositoryPath: './repo', command: 'opencode' }),
     );
 
-    const config = expectOk(await loadConfig(configPath, configStore, undefined));
+    const config = unwrapOk(await loadConfig(configPath, configStore, undefined));
     const opencode = config.agents['opencode'];
     assert.isDefined(opencode, 'agents.opencode block');
 
@@ -2089,7 +2120,7 @@ describe('loadConfig', () => {
   ])('reports not-found for $description', async ({ buildPath }) => {
     const requestedPath = await buildPath(tempDirectory);
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(requestedPath, configStore, undefined),
       'ConfigReadError',
     );
@@ -2108,7 +2139,7 @@ describe('loadConfig', () => {
   ])('reports not-a-file for $description', async ({ buildPath }) => {
     const requestedPath = await buildPath(tempDirectory);
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(requestedPath, configStore, undefined),
       'ConfigReadError',
     );
@@ -2127,7 +2158,7 @@ describe('loadConfig', () => {
     await fs.chmod(requestedPath, 0o000);
 
     try {
-      const error = expectFailure(
+      const error = unwrapErrorOfKind(
         await loadConfig(requestedPath, configStore, undefined),
         'ConfigReadError',
       );
@@ -2153,7 +2184,7 @@ describe('loadConfig', () => {
       await fs.chmod(lockedDirectory, 0o000);
 
       try {
-        const error = expectFailure(
+        const error = unwrapErrorOfKind(
           await loadConfig(requestedPath, configStore, undefined),
           'ConfigReadError',
         );
@@ -2175,7 +2206,7 @@ describe('loadConfig', () => {
     await fs.symlink('loop-a', join(tempDirectory, 'loop-b'));
     const requestedPath = join(tempDirectory, 'loop-a');
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(requestedPath, configStore, undefined),
       'ConfigReadError',
     );
@@ -2194,7 +2225,7 @@ describe('loadConfig', () => {
       Object.assign(new Error('blocked'), { code: 'EPERM' }),
     );
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(requestedPath, configStore, undefined),
       'ConfigReadError',
     );
@@ -2213,7 +2244,7 @@ describe('loadConfig', () => {
       Object.assign(new Error('is a directory'), { code: 'EISDIR' }),
     );
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(requestedPath, configStore, undefined),
       'ConfigReadError',
     );
@@ -2230,7 +2261,7 @@ describe('loadConfig', () => {
     const requestedPath = join(tempDirectory, 'tevu.yaml');
     vi.mocked(fs.stat).mockRejectedValueOnce('boom');
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(requestedPath, configStore, undefined),
       'ConfigReadError',
     );
@@ -2246,7 +2277,7 @@ describe('loadConfig', () => {
   it('reports a ConfigParseError with a line identifier for malformed YAML', async () => {
     const configPath = await writeConfigFile('version: 1\nbroken: [1, 2');
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(configPath, configStore, undefined),
       'ConfigParseError',
     );
@@ -2260,7 +2291,7 @@ describe('loadConfig', () => {
   it('reports ConfigParseError when YAML aliases cannot be resolved', async () => {
     const configPath = await writeConfigFile('m:\n  <<: *missing\n');
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(configPath, configStore, undefined),
       'ConfigParseError',
     );
@@ -2273,7 +2304,7 @@ describe('loadConfig', () => {
   it('reports field identifiers for schema violations', async () => {
     const configPath = await writeConfigFile('version: 2\n');
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(configPath, configStore, undefined),
       'ConfigValidationError',
     );
@@ -2289,7 +2320,7 @@ describe('loadConfig', () => {
       `${configYaml({ outputDirectory: './runs', repositoryPath: './repo', command: 'opencode' })}\nunknownSection: {}\n`,
     );
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(configPath, configStore, undefined),
       'ConfigValidationError',
     );
@@ -2311,7 +2342,7 @@ describe('loadConfig', () => {
       }),
     );
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(configPath, configStore, undefined),
       'ConfigValidationError',
     );
@@ -2332,7 +2363,7 @@ describe('loadConfig', () => {
       configYaml({ outputDirectory: './runs', repositoryPath: './runs/repo', command: 'opencode' }),
     );
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(configPath, configStore, undefined),
       'ConfigValidationError',
     );
@@ -2354,7 +2385,7 @@ describe('loadConfig', () => {
       configYaml({ outputDirectory: './runs-link', repositoryPath: './repo', command: 'opencode' }),
     );
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(configPath, configStore, undefined),
       'ConfigValidationError',
     );
@@ -2379,7 +2410,7 @@ describe('loadConfig', () => {
         }),
       );
 
-      const error = expectFailure(
+      const error = unwrapErrorOfKind(
         await loadConfig(configPath, configStore, undefined),
         'ConfigValidationError',
       );
@@ -2404,7 +2435,7 @@ describe('loadConfig', () => {
       );
       const root = join(tempDirectory, 'cache');
 
-      const config = expectOk(await loadConfig(configPath, configStore, root));
+      const config = unwrapOk(await loadConfig(configPath, configStore, root));
 
       expect(config.repositories[0]).toEqual({
         id: 'sample-repo',
@@ -2424,7 +2455,7 @@ describe('loadConfig', () => {
         }),
       );
 
-      const error = expectFailure(
+      const error = unwrapErrorOfKind(
         await loadConfig(configPath, configStore, root),
         'ConfigValidationError',
       );
@@ -2450,7 +2481,7 @@ describe('loadConfig', () => {
         }),
       );
 
-      const error = expectFailure(
+      const error = unwrapErrorOfKind(
         await loadConfig(configPath, configStore, root),
         'ConfigValidationError',
       );
@@ -2475,7 +2506,7 @@ describe('loadConfig', () => {
         }).replace('    checks:\n', '    checks:\n      overlay: ./cache/hidden-checks\n'),
       );
 
-      const error = expectFailure(
+      const error = unwrapErrorOfKind(
         await loadConfig(configPath, configStore, root),
         'ConfigValidationError',
       );
@@ -2492,7 +2523,7 @@ describe('loadConfig', () => {
         configYaml({ outputDirectory: './runs', repositoryPath: './cache', command: 'opencode' }),
       );
 
-      const config = expectOk(await loadConfig(configPath, configStore, root));
+      const config = unwrapOk(await loadConfig(configPath, configStore, root));
 
       expect(config.repositories[0]?.path).toBe(root);
     });
@@ -2508,10 +2539,10 @@ describe('loadConfig', () => {
       title: 'Export table as CSV',
       body: 'Users need an export button',
     };
-    const config = buildConfig({
-      run: buildRunSettings({ output_dir: join(tempDirectory, 'artifacts') }),
-      repositories: [buildRepository({ path: join(tempDirectory, 'repo') })],
-      tasks: [buildTaskDefinition({ source })],
+    const config = buildSampleConfig({
+      run: buildSampleRunSettings({ output_dir: join(tempDirectory, 'artifacts') }),
+      repositories: [buildSampleRepository({ path: join(tempDirectory, 'repo') })],
+      tasks: [buildWriteReportTask({ source })],
     });
     const configStore = createConfigStore({ redact: (text) => text });
     const { renderConfigDocument } = await import('./document');
@@ -2924,7 +2955,7 @@ describe('ConfigStore.replaceText permission preservation', () => {
 
 describe('canonicalConfigSerialization', () => {
   it('produces identical output for equivalent configurations with different key insertion order', () => {
-    const ordered = expectSchemaAcceptance(buildConfig());
+    const ordered = expectSchemaAcceptance(buildSampleConfig());
     const reordered = {
       tasks: ordered.tasks,
       models: ordered.models,
@@ -2945,7 +2976,7 @@ describe('canonicalConfigSerialization', () => {
 
   it('serializes environment variable names without any environment values', () => {
     const config = expectSchemaAcceptance(
-      buildConfig({ agents: buildAgents({ secrets: ['SYNTHETIC_OC_VAR'] }) }),
+      buildSampleConfig({ agents: buildAgents({ secrets: ['SYNTHETIC_OC_VAR'] }) }),
     );
 
     const serialized = canonicalConfigSerialization(config);
@@ -2991,7 +3022,7 @@ describe('createTask', () => {
     const dependencies = buildTaskDependencies();
 
     const input = buildTaskWizardInput();
-    const task = expectOk(await createTask(input, dependencies));
+    const task = unwrapOk(await createTask(input, dependencies));
 
     expect(task.id).toBe('new-task');
     expect(task.repo).toBe('sample-repo');
@@ -3003,7 +3034,7 @@ describe('createTask', () => {
   });
 
   it("registers every agent block's secrets and the Jira token as secret variable names", async () => {
-    const config = buildConfig({
+    const config = buildSampleConfig({
       agents: buildAgents({ secrets: ['OC_API_KEY'] }),
       trackers: {
         jira: { url: 'https://jira.example.com', email: '$JIRA_EMAIL', token: '$JIRA_TOKEN' },
@@ -3027,12 +3058,12 @@ describe('createTask', () => {
 
   it('pins the task to a newly added repository when one is supplied', async () => {
     const dependencies = buildTaskDependencies();
-    const newRepository = buildRepository({ id: 'extra-repo', path: '/repos/extra' });
+    const newRepository = buildSampleRepository({ id: 'extra-repo', path: '/repos/extra' });
 
-    const task = expectOk(
+    const task = unwrapOk(
       await createTask(
         buildTaskWizardInput({
-          task: buildTaskDefinition({ id: 'new-task', repo: 'extra-repo' }),
+          task: buildWriteReportTask({ id: 'new-task', repo: 'extra-repo' }),
           newRepository,
         }),
         dependencies,
@@ -3046,11 +3077,11 @@ describe('createTask', () => {
 
   it('rejects a repo that matches no configured or new repository', async () => {
     const input = buildTaskWizardInput({
-      task: buildTaskDefinition({ id: 'new-task', repo: 'ghost' }),
+      task: buildWriteReportTask({ id: 'new-task', repo: 'ghost' }),
     });
     const dependencies = buildTaskDependencies();
 
-    const error = expectFailure(await createTask(input, dependencies), 'ConfigValidationError');
+    const error = unwrapErrorOfKind(await createTask(input, dependencies), 'ConfigValidationError');
 
     expect(error.findings).toContainEqual({
       severity: 'error',
@@ -3065,7 +3096,7 @@ describe('createTask', () => {
     cancellation.abort();
     const dependencies = buildTaskDependencies({ cancellation: cancellation.signal });
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await createTask(buildTaskWizardInput(), dependencies),
       'CancellationError',
     );
@@ -3089,7 +3120,7 @@ describe('createTask', () => {
       }),
     });
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await createTask(buildTaskWizardInput(), dependencies),
       'SourceMaterializationError',
     );
@@ -3113,7 +3144,7 @@ describe('createTask', () => {
       configStore: buildConfigStore({ readText: vi.fn(async () => readFailure) }),
     });
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await createTask(buildTaskWizardInput(), dependencies),
       'ConfigReadError',
     );
@@ -3125,9 +3156,9 @@ describe('createTask', () => {
   it('rejects a candidate that violates the schema and writes nothing', async () => {
     const dependencies = buildTaskDependencies();
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await createTask(
-        buildTaskWizardInput({ task: buildTaskDefinition({ id: 'write-report' }) }),
+        buildTaskWizardInput({ task: buildWriteReportTask({ id: 'write-report' }) }),
         dependencies,
       ),
       'ConfigValidationError',
@@ -3141,19 +3172,19 @@ describe('createTask', () => {
 
   it('bootstraps a new configuration when the file is missing and answers were captured', async () => {
     const bootstrap: Omit<TevuConfigInput, 'version' | 'tasks'> = {
-      run: buildRunSettings(),
+      run: buildSampleRunSettings(),
       agents: buildAgents(),
-      repositories: [buildRepository()],
+      repositories: [buildSampleRepository()],
       models: [
-        buildModel(),
-        buildModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max' }),
+        buildAlphaModel(),
+        buildAlphaModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max' }),
       ],
     };
     const dependencies = buildTaskDependencies({
       configStore: buildConfigStore({ exists: vi.fn(async () => false) }),
     });
 
-    const task = expectOk(await createTask(buildTaskWizardInput({ bootstrap }), dependencies));
+    const task = unwrapOk(await createTask(buildTaskWizardInput({ bootstrap }), dependencies));
 
     expect(task.id).toBe('new-task');
     const replaceText = vi.mocked(dependencies.configStore.replaceText);
@@ -3164,12 +3195,12 @@ describe('createTask', () => {
   it('resolveBootstrapModelCallConfig matches what loadConfig resolves for the file createTask writes (P10)', async () => {
     const configPath = '/tmp/tevu/tevu.yaml';
     const bootstrap: Omit<TevuConfigInput, 'version' | 'tasks'> = {
-      run: buildRunSettings(),
+      run: buildSampleRunSettings(),
       agents: buildAgents(),
-      repositories: [buildRepository()],
+      repositories: [buildSampleRepository()],
       models: [
-        buildModel(),
-        buildModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max' }),
+        buildAlphaModel(),
+        buildAlphaModel({ id: 'beta', model: 'anthropic/claude-4', effort: 'max' }),
       ],
       roles: {
         criteria: buildModelRole({ model: 'openai/criteria-model', effort: 'high' }),
@@ -3197,7 +3228,7 @@ describe('createTask', () => {
     }
     const text = writtenText;
 
-    const loaded = expectOk(
+    const loaded = unwrapOk(
       await loadConfig(
         configPath,
         buildConfigStore({ readText: vi.fn(async () => ({ ok: true as const, value: text })) }),
@@ -3217,7 +3248,7 @@ describe('createTask', () => {
       configStore: buildConfigStore({ exists: vi.fn(async () => false) }),
     });
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await createTask(buildTaskWizardInput(), dependencies),
       'ConfigValidationError',
     );
@@ -3239,7 +3270,7 @@ describe('createTask', () => {
       configStore: buildConfigStore({ replaceText: vi.fn(async () => replaceFailure) }),
     });
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await createTask(buildTaskWizardInput(), dependencies),
       'ArtifactError',
     );
@@ -3252,7 +3283,7 @@ describe('createTask', () => {
     const FULL_HASH = '0123456789abcdef0123456789abcdef01234567';
 
     function buildPullRequestTask(overrides: Partial<TaskInput> = {}): TaskInput {
-      return buildTaskDefinition({
+      return buildWriteReportTask({
         id: 'new-task',
         base_commit: FULL_HASH,
         reference: { kind: 'pull-request', identifier: 'octo/repo#42', commits: [FULL_HASH] },
@@ -3267,7 +3298,7 @@ describe('createTask', () => {
         git: buildGit({ validateSource, resolveCommit }),
       });
 
-      const task = expectOk(
+      const task = unwrapOk(
         await createTask(buildTaskWizardInput({ task: buildPullRequestTask() }), dependencies),
       );
 
@@ -3283,7 +3314,7 @@ describe('createTask', () => {
       const resolveCommit = vi.fn(async () => ({ kind: 'no-repository' as const }));
       const dependencies = buildTaskDependencies({ git: buildGit({ resolveCommit }) });
 
-      const task = expectOk(
+      const task = unwrapOk(
         await createTask(buildTaskWizardInput({ task: buildPullRequestTask() }), dependencies),
       );
 
@@ -3305,7 +3336,7 @@ describe('createTask', () => {
         git: buildGit({ validateSource, resolveCommit }),
       });
 
-      const task = expectOk(
+      const task = unwrapOk(
         await createTask(
           buildTaskWizardInput({ task: buildPullRequestTask({ base_commit: 'HEAD' }) }),
           dependencies,
@@ -3342,7 +3373,7 @@ describe('createTask', () => {
         managedCloneRoot,
       });
 
-      const task = expectOk(await createTask(buildTaskWizardInput(), dependencies));
+      const task = unwrapOk(await createTask(buildTaskWizardInput(), dependencies));
 
       expect(task.repo).toBe('sample-repo');
       expect(validateSource).toHaveBeenCalledExactlyOnceWith(
@@ -3361,25 +3392,27 @@ describe('validateConfig', () => {
   it('returns a valid report with the probed capability report when everything passes', async () => {
     const dependencies = buildValidationDependencies();
 
-    const report = expectOk(
-      await validateConfig(expectSchemaAcceptance(buildConfig()), dependencies),
+    const report = unwrapOk(
+      await validateConfig(expectSchemaAcceptance(buildSampleConfig()), dependencies),
     );
 
     expect(report.valid).toBe(true);
     expect(report.findings).toEqual([]);
-    expect(report.capabilities).toEqual({ opencode: buildAgentCapabilityReport('opencode') });
+    expect(report.capabilities).toEqual({
+      opencode: buildCapabilityReportFor('opencode'),
+    });
   });
 
   it('retains every independent finding instead of stopping at the first failure', async () => {
     const config = expectSchemaAcceptance(
-      buildConfig({
+      buildSampleConfig({
         tasks: [
-          buildTaskDefinition({ id: 'broken-ref' }),
-          buildTaskDefinition({
+          buildWriteReportTask({ id: 'broken-ref' }),
+          buildWriteReportTask({
             id: 'write-report',
             checks: {
-              acceptance: [buildManualCheck()],
-              done: [buildCommandCheck({ env: ['EVAL_TOKEN'] })],
+              acceptance: [buildManualApiCheck()],
+              done: [buildTestsPassCheck({ env: ['EVAL_TOKEN'] })],
             },
           }),
         ],
@@ -3446,7 +3479,7 @@ describe('validateConfig', () => {
     const outcome = await validateConfig(invalidConfig, dependencies);
 
     expect(outcome.ok).toBe(true);
-    const report = expectOk(outcome);
+    const report = unwrapOk(outcome);
     expect(report.valid).toBe(false);
     expect(report.findings.map((finding) => finding.identifier)).toEqual([
       'tasks.0.repo',
@@ -3465,8 +3498,8 @@ describe('validateConfig', () => {
   it('reports a finding naming the agent when no adapter is registered for it, without probing', async () => {
     const dependencies = buildValidationDependencies({ agents: new Map() });
 
-    const report = expectOk(
-      await validateConfig(expectSchemaAcceptance(buildConfig()), dependencies),
+    const report = unwrapOk(
+      await validateConfig(expectSchemaAcceptance(buildSampleConfig()), dependencies),
     );
 
     expect(report.valid).toBe(false);
@@ -3498,8 +3531,8 @@ describe('validateConfig', () => {
       ]),
     });
 
-    const report = expectOk(
-      await validateConfig(expectSchemaAcceptance(buildConfig()), dependencies),
+    const report = unwrapOk(
+      await validateConfig(expectSchemaAcceptance(buildSampleConfig()), dependencies),
     );
 
     expect(report.valid).toBe(false);
@@ -3513,11 +3546,11 @@ describe('validateConfig', () => {
 
   it('surfaces schema findings when revalidating an invalid configuration', async () => {
     const config = {
-      ...expectSchemaAcceptance(buildConfig()),
-      models: [expectSchemaAcceptance(buildConfig()).models[0]!],
+      ...expectSchemaAcceptance(buildSampleConfig()),
+      models: [expectSchemaAcceptance(buildSampleConfig()).models[0]!],
     };
 
-    const report = expectOk(await validateConfig(config, buildValidationDependencies()));
+    const report = unwrapOk(await validateConfig(config, buildValidationDependencies()));
 
     expect(report.findings.map((finding) => finding.identifier)).toContain('models');
     expect(report.valid).toBe(false);
@@ -3525,7 +3558,7 @@ describe('validateConfig', () => {
 
   it('checks every agent and check variable by name and skips the snapshot when one is missing', async () => {
     const config = expectSchemaAcceptance(
-      buildConfig({
+      buildSampleConfig({
         agents: buildAgents({ env: ['OC_VAR'] }),
         trackers: {
           jira: { url: 'https://jira.example.com', email: '$JIRA_EMAIL', token: '$JIRA_TOKEN' },
@@ -3538,7 +3571,7 @@ describe('validateConfig', () => {
       }),
     });
 
-    const report = expectOk(await validateConfig(config, dependencies));
+    const report = unwrapOk(await validateConfig(config, dependencies));
 
     expect(report.findings.map((finding) => finding.identifier)).toEqual(['environment.OC_VAR']);
     expect(dependencies.environments.snapshotParent).not.toHaveBeenCalled();
@@ -3559,8 +3592,8 @@ describe('validateConfig', () => {
       }),
     });
 
-    const report = expectOk(
-      await validateConfig(expectSchemaAcceptance(buildConfig()), dependencies),
+    const report = unwrapOk(
+      await validateConfig(expectSchemaAcceptance(buildSampleConfig()), dependencies),
     );
 
     expect(report.findings).toContainEqual({
@@ -3572,16 +3605,16 @@ describe('validateConfig', () => {
   });
 
   it('validates each distinct repository-and-commit pair once', async () => {
-    const first = buildTaskDefinition({ id: 'task-one' });
-    const second = buildTaskDefinition({ id: 'task-two' });
-    const third = buildTaskDefinition({
+    const first = buildWriteReportTask({ id: 'task-one' });
+    const second = buildWriteReportTask({ id: 'task-two' });
+    const third = buildWriteReportTask({
       id: 'task-three',
       base_commit: 'ffffff0123456789abcdef0123456789abcdef01',
     });
     const dependencies = buildValidationDependencies();
 
-    const config = expectSchemaAcceptance(buildConfig({ tasks: [first, second, third] }));
-    const report = expectOk(await validateConfig(config, dependencies));
+    const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [first, second, third] }));
+    const report = unwrapOk(await validateConfig(config, dependencies));
 
     expect(report.valid).toBe(true);
     expect(vi.mocked(dependencies.git.validateSource)).toHaveBeenCalledTimes(2);
@@ -3597,12 +3630,12 @@ describe('validateConfig', () => {
 
   it('rejects a task whose prompt names its resolved base commit, including one resolved from the cache', async () => {
     const resolvedCommit = 'abcdef0123456789abcdef0123456789abcdef01';
-    const first = buildTaskDefinition({
+    const first = buildWriteReportTask({
       id: 'task-one',
       base_commit: 'main',
       prompt: 'unrelated fedcba9876543210fedcba9876543210fedcba98 and deadbeef',
     });
-    const second = buildTaskDefinition({
+    const second = buildWriteReportTask({
       id: 'task-two',
       base_commit: 'main',
       prompt: 'the agent should pin the commit ABCDEF0 for this task',
@@ -3621,8 +3654,8 @@ describe('validateConfig', () => {
       }),
     });
 
-    const config = expectSchemaAcceptance(buildConfig({ tasks: [first, second] }));
-    const report = expectOk(await validateConfig(config, dependencies));
+    const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [first, second] }));
+    const report = unwrapOk(await validateConfig(config, dependencies));
 
     expect(report.valid).toBe(false);
     expect(report.findings).toEqual([
@@ -3636,12 +3669,12 @@ describe('validateConfig', () => {
 
   it('rejects a task whose prompt names its resolved base commit on the first, uncached lookup', async () => {
     const resolvedCommit = 'abcdef0123456789abcdef0123456789abcdef01';
-    const first = buildTaskDefinition({
+    const first = buildWriteReportTask({
       id: 'task-one',
       base_commit: 'main',
       prompt: 'the agent should pin the commit ABCDEF0 for this task',
     });
-    const second = buildTaskDefinition({
+    const second = buildWriteReportTask({
       id: 'task-two',
       base_commit: 'main',
       prompt: 'unrelated fedcba9876543210fedcba9876543210fedcba98 and deadbeef',
@@ -3660,8 +3693,8 @@ describe('validateConfig', () => {
       }),
     });
 
-    const config = expectSchemaAcceptance(buildConfig({ tasks: [first, second] }));
-    const report = expectOk(await validateConfig(config, dependencies));
+    const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [first, second] }));
+    const report = unwrapOk(await validateConfig(config, dependencies));
 
     expect(report.valid).toBe(false);
     expect(report.findings).toEqual([
@@ -3678,7 +3711,7 @@ describe('validateConfig', () => {
     const REFERENCE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
 
     function buildTaskWithReference(overrides: Partial<TaskInput> = {}): TaskInput {
-      return buildTaskDefinition({
+      return buildWriteReportTask({
         reference: { kind: 'commit', identifier: 'HEAD~3', commits: [REFERENCE_COMMIT] },
         ...overrides,
       });
@@ -3710,8 +3743,8 @@ describe('validateConfig', () => {
         resolveCommit: vi.fn(async () => ({ kind: 'found' as const, commit: REFERENCE_COMMIT })),
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(false);
       expect(report.findings).toEqual([
@@ -3730,8 +3763,8 @@ describe('validateConfig', () => {
         isAncestor: vi.fn(async () => false),
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(false);
       expect(report.findings).toEqual([
@@ -3750,8 +3783,8 @@ describe('validateConfig', () => {
         isAncestor: vi.fn(async () => null),
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(false);
       expect(report.findings).toEqual([
@@ -3771,8 +3804,8 @@ describe('validateConfig', () => {
         isAncestor,
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(true);
       expect(report.findings).toEqual([
@@ -3796,8 +3829,8 @@ describe('validateConfig', () => {
         isAncestor: vi.fn(async () => true),
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(false);
       expect(report.findings).toEqual([
@@ -3816,7 +3849,7 @@ describe('validateConfig', () => {
     const MERGE_COMMIT = '1111111111111111111111111111111111111111';
 
     function buildTaskWithReference(overrides: Partial<TaskInput> = {}): TaskInput {
-      return buildTaskDefinition({
+      return buildWriteReportTask({
         reference: { kind: 'pull-request', identifier: 'octo/app#128', commits: [PR_COMMIT] },
         ...overrides,
       });
@@ -3849,8 +3882,8 @@ describe('validateConfig', () => {
         isAncestor: vi.fn(async () => true),
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(false);
       expect(report.findings).toEqual([
@@ -3869,8 +3902,8 @@ describe('validateConfig', () => {
         isAncestor: vi.fn(async () => false),
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(true);
       expect(report.findings).toEqual([]);
@@ -3890,8 +3923,8 @@ describe('validateConfig', () => {
         }),
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(false);
       expect(report.findings).toContainEqual({
@@ -3919,8 +3952,8 @@ describe('validateConfig', () => {
         }),
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(validateSource).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({ id: 'sample-repo' }),
@@ -3952,8 +3985,8 @@ describe('validateConfig', () => {
         isAncestor,
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(false);
       expect(report.findings).toEqual([
@@ -3985,8 +4018,8 @@ describe('validateConfig', () => {
         }),
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.findings).toContainEqual({
         severity: 'error',
@@ -4005,8 +4038,8 @@ describe('validateConfig', () => {
         isAncestor: vi.fn(async () => false),
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(false);
       expect(report.findings).toContainEqual({
@@ -4030,8 +4063,8 @@ describe('validateConfig', () => {
         resolveCommit: vi.fn(async () => ({ kind: 'not-found' as const })),
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.findings).toContainEqual({
         severity: 'warning',
@@ -4060,8 +4093,8 @@ describe('validateConfig', () => {
         isAncestor: vi.fn(async () => false),
       });
 
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [task] }));
-      const report = expectOk(await validateConfig(config, dependencies));
+      const config = expectSchemaAcceptance(buildSampleConfig({ tasks: [task] }));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.findings).toContainEqual({
         severity: 'warning',
@@ -4092,7 +4125,7 @@ describe('validateConfig', () => {
       repositoryOverrides: Partial<RepositoryDefinition> = {},
     ): TevuConfig {
       return {
-        ...expectSchemaAcceptance(buildConfig({ tasks })),
+        ...expectSchemaAcceptance(buildSampleConfig({ tasks })),
         repositories: [buildGitHubRepository(repositoryOverrides)],
       };
     }
@@ -4100,9 +4133,9 @@ describe('validateConfig', () => {
     it('reports a missing-clone finding and skips commit resolution entirely', async () => {
       const inspectClone = vi.fn(async () => 'missing' as const);
       const dependencies = buildValidationDependencies({ clones: { inspectClone } });
-      const config = buildGitHubTaskConfig([buildTaskDefinition()]);
+      const config = buildGitHubTaskConfig([buildWriteReportTask()]);
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(false);
       expect(report.findings).toContainEqual({
@@ -4118,9 +4151,9 @@ describe('validateConfig', () => {
     it('reports a not-a-repository finding naming the removal-and-reclone hint', async () => {
       const inspectClone = vi.fn(async () => 'not-a-repository' as const);
       const dependencies = buildValidationDependencies({ clones: { inspectClone } });
-      const config = buildGitHubTaskConfig([buildTaskDefinition()]);
+      const config = buildGitHubTaskConfig([buildWriteReportTask()]);
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.findings).toContainEqual({
         severity: 'error',
@@ -4133,8 +4166,8 @@ describe('validateConfig', () => {
       const inspectClone = vi.fn(async () => 'missing' as const);
       const dependencies = buildValidationDependencies({ clones: { inspectClone } });
       const config = buildGitHubTaskConfig([
-        buildTaskDefinition({ id: 'task-one' }),
-        buildTaskDefinition({ id: 'task-two' }),
+        buildWriteReportTask({ id: 'task-one' }),
+        buildWriteReportTask({ id: 'task-two' }),
       ]);
 
       await validateConfig(config, dependencies);
@@ -4154,9 +4187,9 @@ describe('validateConfig', () => {
           })),
         }),
       });
-      const config = buildGitHubTaskConfig([buildTaskDefinition()]);
+      const config = buildGitHubTaskConfig([buildWriteReportTask()]);
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(true);
       expect(report.findings).toEqual([]);
@@ -4166,7 +4199,7 @@ describe('validateConfig', () => {
     it("names the tevu run --dry-run fetch when a pull-request task's full-hash base is not in the clone", async () => {
       const BASE = 'abcdef0123456789abcdef0123456789abcdef01';
       const PR_COMMIT = '0123456789abcdef0123456789abcdef01234567';
-      const task = buildTaskDefinition({
+      const task = buildWriteReportTask({
         base_commit: BASE,
         reference: { kind: 'pull-request', identifier: 'octo/app#128', commits: [PR_COMMIT] },
       });
@@ -4184,7 +4217,7 @@ describe('validateConfig', () => {
       });
       const config = buildGitHubTaskConfig([task]);
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.findings).toContainEqual({
         severity: 'error',
@@ -4195,7 +4228,7 @@ describe('validateConfig', () => {
     });
 
     it('names the tevu run --dry-run fetch when a branch base of a task without a reference is not in the clone', async () => {
-      const task = buildTaskDefinition({ base_commit: 'release-2' });
+      const task = buildWriteReportTask({ base_commit: 'release-2' });
       const validateSource = vi.fn();
       const dependencies = buildValidationDependencies({
         clones: { inspectClone: vi.fn(async () => 'repository' as const) },
@@ -4206,7 +4239,7 @@ describe('validateConfig', () => {
       });
       const config = buildGitHubTaskConfig([task]);
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.findings).toContainEqual({
         severity: 'error',
@@ -4220,7 +4253,7 @@ describe('validateConfig', () => {
     it('appends the tevu run --dry-run hint to the reference-commits-unavailable warning', async () => {
       const BASE = 'abcdef0123456789abcdef0123456789abcdef01';
       const REFERENCE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
-      const task = buildTaskDefinition({
+      const task = buildWriteReportTask({
         base_commit: BASE,
         reference: { kind: 'commit', identifier: 'HEAD~3', commits: [REFERENCE_COMMIT] },
       });
@@ -4245,7 +4278,7 @@ describe('validateConfig', () => {
       });
       const config = buildGitHubTaskConfig([task]);
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.findings).toContainEqual({
         severity: 'warning',
@@ -4259,7 +4292,7 @@ describe('validateConfig', () => {
       const BASE = 'abcdef0123456789abcdef0123456789abcdef01';
       const PR_COMMIT = '0123456789abcdef0123456789abcdef01234567';
       const MERGE_COMMIT = '1111111111111111111111111111111111111111';
-      const task = buildTaskDefinition({
+      const task = buildWriteReportTask({
         base_commit: BASE,
         reference: {
           kind: 'pull-request',
@@ -4290,7 +4323,7 @@ describe('validateConfig', () => {
       });
       const config = buildGitHubTaskConfig([task]);
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.findings).toContainEqual({
         severity: 'warning',
@@ -4304,19 +4337,21 @@ describe('validateConfig', () => {
     it('probes the single configured agent once even when both model roles declare it', async () => {
       const probe = vi.fn(async () => ({
         ok: true as const,
-        value: buildAgentCapabilityReport('opencode'),
+        value: buildCapabilityReportFor('opencode'),
       }));
       const dependencies = buildValidationDependencies({
         agents: new Map([['opencode', buildFakeAgentAdapter({ probe })]]),
       });
       const config = expectSchemaAcceptance(
-        buildConfig({ roles: { criteria: buildModelRole(), grader: buildModelRole() } }),
+        buildSampleConfig({ roles: { criteria: buildModelRole(), grader: buildModelRole() } }),
       );
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(probe).toHaveBeenCalledTimes(1);
-      expect(report.capabilities).toEqual({ opencode: buildAgentCapabilityReport('opencode') });
+      expect(report.capabilities).toEqual({
+        opencode: buildCapabilityReportFor('opencode'),
+      });
     });
 
     it('yields the same findings for a probe failure whether or not model roles are declared', async () => {
@@ -4339,15 +4374,15 @@ describe('validateConfig', () => {
             ],
           ]),
         });
-      const withoutRoles = expectSchemaAcceptance(buildConfig());
+      const withoutRoles = expectSchemaAcceptance(buildSampleConfig());
       const withRoles = expectSchemaAcceptance(
-        buildConfig({ roles: { criteria: buildModelRole(), grader: buildModelRole() } }),
+        buildSampleConfig({ roles: { criteria: buildModelRole(), grader: buildModelRole() } }),
       );
 
-      const reportWithoutRoles = expectOk(
+      const reportWithoutRoles = unwrapOk(
         await validateConfig(withoutRoles, buildFailingDependencies()),
       );
-      const reportWithRoles = expectOk(await validateConfig(withRoles, buildFailingDependencies()));
+      const reportWithRoles = unwrapOk(await validateConfig(withRoles, buildFailingDependencies()));
 
       expect(reportWithRoles.findings).toEqual(reportWithoutRoles.findings);
     });
@@ -4355,20 +4390,22 @@ describe('validateConfig', () => {
 
   describe('graded checks require roles.grader (P12)', () => {
     function buildGradedTaskDefinition(overrides: Partial<TaskInput> = {}): TaskInput {
-      return buildTaskDefinition({
+      return buildWriteReportTask({
         checks: {
           acceptance: [{ id: 'csv-content', description: 'The CSV looks right.' }],
-          done: [buildManualCheck()],
+          done: [buildManualApiCheck()],
         },
         ...overrides,
       });
     }
 
     it('yields the roles.grader finding naming the task when a graded check exists without the role', async () => {
-      const config = expectSchemaAcceptance(buildConfig({ tasks: [buildGradedTaskDefinition()] }));
+      const config = expectSchemaAcceptance(
+        buildSampleConfig({ tasks: [buildGradedTaskDefinition()] }),
+      );
       const dependencies = buildValidationDependencies();
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.valid).toBe(false);
       expect(report.findings).toContainEqual({
@@ -4381,7 +4418,7 @@ describe('validateConfig', () => {
 
     it('names every task with a graded check, in configuration order, joined by ", "', async () => {
       const config = expectSchemaAcceptance(
-        buildConfig({
+        buildSampleConfig({
           tasks: [
             buildGradedTaskDefinition({ id: 'first-task' }),
             buildGradedTaskDefinition({ id: 'second-task' }),
@@ -4390,7 +4427,7 @@ describe('validateConfig', () => {
       );
       const dependencies = buildValidationDependencies();
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.findings).toContainEqual({
         severity: 'error',
@@ -4402,23 +4439,23 @@ describe('validateConfig', () => {
 
     it('yields no roles.grader finding when the role is declared', async () => {
       const config = expectSchemaAcceptance(
-        buildConfig({
+        buildSampleConfig({
           tasks: [buildGradedTaskDefinition()],
           roles: { grader: buildModelRole() },
         }),
       );
       const dependencies = buildValidationDependencies();
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.findings.map((finding) => finding.identifier)).not.toContain('roles.grader');
     });
 
     it('yields no roles.grader finding when no task declares a graded check', async () => {
-      const config = expectSchemaAcceptance(buildConfig());
+      const config = expectSchemaAcceptance(buildSampleConfig());
       const dependencies = buildValidationDependencies();
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.findings.map((finding) => finding.identifier)).not.toContain('roles.grader');
     });
@@ -4447,7 +4484,7 @@ describe('the case-executable stage of validateConfig', () => {
       prerequisites: buildPrerequisites({ hasEnvironmentVariable: vi.fn(() => false) }),
     });
     const config = expectSchemaAcceptance(
-      buildConfig({ agents: buildAgents({ env: ['OC_VAR'] }) }),
+      buildSampleConfig({ agents: buildAgents({ env: ['OC_VAR'] }) }),
     );
 
     await validateConfig(config, dependencies);
@@ -4456,7 +4493,7 @@ describe('the case-executable stage of validateConfig', () => {
   });
 
   it('probes once per distinct probe key, skipping a relative-path executable, an unnamed repository, and non-command checks, and reports a parent-only key at every location sharing it', async () => {
-    const pathRepository = buildRepository({
+    const pathRepository = buildSampleRepository({
       id: 'path-repo',
       path: '/tmp/tevu/path-repo',
       setup: {
@@ -4471,32 +4508,36 @@ describe('the case-executable stage of validateConfig', () => {
       path: '/cache/tevu/repositories/github.com/octo/app.git',
       setup: { before_agent: [['setup-tool']], timeout: '1m', env: ['SETUP_ENV'] },
     } as unknown as RepositoryDefinition;
-    const unusedRepository = buildRepository({
+    const unusedRepository = buildSampleRepository({
       id: 'unused-repo',
       path: '/tmp/tevu/unused-repo',
       setup: { before_agent: [['ghost-tool']], timeout: '1m', env: [] },
     });
-    const taskPath = buildTaskDefinition({
+    const taskPath = buildWriteReportTask({
       id: 'task-path',
       repo: 'path-repo',
       checks: {
         acceptance: [
-          buildCommandCheck({ id: 'check-path', run: ['setup-tool', 'arg2'], env: ['SETUP_ENV'] }),
+          buildTestsPassCheck({
+            id: 'check-path',
+            run: ['setup-tool', 'arg2'],
+            env: ['SETUP_ENV'],
+          }),
         ],
         done: [
-          buildManualCheck({ id: 'manual-done' }),
+          buildManualApiCheck({ id: 'manual-done' }),
           { id: 'graded-done', description: 'graded' },
         ],
       },
     });
-    const taskGithub = buildTaskDefinition({
+    const taskGithub = buildWriteReportTask({
       id: 'task-github',
       repo: 'github-repo',
       checks: {
         acceptance: [
-          buildCommandCheck({ id: 'check-github', run: ['setup-tool'], env: ['SETUP_ENV'] }),
+          buildTestsPassCheck({ id: 'check-github', run: ['setup-tool'], env: ['SETUP_ENV'] }),
         ],
-        done: [buildManualCheck({ id: 'manual-done-2' })],
+        done: [buildManualApiCheck({ id: 'manual-done-2' })],
       },
     });
     const withheldNames = [...GH_CREDENTIAL_ENVIRONMENT_VARIABLES, 'AGENT_SECRET'];
@@ -4541,7 +4582,7 @@ describe('the case-executable stage of validateConfig', () => {
     // shape directly, so it is spliced in afterward rather than parsed.
     const config: TevuConfig = {
       ...expectSchemaAcceptance(
-        buildConfig({
+        buildSampleConfig({
           agents: buildAgents({ secrets: ['AGENT_SECRET'], env: ['AGENT_ENV'] }),
           repositories: [pathRepository, unusedRepository],
           tasks: [taskPath],
@@ -4552,7 +4593,7 @@ describe('the case-executable stage of validateConfig', () => {
       tasks: [taskPath, taskGithub] as unknown as TaskDefinition[],
     };
 
-    const report = expectOk(await validateConfig(config, dependencies));
+    const report = unwrapOk(await validateConfig(config, dependencies));
 
     expect(dependencies.environments.snapshotParent).toHaveBeenCalledOnce();
     expect(probe).toHaveBeenCalledTimes(3);
@@ -4620,8 +4661,8 @@ describe('the case-executable stage of validateConfig', () => {
       caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
     });
 
-    const report = expectOk(
-      await validateConfig(expectSchemaAcceptance(buildConfig()), dependencies),
+    const report = unwrapOk(
+      await validateConfig(expectSchemaAcceptance(buildSampleConfig()), dependencies),
     );
 
     expect(report.valid).toBe(false);
@@ -4684,8 +4725,8 @@ describe('the case-executable stage of validateConfig', () => {
         caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
       });
 
-      const report = expectOk(
-        await validateConfig(expectSchemaAcceptance(buildConfig()), dependencies),
+      const report = unwrapOk(
+        await validateConfig(expectSchemaAcceptance(buildSampleConfig()), dependencies),
       );
 
       expect(report.findings).toContainEqual({
@@ -4728,10 +4769,10 @@ describe('the case-executable stage of validateConfig', () => {
       }),
     });
     const config = expectSchemaAcceptance(
-      buildConfig({ agents: buildAgents({ secrets: ['AGENT_SECRET_VALUE'] }) }),
+      buildSampleConfig({ agents: buildAgents({ secrets: ['AGENT_SECRET_VALUE'] }) }),
     );
 
-    const report = expectOk(await validateConfig(config, dependencies));
+    const report = unwrapOk(await validateConfig(config, dependencies));
 
     const messages = report.findings.map((finding) => finding.message).join('\n');
     expect(messages).not.toContain('sensitive-secret-9f2');
@@ -4740,9 +4781,9 @@ describe('the case-executable stage of validateConfig', () => {
 
   describe('directory-snapshot warnings', () => {
     function buildRepositoryConfig(): TevuConfigInput {
-      return buildConfig({
+      return buildSampleConfig({
         repositories: [
-          buildRepository({ setup: { before_agent: [['tool']], timeout: '1m', env: [] } }),
+          buildSampleRepository({ setup: { before_agent: [['tool']], timeout: '1m', env: [] } }),
         ],
       });
     }
@@ -4763,7 +4804,7 @@ describe('the case-executable stage of validateConfig', () => {
         caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
       });
 
-      const report = expectOk(
+      const report = unwrapOk(
         await validateConfig(expectSchemaAcceptance(buildRepositoryConfig()), dependencies),
       );
 
@@ -4792,7 +4833,7 @@ describe('the case-executable stage of validateConfig', () => {
         caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
       });
 
-      const report = expectOk(
+      const report = unwrapOk(
         await validateConfig(expectSchemaAcceptance(buildRepositoryConfig()), dependencies),
       );
 
@@ -4824,24 +4865,24 @@ describe('the case-executable stage of validateConfig', () => {
       const dependencies = buildValidationDependencies({
         caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
       });
-      const repository = buildRepository({
+      const repository = buildSampleRepository({
         setup: { before_agent: [['tool']], timeout: '1m', env: [] },
       });
       const config = expectSchemaAcceptance(
-        buildConfig({
+        buildSampleConfig({
           repositories: [repository],
           tasks: [
-            buildTaskDefinition({
+            buildWriteReportTask({
               checks: {
-                acceptance: [buildCommandCheck({ id: 'reuses-tool', run: ['tool'], env: [] })],
-                done: [buildManualCheck({ id: 'manual-done' })],
+                acceptance: [buildTestsPassCheck({ id: 'reuses-tool', run: ['tool'], env: [] })],
+                done: [buildManualApiCheck({ id: 'manual-done' })],
               },
             }),
           ],
         }),
       );
 
-      const report = expectOk(await validateConfig(config, dependencies));
+      const report = unwrapOk(await validateConfig(config, dependencies));
 
       expect(report.findings.filter((finding) => finding.severity === 'warning')).toEqual([
         {
@@ -4875,7 +4916,7 @@ describe('the case-executable stage of validateConfig', () => {
         caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
       });
 
-      const report = expectOk(
+      const report = unwrapOk(
         await validateConfig(expectSchemaAcceptance(buildRepositoryConfig()), dependencies),
       );
 
@@ -4901,7 +4942,7 @@ describe('the case-executable stage of validateConfig', () => {
         caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
       });
 
-      const report = expectOk(
+      const report = unwrapOk(
         await validateConfig(expectSchemaAcceptance(buildRepositoryConfig()), dependencies),
       );
 
@@ -4928,7 +4969,7 @@ describe('the case-executable stage of validateConfig', () => {
         caseExecutables: buildFakeCaseExecutablesAdapter({ probe }),
       });
 
-      const report = expectOk(
+      const report = unwrapOk(
         await validateConfig(expectSchemaAcceptance(buildRepositoryConfig()), dependencies),
       );
 
@@ -4967,7 +5008,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(configPath, configStore, undefined),
       'ConfigValidationError',
     );
@@ -4989,7 +5030,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(configPath, configStore, undefined),
       'ConfigValidationError',
     );
@@ -5012,7 +5053,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(configPath, configStore, undefined),
       'ConfigValidationError',
     );
@@ -5035,7 +5076,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(configPath, configStore, undefined),
       'ConfigValidationError',
     );
@@ -5061,7 +5102,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
       }),
     );
 
-    const error = expectFailure(
+    const error = unwrapErrorOfKind(
       await loadConfig(configPath, configStore, undefined),
       'ConfigValidationError',
     );
@@ -5078,10 +5119,10 @@ describe('check-state configuration rules (P13, AC-3)', () => {
   it('rejects a missing overlay directory through validateConfig with the real Git adapter (V1)', async () => {
     const overlayDirectory = join(tempDirectory, 'missing-overlay');
     const config = expectSchemaAcceptance(
-      buildConfig({
+      buildSampleConfig({
         tasks: [
-          buildTaskDefinition({
-            checks: { ...buildTaskDefinition().checks, overlay: overlayDirectory },
+          buildWriteReportTask({
+            checks: { ...buildWriteReportTask().checks, overlay: overlayDirectory },
           }),
         ],
       }),
@@ -5091,7 +5132,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
     });
     const dependencies = buildValidationDependencies({ git });
 
-    const report = expectOk(await validateConfig(config, dependencies));
+    const report = unwrapOk(await validateConfig(config, dependencies));
 
     expect(report.valid).toBe(false);
     expect(report.findings).toContainEqual({
@@ -5106,10 +5147,10 @@ describe('check-state configuration rules (P13, AC-3)', () => {
     await fs.mkdir(overlayDirectory, { recursive: true });
     await fs.symlink(tempDirectory, join(overlayDirectory, 'escape-link'));
     const config = expectSchemaAcceptance(
-      buildConfig({
+      buildSampleConfig({
         tasks: [
-          buildTaskDefinition({
-            checks: { ...buildTaskDefinition().checks, overlay: overlayDirectory },
+          buildWriteReportTask({
+            checks: { ...buildWriteReportTask().checks, overlay: overlayDirectory },
           }),
         ],
       }),
@@ -5119,7 +5160,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
     });
     const dependencies = buildValidationDependencies({ git });
 
-    const report = expectOk(await validateConfig(config, dependencies));
+    const report = unwrapOk(await validateConfig(config, dependencies));
 
     expect(report.valid).toBe(false);
     expect(report.findings).toContainEqual({
@@ -5133,10 +5174,10 @@ describe('check-state configuration rules (P13, AC-3)', () => {
     const overlayDirectory = join(tempDirectory, 'overlay-with-git');
     await fs.mkdir(join(overlayDirectory, '.git'), { recursive: true });
     const config = expectSchemaAcceptance(
-      buildConfig({
+      buildSampleConfig({
         tasks: [
-          buildTaskDefinition({
-            checks: { ...buildTaskDefinition().checks, overlay: overlayDirectory },
+          buildWriteReportTask({
+            checks: { ...buildWriteReportTask().checks, overlay: overlayDirectory },
           }),
         ],
       }),
@@ -5146,7 +5187,7 @@ describe('check-state configuration rules (P13, AC-3)', () => {
     });
     const dependencies = buildValidationDependencies({ git });
 
-    const report = expectOk(await validateConfig(config, dependencies));
+    const report = unwrapOk(await validateConfig(config, dependencies));
 
     expect(report.valid).toBe(false);
     expect(report.findings).toContainEqual({

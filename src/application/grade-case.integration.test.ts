@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import process from 'node:process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { buildRetainingEnvironments } from '@/adapters/__fixtures__/environment.fixtures';
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
 import {
@@ -15,6 +16,11 @@ import {
   runManagedProcess,
 } from '@/adapters/process';
 import { describeModelCallFailure } from '@/application/model-call';
+import {
+  buildRunSettingsInput,
+  buildTaskDefinition,
+  buildTevuConfig,
+} from '@/config/__fixtures__/config.fixtures';
 import { gradeLines } from '@/evaluation/wording';
 
 import { gradeCase } from './grade-case';
@@ -227,19 +233,21 @@ afterAll(async () => {
   await rm(tempRoot, { recursive: true, force: true });
 });
 
-function buildTask(overrides: Partial<TaskDefinition> = {}): TaskDefinition {
+function buildMarkedTask(overrides: Partial<TaskDefinition> = {}): TaskDefinition {
   return {
-    id: TASK_ID_MARKER,
-    title: TASK_TITLE_MARKER,
+    ...buildTaskDefinition({
+      id: TASK_ID_MARKER,
+      title: TASK_TITLE_MARKER,
+      base_commit: '0'.repeat(40),
+      prompt: TASK_PROMPT_MARKER,
+      description: TASK_DESCRIPTION_MARKER,
+      reference: {
+        kind: 'commit',
+        identifier: REFERENCE_IDENTIFIER_MARKER,
+        commits: [REFERENCE_COMMIT],
+      },
+    }),
     repo: 'app',
-    base_commit: '0'.repeat(40),
-    prompt: TASK_PROMPT_MARKER,
-    description: TASK_DESCRIPTION_MARKER,
-    reference: {
-      kind: 'commit',
-      identifier: REFERENCE_IDENTIFIER_MARKER,
-      commits: [REFERENCE_COMMIT],
-    },
     readiness: [],
     checks: {
       acceptance: [{ id: 'csv-content', description: CHECK_DESCRIPTION_MARKER, required: true }],
@@ -249,64 +257,28 @@ function buildTask(overrides: Partial<TaskDefinition> = {}): TaskDefinition {
   };
 }
 
-function buildConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
+function buildGraderConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
   return {
-    version: 1,
-    run: {
-      output_dir: join(tempRoot, 'runs'),
-      concurrency: 1,
-      repeat: 1,
-      timeout: '30s',
-      stop_grace: '200ms',
-    },
-    agents: {
-      opencode: {
-        command: 'unused-fake-opencode-command',
-        secrets: [SECRET_VARIABLE_NAME],
-        env: [],
-        providers: [],
+    ...buildTevuConfig({
+      run: buildRunSettingsInput({
+        output_dir: join(tempRoot, 'runs'),
+        timeout: '30s',
+        stop_grace: '200ms',
+      }),
+      agents: {
+        opencode: {
+          command: 'unused-fake-opencode-command',
+          secrets: [SECRET_VARIABLE_NAME],
+          env: [],
+        },
       },
-    },
+      roles: { grader: { model: 'openai/grader-model', effort: 'high', agent: 'opencode' } },
+    }),
     repositories: [],
     models: [],
-    roles: { grader: { model: 'openai/grader-model', effort: 'high', agent: 'opencode' } },
     tasks: [],
     ...overrides,
   };
-}
-
-/** Wraps the environment adapter so every removal deletes the call directory and then fails, recording each root in call order. */
-function buildRetainingEnvironments(): { environments: EnvironmentAdapter; roots: string[] } {
-  const real = createEnvironmentAdapter();
-  const roots: string[] = [];
-  const environments: EnvironmentAdapter = {
-    ...real,
-    createModelCallEnvironment: async (snapshot, agentVariables, configurationFiles) => {
-      const created = await real.createModelCallEnvironment(
-        snapshot,
-        agentVariables,
-        configurationFiles,
-      );
-      if (!created.ok) {
-        return created;
-      }
-      roots.push(created.value.rootDirectory);
-      return {
-        ok: true,
-        value: {
-          ...created.value,
-          dispose: async () => {
-            await created.value.dispose();
-            return {
-              ok: false,
-              error: { kind: 'ArtifactError', operation: 'remove', reason: 'busy' },
-            };
-          },
-        },
-      };
-    },
-  };
-  return { environments, roots };
 }
 
 type CallOptions = {
@@ -352,8 +324,8 @@ async function gradeWithFakeExecutable(options: CallOptions) {
   };
   const outcome = await gradeCase(
     {
-      config: options.config ?? buildConfig(),
-      task: options.task ?? buildTask(),
+      config: options.config ?? buildGraderConfig(),
+      task: options.task ?? buildMarkedTask(),
       patch: options.patch ?? `diff --git a/x b/x\n+${PATCH_MARKER}\n`,
       timeoutMs: options.timeoutMs ?? 10_000,
       redact: options.redact ?? ((text: string) => text),
@@ -820,8 +792,8 @@ describe('gradeCase providers forwarding', () => {
 
     const outcome = await gradeCase(
       {
-        config: buildConfig(),
-        task: buildTask(),
+        config: buildGraderConfig(),
+        task: buildMarkedTask(),
         patch: `diff --git a/x b/x\n+${PATCH_MARKER}\n`,
         timeoutMs: 10_000,
         redact: (text) => text,

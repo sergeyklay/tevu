@@ -3,13 +3,13 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
-import { execa } from 'execa';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createSourceValidator } from '@/adapters/git';
 import { runManagedProcess } from '@/adapters/process';
 import { ensureManagedCommits } from '@/application/managed-clone';
 
+import { GIT_IDENTITY_FLAGS, runGit, tryGit } from './__fixtures__/git.fixtures';
 import { createManagedCloneAdapter } from './managed-clone';
 
 import type { ManagedCloneDependencies } from '@/application/managed-clone';
@@ -19,7 +19,6 @@ import type {
   ManagedProcessRunner,
 } from '@/domain/ports/managed-process-runner';
 
-const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
 const ENTRY = { id: 'app', github: 'octo/app' };
 const TEST_TIMEOUT_MS = 20_000;
 
@@ -39,36 +38,13 @@ let remoteDirectory = '';
 let cloneRoot = '';
 let ghBinDirectory = '';
 
-async function runGit(
-  cwd: string,
-  args: readonly string[],
-): Promise<{ exitCode: number | null; stdout: string }> {
-  const result = await execa('git', [...args], {
-    cwd,
-    env: {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_SYSTEM: '/dev/null',
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_TERMINAL_PROMPT: '0',
-    },
-    reject: false,
-    stdin: 'ignore',
-    timeout: 15_000,
-  });
-  return {
-    exitCode: typeof result.exitCode === 'number' ? result.exitCode : null,
-    stdout: typeof result.stdout === 'string' ? result.stdout.trim() : '',
-  };
-}
-
 /** Writes `name`, commits it on the current branch, and returns the new commit hash. */
 async function commitFile(directory: string, name: string, message: string): Promise<string> {
   await writeFile(join(directory, name), `${name}\n`);
   await runGit(directory, ['add', name]);
   await runGit(directory, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', message]);
   const head = await runGit(directory, ['rev-parse', 'HEAD']);
-  return head.stdout;
+  return head.trim();
 }
 
 async function writeExecutableScript(path: string, contents: string): Promise<void> {
@@ -293,7 +269,7 @@ describe('managed-clone adapter integration (real git, fake gh on PATH)', () => 
       );
 
       const cloneDirectory = join(cloneRoot, 'github.com', 'octo', 'app.git');
-      const configCheck = await runGit(cloneDirectory, ['config', '--get-regexp', 'credential']);
+      const configCheck = await tryGit(cloneDirectory, ['config', '--get-regexp', 'credential']);
 
       expect(configCheck.exitCode).toBe(1);
       expect(configCheck.stdout).toBe('');

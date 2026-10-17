@@ -1,21 +1,22 @@
 // @vitest-environment node
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { afterAll, assert, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import {
+  createSyntheticRepository,
+  GIT_IDENTITY_FLAGS,
+} from '@/adapters/__fixtures__/git.fixtures';
+import { buildSecretRedactor } from '@/adapters/__fixtures__/process.fixtures';
 import { createOpenCodeAdapter } from '@/adapters/agents/opencode/opencode';
 import { createGitWorkspaceAdapter } from '@/adapters/git';
-import {
-  createEnvironmentAdapter,
-  createRedactor,
-  createSecretRedactor,
-  runManagedProcess,
-} from '@/adapters/process';
+import { createEnvironmentAdapter, runManagedProcess } from '@/adapters/process';
+import { buildRunSettingsInput, buildTevuConfig } from '@/config/__fixtures__/config.fixtures';
 
 import { draftCriteria } from './draft-criteria';
 
@@ -28,7 +29,6 @@ import type { TevuResult } from '@/domain/errors';
 import type { AgentAdapter } from '@/domain/ports/agent';
 import type { EnvironmentAdapter } from '@/domain/ports/environment';
 import type { PullRequestReader } from '@/domain/ports/pull-request-reader';
-import type { SecretRedactor } from '@/domain/ports/secret-redactor';
 
 const SECRET_VARIABLE_NAME = 'TEVU_DRAFT_CRITERIA_SECRET';
 const SECRET_VALUE = 'sk-live-draft-criteria-secret-445566';
@@ -38,10 +38,6 @@ const DRAFTED_REPLY = JSON.stringify({
   done: ['The change is documented for users.'],
 });
 const MALFORMED_REPLY = JSON.stringify({ acceptance: ['The export button appears.'] });
-
-function buildSecretRedactor(secretValues: readonly string[]): SecretRedactor {
-  return createSecretRedactor(() => secretValues, createRedactor(secretValues));
-}
 
 type RunBehavior = 'ok' | 'error-exit-1' | 'sleep';
 type ModelsBehavior =
@@ -204,8 +200,6 @@ async function writeFakeExecutable(behavior: FakeBehavior): Promise<string> {
   return filePath;
 }
 
-const GIT_IDENTITY_FLAGS = ['-c', 'user.name=tevu', '-c', 'user.email=tevu@localhost'];
-
 function runGitSync(cwd: string, args: readonly string[]): string {
   return execFileSync('git', [...args], {
     cwd,
@@ -222,14 +216,14 @@ function runGitSync(cwd: string, args: readonly string[]): string {
 /** A synthetic repository with a base commit and a second commit that adds `feature.txt`. */
 let repositoryCounter = 0;
 
-async function createSyntheticRepository(): Promise<{ path: string; commit: string }> {
+async function createRepositoryWithFeatureCommit(): Promise<{ path: string; commit: string }> {
   repositoryCounter += 1;
   const path = join(tempRoot, `source-repository-${String(repositoryCounter)}`);
-  await mkdir(path, { recursive: true });
-  runGitSync(path, ['init', '--quiet', '-b', 'main']);
-  await writeFile(join(path, 'README.md'), 'synthetic source\n');
-  runGitSync(path, ['add', '-A']);
-  runGitSync(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'base commit']);
+  await createSyntheticRepository(
+    path,
+    { 'README.md': 'synthetic source\n' },
+    { message: 'base commit' },
+  );
   await writeFile(join(path, 'feature.txt'), 'feature content\n');
   runGitSync(path, ['add', '-A']);
   runGitSync(path, [...GIT_IDENTITY_FLAGS, 'commit', '--quiet', '-m', 'add feature']);
@@ -252,27 +246,25 @@ function buildResolvedPullRequestReference(): ResolvedReferenceSolution {
   };
 }
 
-function buildConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
+function buildCriteriaConfig(overrides: Partial<TevuConfig> = {}): TevuConfig {
   return {
-    version: 1,
-    run: {
-      output_dir: join(tempRoot, 'runs'),
-      concurrency: 1,
-      repeat: 1,
-      timeout: '30s',
-      stop_grace: '200ms',
-    },
-    agents: {
-      opencode: {
-        command: 'unused-fake-opencode-command',
-        secrets: [SECRET_VARIABLE_NAME],
-        env: [],
-        providers: [],
+    ...buildTevuConfig({
+      run: buildRunSettingsInput({
+        output_dir: join(tempRoot, 'runs'),
+        timeout: '30s',
+        stop_grace: '200ms',
+      }),
+      agents: {
+        opencode: {
+          command: 'unused-fake-opencode-command',
+          secrets: [SECRET_VARIABLE_NAME],
+          env: [],
+        },
       },
-    },
+      roles: { criteria: { model: 'openai/criteria-model', effort: 'high', agent: 'opencode' } },
+    }),
     repositories: [],
     models: [],
-    roles: { criteria: { model: 'openai/criteria-model', effort: 'high', agent: 'opencode' } },
     tasks: [],
     ...overrides,
   };
@@ -350,7 +342,7 @@ async function draftWithFakeAgent(
     dependencies,
   );
   const adapter = options.wrapAdapter?.(created) ?? created;
-  const config = options.config ?? buildConfig();
+  const config = options.config ?? buildCriteriaConfig();
   const repository = options.repository ?? { id: 'repo-1', path: '/unused' };
   const request: CriteriaDraftRequest = {
     configPath: join(tempRoot, 'tevu.yaml'),
@@ -387,7 +379,7 @@ afterAll(async () => {
 
 describe('draftCriteria against a fake OpenCode executable and a synthetic repository', () => {
   it('drafts successfully for a commit reference', async () => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
 
     const outcome = await draftWithFakeAgent({
       run: 'ok',
@@ -408,7 +400,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
   });
 
   it('drafts successfully from bootstrap answers, resolving the call configuration through resolveBootstrapModelCallConfig', async () => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
 
     const outcome = await draftWithFakeAgent({
       run: 'ok',
@@ -430,7 +422,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
   });
 
   it('fails as unredactable when redact returns a non-string value', async () => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
 
     const outcome = await draftWithFakeAgent({
       run: 'ok',
@@ -466,7 +458,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
   });
 
   it('fails as unreadable changes when the reference changes cannot be read', async () => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
     const rootCommit = runGitSync(repository.path, ['rev-list', '--max-parents=0', 'HEAD']);
 
     const outcome = await draftWithFakeAgent({
@@ -482,7 +474,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
   });
 
   it('fails as unredactable when the redactor throws', async () => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
 
     const outcome = await draftWithFakeAgent({
       run: 'ok',
@@ -501,7 +493,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
   });
 
   it('fails as call-failed with the agent message and the call reason when the call fails and no listing settles it', async () => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
 
     const outcome = await draftWithFakeAgent({
       run: 'error-exit-1',
@@ -520,7 +512,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
   });
 
   it('fails as an invalid reply when the reply is malformed', async () => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
 
     const outcome = await draftWithFakeAgent({
       run: 'ok',
@@ -584,7 +576,7 @@ describe('draftCriteria against a fake OpenCode executable and a synthetic repos
   });
 
   it('runs registerSecrets before redact', async () => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
     const order: string[] = [];
 
     await draftWithFakeAgent({
@@ -607,7 +599,7 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
   const OTHER_UNSET_VARIABLE = 'TEVU_DRAFT_CRITERIA_UNSET_B';
 
   function buildConfigWithVariables(secrets: string[], env: string[] = []): TevuConfig {
-    const config = buildConfig();
+    const config = buildCriteriaConfig();
     const opencode = config.agents['opencode'];
     assert.isDefined(opencode, 'agents.opencode block');
     return { ...config, agents: { opencode: { ...opencode, secrets, env } } };
@@ -628,7 +620,7 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
   }
 
   it('fails as model-unavailable before any call when the agent does not list the criteria model', async () => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
     const invocationsPath = join(tempRoot, nextScriptName());
 
     const outcome = await draftWithFakeAgent({
@@ -648,7 +640,7 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
   });
 
   it("fails as call-failed with the agent's own message when the call fails and the agent lists the model", async () => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
 
     const outcome = await draftWithFakeAgent({
       run: 'error-exit-1',
@@ -669,7 +661,7 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
   });
 
   it('fails as call-failed without an agent message when the failure is not a failed run', async () => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
 
     const outcome = await draftWithFakeAgent({
       run: 'ok',
@@ -698,7 +690,7 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
       detail: 'the session called the tool "read" although every tool is denied to a model call',
     },
   ])('carries the reason of the call as the detail for $name', async ({ behavior, detail }) => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
 
     const outcome = await draftWithFakeAgent({
       run: 'ok',
@@ -765,8 +757,8 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
   });
 
   it('fails as timed-out with the configured run limit when the model does not answer in time', async () => {
-    const repository = await createSyntheticRepository();
-    const config = buildConfig();
+    const repository = await createRepositoryWithFeatureCommit();
+    const config = buildCriteriaConfig();
 
     const outcome = await draftWithFakeAgent({
       run: 'sleep',
@@ -783,7 +775,7 @@ describe('draftCriteria failure causes against a fake OpenCode executable', () =
   });
 
   it('is cancelled before any call when the signal aborts during the model listing', async () => {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
     const invocationsPath = join(tempRoot, nextScriptName());
     const controller = new AbortController();
 
@@ -813,7 +805,7 @@ describe('draftCriteria effort check against a fake OpenCode executable', () => 
   }
 
   async function draft(options: Partial<BuildOptions> & { invocationsPath?: string }) {
-    const repository = await createSyntheticRepository();
+    const repository = await createRepositoryWithFeatureCommit();
     return draftWithFakeAgent({
       run: 'ok',
       reference: buildResolvedCommitReference(repository.commit),
@@ -1022,7 +1014,7 @@ describe('draftCriteria effort check against a fake OpenCode executable', () => 
 
   it('lists the retained directory of the listing, then of the call, when the call times out', async () => {
     const { environments, roots } = buildRetainingEnvironments();
-    const config = buildConfig();
+    const config = buildCriteriaConfig();
 
     const outcome = await draft({
       run: 'sleep',

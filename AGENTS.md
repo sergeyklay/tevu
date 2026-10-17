@@ -20,6 +20,7 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 - **Under `src`, only test files write `process.env`.** `src/index.ts` reads every variable from a copy of tevu's environment taken at startup, while adapters read `process.env` when they run, so a later write leaves the two disagreeing about the same variable.
 - **`tevu report` must reproduce byte-identical JSON and Markdown from unchanged artifacts.** Derived output may not depend on wall-clock time, randomness, or unordered iteration.
 - **CI runs the tests on Ubuntu and macOS, and macOS breaks two assumptions a Linux run hides.** Its temporary directory sits behind the `/var` -> `/private/var` symlink, so a test compares a path a child process reports against a `realpath`, never against the raw `tmpdir()`. macOS adds `__CF_USER_TEXT_ENCODING` to a child process's environment, so an exact environment check filters it with `withoutPlatformVariables` from `src/adapters/__fixtures__/environment.fixtures.ts`. To reproduce the path failures on Linux, run `bun run test` with `TMPDIR` pointing at a symlink to a directory.
+- **A test data builder exists once, in a `__fixtures__` module, and a test imports it instead of declaring a copy.** The test passes the values it depends on as overrides, so changing a shared default keeps every test's input unchanged. `bun run lint` fails a test file or fixture module over 1,500 lines unless `oversizedTestFiles` in `eslint.config.mjs` lists it, fails a listed file once it grows past its listed count, and counts no blank or comment-only line. Fixture modules are never listed.
 
 ## Boundaries
 
@@ -30,7 +31,7 @@ A benchmark whose output is worth only as much as its fairness and its evidence.
 
 ### Ask first
 
-- Raising a limit of the size budget in `eslint.config.mjs` (300 lines per file, 50 per function, complexity 10), adding a file to its `oversizedFiles` list, or raising a listed file's numbers. Listed numbers only go down: a change that shrinks a listed file lowers them in the same change, and the file leaves the list once it fits the budget.
+- Raising a limit of the size budget in `eslint.config.mjs` (300 lines per file, 50 per function, complexity 10 for production code; 1,500 lines per test file and per fixture module), adding a file to its `oversizedFiles` list or a test file to its `oversizedTestFiles` list, or raising a listed file's numbers. Listed numbers only go down in either list: a change that shrinks a listed file lowers them in the same change, and the file leaves its list once it fits the budget.
 - Any change to the configuration contract (`version: 1`, strict rejection of unknown fields) or to the layout and format of saved run artifacts. Both are public contracts with existing files on disk.
 - Restructuring `docs/`, which follows Diátaxis: getting-started, guides, reference, concepts.
 

@@ -1,8 +1,25 @@
 // @vitest-environment node
-import { assert, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { durationMs, TevuConfigSchema } from '@/config/schema';
+import {
+  buildModelDefinitionInput,
+  buildRepositoryInput,
+  buildRunSettingsInput,
+  buildTaskInput,
+  buildTevuConfig,
+  FAKE_AGENT_NAME,
+  rekeyToFakeAgent,
+} from '@/config/__fixtures__/config.fixtures';
+import { durationMs } from '@/config/schema';
+import { unwrapError, unwrapOk } from '@/domain/__fixtures__/errors.fixtures';
 import { unavailableBenchmarkMetrics } from '@/domain/run-records';
+import {
+  buildAgentCapabilityReport,
+  buildCaseArtifacts,
+  buildCaseIdentity,
+  buildCaseResult,
+  buildProcessResult,
+} from '@/evaluation/__fixtures__/report.fixtures';
 import { evaluateChecks } from '@/evaluation/checks';
 
 import { buildVerifiedEfforts } from './__fixtures__/effort.fixtures';
@@ -79,7 +96,6 @@ const CANCELLED_BEFORE_START_MESSAGE =
 const SCHEDULING_STOPPED_MESSAGE =
   'tevu stopped starting attempts after it failed to save files for an earlier attempt, so this attempt has no result. Fix the failure reported for that attempt and run the comparison again.';
 
-const AGENT_NAME = 'fake-agent';
 const CONFIG_PATH = '/synthetic/tevu.yaml';
 
 const EMPTY_CAPTURE: RedactedCapture = {
@@ -117,22 +133,6 @@ type ExportFailure = Extract<TevuError, { kind: 'AgentProcessError' | 'AgentProt
 
 type RunScript = (input: AgentRunInput) => Promise<FakeRunOutcome>;
 
-function unwrapOk<T, K extends TevuError['kind']>(result: TevuResult<T, K>): T {
-  if (!result.ok) {
-    throw new Error(`expected an ok result, received ${result.error.kind}`);
-  }
-  return result.value;
-}
-
-function unwrapError<T, K extends TevuError['kind']>(
-  result: TevuResult<T, K>,
-): Extract<TevuError, { kind: K }> {
-  if (result.ok) {
-    throw new Error('expected an error result');
-  }
-  return result.error;
-}
-
 function waitForSignal(signal: AbortSignal): Promise<void> {
   if (signal.aborted) {
     return Promise.resolve();
@@ -154,15 +154,11 @@ function buildCheck(overrides: Partial<CheckInput> = {}): CheckInput {
   };
 }
 
-function buildTask(overrides: Partial<TaskInput> = {}): TaskInput {
-  return {
-    id: 'task-1',
+function buildBenchmarkTask(overrides: Partial<TaskInput> = {}): TaskInput {
+  return buildTaskInput({
     title: 'Synthetic task',
-    repo: 'repo-1',
     base_commit: COMMIT_A,
-    description: 'synthetic task description',
     prompt: 'implement the synthetic feature',
-    readiness: ['synthetic ready item'],
     checks: {
       acceptance: [buildCheck({ id: 'acc-required' })],
       done: [
@@ -173,95 +169,74 @@ function buildTask(overrides: Partial<TaskInput> = {}): TaskInput {
       ],
     },
     ...overrides,
-  };
+  });
 }
 
-function buildRunSettings(overrides: Partial<TevuConfigInput['run']> = {}): TevuConfigInput['run'] {
-  return {
-    output_dir: '/synthetic/artifacts',
+function buildBenchmarkRunSettings(
+  overrides: Partial<TevuConfigInput['run']> = {},
+): TevuConfigInput['run'] {
+  return buildRunSettingsInput({
     concurrency: 2,
     timeout: '60s',
     stop_grace: '500ms',
     ...overrides,
-  };
+  });
 }
 
-/**
- * Renames the schema-required `opencode` key to `fake-agent` after parsing.
- * The strict schema accepts only the literal `opencode` key (out of scope for
- * this migration), so every agent-neutral test builds through that key and
- * relabels the materialized config instead of parsing `fake-agent` directly.
- */
-function rekeyToFakeAgent(config: TevuConfig): TevuConfig {
-  const { opencode, ...otherAgents } = config.agents;
-  assert.isDefined(opencode, 'agents.opencode block');
-  return {
-    ...config,
-    agents: { ...otherAgents, [AGENT_NAME]: opencode },
-    models: config.models.map((model) => ({ ...model, agent: AGENT_NAME })),
-  };
+function buildBenchmarkConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
+  return rekeyToFakeAgent(
+    buildTevuConfig({
+      run: buildBenchmarkRunSettings(),
+      agents: {
+        opencode: { command: '/synthetic/fake-agent', secrets: ['TEVU_PROVIDER_KEY'], env: [] },
+      },
+      repositories: [buildRepositoryInput({ path: '/synthetic/source' })],
+      models: [
+        buildModelDefinitionInput({ id: 'c1', model: 'synthetic/model-a', effort: 'fast' }),
+        buildModelDefinitionInput({ id: 'c2', model: 'synthetic/model-b', effort: 'deep' }),
+      ],
+      tasks: [buildBenchmarkTask({ id: 'task-1' }), buildBenchmarkTask({ id: 'task-2' })],
+      ...overrides,
+    }),
+  );
 }
 
-function buildTevuConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
-  const config: TevuConfigInput = {
-    version: 1,
-    run: buildRunSettings(),
-    agents: {
-      opencode: { command: '/synthetic/fake-agent', secrets: ['TEVU_PROVIDER_KEY'], env: [] },
-    },
-    repositories: [{ id: 'repo-1', path: '/synthetic/source' }],
-    models: [
-      { id: 'c1', model: 'synthetic/model-a', effort: 'fast' },
-      { id: 'c2', model: 'synthetic/model-b', effort: 'deep' },
-    ],
-    tasks: [buildTask({ id: 'task-1' }), buildTask({ id: 'task-2' })],
-    ...overrides,
-  };
-  return rekeyToFakeAgent(TevuConfigSchema.parse(config));
-}
-
-function buildCaseIdentity(caseId = 'task-1--c1--1'): CaseIdentity {
-  return {
+function buildBenchmarkCaseIdentity(caseId = 'task-1--c1--1'): CaseIdentity {
+  return buildCaseIdentity({
     caseId,
-    taskId: 'task-1',
     modelId: 'c1',
     attempt: Number(caseId.slice(caseId.lastIndexOf('--') + 2)),
     sourceCommit: COMMIT_A,
     model: 'synthetic/model-a',
     effort: 'fast',
-    agent: AGENT_NAME,
-    timeoutMs: 60_000,
-  };
+    agent: FAKE_AGENT_NAME,
+  });
 }
 
-function buildProcessResult(overrides: Partial<ProcessResult> = {}): ProcessResult {
-  return {
-    exitCode: 0,
-    signal: null,
+function buildBenchmarkProcessResult(overrides: Partial<ProcessResult> = {}): ProcessResult {
+  return buildProcessResult({
     startedAt: CLOCK_BASE,
     endedAt: '2026-01-01T00:00:01.000Z',
     durationMs: 1_000,
-    terminationStage: 'none',
     ...overrides,
-  };
+  });
 }
 
 function buildAgentRunResult(overrides: Partial<AgentRunResult> = {}): AgentRunResult {
   return {
-    process: buildProcessResult(),
+    process: buildBenchmarkProcessResult(),
     sessionId: 'session-synthetic',
     parseFindings: [],
     ...overrides,
   };
 }
 
-function buildCapabilityReport(): AgentCapabilityReport {
-  return {
+function buildFakeAgentCapabilityReport(): AgentCapabilityReport {
+  return buildAgentCapabilityReport({
     executable: '/synthetic/fake-agent',
     detectedVersion: '99.0.0-synthetic',
     capabilities: [{ name: 'run command', required: true, availability: 'available' }],
-    isolation: { denyOutsideWorktree: 'available' },
-  };
+  });
 }
 
 function buildHostProbe(): HostProbe {
@@ -321,35 +296,20 @@ function buildFakeEnvironment(
   return { caseId, recipient, homeDirectory, temporaryDirectory, variables, variableManifest };
 }
 
-function buildCaseResult(overrides: Partial<CaseResult> = {}): CaseResult {
-  return {
-    schemaVersion: 1,
-    identity: buildCaseIdentity(),
-    lifecycle: 'completed',
-    process: null,
-    outcome: 'passed',
-    checks: [],
+function buildBenchmarkCaseResult(overrides: Partial<CaseResult> = {}): CaseResult {
+  return buildCaseResult({
+    identity: buildBenchmarkCaseIdentity(),
     metrics: unavailableBenchmarkMetrics('synthetic metrics unavailable'),
-    artifacts: {
-      events: null,
-      diagnostics: null,
-      sessionExport: null,
-      solutionPatch: null,
-      checks: null,
-      assessment: null,
-      grading: null,
-      result: 'task-1--c1--1/result.json',
-    },
-    failure: null,
+    artifacts: buildCaseArtifacts({ result: 'task-1--c1--1/result.json' }),
     ...overrides,
-  };
+  });
 }
 
 function buildFailureRecord(overrides: Partial<FailureRecord> = {}): FailureRecord {
   return {
     error: {
       kind: 'AgentProcessError',
-      agent: AGENT_NAME,
+      agent: FAKE_AGENT_NAME,
       caseId: 'task-1--c1--1',
       exitCode: 3,
       signal: null,
@@ -387,7 +347,7 @@ function failedRunScript(
     }
     const value = buildAgentRunResult({
       sessionId,
-      process: buildProcessResult({ exitCode: 3, durationMs: 4_321 }),
+      process: buildBenchmarkProcessResult({ exitCode: 3, durationMs: 4_321 }),
     });
     input.onProcess?.(value);
     return { ok: false, error };
@@ -401,7 +361,7 @@ function timedOutRunScript(): RunScript {
     await input.onEvent({ kind: 'error' } satisfies FakeEventRecord);
     const value = buildAgentRunResult({
       sessionId,
-      process: buildProcessResult({
+      process: buildBenchmarkProcessResult({
         exitCode: null,
         signal: 'SIGKILL',
         durationMs: 4_321,
@@ -629,7 +589,7 @@ function createHarness(config: TevuConfig) {
       if (agentState.probeError !== null) {
         return { ok: false, error: agentState.probeError };
       }
-      return { ok: true, value: buildCapabilityReport() };
+      return { ok: true, value: buildFakeAgentCapabilityReport() };
     },
     async readProviders() {
       if (agentState.providersError !== null) {
@@ -690,7 +650,7 @@ function createHarness(config: TevuConfig) {
       return { ok: false, error: { kind: 'CancellationError', activeCaseIds: [] } };
     },
   };
-  const agents: AgentRegistry = new Map([[AGENT_NAME, fakeAdapter]]);
+  const agents: AgentRegistry = new Map([[FAKE_AGENT_NAME, fakeAdapter]]);
 
   const artifactState = {
     failOnce: new Map<string, Extract<TevuError, { kind: 'ArtifactError' }>>(),
@@ -956,9 +916,9 @@ async function runCancelledDuringEvaluation(): Promise<{
   run: RunResult;
   harness: Harness;
 }> {
-  const config = buildTevuConfig({
-    run: buildRunSettings({ concurrency: 1 }),
-    tasks: [buildTask()],
+  const config = buildBenchmarkConfig({
+    run: buildBenchmarkRunSettings({ concurrency: 1 }),
+    tasks: [buildBenchmarkTask()],
   });
   const harness = createHarness(config);
   harness.evaluatorProcesses.holdChecks();
@@ -978,7 +938,7 @@ async function runCancelledDuringEvaluation(): Promise<{
 async function runWithFailingExport(
   buildError: (caseId: string) => ExportFailure,
 ): Promise<{ run: RunResult; harness: Harness }> {
-  const config = buildTevuConfig({ tasks: [buildTask()] });
+  const config = buildBenchmarkConfig({ tasks: [buildBenchmarkTask()] });
   const harness = createHarness(config);
   harness.agent.exportFailures.set('session-task-1--c1--1', buildError('task-1--c1--1'));
   const result = await runBenchmark(
@@ -1008,10 +968,10 @@ function expectUnavailableMetric(metric: MetricValue, reasonIncludes: string): v
 
 describe('planBenchmark', () => {
   it('plans one attempt per pair, in configuration order, with attempt 1 in every case ID, when run.repeat is absent (AC-2)', () => {
-    const config = buildTevuConfig({
+    const config = buildBenchmarkConfig({
       tasks: [
-        buildTask({ id: 'task-1', base_commit: COMMIT_A }),
-        buildTask({ id: 'task-2', base_commit: COMMIT_B }),
+        buildBenchmarkTask({ id: 'task-1', base_commit: COMMIT_A }),
+        buildBenchmarkTask({ id: 'task-2', base_commit: COMMIT_B }),
       ],
     });
 
@@ -1028,7 +988,7 @@ describe('planBenchmark', () => {
         sourceCommit: COMMIT_A,
         model: 'synthetic/model-a',
         effort: 'fast',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         timeoutMs: 60_000,
       },
       {
@@ -1039,7 +999,7 @@ describe('planBenchmark', () => {
         sourceCommit: COMMIT_A,
         model: 'synthetic/model-b',
         effort: 'deep',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         timeoutMs: 60_000,
       },
       {
@@ -1050,7 +1010,7 @@ describe('planBenchmark', () => {
         sourceCommit: COMMIT_B,
         model: 'synthetic/model-a',
         effort: 'fast',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         timeoutMs: 60_000,
       },
       {
@@ -1061,14 +1021,16 @@ describe('planBenchmark', () => {
         sourceCommit: COMMIT_B,
         model: 'synthetic/model-b',
         effort: 'deep',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         timeoutMs: 60_000,
       },
     ]);
   });
 
   it('builds each CaseIdentity with keys in the order caseId, taskId, modelId, attempt, sourceCommit, model, effort, agent, timeoutMs', () => {
-    const config = buildTevuConfig({ tasks: [buildTask({ id: 'task-1', base_commit: COMMIT_A })] });
+    const config = buildBenchmarkConfig({
+      tasks: [buildBenchmarkTask({ id: 'task-1', base_commit: COMMIT_A })],
+    });
 
     const plan = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
 
@@ -1086,7 +1048,7 @@ describe('planBenchmark', () => {
   });
 
   it('copies the configured limits and artifact destination into the plan', () => {
-    const config = buildTevuConfig();
+    const config = buildBenchmarkConfig();
     const plan = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
 
     expect(plan.concurrency).toBe(2);
@@ -1096,11 +1058,11 @@ describe('planBenchmark', () => {
   });
 
   it('plans 12 cases ordered attempt-major, then task, then model, for 2 tasks, 2 model entries, and run.repeat: 3 (AC-1)', () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ repeat: 3 }),
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ repeat: 3 }),
       tasks: [
-        buildTask({ id: 'task-1', base_commit: COMMIT_A }),
-        buildTask({ id: 'task-2', base_commit: COMMIT_B }),
+        buildBenchmarkTask({ id: 'task-1', base_commit: COMMIT_A }),
+        buildBenchmarkTask({ id: 'task-2', base_commit: COMMIT_B }),
       ],
     });
 
@@ -1128,7 +1090,7 @@ describe('planBenchmark', () => {
   });
 
   it('resolves the effective repeat to repeatOverride with source cli, and leaves plan.config.run.repeat at its loaded value (AC-3, verification property 2)', () => {
-    const config = buildTevuConfig({ run: buildRunSettings({ repeat: 3 }) });
+    const config = buildBenchmarkConfig({ run: buildBenchmarkRunSettings({ repeat: 3 }) });
 
     const plan = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config), 2);
 
@@ -1141,7 +1103,7 @@ describe('planBenchmark', () => {
   });
 
   it("resolves plan.repeat.source to cli whatever repeatOverride's value, and to config when it is absent", () => {
-    const config = buildTevuConfig({ run: buildRunSettings({ repeat: 3 }) });
+    const config = buildBenchmarkConfig({ run: buildBenchmarkRunSettings({ repeat: 3 }) });
 
     expect(planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config), 3).repeat).toEqual({
       value: 3,
@@ -1154,9 +1116,12 @@ describe('planBenchmark', () => {
   });
 
   it("resolves every case's timeoutMs from its own task, leaving other tasks under run.timeout (AC-2)", () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ repeat: 2 }),
-      tasks: [buildTask({ id: 'task-1', timeout: '20m' }), buildTask({ id: 'task-2' })],
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ repeat: 2 }),
+      tasks: [
+        buildBenchmarkTask({ id: 'task-1', timeout: '20m' }),
+        buildBenchmarkTask({ id: 'task-2' }),
+      ],
     });
 
     const plan = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
@@ -1177,7 +1142,7 @@ describe('planBenchmark', () => {
     const unsupported = { status: 'unsupported', reason: 'synthetic unsupported reason' } as const;
 
     it('records the model entry checks and the grader check of the validation', () => {
-      const config = buildTevuConfig();
+      const config = buildBenchmarkConfig();
 
       const plan = planBenchmark(config, CONFIG_PATH, {
         models: { c1: { status: 'verified' }, c2: unsupported },
@@ -1191,7 +1156,7 @@ describe('planBenchmark', () => {
     });
 
     it('records a null grader check when the validation declared no grader', () => {
-      const config = buildTevuConfig();
+      const config = buildBenchmarkConfig();
 
       const plan = planBenchmark(config, CONFIG_PATH, {
         models: { c1: { status: 'verified' }, c2: { status: 'verified' } },
@@ -1202,7 +1167,7 @@ describe('planBenchmark', () => {
     });
 
     it('leaves the criteria check out of the plan', () => {
-      const config = buildTevuConfig();
+      const config = buildBenchmarkConfig();
 
       const plan = planBenchmark(config, CONFIG_PATH, {
         models: { c1: { status: 'verified' }, c2: { status: 'verified' } },
@@ -1216,7 +1181,7 @@ describe('planBenchmark', () => {
     });
 
     it('leaves the summary check out of the plan', () => {
-      const config = buildTevuConfig();
+      const config = buildBenchmarkConfig();
 
       const plan = planBenchmark(config, CONFIG_PATH, {
         models: { c1: { status: 'verified' }, c2: { status: 'verified' } },
@@ -1230,7 +1195,7 @@ describe('planBenchmark', () => {
     });
 
     it('copies the model entry checks, so a later change to the validation does not alter the plan', () => {
-      const config = buildTevuConfig();
+      const config = buildBenchmarkConfig();
       const efforts = buildVerifiedEfforts(config);
 
       const plan = planBenchmark(config, CONFIG_PATH, efforts);
@@ -1241,7 +1206,7 @@ describe('planBenchmark', () => {
     });
 
     it('stays deterministic for the same configuration and checks', () => {
-      const config = buildTevuConfig();
+      const config = buildBenchmarkConfig();
 
       const first = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
       const second = planBenchmark(config, CONFIG_PATH, buildVerifiedEfforts(config));
@@ -1250,7 +1215,7 @@ describe('planBenchmark', () => {
     });
 
     it('keeps every case identity effort equal to the configured string whatever its check', () => {
-      const config = buildTevuConfig();
+      const config = buildBenchmarkConfig();
 
       const plan = planBenchmark(config, CONFIG_PATH, {
         models: { c1: unsupported, c2: unverified },
@@ -1276,7 +1241,7 @@ describe('reduceRunExitCode', () => {
     },
     {
       label: 'a cancelled case without the flag',
-      cases: [buildCaseResult({ lifecycle: 'cancelled' })],
+      cases: [buildBenchmarkCaseResult({ lifecycle: 'cancelled' })],
       findings: [],
       cancelled: false,
       expected: 130,
@@ -1290,56 +1255,56 @@ describe('reduceRunExitCode', () => {
     },
     {
       label: 'an infrastructure-failed case',
-      cases: [buildCaseResult({ lifecycle: 'infrastructure-failed' })],
+      cases: [buildBenchmarkCaseResult({ lifecycle: 'infrastructure-failed' })],
       findings: [],
       cancelled: false,
       expected: 1,
     },
     {
       label: 'a timed-out case',
-      cases: [buildCaseResult({ lifecycle: 'timed-out' })],
+      cases: [buildBenchmarkCaseResult({ lifecycle: 'timed-out' })],
       findings: [],
       cancelled: false,
       expected: 2,
     },
     {
       label: 'a process-failed case',
-      cases: [buildCaseResult({ lifecycle: 'process-failed' })],
+      cases: [buildBenchmarkCaseResult({ lifecycle: 'process-failed' })],
       findings: [],
       cancelled: false,
       expected: 2,
     },
     {
       label: 'a failed acceptance outcome',
-      cases: [buildCaseResult({ outcome: 'failed' })],
+      cases: [buildBenchmarkCaseResult({ outcome: 'failed' })],
       findings: [],
       cancelled: false,
       expected: 2,
     },
     {
       label: 'a pending acceptance outcome',
-      cases: [buildCaseResult({ outcome: 'pending' })],
+      cases: [buildBenchmarkCaseResult({ outcome: 'pending' })],
       findings: [],
       cancelled: false,
       expected: 2,
     },
     {
       label: 'a completed case with a preserved runtime failure',
-      cases: [buildCaseResult({ failure: buildFailureRecord() })],
+      cases: [buildBenchmarkCaseResult({ failure: buildFailureRecord() })],
       findings: [],
       cancelled: false,
       expected: 2,
     },
     {
       label: 'cancellation over error findings',
-      cases: [buildCaseResult({ lifecycle: 'cancelled' })],
+      cases: [buildBenchmarkCaseResult({ lifecycle: 'cancelled' })],
       findings: [buildRunFinding({ severity: 'error' })],
       cancelled: false,
       expected: 130,
     },
     {
       label: 'error findings over degraded cases',
-      cases: [buildCaseResult({ lifecycle: 'timed-out' })],
+      cases: [buildBenchmarkCaseResult({ lifecycle: 'timed-out' })],
       findings: [buildRunFinding({ severity: 'error' })],
       cancelled: false,
       expected: 1,
@@ -1347,8 +1312,8 @@ describe('reduceRunExitCode', () => {
     {
       label: 'infrastructure failure over a preserved runtime failure',
       cases: [
-        buildCaseResult({ lifecycle: 'infrastructure-failed' }),
-        buildCaseResult({ failure: buildFailureRecord() }),
+        buildBenchmarkCaseResult({ lifecycle: 'infrastructure-failed' }),
+        buildBenchmarkCaseResult({ failure: buildFailureRecord() }),
       ],
       findings: [],
       cancelled: false,
@@ -1361,7 +1326,7 @@ describe('reduceRunExitCode', () => {
 
 describe('runBenchmark', () => {
   it('writes the plan efforts as the manifest efforts', async () => {
-    const config = buildTevuConfig();
+    const config = buildBenchmarkConfig();
     const harness = createHarness(config);
     const plan = planBenchmark(config, CONFIG_PATH, {
       models: {
@@ -1378,7 +1343,7 @@ describe('runBenchmark', () => {
   });
 
   it('probes the host once, snapshots the parent environment once, and pins commits before the first write', async () => {
-    const config = buildTevuConfig();
+    const config = buildBenchmarkConfig();
     const harness = createHarness(config);
 
     const result = await runBenchmark(
@@ -1407,7 +1372,7 @@ describe('runBenchmark', () => {
   });
 
   it('writes a manifest with pinned identities, injected provenance, and a completed timestamp', async () => {
-    const config = buildTevuConfig();
+    const config = buildBenchmarkConfig();
     const harness = createHarness(config);
 
     const result = await runBenchmark(
@@ -1427,9 +1392,9 @@ describe('runBenchmark', () => {
     });
     expect(manifest.tools).toEqual({
       gitVersion: '2.45.0-synthetic',
-      agentVersions: { [AGENT_NAME]: '99.0.0-synthetic' },
-      agentConfigurationFiles: { [AGENT_NAME]: [] },
-      copiedProviders: { [AGENT_NAME]: [] },
+      agentVersions: { [FAKE_AGENT_NAME]: '99.0.0-synthetic' },
+      agentConfigurationFiles: { [FAKE_AGENT_NAME]: [] },
+      copiedProviders: { [FAKE_AGENT_NAME]: [] },
     });
     expect(manifest.configPath).toBe(CONFIG_PATH);
     expect(manifest.execution).toEqual({
@@ -1446,7 +1411,7 @@ describe('runBenchmark', () => {
         sourceCommit: `pinned-${COMMIT_A}`,
         model: 'synthetic/model-a',
         effort: 'fast',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         timeoutMs: 60_000,
       },
       {
@@ -1457,7 +1422,7 @@ describe('runBenchmark', () => {
         sourceCommit: `pinned-${COMMIT_A}`,
         model: 'synthetic/model-b',
         effort: 'deep',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         timeoutMs: 60_000,
       },
       {
@@ -1468,7 +1433,7 @@ describe('runBenchmark', () => {
         sourceCommit: `pinned-${COMMIT_A}`,
         model: 'synthetic/model-a',
         effort: 'fast',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         timeoutMs: 60_000,
       },
       {
@@ -1479,13 +1444,13 @@ describe('runBenchmark', () => {
         sourceCommit: `pinned-${COMMIT_A}`,
         model: 'synthetic/model-b',
         effort: 'deep',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         timeoutMs: 60_000,
       },
     ]);
     expect(manifest.context?.config).toBe(config);
     expect(
-      (manifest.context?.capabilities as Record<string, AgentCapabilityReport>)[AGENT_NAME]
+      (manifest.context?.capabilities as Record<string, AgentCapabilityReport>)[FAKE_AGENT_NAME]
         ?.detectedVersion,
     ).toBe('99.0.0-synthetic');
     expect(harness.artifacts.startedManifests[0]?.completedAt).toBeNull();
@@ -1503,16 +1468,16 @@ describe('runBenchmark', () => {
     ];
 
     function buildTwoAgentHarness() {
-      const base = buildTevuConfig();
+      const base = buildBenchmarkConfig();
       const config: TevuConfig = {
         ...base,
-        agents: { ...base.agents, [SECOND_AGENT_NAME]: base.agents[AGENT_NAME]! },
+        agents: { ...base.agents, [SECOND_AGENT_NAME]: base.agents[FAKE_AGENT_NAME]! },
         models: base.models.map((model) =>
           model.id === 'c2' ? { ...model, agent: SECOND_AGENT_NAME } : model,
         ),
       };
       const harness = createHarness(config);
-      const baseAdapter = harness.dependencies.agents.get(AGENT_NAME)!;
+      const baseAdapter = harness.dependencies.agents.get(FAKE_AGENT_NAME)!;
       const received = new Map<string, readonly CopiedProvider[]>();
       const withProviders = (
         agent: string,
@@ -1531,7 +1496,7 @@ describe('runBenchmark', () => {
         },
       });
       harness.dependencies.agents = new Map([
-        [AGENT_NAME, withProviders(AGENT_NAME, FIRST_PROVIDERS)],
+        [FAKE_AGENT_NAME, withProviders(FAKE_AGENT_NAME, FIRST_PROVIDERS)],
         [SECOND_AGENT_NAME, withProviders(SECOND_AGENT_NAME, SECOND_PROVIDERS)],
       ]);
       return { config, harness, received };
@@ -1550,10 +1515,10 @@ describe('runBenchmark', () => {
         Object.keys(tools.agentConfigurationFiles),
       );
       expect(tools.copiedProviders).toEqual({
-        [AGENT_NAME]: FIRST_PROVIDERS,
+        [FAKE_AGENT_NAME]: FIRST_PROVIDERS,
         [SECOND_AGENT_NAME]: SECOND_PROVIDERS,
       });
-      const recorded = tools.copiedProviders[AGENT_NAME]!;
+      const recorded = tools.copiedProviders[FAKE_AGENT_NAME]!;
       expect(recorded).not.toBe(FIRST_PROVIDERS);
       expect(recorded[0]).not.toBe(FIRST_PROVIDERS[0]);
       expect(recorded[0]!.pricedModels).not.toBe(FIRST_PROVIDERS[0]!.pricedModels);
@@ -1576,9 +1541,9 @@ describe('runBenchmark', () => {
     });
   });
   it('gives each attempt its own createIsolatedCase call with its own identity, and its own createCaseEnvironments call (AC-5, verification property 4)', async () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ repeat: 2 }),
-      tasks: [buildTask({ id: 'task-1' })],
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ repeat: 2 }),
+      tasks: [buildBenchmarkTask({ id: 'task-1' })],
     });
     const harness = createHarness(config);
 
@@ -1605,12 +1570,12 @@ describe('runBenchmark', () => {
   });
 
   it("passes the case's own task repository to createIsolatedCase, not the first configured repository", async () => {
-    const config = buildTevuConfig({
+    const config = buildBenchmarkConfig({
       repositories: [
         { id: 'repo-1', path: '/synthetic/source-repo-1' },
         { id: 'repo-2', path: '/synthetic/source-repo-2' },
       ],
-      tasks: [buildTask({ id: 'task-1', repo: 'repo-2', base_commit: COMMIT_B })],
+      tasks: [buildBenchmarkTask({ id: 'task-1', repo: 'repo-2', base_commit: COMMIT_B })],
     });
     const harness = createHarness(config);
 
@@ -1627,7 +1592,7 @@ describe('runBenchmark', () => {
   });
 
   it('returns the host probe failure before any write', async () => {
-    const config = buildTevuConfig();
+    const config = buildBenchmarkConfig();
     const harness = createHarness(config);
     harness.prerequisites.probeHostError = {
       kind: 'PrerequisiteError',
@@ -1649,7 +1614,7 @@ describe('runBenchmark', () => {
   });
 
   it('returns the snapshot failure before the capability probe and any write', async () => {
-    const config = buildTevuConfig();
+    const config = buildBenchmarkConfig();
     const harness = createHarness(config);
     harness.environments.snapshotParentError = {
       kind: 'PrerequisiteError',
@@ -1671,11 +1636,11 @@ describe('runBenchmark', () => {
   });
 
   it('returns the capability probe failure before commit pinning and any write', async () => {
-    const config = buildTevuConfig();
+    const config = buildBenchmarkConfig();
     const harness = createHarness(config);
     harness.agent.probeError = {
       kind: 'AgentProtocolError',
-      agent: AGENT_NAME,
+      agent: FAKE_AGENT_NAME,
       context: { phase: 'probe' },
       reason: 'synthetic missing run command',
     };
@@ -1693,7 +1658,7 @@ describe('runBenchmark', () => {
   });
 
   it('returns a readProviders failure as ConfigValidationError before any startRun call', async () => {
-    const config = buildTevuConfig();
+    const config = buildBenchmarkConfig();
     const harness = createHarness(config);
     harness.agent.providersError = {
       kind: 'ConfigValidationError',
@@ -1728,7 +1693,7 @@ describe('runBenchmark', () => {
   });
 
   it('returns a PrerequisiteError naming the agent when no adapter is registered for it', async () => {
-    const config = buildTevuConfig();
+    const config = buildBenchmarkConfig();
     const harness = createHarness(config);
     harness.dependencies.agents = new Map();
 
@@ -1741,7 +1706,7 @@ describe('runBenchmark', () => {
       ok: false,
       error: {
         kind: 'PrerequisiteError',
-        tool: AGENT_NAME,
+        tool: FAKE_AGENT_NAME,
         expected: 'a registered agent adapter',
         actual: 'none',
       },
@@ -1749,7 +1714,7 @@ describe('runBenchmark', () => {
   });
 
   it('remaps source resolution failures to the owning task before any write', async () => {
-    const config = buildTevuConfig();
+    const config = buildBenchmarkConfig();
     const harness = createHarness(config);
     harness.git.validateSourceError = {
       kind: 'SourceMaterializationError',
@@ -1769,10 +1734,10 @@ describe('runBenchmark', () => {
   });
 
   it("fails before any case starts when a planned case's prompt names its resolved commit", async () => {
-    const config = buildTevuConfig({
+    const config = buildBenchmarkConfig({
       tasks: [
-        buildTask({ id: 'task-1' }),
-        buildTask({ id: 'task-2', prompt: 'the agent prompt names pinned-something' }),
+        buildBenchmarkTask({ id: 'task-1' }),
+        buildBenchmarkTask({ id: 'task-2', prompt: 'the agent prompt names pinned-something' }),
       ],
     });
     const harness = createHarness(config);
@@ -1799,10 +1764,10 @@ describe('runBenchmark', () => {
   });
 
   it("fails before any case starts when the first, uncached task's prompt names its resolved commit", async () => {
-    const config = buildTevuConfig({
+    const config = buildBenchmarkConfig({
       tasks: [
-        buildTask({ id: 'task-1', prompt: 'the agent prompt names pinned-something' }),
-        buildTask({ id: 'task-2' }),
+        buildBenchmarkTask({ id: 'task-1', prompt: 'the agent prompt names pinned-something' }),
+        buildBenchmarkTask({ id: 'task-2' }),
       ],
     });
     const harness = createHarness(config);
@@ -1830,9 +1795,9 @@ describe('runBenchmark', () => {
 
   it("fails before any case starts when a planned case's prompt names a reference commit", async () => {
     const referenceCommit = 'fedcba9876543210fedcba9876543210fedcba98';
-    const config = buildTevuConfig({
+    const config = buildBenchmarkConfig({
       tasks: [
-        buildTask({
+        buildBenchmarkTask({
           id: 'task-1',
           reference: { kind: 'commit', identifier: 'HEAD~3', commits: [referenceCommit] },
           prompt: `follow the same approach as ${referenceCommit.slice(0, 7)}`,
@@ -1859,9 +1824,9 @@ describe('runBenchmark', () => {
   });
 
   it("fails before any case starts when a planned case's prompt names a pull-request reference", async () => {
-    const config = buildTevuConfig({
+    const config = buildBenchmarkConfig({
       tasks: [
-        buildTask({
+        buildBenchmarkTask({
           id: 'task-1',
           reference: {
             kind: 'pull-request',
@@ -1892,9 +1857,9 @@ describe('runBenchmark', () => {
   });
 
   it('runs the complete per-case pipeline in order with the patch captured before evaluators', async () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ concurrency: 1 }),
-      tasks: [buildTask()],
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ concurrency: 1 }),
+      tasks: [buildBenchmarkTask()],
     });
     const harness = createHarness(config);
 
@@ -1946,7 +1911,7 @@ describe('runBenchmark', () => {
     const runInput = harness.agent.runInputs[0];
     expect(runInput).toBeDefined();
     expect(runInput?.identity).toEqual({
-      ...buildCaseIdentity('task-1--c1--1'),
+      ...buildBenchmarkCaseIdentity('task-1--c1--1'),
       sourceCommit: `pinned-${COMMIT_A}`,
     });
     const task = config.tasks[0];
@@ -2000,7 +1965,7 @@ describe('runBenchmark', () => {
   });
 
   it('caps active cases at the configured concurrency', async () => {
-    const config = buildTevuConfig();
+    const config = buildBenchmarkConfig();
     const harness = createHarness(config);
     harness.agent.holdNewRuns();
     const firstStart = harness.agent.waitForCaseStart('task-1--c1--1');
@@ -2027,9 +1992,9 @@ describe('runBenchmark', () => {
   });
 
   it('keeps the concurrency slot held while acceptance checks evaluate', async () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ concurrency: 1 }),
-      tasks: [buildTask()],
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ concurrency: 1 }),
+      tasks: [buildBenchmarkTask()],
     });
     const harness = createHarness(config);
     harness.evaluatorProcesses.holdChecks();
@@ -2062,7 +2027,7 @@ describe('runBenchmark', () => {
       label: 'readable agent process failure',
       buildError: (caseId: string): CaseRunFailure => ({
         kind: 'AgentProcessError',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         caseId,
         exitCode: 3,
         signal: null,
@@ -2072,14 +2037,14 @@ describe('runBenchmark', () => {
       label: 'readable case-context agent protocol failure',
       buildError: (caseId: string): CaseRunFailure => ({
         kind: 'AgentProtocolError',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         context: { phase: 'case', caseId },
         reason: 'synthetic malformed event identity',
       }),
     },
   ])('$label', ({ buildError }) => {
     it('completes evaluation, preserves the runtime failure, and forces exit 2 without retrying', async () => {
-      const config = buildTevuConfig({ tasks: [buildTask()] });
+      const config = buildBenchmarkConfig({ tasks: [buildBenchmarkTask()] });
       const harness = createHarness(config);
       harness.agent.scripts.set('task-1--c1--1', failedRunScript(buildError('task-1--c1--1')));
 
@@ -2118,7 +2083,7 @@ describe('runBenchmark', () => {
       label: 'agent process error',
       buildError: (caseId: string): ExportFailure => ({
         kind: 'AgentProcessError',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         caseId,
         exitCode: 2,
         signal: null,
@@ -2128,7 +2093,7 @@ describe('runBenchmark', () => {
       label: 'case-context agent protocol error',
       buildError: (caseId: string): ExportFailure => ({
         kind: 'AgentProtocolError',
-        agent: AGENT_NAME,
+        agent: FAKE_AGENT_NAME,
         context: { phase: 'case', caseId },
         reason: 'synthetic export identity failure',
       }),
@@ -2183,7 +2148,7 @@ describe('runBenchmark', () => {
   });
 
   it('marks an unreadable workspace as process-failed and skips export, patch, and checks', async () => {
-    const config = buildTevuConfig({ tasks: [buildTask()] });
+    const config = buildBenchmarkConfig({ tasks: [buildBenchmarkTask()] });
     const harness = createHarness(config);
     harness.git.unreadableCaseIds.add('task-1--c1--1');
     harness.agent.scripts.set(
@@ -2191,7 +2156,7 @@ describe('runBenchmark', () => {
       failedRunScript(
         {
           kind: 'AgentProcessError',
-          agent: AGENT_NAME,
+          agent: FAKE_AGENT_NAME,
           caseId: 'task-1--c1--1',
           exitCode: 3,
           signal: null,
@@ -2236,13 +2201,13 @@ describe('runBenchmark', () => {
   });
 
   it('marks an unreadable workspace as process-failed after an agent session error and skips export, patch, and checks', async () => {
-    const config = buildTevuConfig({ tasks: [buildTask()] });
+    const config = buildBenchmarkConfig({ tasks: [buildBenchmarkTask()] });
     const harness = createHarness(config);
     harness.git.unreadableCaseIds.add('task-1--c1--1');
     harness.agent.scripts.set(
       'task-1--c1--1',
       failedRunScript(
-        { kind: 'AgentSessionError', agent: AGENT_NAME, caseId: 'task-1--c1--1' },
+        { kind: 'AgentSessionError', agent: FAKE_AGENT_NAME, caseId: 'task-1--c1--1' },
         { withErrorEvent: true },
       ),
     );
@@ -2264,7 +2229,7 @@ describe('runBenchmark', () => {
     expectAvailableMetric(failedCase.metrics.apiErrors, 1, 'count', 'run events');
     expectUnavailableMetric(
       failedCase.metrics.inputTokens,
-      `the workspace was unreadable after the failure: agent "${AGENT_NAME}" reported a session error`,
+      `the workspace was unreadable after the failure: agent "${FAKE_AGENT_NAME}" reported a session error`,
     );
     expect(harness.agent.exportCalls).not.toContain('session-task-1--c1--1');
     expect(harness.timeline).not.toContain('patch:task-1--c1--1');
@@ -2272,7 +2237,7 @@ describe('runBenchmark', () => {
   });
 
   it('times out, skips all checks, attempts the patch, and falls back to event metrics', async () => {
-    const config = buildTevuConfig({ tasks: [buildTask()] });
+    const config = buildBenchmarkConfig({ tasks: [buildBenchmarkTask()] });
     const harness = createHarness(config);
     harness.agent.scripts.set('task-1--c1--1', timedOutRunScript());
 
@@ -2307,9 +2272,12 @@ describe('runBenchmark', () => {
   });
 
   it('passes each case its own task timeout, distinct from run.timeout, to the agent and to CaseTimeoutError (AC-3)', async () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ repeat: 2 }),
-      tasks: [buildTask({ id: 'task-1', timeout: '20m' }), buildTask({ id: 'task-2' })],
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ repeat: 2 }),
+      tasks: [
+        buildBenchmarkTask({ id: 'task-1', timeout: '20m' }),
+        buildBenchmarkTask({ id: 'task-2' }),
+      ],
     });
     const harness = createHarness(config);
     harness.agent.scripts.set('task-1--c1--1', timedOutRunScript());
@@ -2333,9 +2301,9 @@ describe('runBenchmark', () => {
   });
 
   it('stops scheduling queued cases after an artifact failure and reports every planned case', async () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ concurrency: 1 }),
-      tasks: [buildTask()],
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ concurrency: 1 }),
+      tasks: [buildBenchmarkTask()],
     });
     const harness = createHarness(config);
     harness.artifacts.failOnce.set('appendEvent:task-1--c1--1', {
@@ -2377,9 +2345,9 @@ describe('runBenchmark', () => {
   });
 
   it('finalizes the run with queued-case findings when cancelled during a case', async () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ concurrency: 1 }),
-      tasks: [buildTask()],
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ concurrency: 1 }),
+      tasks: [buildBenchmarkTask()],
     });
     const harness = createHarness(config);
     harness.agent.scripts.set('task-1--c1--1', async (input) => {
@@ -2456,7 +2424,7 @@ describe('runBenchmark', () => {
   });
 
   it('returns CancellationError without any writes when the run signal is already aborted', async () => {
-    const config = buildTevuConfig();
+    const config = buildBenchmarkConfig();
     const harness = createHarness(config);
     harness.cancellation.abort();
 
@@ -2475,7 +2443,7 @@ describe('runBenchmark', () => {
   });
 
   it('records preparation failure as infrastructure-failed without starting the process', async () => {
-    const config = buildTevuConfig({ tasks: [buildTask()] });
+    const config = buildBenchmarkConfig({ tasks: [buildBenchmarkTask()] });
     const harness = createHarness(config);
     harness.git.createIsolatedCaseError = {
       kind: 'IsolationError',
@@ -2504,7 +2472,7 @@ describe('runBenchmark', () => {
   });
 
   it('records a cleanup warning with the retained path when disposal fails', async () => {
-    const config = buildTevuConfig({ tasks: [buildTask()] });
+    const config = buildBenchmarkConfig({ tasks: [buildBenchmarkTask()] });
     const harness = createHarness(config);
     harness.git.disposeErrors.set('task-1--c1--1', {
       kind: 'ArtifactError',
@@ -2533,9 +2501,9 @@ describe('runBenchmark', () => {
   });
 
   it('stops scheduling and retains the workspace when case persistence fails', async () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ concurrency: 1 }),
-      tasks: [buildTask()],
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ concurrency: 1 }),
+      tasks: [buildBenchmarkTask()],
     });
     const harness = createHarness(config);
     harness.artifacts.failOnce.set('finalizeCase:task-1--c1--1', {
@@ -2571,9 +2539,9 @@ describe('runBenchmark', () => {
   });
 
   it('reports a failed save without a workspace when preparation fails and its result cannot be persisted', async () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ concurrency: 1 }),
-      tasks: [buildTask()],
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ concurrency: 1 }),
+      tasks: [buildBenchmarkTask()],
     });
     const harness = createHarness(config);
     harness.git.createIsolatedCaseError = {
@@ -2602,7 +2570,7 @@ describe('runBenchmark', () => {
   });
 
   it('warns that the solution patch is missing when it cannot be captured after a timeout', async () => {
-    const config = buildTevuConfig({ tasks: [buildTask()] });
+    const config = buildBenchmarkConfig({ tasks: [buildBenchmarkTask()] });
     const harness = createHarness(config);
     harness.agent.scripts.set('task-1--c1--1', timedOutRunScript());
     harness.git.capturePatchError = {
@@ -2644,9 +2612,9 @@ describe('runBenchmark', () => {
   ])(
     'completes $label with outcome $expectedOutcome and forces exit 2',
     async ({ manualDefinitionOfDone, acceptanceExitCode, expectedOutcome }) => {
-      const config = buildTevuConfig({
+      const config = buildBenchmarkConfig({
         tasks: [
-          buildTask({
+          buildBenchmarkTask({
             checks: {
               acceptance: [buildCheck({ id: 'acc-required' })],
               done: manualDefinitionOfDone
@@ -2690,8 +2658,8 @@ describe('runBenchmark', () => {
 
 describe('runBenchmark repository setup orchestration (P5, P6, AC-2, AC-3)', () => {
   it('ends a failing before_agent command as not-evaluated, never starting the agent, and names the phase and command (AC-2, P5)', async () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ concurrency: 1 }),
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ concurrency: 1 }),
       repositories: [
         {
           id: 'repo-1',
@@ -2699,7 +2667,7 @@ describe('runBenchmark repository setup orchestration (P5, P6, AC-2, AC-3)', () 
           setup: { before_agent: [['/synthetic/setup-before-agent']], timeout: '5s', env: [] },
         },
       ],
-      tasks: [buildTask()],
+      tasks: [buildBenchmarkTask()],
     });
     const harness = createHarness(config);
     harness.evaluatorProcesses.exitCodes.set('/synthetic/setup-before-agent', 7);
@@ -2730,8 +2698,8 @@ describe('runBenchmark repository setup orchestration (P5, P6, AC-2, AC-3)', () 
   });
 
   it('ends a failing before_checks command as not-evaluated with no check started and the solution patch preserved (AC-3, P6)', async () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ concurrency: 1 }),
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ concurrency: 1 }),
       repositories: [
         {
           id: 'repo-1',
@@ -2739,7 +2707,7 @@ describe('runBenchmark repository setup orchestration (P5, P6, AC-2, AC-3)', () 
           setup: { before_checks: [['/synthetic/setup-before-checks']], timeout: '5s', env: [] },
         },
       ],
-      tasks: [buildTask()],
+      tasks: [buildBenchmarkTask()],
     });
     const harness = createHarness(config);
     harness.evaluatorProcesses.exitCodes.set('/synthetic/setup-before-checks', 9);
@@ -2779,12 +2747,16 @@ describe('runBenchmark check-state orchestration', () => {
 
   it('reads each distinct overlay directory once between the last validateSource call and the run start, and calls applyCheckState once per case between the patch write and the first evaluator process', async () => {
     const overlaySnapshot = buildOverlaySnapshot();
-    const config = buildTevuConfig({
-      run: buildRunSettings({ concurrency: 1 }),
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ concurrency: 1 }),
       tasks: [
-        buildTask({
+        buildBenchmarkTask({
           id: 'task-1',
-          checks: { ...buildTask().checks, restore: ['tests/**'], overlay: '/synthetic/overlay-a' },
+          checks: {
+            ...buildBenchmarkTask().checks,
+            restore: ['tests/**'],
+            overlay: '/synthetic/overlay-a',
+          },
         }),
       ],
     });
@@ -2818,10 +2790,13 @@ describe('runBenchmark check-state orchestration', () => {
   });
 
   it('ends the case as infrastructure-failed with no checks and no evaluator process when applyCheckState fails', async () => {
-    const config = buildTevuConfig({
-      run: buildRunSettings({ concurrency: 1 }),
+    const config = buildBenchmarkConfig({
+      run: buildBenchmarkRunSettings({ concurrency: 1 }),
       tasks: [
-        buildTask({ id: 'task-1', checks: { ...buildTask().checks, restore: ['tests/**'] } }),
+        buildBenchmarkTask({
+          id: 'task-1',
+          checks: { ...buildBenchmarkTask().checks, restore: ['tests/**'] },
+        }),
       ],
     });
     const harness = createHarness(config);
@@ -2850,7 +2825,7 @@ describe('runBenchmark check-state orchestration', () => {
   });
 
   it('never calls applyCheckState or readOverlay, and omits checkState, for a task declaring neither key', async () => {
-    const config = buildTevuConfig({ tasks: [buildTask({ id: 'task-1' })] });
+    const config = buildBenchmarkConfig({ tasks: [buildBenchmarkTask({ id: 'task-1' })] });
     const harness = createHarness(config);
 
     const result = await runBenchmark(
@@ -2867,8 +2842,13 @@ describe('runBenchmark check-state orchestration', () => {
   });
 
   it('never calls applyCheckState and omits checkState for a task declaring an empty restore array without an overlay', async () => {
-    const config = buildTevuConfig({
-      tasks: [buildTask({ id: 'task-1', checks: { ...buildTask().checks, restore: [] } })],
+    const config = buildBenchmarkConfig({
+      tasks: [
+        buildBenchmarkTask({
+          id: 'task-1',
+          checks: { ...buildBenchmarkTask().checks, restore: [] },
+        }),
+      ],
     });
     const harness = createHarness(config);
 
@@ -2883,11 +2863,11 @@ describe('runBenchmark check-state orchestration', () => {
   });
 
   it('returns the readOverlay failure unchanged before the run starts, any case is prepared, or any agent runs', async () => {
-    const config = buildTevuConfig({
+    const config = buildBenchmarkConfig({
       tasks: [
-        buildTask({
+        buildBenchmarkTask({
           id: 'task-1',
-          checks: { ...buildTask().checks, overlay: '/synthetic/overlay-a' },
+          checks: { ...buildBenchmarkTask().checks, overlay: '/synthetic/overlay-a' },
         }),
       ],
     });
@@ -2940,18 +2920,18 @@ type SetupEvidence = NonNullable<CaseResult['setup']>;
 type RepositoriesOverride = Pick<TevuConfigInput, 'repositories'>;
 
 function buildSingleCaseConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
-  const config = buildTevuConfig({
-    run: buildRunSettings({ concurrency: 1 }),
-    tasks: [buildTask()],
+  const config = buildBenchmarkConfig({
+    run: buildBenchmarkRunSettings({ concurrency: 1 }),
+    tasks: [buildBenchmarkTask()],
     ...overrides,
   });
   return { ...config, models: config.models.slice(0, 1) };
 }
 
 function buildTwoCaseConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfig {
-  return buildTevuConfig({
-    run: buildRunSettings({ concurrency: 1 }),
-    tasks: [buildTask()],
+  return buildBenchmarkConfig({
+    run: buildBenchmarkRunSettings({ concurrency: 1 }),
+    tasks: [buildBenchmarkTask()],
     ...overrides,
   });
 }
@@ -2959,7 +2939,7 @@ function buildTwoCaseConfig(overrides: Partial<TevuConfigInput> = {}): TevuConfi
 function buildGradedConfig(build: (overrides: Partial<TevuConfigInput>) => TevuConfig): TevuConfig {
   const config = build({
     tasks: [
-      buildTask({
+      buildBenchmarkTask({
         checks: {
           acceptance: [buildCheck({ id: 'acc-required' })],
           done: [{ id: 'dod-graded', description: 'the change is explained' }],
@@ -2969,7 +2949,7 @@ function buildGradedConfig(build: (overrides: Partial<TevuConfigInput>) => TevuC
   });
   return {
     ...config,
-    roles: { grader: { model: 'synthetic/grader-model', effort: 'high', agent: AGENT_NAME } },
+    roles: { grader: { model: 'synthetic/grader-model', effort: 'high', agent: FAKE_AGENT_NAME } },
   };
 }
 
@@ -3034,7 +3014,7 @@ function timelineAfter(harness: Harness, entry: string): string[] {
 }
 
 function buildPinnedIdentity(caseId = FIRST_CASE_ID): CaseIdentity {
-  return { ...buildCaseIdentity(caseId), sourceCommit: `pinned-${COMMIT_A}` };
+  return { ...buildBenchmarkCaseIdentity(caseId), sourceCommit: `pinned-${COMMIT_A}` };
 }
 
 function buildArtifactError(
@@ -3049,7 +3029,7 @@ function buildAgentProcessError(
 ): Extract<TevuError, { kind: 'AgentProcessError' }> {
   return {
     kind: 'AgentProcessError',
-    agent: AGENT_NAME,
+    agent: FAKE_AGENT_NAME,
     caseId: FIRST_CASE_ID,
     exitCode,
     signal: null,
@@ -3073,7 +3053,7 @@ function buildTimeoutError(): Extract<TevuError, { kind: 'CaseTimeoutError' }> {
 }
 
 function buildTimedOutProcess(): ProcessResult {
-  return buildProcessResult({
+  return buildBenchmarkProcessResult({
     exitCode: null,
     signal: 'SIGKILL',
     durationMs: 4_321,
@@ -3082,25 +3062,15 @@ function buildTimedOutProcess(): ProcessResult {
 }
 
 function buildFailedProcess(): ProcessResult {
-  return buildProcessResult({ exitCode: 3, durationMs: 4_321 });
+  return buildBenchmarkProcessResult({ exitCode: 3, durationMs: 4_321 });
 }
 
 function recordedFailure(error: TevuError): FailureRecord {
   return buildFailureRecord({ error, occurredAt: FIRST_CASE_FAILURE_OCCURRED_AT });
 }
 
-function buildArtifactIndex(overrides: Partial<CaseArtifactIndex> = {}): CaseArtifactIndex {
-  return {
-    events: null,
-    diagnostics: null,
-    sessionExport: null,
-    solutionPatch: null,
-    checks: null,
-    assessment: null,
-    grading: null,
-    result: `${FIRST_CASE_ID}/result.json`,
-    ...overrides,
-  };
+function buildFirstCaseArtifacts(overrides: Partial<CaseArtifactIndex> = {}): CaseArtifactIndex {
+  return buildCaseArtifacts({ result: `${FIRST_CASE_ID}/result.json`, ...overrides });
 }
 
 function buildMeasuredElapsed(durationMs: number): MetricValue {
@@ -3167,7 +3137,7 @@ function buildGradedCheck(): CheckResult {
 
 function buildCaseGrading(): CaseGrading {
   return {
-    grader: { model: 'synthetic/grader-model', effort: 'high', agent: AGENT_NAME },
+    grader: { model: 'synthetic/grader-model', effort: 'high', agent: FAKE_AGENT_NAME },
     call: { status: 'replied', reply: 'synthetic reply' },
     calls: [],
     metrics: buildFullMetrics(),
@@ -3237,11 +3207,11 @@ function buildAgentRanCase(harness: Harness, overrides: Partial<CaseResult> = {}
     schemaVersion: 1,
     identity: buildPinnedIdentity(),
     lifecycle: 'completed',
-    process: buildProcessResult(),
+    process: buildBenchmarkProcessResult(),
     outcome: 'passed',
     checks: buildPassedChecks(),
     metrics: buildExportedMetrics(1_000),
-    artifacts: buildArtifactIndex({
+    artifacts: buildFirstCaseArtifacts({
       events: EVENTS_PATH,
       sessionExport: SESSION_EXPORT_PATH,
       solutionPatch: PATCH_PATH,
@@ -3274,7 +3244,7 @@ function buildAgentNotStartedCase(
     outcome: 'not-evaluated',
     checks: [],
     metrics: unavailableBenchmarkMetrics(reason),
-    artifacts: buildArtifactIndex(),
+    artifacts: buildFirstCaseArtifacts(),
     failure: recordedFailure(failure),
     setup,
   };
@@ -3335,7 +3305,9 @@ describe('case lifecycle: result record shape', () => {
   it('places checkState and setup between failure and context, with the before_agent log listed first', async () => {
     const config = buildSingleCaseConfig({
       ...declareSetup('before_agent', 'before_checks'),
-      tasks: [buildTask({ checks: { ...buildTask().checks, restore: ['tests/**'] } })],
+      tasks: [
+        buildBenchmarkTask({ checks: { ...buildBenchmarkTask().checks, restore: ['tests/**'] } }),
+      ],
     });
     const harness = createHarness(config);
 
@@ -3648,7 +3620,10 @@ describe('case lifecycle: before the agent', () => {
           'an artifact failure ended the case before the root session could be exported',
           [TOOL_EVENT],
         ),
-        artifacts: buildArtifactIndex({ events: EVENTS_PATH, diagnostics: DIAGNOSTICS_PATH }),
+        artifacts: buildFirstCaseArtifacts({
+          events: EVENTS_PATH,
+          diagnostics: DIAGNOSTICS_PATH,
+        }),
       }),
     );
     expect(harness.agent.exportCalls).toEqual([]);
@@ -3677,7 +3652,7 @@ describe('case lifecycle: agent outcome', () => {
           'the case was cancelled before the root session could be exported',
           [TOOL_EVENT],
         ),
-        artifacts: buildArtifactIndex({ events: EVENTS_PATH }),
+        artifacts: buildFirstCaseArtifacts({ events: EVENTS_PATH }),
       }),
     );
     expect(harness.agent.exportCalls).toEqual([]);
@@ -3701,7 +3676,7 @@ describe('case lifecycle: agent outcome', () => {
           'the case timed out before the root session could be exported',
           [TOOL_EVENT, ERROR_EVENT],
         ),
-        artifacts: buildArtifactIndex({ events: EVENTS_PATH, solutionPatch: PATCH_PATH }),
+        artifacts: buildFirstCaseArtifacts({ events: EVENTS_PATH, solutionPatch: PATCH_PATH }),
       }),
     );
     expect(harness.agent.exportCalls).toEqual([]);
@@ -3727,7 +3702,7 @@ describe('case lifecycle: agent outcome', () => {
           'the case timed out before the root session could be exported',
           [TOOL_EVENT, ERROR_EVENT],
         ),
-        artifacts: buildArtifactIndex({ events: EVENTS_PATH }),
+        artifacts: buildFirstCaseArtifacts({ events: EVENTS_PATH }),
       }),
     );
     expect(run.findings).toEqual([
@@ -3754,7 +3729,7 @@ describe('case lifecycle: agent outcome', () => {
           'the case timed out before the root session could be exported',
           [TOOL_EVENT, ERROR_EVENT],
         ),
-        artifacts: buildArtifactIndex({ events: EVENTS_PATH }),
+        artifacts: buildFirstCaseArtifacts({ events: EVENTS_PATH }),
       }),
     );
     expect(run.findings).toEqual([
@@ -3769,7 +3744,7 @@ describe('case lifecycle: export and patch', () => {
     {
       label: 'a clean exit',
       script: sessionlessRunScript(),
-      process: buildProcessResult(),
+      process: buildBenchmarkProcessResult(),
       durationMs: 1_000,
       failure: null,
       reason: UNIDENTIFIED_SESSION_REASON,
@@ -3798,7 +3773,7 @@ describe('case lifecycle: export and patch', () => {
           process,
           failure: failure === null ? null : recordedFailure(failure),
           metrics: buildFallbackMetrics(durationMs, reason, [TOOL_EVENT]),
-          artifacts: buildArtifactIndex({
+          artifacts: buildFirstCaseArtifacts({
             events: EVENTS_PATH,
             solutionPatch: PATCH_PATH,
             checks: CHECKS_PATH,
@@ -3830,7 +3805,7 @@ describe('case lifecycle: export and patch', () => {
           'session export could not be persisted: synthetic export write failure',
           [TOOL_EVENT],
         ),
-        artifacts: buildArtifactIndex({ events: EVENTS_PATH }),
+        artifacts: buildFirstCaseArtifacts({ events: EVENTS_PATH }),
       }),
     );
     expect(harness.agent.exportCalls).toEqual([`session-${FIRST_CASE_ID}`]);
@@ -3857,7 +3832,7 @@ describe('case lifecycle: export and patch', () => {
           'root session export failed: agent "fake-agent" process ended with exit code 2 and signal null',
           [TOOL_EVENT],
         ),
-        artifacts: buildArtifactIndex({
+        artifacts: buildFirstCaseArtifacts({
           events: EVENTS_PATH,
           solutionPatch: PATCH_PATH,
           checks: CHECKS_PATH,
@@ -3913,7 +3888,7 @@ describe('case lifecycle: export and patch', () => {
           lifecycle: 'cancelled',
           failure: failure === null ? null : recordedFailure(failure),
           metrics,
-          artifacts: buildArtifactIndex(artifacts),
+          artifacts: buildFirstCaseArtifacts(artifacts),
         }),
       );
       expect(harness.git.capturePatchBases).toEqual([]);
@@ -3932,7 +3907,10 @@ describe('case lifecycle: export and patch', () => {
       buildNotEvaluatedCase(harness, {
         lifecycle: 'infrastructure-failed',
         failure: recordedFailure(buildPatchCaptureError()),
-        artifacts: buildArtifactIndex({ events: EVENTS_PATH, sessionExport: SESSION_EXPORT_PATH }),
+        artifacts: buildFirstCaseArtifacts({
+          events: EVENTS_PATH,
+          sessionExport: SESSION_EXPORT_PATH,
+        }),
       }),
     );
     expect(run.cases.map((entry) => entry.lifecycle)).toEqual([
@@ -3955,7 +3933,10 @@ describe('case lifecycle: export and patch', () => {
       buildNotEvaluatedCase(harness, {
         lifecycle: 'infrastructure-failed',
         failure: recordedFailure(writeFailure),
-        artifacts: buildArtifactIndex({ events: EVENTS_PATH, sessionExport: SESSION_EXPORT_PATH }),
+        artifacts: buildFirstCaseArtifacts({
+          events: EVENTS_PATH,
+          sessionExport: SESSION_EXPORT_PATH,
+        }),
       }),
     );
     expect(run.findings).toEqual([
@@ -3974,7 +3955,7 @@ describe('case lifecycle: export and patch', () => {
     expect(finalizedCaseOf(harness)).toEqual(
       buildNotEvaluatedCase(harness, {
         lifecycle: 'cancelled',
-        artifacts: buildArtifactIndex({
+        artifacts: buildFirstCaseArtifacts({
           events: EVENTS_PATH,
           sessionExport: SESSION_EXPORT_PATH,
           solutionPatch: PATCH_PATH,
@@ -3990,7 +3971,9 @@ describe('case lifecycle: checks', () => {
   it('records the applied check state on the completed case', async () => {
     const checkState = buildCheckStateRecord();
     const config = buildSingleCaseConfig({
-      tasks: [buildTask({ checks: { ...buildTask().checks, restore: ['tests/**'] } })],
+      tasks: [
+        buildBenchmarkTask({ checks: { ...buildBenchmarkTask().checks, restore: ['tests/**'] } }),
+      ],
     });
     const harness = createHarness(config);
     harness.git.applyCheckStateResults.set(FIRST_CASE_ID, checkState);
@@ -4012,7 +3995,7 @@ describe('case lifecycle: checks', () => {
       buildNotEvaluatedCase(harness, {
         lifecycle: 'infrastructure-failed',
         failure: recordedFailure(logFailure),
-        artifacts: buildArtifactIndex({
+        artifacts: buildFirstCaseArtifacts({
           events: EVENTS_PATH,
           sessionExport: SESSION_EXPORT_PATH,
           solutionPatch: PATCH_PATH,
@@ -4042,7 +4025,7 @@ describe('case lifecycle: checks', () => {
           argv: [SETUP_ARGV.before_checks],
           reason: 'exited with code 9',
         }),
-        artifacts: buildArtifactIndex({
+        artifacts: buildFirstCaseArtifacts({
           events: EVENTS_PATH,
           sessionExport: SESSION_EXPORT_PATH,
           solutionPatch: PATCH_PATH,
@@ -4086,7 +4069,7 @@ describe('case lifecycle: checks', () => {
       expect(finalizedCaseOf(harness)).toEqual(
         buildNotEvaluatedCase(harness, {
           lifecycle: 'cancelled',
-          artifacts: buildArtifactIndex({
+          artifacts: buildFirstCaseArtifacts({
             events: EVENTS_PATH,
             sessionExport: SESSION_EXPORT_PATH,
             solutionPatch: PATCH_PATH,
@@ -4151,7 +4134,9 @@ describe('case lifecycle: checks', () => {
     const checkState = buildCheckStateRecord();
     const config = buildSingleCaseConfig({
       ...declareSetup('before_agent', 'before_checks'),
-      tasks: [buildTask({ checks: { ...buildTask().checks, restore: ['tests/**'] } })],
+      tasks: [
+        buildBenchmarkTask({ checks: { ...buildBenchmarkTask().checks, restore: ['tests/**'] } }),
+      ],
     });
     const harness = createHarness(config);
     harness.git.applyCheckStateResults.set(FIRST_CASE_ID, checkState);
@@ -4168,7 +4153,7 @@ describe('case lifecycle: checks', () => {
           argv: [SETUP_ARGV.before_checks],
           reason: 'exited with code 9',
         }),
-        artifacts: buildArtifactIndex({
+        artifacts: buildFirstCaseArtifacts({
           events: EVENTS_PATH,
           sessionExport: SESSION_EXPORT_PATH,
           solutionPatch: PATCH_PATH,
@@ -4201,7 +4186,7 @@ describe('case lifecycle: checks', () => {
       buildNotEvaluatedCase(harness, {
         lifecycle: 'infrastructure-failed',
         failure: recordedFailure(logFailure),
-        artifacts: buildArtifactIndex({
+        artifacts: buildFirstCaseArtifacts({
           events: EVENTS_PATH,
           sessionExport: SESSION_EXPORT_PATH,
           solutionPatch: PATCH_PATH,
@@ -4220,7 +4205,9 @@ describe('case lifecycle: checks', () => {
     const checkState = buildCheckStateRecord();
     const config = buildSingleCaseConfig({
       ...declareSetup('before_agent', 'before_checks'),
-      tasks: [buildTask({ checks: { ...buildTask().checks, restore: ['tests/**'] } })],
+      tasks: [
+        buildBenchmarkTask({ checks: { ...buildBenchmarkTask().checks, restore: ['tests/**'] } }),
+      ],
     });
     const harness = createHarness(config);
     harness.git.applyCheckStateResults.set(FIRST_CASE_ID, checkState);
@@ -4231,7 +4218,7 @@ describe('case lifecycle: checks', () => {
     expect(finalizedCaseOf(harness)).toEqual(
       buildNotEvaluatedCase(harness, {
         lifecycle: 'cancelled',
-        artifacts: buildArtifactIndex({
+        artifacts: buildFirstCaseArtifacts({
           events: EVENTS_PATH,
           sessionExport: SESSION_EXPORT_PATH,
           solutionPatch: PATCH_PATH,
@@ -4296,7 +4283,7 @@ describe('case lifecycle: checks', () => {
         lifecycle: 'infrastructure-failed',
         outcome: 'not-evaluated',
         failure: recordedFailure(writeFailure),
-        artifacts: buildArtifactIndex({
+        artifacts: buildFirstCaseArtifacts({
           events: EVENTS_PATH,
           sessionExport: SESSION_EXPORT_PATH,
           solutionPatch: PATCH_PATH,
@@ -4423,7 +4410,7 @@ describe('case lifecycle: grading', () => {
       buildNotEvaluatedCase(harness, {
         lifecycle: 'cancelled',
         checks: [buildPassedCheck('acc-required', 'acceptance'), buildGradedCheck()],
-        artifacts: buildArtifactIndex({
+        artifacts: buildFirstCaseArtifacts({
           events: EVENTS_PATH,
           sessionExport: SESSION_EXPORT_PATH,
           solutionPatch: PATCH_PATH,
@@ -4445,7 +4432,7 @@ describe('case lifecycle: grading', () => {
     expect(finalizedCaseOf(harness)).toEqual(
       buildAgentRanCase(harness, {
         checks: [buildPassedCheck('acc-required', 'acceptance'), buildGradedCheck()],
-        artifacts: buildArtifactIndex({
+        artifacts: buildFirstCaseArtifacts({
           events: EVENTS_PATH,
           sessionExport: SESSION_EXPORT_PATH,
           solutionPatch: PATCH_PATH,
