@@ -85,7 +85,7 @@ function sizeRules({ lines, functionLines, complexity }) {
 
 export default defineConfig([
   // ESLint does not read .gitignore or .git/info/exclude.
-  globalIgnores(['dist/**']),
+  globalIgnores(['dist/**', 'coverage/**', '.stryker-tmp/**']),
 
   js.configs.recommended,
   tseslint.configs.recommended,
