@@ -36,6 +36,11 @@ updates:
         patterns:
           - '@clack/core'
           - '@clack/prompts'
+      vitest:
+        applies-to: version-updates
+        patterns:
+          - vitest
+          - '@vitest/*'
       bun-minor-patch:
         applies-to: version-updates
         patterns:

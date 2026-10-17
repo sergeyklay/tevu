@@ -16,3 +16,8 @@ tevu.yaml
 
 # Build artefacts
 *.tgz
+
+# Coverage and mutation testing output.
+/coverage
+/reports
+/.stryker-tmp

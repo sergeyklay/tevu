@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "mutate": [
+    "src/evaluation/**/*.ts",
+    "!src/evaluation/**/*.test.ts",
+    "!src/evaluation/__fixtures__/**"
+  ],
+  "ignorePatterns": ["/*", "!/src", "!/package.json", "!/tsconfig.json", "!/vitest.config.ts"],
+  "commandRunner": {
+    "command": "bun run test -- src/evaluation --bail=1 --maxWorkers=1"
+  }
+}
