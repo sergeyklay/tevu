@@ -45,7 +45,7 @@ Rebuild after each change; the link picks up the new file. If the npm package is
 
 ## Reproduce CI
 
-CI runs on every pull request. It lints and type-checks once, then runs the tests and the build on Ubuntu and macOS, each with Node.js 24.0.0, the lowest version `engines` allows, and with the latest Node.js 24 release. Run the same gates locally:
+CI runs on every pull request. It lints and type-checks once, then runs the tests and the build on Ubuntu and macOS, each with Node.js 24.0.0, the lowest version `engines` allows, and with the latest Node.js 24 release. On Ubuntu with the latest Node.js 24 release, the tests run with coverage, and CI uploads the report to Codecov except on pull requests from forks and from Dependabot. Run the same gates locally:
 
 ```sh
 bun run check
@@ -127,6 +127,27 @@ To iterate on one gate:
 | Build | `bun run build` |
 
 Use `bun run test`, never `bun test`: the second starts Bun's own test runner instead of Vitest and fails.
+
+## Measure test quality
+
+Coverage and mutation testing report on the tests without gating a change, and `bun run check` runs neither.
+
+### Coverage
+
+`bun run test:coverage` runs the tests with V8 coverage over `src/`, prints per-file percentages, and writes `coverage/index.html` and `coverage/lcov.info`. It sets no thresholds, so it never fails on a percentage, and `bun run test` collects no coverage. `bun run test:coverage -- <path>` limits a run. CI uploads `coverage/lcov.info` from the Ubuntu test run with the latest Node.js 24 release to Codecov, whose statuses are informational and never fail a pull request.
+
+### Mutation testing
+
+`bun run test:mutation` mutates the `.ts` files under `src/evaluation` except tests and fixtures, runs the test files under `src/evaluation` against each mutant, and writes `reports/mutation/mutation.html`. A full run takes about 43 minutes on 4 CPUs, and it exits 0 whenever it completes, whatever the score. A surviving mutant is a change to `src/evaluation` that no test under `src/evaluation` detects, so a test elsewhere that would catch it does not count. `bun run test:mutation -- --mutate src/evaluation/metrics.ts` limits a run to one module.
+
+The `Mutation` workflow runs weekly and on manual dispatch with `gh workflow run mutation.yml`, never on pull requests or pushes, and attaches the `mutation-report` artifact.
+
+### Mutation runner rules
+
+- Stryker runs the tests through its command runner because `@stryker-mutator/vitest-runner` reports a false score under Vitest 5. The cause is [stryker-mutator/stryker-js#6210](https://github.com/stryker-mutator/stryker-js/issues/6210).
+- `stryker.config.json` leaves `testRunner` at its default, `command`, because writing `"testRunner": "command"` makes knip's Stryker plugin require the nonexistent package `@stryker-mutator/command-runner`.
+- `commandRunner.command` passes `--maxWorkers=1` because oversubscribed CPUs push mutants past Stryker's timeout, and Stryker counts a timed-out mutant as detected.
+- A change to the runner or to `commandRunner.command`, including a switch to the Vitest runner once a release fixes the linked issue, merges only after a full run scores above 50% for `src/evaluation/metrics.ts` with at most 10 Timeout mutants in the `All files` row of the clear-text table. The score bound catches a defective runner: the Vitest runner as released scores 0.00% on `metrics.ts`, against 92.00% for the reference. The Timeout bound catches oversubscription: without `--maxWorkers=1`, the command runner turned 258 survivors into Timeout mutants and raised the overall score from 89.01% to 96.96%.
 
 ## Architecture
 

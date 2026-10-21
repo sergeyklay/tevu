@@ -35,6 +35,8 @@
     "tevu": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:mutation": "stryker run",
     "build": "node scripts/build.mjs",
     "prepack": "bun run build",
     "lint": "eslint . --max-warnings 0",
@@ -58,7 +60,9 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@ianvs/prettier-plugin-sort-imports": "^4.7.1",
+    "@stryker-mutator/core": "^10.0.0",
     "@types/node": "^24.19.1",
+    "@vitest/coverage-v8": "5.0.3",
     "esbuild": "0.28.2",
     "eslint": "^10.12.0",
     "eslint-config-prettier": "^10.1.8",

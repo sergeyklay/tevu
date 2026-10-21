@@ -80,6 +80,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         node: ['24.0.0', '24.x']
+        include:
+          - os: ubuntu-latest
+            node: '24.x'
+            coverage: true
 
     steps:
       - name: Checkout code
@@ -103,9 +107,40 @@ jobs:
         run: git lfs version
 
       - name: Run tests
+        if: ${{ !matrix.coverage }}
         run: |
           node --version
           bun run test
+
+      - name: Run tests with coverage
+        if: ${{ matrix.coverage }}
+        run: |
+          node --version
+          bun run test:coverage
+
+      - name: Check for a Codecov token
+        if: ${{ matrix.coverage }}
+        id: codecov-token
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: |
+          if [ -n "$CODECOV_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              echo "::warning::CODECOV_TOKEN is not set; skipping the Codecov upload."
+            fi
+          fi
+
+      - name: Upload coverage to Codecov
+        if: steps.codecov-token.outputs.available == 'true'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/lcov.info
+          disable_search: true
+          fail_ci_if_error: false
 
   test:
     name: Test
