@@ -46,8 +46,8 @@
     "check": "bun run format:check && bun run lint && bun run knip && bun run typecheck && bun run test && bun run build"
   },
   "dependencies": {
-    "@clack/core": "1.5.1",
-    "@clack/prompts": "^1.8.1",
+    "@clack/core": "1.6.0",
+    "@clack/prompts": "^1.9.0",
     "commander": "^15.0.0",
     "execa": "^10.1.0",
     "jsonc-parser": "^3.3.1",
